@@ -18,6 +18,35 @@ export const LABEL_IN_PROGRESS = 'loop:in-progress'
 
 const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
 
+// Claiming and duplicate reconciliation both make multi-step forge transitions.
+// Serialize those transitions per issue so one cannot act on a snapshot taken in
+// the middle of the other. The final claim read below remains necessary because a
+// different orchestration process does not share this coordinator.
+const issueCoordination = new WeakMap<Forge, Map<number, Promise<void>>>()
+
+async function withIssueCoordination<T>(
+  forge: Forge,
+  issueNumber: number,
+  action: () => Promise<T>,
+): Promise<T> {
+  let issueTails = issueCoordination.get(forge)
+  if (issueTails === undefined) {
+    issueTails = new Map()
+    issueCoordination.set(forge, issueTails)
+  }
+  const previous = issueTails.get(issueNumber) ?? Promise.resolve()
+  let release: () => void = () => {}
+  const tail = new Promise<void>((resolve) => { release = resolve })
+  issueTails.set(issueNumber, tail)
+  await previous
+  try {
+    return await action()
+  } finally {
+    release()
+    if (issueTails.get(issueNumber) === tail) issueTails.delete(issueNumber)
+  }
+}
+
 /**
  * A scan words the same finding differently every cycle, so text cannot be the
  * identity. What survives rewording: an advisory identifier when one is named, else
@@ -127,6 +156,13 @@ function isReadyToClose(issue: ForgeIssue, fingerprint: string): boolean {
     && !issue.labels.includes(LABEL_IN_PROGRESS)
 }
 
+function isReadyToClaim(issue: ForgeIssue): boolean {
+  return issue.state === 'open'
+    && issue.assignees.length === 0
+    && issue.labels.includes(LABEL_READY)
+    && !issue.labels.includes(LABEL_IN_PROGRESS)
+}
+
 /** Preserve claimed work; otherwise keep the oldest match and close ready duplicates. */
 async function reconcileOpenFindings(
   forge: Forge,
@@ -151,17 +187,19 @@ async function reconcileOpenFindings(
   if (survivor === undefined) return undefined
   for (const duplicate of ordered) {
     if (duplicate.number === survivor) continue
-    // Assignment and labels may have changed since listOpenIssues returned. Re-read
-    // immediately before closing so reconciliation cannot knowingly sever a lease.
-    let current: ForgeIssue
-    try {
-      current = await forge.getIssue(duplicate.number)
-    } catch {
-      continue
-    }
-    if (isReadyToClose(current, fingerprint)) {
-      await closeDuplicate(forge, current.number, survivor)
-    }
+    await withIssueCoordination(forge, duplicate.number, async () => {
+      // Assignment and labels may have changed since listOpenIssues returned. Re-read
+      // inside the same critical section used by claims before closing.
+      let current: ForgeIssue
+      try {
+        current = await forge.getIssue(duplicate.number)
+      } catch {
+        return
+      }
+      if (isReadyToClose(current, fingerprint)) {
+        await closeDuplicate(forge, current.number, survivor)
+      }
+    })
   }
   return survivor
 }
@@ -271,34 +309,56 @@ export async function claimIssue(
   me: string,
   appendRequirements: (taskId: string, requirement: string) => void,
 ): Promise<ClaimResult> {
-  await forge.assignIssue(issue.number, me)
-  const after = await forge.getIssue(issue.number)
-  const winner = [...after.assignees].sort()[0]
-  if (winner !== me) {
-    await forge.unassignIssue(issue.number, me)
-    return { outcome: 'lost-race', issueNumber: issue.number }
-  }
-  await forge.addLabel(issue.number, LABEL_IN_PROGRESS)
-  await forge.removeLabel(issue.number, LABEL_READY)
+  return withIssueCoordination(forge, issue.number, async () => {
+    const current = await forge.getIssue(issue.number)
+    if (!isReadyToClaim(current)) {
+      return { outcome: 'lost-race', issueNumber: issue.number }
+    }
 
-  const parsed = parseIssueBody(after.body)
-  if (parsed === undefined) {
-    // A finding whose body lost its structure cannot become a task; leave it claimed
-    // so it does not bounce between workers, and let a person look.
-    return { outcome: 'unparseable', issueNumber: issue.number }
-  }
+    await forge.assignIssue(issue.number, me)
+    const afterAssignment = await forge.getIssue(issue.number)
+    const winner = [...afterAssignment.assignees].sort()[0]
+    if (afterAssignment.state !== 'open'
+      || !afterAssignment.labels.includes(LABEL_READY)
+      || afterAssignment.labels.includes(LABEL_IN_PROGRESS)
+      || winner !== me) {
+      await forge.unassignIssue(issue.number, me)
+      return { outcome: 'lost-race', issueNumber: issue.number }
+    }
+    await forge.addLabel(issue.number, LABEL_IN_PROGRESS)
+    await forge.removeLabel(issue.number, LABEL_READY)
 
-  const taskId = taskIdForDesc(paths, 'auto', parsed.requirement)
-  if (!existsSync(specFile(paths, taskId))) {
-    newTaskSpec(paths, taskId)
-    appendRequirements(taskId, parsed.requirement)
-  }
-  if (parsed.effort !== undefined && ['minimal', 'low', 'medium', 'high'].includes(parsed.effort)) {
-    mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
-    writeFileSync(join(paths.queueDir, 'effort', taskId), `${parsed.effort}\n`)
-  }
-  recordIssueForTask(paths, taskId, issue.number)
-  return { outcome: 'claimed', taskId, issueNumber: issue.number, enqueue: enqueueTask(paths, taskId, 1) }
+    // A remote reconciler can still close or relabel the issue because its process
+    // does not share this coordinator. Revalidate after every claim mutation and
+    // immediately before materializing local work.
+    const claimed = await forge.getIssue(issue.number)
+    if (claimed.state !== 'open'
+      || claimed.labels.includes(LABEL_READY)
+      || !claimed.labels.includes(LABEL_IN_PROGRESS)
+      || [...claimed.assignees].sort()[0] !== me) {
+      await forge.unassignIssue(issue.number, me)
+      return { outcome: 'lost-race', issueNumber: issue.number }
+    }
+
+    const parsed = parseIssueBody(claimed.body)
+    if (parsed === undefined) {
+      // A finding whose body lost its structure cannot become a task; leave it claimed
+      // so it does not bounce between workers, and let a person look.
+      return { outcome: 'unparseable', issueNumber: issue.number }
+    }
+
+    const taskId = taskIdForDesc(paths, 'auto', parsed.requirement)
+    if (!existsSync(specFile(paths, taskId))) {
+      newTaskSpec(paths, taskId)
+      appendRequirements(taskId, parsed.requirement)
+    }
+    if (parsed.effort !== undefined && ['minimal', 'low', 'medium', 'high'].includes(parsed.effort)) {
+      mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+      writeFileSync(join(paths.queueDir, 'effort', taskId), `${parsed.effort}\n`)
+    }
+    recordIssueForTask(paths, taskId, issue.number)
+    return { outcome: 'claimed', taskId, issueNumber: issue.number, enqueue: enqueueTask(paths, taskId, 1) }
+  })
 }
 
 /**
