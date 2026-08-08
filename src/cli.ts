@@ -70,10 +70,19 @@ async function main(): Promise<number> {
   }
   const command = commands[commandName]
   if (command === undefined) {
-    const root = repoRoot()
-    console.error(`Not ported yet: '${commandName}'. Until the cutover, run:`)
-    console.error(`  ${join(root, 'orchestration', 'orchestrate.sh')} ${commandName}`)
-    console.error(`Ported commands: ${Object.keys(commands).join(', ')}`)
+    // Two different situations end up here, and only one of them is transitional.
+    // While the bash implementation is still in the tree, a name it knows is simply
+    // not ported yet, and pointing at it helps. Once the cutover has deleted it, a
+    // name reaching this branch is a missing or mistyped command, and the last thing
+    // the message may do is recommend a file that no longer exists.
+    const bashEntry = join(repoRoot(), 'orchestration', 'orchestrate.sh')
+    if (existsSync(bashEntry)) {
+      console.error(`Not ported yet: '${commandName}'. Until the cutover, run:`)
+      console.error(`  ${bashEntry} ${commandName}`)
+    } else {
+      console.error(`Unknown command: '${commandName}'.`)
+    }
+    console.error(`Available commands: ${Object.keys(commands).join(', ')}`)
     return 1
   }
   return command(orchPaths(repoRoot()), args)
