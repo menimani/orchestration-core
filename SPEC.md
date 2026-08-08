@@ -210,6 +210,8 @@ from or equivalent to `orchestration/tests/*.sh`.
     work as an issue already assigned to the current user with `loop:finding` +
     `loop:in-progress`. Delegation remains local-only with a warning if the forge is
     unavailable, and fingerprint duplicates link the local task to the existing issue.
+    The marker includes the daemon PID, is removed with the PID lock on every graceful
+    exit, and is ignored when its owning process is no longer alive.
 
 ## Test parity
 

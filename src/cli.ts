@@ -15,7 +15,8 @@ import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import {
-  delegateTaskVisible, enqueueTask, isLoopRunning, newTaskSpec, writeIssueModeMarker,
+  delegateTaskVisible, enqueueTask, isLoopRunning, newTaskSpec, removeIssueModeMarker,
+  writeIssueModeMarker,
 } from './tasks.ts'
 import { waitForNextPoll } from './wake.ts'
 
@@ -376,51 +377,63 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
     rmSync(pidFile, { force: true })
   }
   writeFileSync(pidFile, `${process.pid}\n`)
-  writeIssueModeMarker(paths, config.issueQueueEnabled)
-  const releasePid = (): void => {
+  const releaseDaemonState = (): void => {
     try {
-      rmSync(pidFile, { force: true })
+      removeIssueModeMarker(paths, process.pid)
+    } catch {
+      // nothing to release
+    }
+    try {
+      if (readFileSync(pidFile, 'utf8').trim() === `${process.pid}`) {
+        rmSync(pidFile, { force: true })
+      }
     } catch {
       // nothing to release
     }
   }
-  process.on('exit', releasePid)
+  process.on('exit', releaseDaemonState)
   process.on('SIGINT', () => process.exit(0))
   process.on('SIGTERM', () => process.exit(0))
 
-  // A stale stop file is cleared only after the PID lock is taken, so another
-  // instance's signal is never removed.
-  rmSync(stopFile, { force: true })
-  if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
+  try {
+    writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
 
-  const forge = await loadForge(config.forge, paths.repoRoot)
-  const runner = await loadRunner(config.runner)
-  const project = await loadProject(config.project)
-  const log = (line: string): void => console.log(line)
-  if (config.issueQueueEnabled) {
-    const { ensureQueueLabels } = await import('./issueQueue.ts')
-    await ensureQueueLabels(forge)
-  }
-  const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
+    // A stale stop file is cleared only after the PID lock is taken, so another
+    // instance's signal is never removed.
+    rmSync(stopFile, { force: true })
+    if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
 
-  loop.initializeSessionStateForBranch()
+    const forge = await loadForge(config.forge, paths.repoRoot)
+    const runner = await loadRunner(config.runner)
+    const project = await loadProject(config.project)
+    const log = (line: string): void => console.log(line)
+    if (config.issueQueueEnabled) {
+      const { ensureQueueLabels } = await import('./issueQueue.ts')
+      await ensureQueueLabels(forge)
+    }
+    const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
 
-  log(`[loop] Start | MAX_PARALLEL=${config.maxParallel} POLL_INTERVAL=${config.pollIntervalSeconds}s AUTO_MERGE=${config.autoMerge}`)
-  log(`[loop]      | MAX_GROWTH_DEPTH=${config.maxGrowthDepth} MAX_TOTAL_TASKS=${config.maxTotalTasks}`)
-  log(`[loop]      | SCAN_ENABLED=${config.scanEnabled} MAX_SCAN_CYCLES=${config.maxScanCycles}`)
-  log(`[loop]      | AUTO_PR=${config.autoPr} REVIEW_ENABLED=${config.reviewEnabled} CI_GATE_ENABLED=${config.ciGateEnabled}`)
-  log(`[loop]      | AUTO_REVIEW=${config.autoReview} MAX_REVIEW_ROUNDS=${config.maxReviewRounds} REVIEW_EVERY_N_CYCLES=${config.reviewEveryNCycles} MAX_FINAL_REVIEW_ROUNDS=${config.maxFinalReviewRounds}`)
-  log(`[loop]      | MAX_BURST_FAILURES=${config.maxBurstFailures} MAX_CONSECUTIVE_MERGE_FAILURES=${config.maxConsecutiveMergeFailures}`)
-  log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} TASK_GATE=${config.taskGate}`
-    + `${config.scanModel === '' ? '' : ` SCAN_MODEL=${config.scanModel}`}${config.taskModel === '' ? '' : ` TASK_MODEL=${config.taskModel}`}`)
-  log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project} ISSUE_QUEUE_ENABLED=${config.issueQueueEnabled}`)
-  log('[loop] Stop: npm run -C orchestration/ts stop or Ctrl+C')
-  log('')
+    loop.initializeSessionStateForBranch()
 
-  for (;;) {
-    const outcome = await loop.poll()
-    if (outcome !== 'continue') return 0
-    await waitForNextPoll(paths, config.pollIntervalSeconds)
+    log(`[loop] Start | MAX_PARALLEL=${config.maxParallel} POLL_INTERVAL=${config.pollIntervalSeconds}s AUTO_MERGE=${config.autoMerge}`)
+    log(`[loop]      | MAX_GROWTH_DEPTH=${config.maxGrowthDepth} MAX_TOTAL_TASKS=${config.maxTotalTasks}`)
+    log(`[loop]      | SCAN_ENABLED=${config.scanEnabled} MAX_SCAN_CYCLES=${config.maxScanCycles}`)
+    log(`[loop]      | AUTO_PR=${config.autoPr} REVIEW_ENABLED=${config.reviewEnabled} CI_GATE_ENABLED=${config.ciGateEnabled}`)
+    log(`[loop]      | AUTO_REVIEW=${config.autoReview} MAX_REVIEW_ROUNDS=${config.maxReviewRounds} REVIEW_EVERY_N_CYCLES=${config.reviewEveryNCycles} MAX_FINAL_REVIEW_ROUNDS=${config.maxFinalReviewRounds}`)
+    log(`[loop]      | MAX_BURST_FAILURES=${config.maxBurstFailures} MAX_CONSECUTIVE_MERGE_FAILURES=${config.maxConsecutiveMergeFailures}`)
+    log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} TASK_GATE=${config.taskGate}`
+      + `${config.scanModel === '' ? '' : ` SCAN_MODEL=${config.scanModel}`}${config.taskModel === '' ? '' : ` TASK_MODEL=${config.taskModel}`}`)
+    log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project} ISSUE_QUEUE_ENABLED=${config.issueQueueEnabled}`)
+    log('[loop] Stop: npm run -C orchestration/ts stop or Ctrl+C')
+    log('')
+
+    for (;;) {
+      const outcome = await loop.poll()
+      if (outcome !== 'continue') return 0
+      await waitForNextPoll(paths, config.pollIntervalSeconds)
+    }
+  } finally {
+    releaseDaemonState()
   }
 }
 
