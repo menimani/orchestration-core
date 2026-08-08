@@ -452,7 +452,7 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
     log(`[loop]      | AUTO_PR=${config.autoPr} REVIEW_ENABLED=${config.reviewEnabled} CI_GATE_ENABLED=${config.ciGateEnabled}`)
     log(`[loop]      | AUTO_REVIEW=${config.autoReview} MAX_REVIEW_ROUNDS=${config.maxReviewRounds} REVIEW_EVERY_N_CYCLES=${config.reviewEveryNCycles} MAX_FINAL_REVIEW_ROUNDS=${config.maxFinalReviewRounds}`)
     log(`[loop]      | MAX_BURST_FAILURES=${config.maxBurstFailures} MAX_CONSECUTIVE_MERGE_FAILURES=${config.maxConsecutiveMergeFailures}`)
-    log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} TASK_GATE=${config.taskGate}`
+    log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} REVIEW_EFFORT=${config.reviewEffort} TASK_GATE=${config.taskGate}`
       + `${config.scanModel === '' ? '' : ` SCAN_MODEL=${config.scanModel}`}${config.taskModel === '' ? '' : ` TASK_MODEL=${config.taskModel}`}`)
     log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project} ISSUE_QUEUE_ENABLED=${config.issueQueueEnabled}`)
     log('[loop] Stop: npm run -C orchestration/ts stop or Ctrl+C')
