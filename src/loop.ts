@@ -132,12 +132,13 @@ export function createLoop(deps: LoopDeps) {
 
   async function updateAdoptedIssue(
     issueNumber: number,
+    taskId: string,
     mergeCommit: string,
     runBranch: string,
   ): Promise<void> {
-    const comment = issueMergeComment(mergeCommit, runBranch)
+    const comment = issueMergeComment(taskId, mergeCommit, runBranch)
     if (!(await forge.listIssueComments(issueNumber)).includes(comment)) {
-      await commentOnIssueMerge(forge, issueNumber, mergeCommit, runBranch)
+      await commentOnIssueMerge(forge, issueNumber, taskId, mergeCommit, runBranch)
     }
     await forge.removeLabel(issueNumber, LABEL_MERGE_READY)
   }
@@ -159,6 +160,7 @@ export function createLoop(deps: LoopDeps) {
         try {
           await updateAdoptedIssue(
             issue.number,
+            adopted.taskId,
             adopted.mergeCommit,
             adopted.runBranch,
           )
@@ -205,7 +207,7 @@ export function createLoop(deps: LoopDeps) {
         recordIssueForTask(paths, taskId, issue.number)
         recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
         try {
-          await updateAdoptedIssue(issue.number, mergeCommit, runBranch)
+          await updateAdoptedIssue(issue.number, taskId, mergeCommit, runBranch)
         } catch (error) {
           log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${(error as Error).message}`)
         }
@@ -1140,6 +1142,7 @@ export function createLoop(deps: LoopDeps) {
                 await commentOnIssueMerge(
                   forge,
                   linkedIssue,
+                  taskId,
                   mergeCommit,
                   runBranch,
                 )

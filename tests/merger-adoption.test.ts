@@ -120,6 +120,9 @@ describe('remote task adoption', () => {
     expect(git(repoRoot, ['rev-list', '--parents', '-n', '1', 'HEAD']).trim().split(' ')).toHaveLength(3)
     expect(logged.join('\n')).toContain(`[loop] Adopted remote task from issue #${issueNumber}`)
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+    expect(forge.issueComments.get(issueNumber)).toContain(
+      `MERGED: 20260809_000000_003_auto-remote-fix\nMerged as ${git(repoRoot, ['rev-parse', 'HEAD']).trim()} into run branch main. This issue closes on promotion.`,
+    )
 
     const failedIssue = await forge.getIssue(failedIssueNumber)
     expect(failedIssue.labels).toContain(LABEL_MERGE_FAILED)
@@ -171,7 +174,7 @@ describe('remote task adoption', () => {
     expect(mergeChecks).toBe(1)
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_FAILED)
-    expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('Merged as ')))
+    expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
       .toHaveLength(1)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
   })

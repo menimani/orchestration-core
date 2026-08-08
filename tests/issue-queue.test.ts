@@ -442,8 +442,29 @@ describe('reapStaleLeases', () => {
     expect(issue.assignees).toEqual(['worker-a'])
     expect(issue.labels).toContain(LABEL_IN_PROGRESS)
     expect(forge.issueComments.get(issueNumber)).toEqual([
-      'Merged as abc123 into run branch feature/run-9. This issue closes on promotion.',
+      'MERGED: task-merged\nMerged as abc123 into run branch feature/run-9. This issue closes on promotion.',
     ])
+  })
+
+  it('does not reap an issue with a remote merge marker when the local issue map is empty', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged elsewhere', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    await forge.commentIssue(issueNumber,
+      'MERGED: 20260808_000000_001_auto-remote-fix\nMerged by another checkout.')
+
+    const reaped = await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )
+
+    expect(reaped).toEqual([])
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.labels).not.toContain(LABEL_READY)
+    expect(existsSync(join(paths.queueDir, 'issue-map'))).toBe(false)
   })
 
   it('removes persisted merge metadata after promotion closes the issue', async () => {
@@ -517,10 +538,10 @@ describe('worker heartbeats', () => {
     })
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
 
-    await commentOnIssueMerge(forge, issueNumber, 'abc123', 'feature/run-9')
+    await commentOnIssueMerge(forge, issueNumber, 'task-merged', 'abc123', 'feature/run-9')
 
     expect(forge.issueComments.get(issueNumber)).toEqual([
-      'Merged as abc123 into run branch feature/run-9. This issue closes on promotion.',
+      'MERGED: task-merged\nMerged as abc123 into run branch feature/run-9. This issue closes on promotion.',
     ])
     expect((await forge.getIssue(issueNumber)).updatedAt).toBe('2026-08-08T12:00:00.000Z')
   })

@@ -279,7 +279,7 @@ const cmdMerge: Command = async (paths, args) => {
       recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
       try {
         const forge = await loadForge(config.forge, paths.repoRoot)
-        await commentOnIssueMerge(forge, linkedIssue, mergeCommit, runBranch)
+        await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
       } catch (error) {
         console.error(
           `WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`,
