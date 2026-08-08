@@ -903,6 +903,21 @@ export function createLoop(deps: LoopDeps) {
     if (!config.scanEnabled) return 'continue'
     if (countRunning() > 0 || queueLength() > 0) return 'continue'
     if (isScanRunning()) return 'continue'
+    if (config.issueQueueEnabled) {
+      try {
+        const issues = await Promise.all([
+          forge.listOpenIssues(LABEL_READY),
+          forge.listOpenIssues(LABEL_MERGE_READY),
+        ])
+        const remoteCount = new Set(issues.flat().map((issue) => issue.number)).size
+        if (remoteCount > 0) {
+          log(`[loop] Waiting for ${remoteCount} remote issue-queue task(s) before entering the cycle gate`)
+          return 'continue'
+        }
+      } catch (error) {
+        log(`[loop] WARN: could not count remote issue-queue work: ${(error as Error).message}`)
+      }
+    }
 
     const currentScans = readCount(scanCountFile)
 

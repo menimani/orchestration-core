@@ -405,6 +405,56 @@ describe('cycleIsFinal', () => {
   })
 })
 
+describe('remote issue queue idle detection', () => {
+  beforeEach(() => {
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'review-template.md'),
+      '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+  })
+
+  function makeReviewLoop(issueQueueEnabled: boolean): Loop {
+    return makeLoop({
+      issueQueueEnabled,
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: true,
+    })
+  }
+
+  it('defers the cycle gate and review while a ready issue is open', async () => {
+    const loop = makeReviewLoop(true)
+    await fakeForge.createIssue({ title: 'pending fix', body: '', labels: ['loop:ready'] })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(logText()).toContain('Waiting for 1 remote issue-queue task')
+  })
+
+  it('enters the gate and dispatches the review when no remote issue is open', async () => {
+    const loop = makeReviewLoop(true)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
+  })
+
+  it('never consults the forge when the issue queue is disabled', async () => {
+    const loop = makeReviewLoop(false)
+    fakeForge.listOpenIssues = async () => {
+      throw new Error('forge should not be consulted')
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
+  })
+})
+
 describe('collectDecisions', () => {
   const decisionsFile = (): string => join(paths.queueDir, 'decisions.txt')
   const countDecisions = (): number =>
