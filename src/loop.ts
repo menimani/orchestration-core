@@ -221,8 +221,17 @@ export function createLoop(deps: LoopDeps) {
       ? [...new Set(findings)].filter((finding) => {
         const existing = existingTaskIdForDesc(paths, 'auto', finding)
         if (existing !== undefined) {
-          log(`[loop]   Duplicate finding, existing task ${existing}: ${finding}`)
-          return false
+          // A failed task is retryable by design — enqueueTask re-admits it — so only
+          // queued, active or landed work suppresses the finding. Suppressing on the
+          // bare existence of the spec blocked that supported retry path.
+          const status = readStatus(paths, existing)?.status
+          const queued = existsSync(queueFile)
+            && readFileSync(queueFile, 'utf8').split(/\r?\n/)
+              .some((line) => line.startsWith(`${existing}:`))
+          if (queued || status === 'running' || status === 'completed' || status === 'merged') {
+            log(`[loop]   Duplicate finding, existing task ${existing}: ${finding}`)
+            return false
+          }
         }
         return true
       })
