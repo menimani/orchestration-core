@@ -113,21 +113,53 @@ async function closeDuplicate(forge: Forge, issueNumber: number, survivor: numbe
   }
 }
 
-/** Keep the oldest matching issue and close later concurrent creations. */
+function isClaimed(issue: ForgeIssue): boolean {
+  return issue.assignees.length > 0 || issue.labels.includes(LABEL_IN_PROGRESS)
+}
+
+function isReadyToClose(issue: ForgeIssue, fingerprint: string): boolean {
+  return issue.state === 'open'
+    && issueFingerprint(issue) === fingerprint
+    && issue.assignees.length === 0
+    && issue.labels.includes(LABEL_READY)
+    && !issue.labels.includes(LABEL_IN_PROGRESS)
+}
+
+/** Preserve claimed work; otherwise keep the oldest match and close ready duplicates. */
 async function reconcileOpenFindings(
   forge: Forge,
   fingerprint: string,
   createdIssueNumber?: number,
 ): Promise<number | undefined> {
-  const issueNumbers = new Set((await forge.listOpenIssues(LABEL_FINDING))
+  const issues = new Map((await forge.listOpenIssues(LABEL_FINDING))
     .filter((issue) => issueFingerprint(issue) === fingerprint)
-    .map((issue) => issue.number))
-  if (createdIssueNumber !== undefined) issueNumbers.add(createdIssueNumber)
-  const ordered = [...issueNumbers].sort((a, b) => a - b)
-  const survivor = ordered[0]
+    .map((issue) => [issue.number, issue]))
+  if (createdIssueNumber !== undefined && !issues.has(createdIssueNumber)) {
+    try {
+      const created = await forge.getIssue(createdIssueNumber)
+      if (created.state === 'open' && issueFingerprint(created) === fingerprint) {
+        issues.set(created.number, created)
+      }
+    } catch {
+      // A concurrent close can make a just-created issue disappear from the open set.
+    }
+  }
+  const ordered = [...issues.values()].sort((a, b) => a.number - b.number)
+  const survivor = ordered.find(isClaimed)?.number ?? ordered[0]?.number
   if (survivor === undefined) return undefined
-  for (const duplicate of ordered.slice(1)) {
-    await closeDuplicate(forge, duplicate, survivor)
+  for (const duplicate of ordered) {
+    if (duplicate.number === survivor) continue
+    // Assignment and labels may have changed since listOpenIssues returned. Re-read
+    // immediately before closing so reconciliation cannot knowingly sever a lease.
+    let current: ForgeIssue
+    try {
+      current = await forge.getIssue(duplicate.number)
+    } catch {
+      continue
+    }
+    if (isReadyToClose(current, fingerprint)) {
+      await closeDuplicate(forge, current.number, survivor)
+    }
   }
   return survivor
 }

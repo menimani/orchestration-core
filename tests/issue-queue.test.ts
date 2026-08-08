@@ -114,6 +114,26 @@ describe('publishFinding', () => {
     expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
   })
 
+  it('preserves a later claimed issue and closes only the older ready duplicate', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks'
+    const first = await publishFinding(forge, paths, description, 'scan-1')
+    const claimed = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-2'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    await forge.assignIssue(claimed, 'worker-busy')
+
+    const result = await publishFinding(forge, paths, description, 'scan-3')
+
+    expect(result).toEqual({ outcome: 'duplicate', issueNumber: claimed })
+    expect((await forge.getIssue(first.issueNumber)).state).toBe('closed')
+    const claimedAfter = await forge.getIssue(claimed)
+    expect(claimedAfter.state).toBe('open')
+    expect(claimedAfter.assignees).toEqual(['worker-busy'])
+    expect(claimedAfter.labels).toContain(LABEL_IN_PROGRESS)
+  })
+
   it('drops a ledger entry for a closed issue and files the finding again', async () => {
     const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
     await forge.closeIssue(first.issueNumber, 'fixed')
