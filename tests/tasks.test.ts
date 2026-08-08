@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { issueNumberForTask, LABEL_FINDING, LABEL_IN_PROGRESS } from '../src/issueQueue.ts'
 import {
-  delegateTask, delegateTaskVisible, enqueueTask, newTaskSpec, specFile, writeIssueModeMarker,
+  delegateTask, delegateTaskVisible, enqueueTask, isIssueModeActive, newTaskSpec,
+  removeIssueModeMarker, specFile, writeIssueModeMarker,
 } from '../src/tasks.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
@@ -129,6 +130,23 @@ describe('delegateTask', () => {
     const issue = await forge.getIssue(1)
     expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
     expect(issue.assignees).toEqual(['delegator'])
+  })
+
+  it('ignores an issue-mode marker whose daemon is no longer alive', () => {
+    writeIssueModeMarker(paths, true, 2147483647)
+
+    expect(isIssueModeActive(paths, {})).toBe(false)
+  })
+
+  it('removes only the issue-mode marker owned by the exiting daemon', () => {
+    const marker = join(paths.queueDir, 'issue-mode')
+    writeIssueModeMarker(paths, true, 123)
+
+    removeIssueModeMarker(paths, 456)
+    expect(existsSync(marker)).toBe(true)
+
+    removeIssueModeMarker(paths, 123)
+    expect(existsSync(marker)).toBe(false)
   })
 
   it('still enqueues locally when forge publication fails', async () => {

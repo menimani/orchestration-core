@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pitfallsFileForDesc } from './gates.ts'
 import { taskIdForDesc } from './ids.ts'
@@ -95,8 +95,19 @@ export function issueModeMarkerFile(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-mode')
 }
 
-export function writeIssueModeMarker(paths: OrchPaths, enabled: boolean): void {
-  writeFileSync(issueModeMarkerFile(paths), `${enabled}\n`)
+export function writeIssueModeMarker(
+  paths: OrchPaths,
+  enabled: boolean,
+  pid = process.pid,
+): void {
+  writeFileSync(issueModeMarkerFile(paths), `${enabled}\n${pid}\n`)
+}
+
+export function removeIssueModeMarker(paths: OrchPaths, pid: number): void {
+  const marker = issueModeMarkerFile(paths)
+  if (!existsSync(marker)) return
+  const [, owner] = readFileSync(marker, 'utf8').trim().split(/\s+/)
+  if (owner === `${pid}`) rmSync(marker, { force: true })
 }
 
 /** The delegate process prefers its own explicit setting, then the daemon marker. */
@@ -107,7 +118,15 @@ export function isIssueModeActive(
   const configured = env['ISSUE_QUEUE_ENABLED']
   if (configured !== undefined) return configured === 'true'
   const marker = issueModeMarkerFile(paths)
-  return existsSync(marker) && readFileSync(marker, 'utf8').trim() === 'true'
+  if (!existsSync(marker)) return false
+  const [enabled, owner] = readFileSync(marker, 'utf8').trim().split(/\s+/)
+  if (enabled !== 'true' || owner === undefined || !/^\d+$/.test(owner)) return false
+  try {
+    process.kill(Number(owner), 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
