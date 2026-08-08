@@ -43,7 +43,7 @@ function git(cwd: string, args: string[]): string {
  * uncommitted changes or a missing deliverable stop the merge and keep the worktree,
  * because removing it would lose work an agent forgot to commit.
  */
-export async function mergeTask(paths: OrchPaths, taskId: string, options: MergeOptions): Promise<void> {
+export async function mergeTask(paths: OrchPaths, taskId: string, options: MergeOptions): Promise<string> {
   const out = (text: string): void => {
     if (options.outputFile !== undefined) {
       appendFileSync(options.outputFile, `${text}\n`)
@@ -174,4 +174,5 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   }
   await writeStatus(paths, taskId, 'merged')
   out(`Merged ${taskId} and removed the worktree.`)
+  return git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
 }

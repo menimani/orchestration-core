@@ -130,6 +130,13 @@ describe('actionable findings', () => {
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
   })
 
+  it('keeps findings that describe incorrect no-issue behavior', () => {
+    const loop = makeLoop()
+    const finding = '[BUG] SearchPage reports no issues when the request fails'
+    writeFinal('t-no-issues-bug', `NEXT_TASK: ${finding}\n`)
+    expect(loop.actionableFindings(finalMessageFile(paths, 't-no-issues-bug'))).toEqual([finding])
+  })
+
   it('keeps a real finding that contains None', () => {
     const loop = makeLoop()
     const findings = [

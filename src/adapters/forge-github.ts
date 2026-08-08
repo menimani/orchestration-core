@@ -163,10 +163,6 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
       }
     },
 
-    async updateIssueBody(issueNumber: number, body: string): Promise<void> {
-      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--body', body])
-    },
-
     async commentIssue(issueNumber: number, comment: string): Promise<void> {
       await gh(repoRoot, ['issue', 'comment', String(issueNumber), '--body', comment])
     },

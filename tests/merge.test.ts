@@ -52,8 +52,11 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_001_user-adds-a-file'
     const worktree = await makeCompletedTask(taskId, { commit: true })
 
-    await mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject })
+    const mergeCommit = await mergeTask(
+      paths, taskId, { taskGate: 'light', project: shioraProject },
+    )
 
+    expect(mergeCommit).toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
     expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(`Merge ${taskId} via Codex`)
     expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(true)
     expect(existsSync(worktree)).toBe(false)
@@ -108,4 +111,3 @@ describe('mergeTask', () => {
       .rejects.toBeInstanceOf(MergeError)
   })
 })
-

@@ -57,12 +57,6 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
       return { ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }
     },
-    async updateIssueBody(issueNumber: number, body: string): Promise<void> {
-      const issue = fake.issues.get(issueNumber)
-      if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
-      issue.body = body
-      issue.updatedAt = fake.clock().toISOString()
-    },
     async commentIssue(issueNumber: number, comment: string): Promise<void> {
       const issue = fake.issues.get(issueNumber)
       if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)

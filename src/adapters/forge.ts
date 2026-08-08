@@ -67,8 +67,6 @@ export interface Forge {
   ensureLabel(name: string, description: string): Promise<void>
   createIssue(options: CreateIssueOptions): Promise<number>
   getIssue(issueNumber: number): Promise<ForgeIssue>
-  /** Replace an issue's body. */
-  updateIssueBody(issueNumber: number, body: string): Promise<void>
   /** Add a comment to an issue. */
   commentIssue(issueNumber: number, comment: string): Promise<void>
   /** Open issues carrying the label, newest first. */

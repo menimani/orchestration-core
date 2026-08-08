@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import { taskIdForDesc } from './ids.ts'
 import type { OrchPaths } from './paths.ts'
-import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
 } from './tasks.ts'
@@ -264,7 +263,7 @@ async function reconcileCreatedFinding(
 
 /** Revisit forge-persisted fingerprints on every poll after listing lag has cleared. */
 export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPaths): Promise<void> {
-  const openFindings = await forge.listOpenIssues(LABEL_FINDING)
+  let openFindings = await forge.listOpenIssues(LABEL_FINDING)
   const byFingerprintSet = new Map<string, { fingerprints: string[]; issues: ForgeIssue[] }>()
   for (const issue of openFindings) {
     const fingerprints = issueFingerprints(issue)
@@ -279,6 +278,42 @@ export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPath
     if (survivor !== undefined) {
       for (const fingerprint of fingerprints) recordFingerprint(paths, fingerprint, survivor)
     }
+  }
+
+  // Exact-set reconciliation cannot see a review issue carrying {A, B} and a racing
+  // scan issue carrying {A}. Prefer claimed work, then the broadest ready issue, and
+  // close a ready issue only when every one of its constituents is already covered.
+  // Partially overlapping issues stay open so their unmatched findings are not lost.
+  openFindings = await forge.listOpenIssues(LABEL_FINDING)
+  const ordered = openFindings
+    .filter((issue) => issueFingerprints(issue).length > 0)
+    .sort((a, b) => Number(isClaimed(b)) - Number(isClaimed(a))
+      || issueFingerprints(b).length - issueFingerprints(a).length
+      || a.number - b.number)
+  const owners = new Map<string, number>()
+  for (const issue of ordered) {
+    const fingerprints = [...new Set(issueFingerprints(issue))]
+    const coveredBy = fingerprints.map((fingerprint) => owners.get(fingerprint))
+    if (!isClaimed(issue) && coveredBy.every((owner) => owner !== undefined)) {
+      await withIssueCoordination(forge, issue.number, async () => {
+        let current: ForgeIssue
+        try {
+          current = await forge.getIssue(issue.number)
+        } catch {
+          return
+        }
+        if (isReadyToClose(current, fingerprints)) {
+          await closeDuplicate(forge, issue.number, coveredBy[0] as number)
+        }
+      })
+      continue
+    }
+    for (const fingerprint of fingerprints) {
+      if (!owners.has(fingerprint)) owners.set(fingerprint, issue.number)
+    }
+  }
+  for (const [fingerprint, issueNumber] of owners) {
+    recordFingerprint(paths, fingerprint, issueNumber)
   }
 }
 
@@ -510,12 +545,72 @@ export function issueNumberForTask(paths: OrchPaths, taskId: string): number | u
   return /^\d+$/.test(raw) ? Number(raw) : undefined
 }
 
-function mergedTaskForIssue(paths: OrchPaths, issueNumber: number): string | undefined {
-  const dir = join(paths.queueDir, 'issue-map')
-  if (!existsSync(dir)) return undefined
-  return readdirSync(dir).find((taskId) =>
-    issueNumberForTask(paths, taskId) === issueNumber
-      && readStatus(paths, taskId)?.status === 'merged')
+interface PromotionPending {
+  taskId: string
+  issueNumber: number
+  mergeCommit: string
+  runBranch: string
+}
+
+function promotionDir(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-promotion')
+}
+
+function promotionFile(paths: OrchPaths, issueNumber: number): string {
+  return join(promotionDir(paths), `${issueNumber}.json`)
+}
+
+function promotionForIssue(paths: OrchPaths, issueNumber: number): PromotionPending | undefined {
+  const file = promotionFile(paths, issueNumber)
+  if (!existsSync(file)) return undefined
+  try {
+    const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<PromotionPending>
+    if (typeof value.taskId !== 'string'
+      || value.issueNumber !== issueNumber
+      || typeof value.mergeCommit !== 'string'
+      || value.mergeCommit === ''
+      || typeof value.runBranch !== 'string'
+      || value.runBranch === '') return undefined
+    return value as PromotionPending
+  } catch {
+    return undefined
+  }
+}
+
+/** Persist the merge identity independently of task status until promotion closes its issue. */
+export function recordIssuePromotion(
+  paths: OrchPaths,
+  taskId: string,
+  mergeCommit: string,
+  runBranch: string,
+): number | undefined {
+  const issueNumber = issueNumberForTask(paths, taskId)
+  if (issueNumber === undefined) return undefined
+  mkdirSync(promotionDir(paths), { recursive: true })
+  writeFileSync(promotionFile(paths, issueNumber), `${JSON.stringify({
+    taskId, issueNumber, mergeCommit, runBranch,
+  })}\n`)
+  return issueNumber
+}
+
+async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Promise<void> {
+  const dir = promotionDir(paths)
+  if (!existsSync(dir)) return
+  for (const name of readdirSync(dir)) {
+    const match = /^(\d+)\.json$/.exec(name)
+    if (match === null) continue
+    const issueNumber = Number(match[1])
+    let issue: ForgeIssue
+    try {
+      issue = await forge.getIssue(issueNumber)
+    } catch {
+      continue
+    }
+    if (issue.state !== 'closed') continue
+    const promotion = promotionForIssue(paths, issueNumber)
+    rmSync(join(dir, name), { force: true })
+    if (promotion !== undefined) rmSync(issueMapFile(paths, promotion.taskId), { force: true })
+  }
 }
 
 function heartbeatFile(paths: OrchPaths, taskId: string): string {
@@ -541,12 +636,7 @@ export async function heartbeatIssueForTask(
   }
 
   const timestamp = now.toISOString()
-  const issue = await forge.getIssue(issueNumber)
-  const heartbeat = `Heartbeat: ${timestamp}`
-  const body = /^Heartbeat: .*$/m.test(issue.body)
-    ? issue.body.replace(/^Heartbeat: .*$/m, heartbeat)
-    : `${issue.body}${issue.body.endsWith('\n') ? '' : '\n'}${heartbeat}\n`
-  await forge.updateIssueBody(issueNumber, body)
+  await forge.commentIssue(issueNumber, `Heartbeat: ${timestamp}`)
   mkdirSync(join(paths.queueDir, 'heartbeat'), { recursive: true })
   writeFileSync(file, `${timestamp}\n`)
   return true
@@ -645,15 +735,16 @@ export async function reapStaleLeases(
   paths: OrchPaths,
   leaseHours: number,
   now: Date,
-  mergeCommit: string,
-  runBranch: string,
 ): Promise<number[]> {
   const reaped: number[] = []
   for (const issue of await forge.listOpenIssues(LABEL_IN_PROGRESS)) {
     const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
     if (ageMs < leaseHours * 3600 * 1000) continue
-    if (mergedTaskForIssue(paths, issue.number) !== undefined) {
-      await commentOnIssueMerge(forge, issue.number, mergeCommit, runBranch)
+    const promotion = promotionForIssue(paths, issue.number)
+    if (promotion !== undefined) {
+      await commentOnIssueMerge(
+        forge, issue.number, promotion.mergeCommit, promotion.runBranch,
+      )
       continue
     }
     for (const assignee of issue.assignees) {
@@ -663,6 +754,7 @@ export async function reapStaleLeases(
     await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
     reaped.push(issue.number)
   }
+  await removeClosedPromotionRecords(forge, paths)
   return reaped
 }
 

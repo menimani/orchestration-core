@@ -23,7 +23,7 @@ import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import {
   claimIssue, commentOnIssueMerge, heartbeatIssueForTask, issueNumberForTask,
-  publishFinding, reapStaleLeases,
+  publishFinding, reapStaleLeases, recordIssuePromotion,
   reconcileFindingFingerprints, unresolvedFindings, LABEL_READY,
 } from './issueQueue.ts'
 
@@ -128,10 +128,9 @@ export function createLoop(deps: LoopDeps) {
     const normalized = trimmed.replace(/[.!]+$/, '').toLowerCase()
     if (['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
       .includes(normalized)) return true
-    if (/^none\b/i.test(trimmed)) return true
-
-    const firstSentence = trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? ''
-    return /\b(?:no (?:actionable )?(?:issues|findings)|found no (?:actionable )?(?:issues|findings)|nothing to report)\b/i
+    const firstSentence = (trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? '')
+      .replace(/[.!]+$/, '').toLowerCase()
+    return /^(?:none|no (?:actionable )?(?:issues|findings)(?: (?:were )?found)?|(?:sections? [\w, -]+|the review|review|i|we) found no (?:actionable )?(?:issues|findings)|nothing to report)$/
       .test(firstSentence)
   }
 
@@ -922,7 +921,7 @@ export function createLoop(deps: LoopDeps) {
           const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
           const linkedIssue = issueNumberForTask(paths, taskId)
           try {
-            await mergeTask(paths, taskId, {
+            const mergeCommit = await mergeTask(paths, taskId, {
               taskGate: config.taskGate,
               testCmd: config.testCmd === '' ? undefined : config.testCmd,
               skipAutoTest: config.skipAutoTest,
@@ -933,12 +932,14 @@ export function createLoop(deps: LoopDeps) {
             log(`[loop]   Merge successful: ${taskId}`)
             writeFileSync(mergeFailureFile, '0\n')
             if (linkedIssue !== undefined) {
+              const runBranch = git(['branch', '--show-current']).trim()
               try {
+                recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
                 await commentOnIssueMerge(
                   forge,
                   linkedIssue,
-                  git(['rev-parse', 'HEAD']).trim(),
-                  git(['branch', '--show-current']).trim(),
+                  mergeCommit,
+                  runBranch,
                 )
               } catch (error) {
                 log(`[loop] WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`)
@@ -988,8 +989,6 @@ export function createLoop(deps: LoopDeps) {
             paths,
             config.issueLeaseHours,
             now(),
-            git(['rev-parse', 'HEAD']).trim(),
-            currentBranch,
           )) {
             log(`[loop] Lease reaped: issue #${reaped} is ready again`)
           }

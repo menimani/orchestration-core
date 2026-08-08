@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   buildIssueBody, claimIssue, commentOnIssueMerge, fingerprintOf, heartbeatIssueForTask,
   issueNumberForTask, parseIssueBody, publishDelegatedTask, publishFinding,
-  reapStaleLeases, reconcileFindingFingerprints, recordIssueForTask,
+  reapStaleLeases, reconcileFindingFingerprints, recordIssueForTask, recordIssuePromotion,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
@@ -159,6 +159,53 @@ describe('publishFinding', () => {
     expect((await listOpenIssues(LABEL_FINDING)).map((issue) => issue.number)).toEqual([1])
     expect((await forge.getIssue(2)).state).toBe('closed')
     expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
+  })
+
+  it('closes an individual issue fully subsumed by a combined review issue', async () => {
+    const findingA = '[BUG] `src/a.ts` breaks'
+    const findingB = '[TEST] `src/b.test.ts` lacks coverage'
+    const combined = await publishFinding(
+      forge, paths, `1. ${findingA}\n2. ${findingB}`, 'review-1', 'high',
+      'Review round fixes', [findingA, findingB],
+    )
+    const individual = await forge.createIssue({
+      title: findingA,
+      body: buildIssueBody(findingA, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    await reconcileFindingFingerprints(forge, paths)
+
+    expect((await forge.getIssue(combined.issueNumber)).state).toBe('open')
+    expect((await forge.getIssue(individual)).state).toBe('closed')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8').split(/\r?\n/))
+      .toEqual(expect.arrayContaining([
+        `bug:src/a.ts ${combined.issueNumber}`,
+        `test:src/b.test.ts ${combined.issueNumber}`,
+      ]))
+  })
+
+  it('keeps a partially overlapping issue that carries an unmatched finding', async () => {
+    const findingA = '[BUG] `src/a.ts` breaks'
+    const findingB = '[BUG] `src/b.ts` breaks'
+    const findingC = '[BUG] `src/c.ts` breaks'
+    const first = await publishFinding(
+      forge, paths, `1. ${findingA}\n2. ${findingB}`, 'review-1', 'high',
+      'First review fixes', [findingA, findingB],
+    )
+    const second = await forge.createIssue({
+      title: 'Second review fixes',
+      body: buildIssueBody(
+        `1. ${findingB}\n2. ${findingC}`, 'review-2', 'high',
+        [fingerprintOf(findingB), fingerprintOf(findingC)],
+      ),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    await reconcileFindingFingerprints(forge, paths)
+
+    expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
+    expect((await forge.getIssue(second)).state).toBe('open')
   })
 
   it('preserves a later claimed issue and closes only the older ready duplicate', async () => {
@@ -351,7 +398,7 @@ describe('reapStaleLeases', () => {
     })
     await forge.assignIssue(live, 'worker-busy')
 
-    const reaped = await reapStaleLeases(forge, paths, 3, base, 'abc123', 'feature/run-9')
+    const reaped = await reapStaleLeases(forge, paths, 3, base)
     expect(reaped).toEqual([stale])
     const staleAfter = await forge.getIssue(stale)
     expect(staleAfter.assignees).toEqual([])
@@ -361,19 +408,18 @@ describe('reapStaleLeases', () => {
     expect(liveAfter.labels).toContain(LABEL_IN_PROGRESS)
   })
 
-  it('refreshes a stale lease linked to a merged task instead of reaping it', async () => {
+  it('uses persisted merge metadata after task status cleanup instead of reaping it', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
       title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
     })
     recordIssueForTask(paths, 'task-merged', issueNumber)
-    writeFileSync(join(paths.statusDir, 'task-merged.json'),
-      JSON.stringify({ task_id: 'task-merged', status: 'merged' }))
+    recordIssuePromotion(paths, 'task-merged', 'abc123', 'feature/run-9')
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
 
     const reap = () => reapStaleLeases(
-      forge, paths, 3, new Date('2026-08-08T12:00:00Z'), 'abc123', 'feature/run-9',
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
     )
     await expect(reap()).resolves.toEqual([])
     await expect(reap()).resolves.toEqual([])
@@ -384,6 +430,21 @@ describe('reapStaleLeases', () => {
     expect(forge.issueComments.get(issueNumber)).toEqual([
       'Merged as abc123 into run branch feature/run-9. This issue closes on promotion.',
     ])
+  })
+
+  it('removes persisted merge metadata after promotion closes the issue', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssueForTask(paths, 'task-merged', issueNumber)
+    recordIssuePromotion(paths, 'task-merged', 'abc123', 'feature/run-9')
+    await forge.closeIssue(issueNumber, 'promoted')
+
+    await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
+
+    expect(readdirSync(join(paths.queueDir, 'issue-promotion'))).toEqual([])
+    expect(issueNumberForTask(paths, 'task-merged')).toBeUndefined()
   })
 
   it('reaps a stale mapped lease when its local task is not merged', async () => {
@@ -397,7 +458,7 @@ describe('reapStaleLeases', () => {
       JSON.stringify({ task_id: 'task-completed', status: 'completed' }))
 
     const reaped = await reapStaleLeases(
-      forge, paths, 3, new Date('2026-08-08T12:00:00Z'), 'abc123', 'feature/run-9',
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
     )
 
     expect(reaped).toEqual([issueNumber])
@@ -407,13 +468,17 @@ describe('reapStaleLeases', () => {
 })
 
 describe('worker heartbeats', () => {
-  it('refreshes a linked task after 30 minutes and replaces the previous body line', async () => {
+  it('refreshes a linked task after 30 minutes without replacing a concurrent body edit', async () => {
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
     const issueNumber = await forge.createIssue({
       title: 'linked', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
     recordIssueForTask(paths, 'task-linked', issueNumber)
+    const editedBody = `${buildIssueBody('[BUG] `a/b.ts` x', 'p')}\nHuman note\n`
+    const issue = forge.issues.get(issueNumber)
+    if (issue === undefined) throw new Error('expected linked issue')
+    issue.body = editedBody
 
     expect(await heartbeatIssueForTask(forge, paths, 'task-linked', new Date('2026-08-08T12:00:00Z')))
       .toBe(true)
@@ -423,9 +488,11 @@ describe('worker heartbeats', () => {
     forge.clock = () => new Date('2026-08-08T12:30:00Z')
     expect(await heartbeatIssueForTask(forge, paths, 'task-linked', new Date('2026-08-08T12:30:00Z')))
       .toBe(true)
-    const body = (await forge.getIssue(issueNumber)).body
-    expect(body.match(/^Heartbeat: .*$/gm)).toEqual(['Heartbeat: 2026-08-08T12:30:00.000Z'])
-    expect(parseIssueBody(body)?.requirement).toBe('[BUG] `a/b.ts` x')
+    expect((await forge.getIssue(issueNumber)).body).toBe(editedBody)
+    expect(forge.issueComments.get(issueNumber)).toEqual([
+      'Heartbeat: 2026-08-08T12:00:00.000Z',
+      'Heartbeat: 2026-08-08T12:30:00.000Z',
+    ])
   })
 
   it('comments with the merge linkage and refreshes the issue timestamp', async () => {
@@ -579,13 +646,13 @@ describe('loop integration in issue mode', () => {
     const linkedAfter = await forge.getIssue(linked)
     expect(linkedAfter.assignees).toEqual(['worker-a'])
     expect(linkedAfter.labels).toContain(LABEL_IN_PROGRESS)
-    expect(linkedAfter.body).toContain('Heartbeat: 2026-08-08T12:00:00.000Z')
+    expect(forge.issueComments.get(linked)).toEqual(['Heartbeat: 2026-08-08T12:00:00.000Z'])
     const unlinkedAfter = await forge.getIssue(unlinked)
     expect(unlinkedAfter.assignees).toEqual([])
     expect(unlinkedAfter.labels).toContain(LABEL_READY)
   })
 
-  it('continues polling when a heartbeat body edit fails', async () => {
+  it('continues polling when a heartbeat comment fails', async () => {
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
     const issueNumber = await forge.createIssue({
       title: 'linked', body: buildIssueBody('[BUG] `src/a.ts` breaks', 'scan'),
@@ -594,7 +661,7 @@ describe('loop integration in issue mode', () => {
     recordIssueForTask(paths, 'task-running', issueNumber)
     writeFileSync(join(paths.statusDir, 'task-running.json'),
       JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
-    forge.updateIssueBody = async () => { throw new Error('forge unavailable') }
+    forge.commentIssue = async () => { throw new Error('forge unavailable') }
     const logged: string[] = []
 
     const { createLoop } = await import('../src/loop.ts')
