@@ -16,6 +16,8 @@ export const LABEL_FINDING = 'loop:finding'
 export const LABEL_READY = 'loop:ready'
 export const LABEL_IN_PROGRESS = 'loop:in-progress'
 
+const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
+
 /**
  * A scan words the same finding differently every cycle, so text cannot be the
  * identity. What survives rewording: an advisory identifier when one is named, else
@@ -164,6 +166,24 @@ async function reconcileOpenFindings(
   return survivor
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Give eventually consistent issue listings a bounded window to expose a racing creation. */
+async function reconcileCreatedFinding(
+  forge: Forge,
+  fingerprint: string,
+  createdIssueNumber: number,
+): Promise<number> {
+  for (const delayMs of POST_CREATE_RECONCILE_DELAYS_MS) {
+    if (delayMs > 0) await sleep(delayMs)
+    const survivor = await reconcileOpenFindings(forge, fingerprint, createdIssueNumber)
+    if (survivor !== undefined && survivor !== createdIssueNumber) return survivor
+  }
+  return createdIssueNumber
+}
+
 /**
  * File a finding as a ready issue unless an open issue already carries its
  * fingerprint. The check reads open findings only: a closed issue's fix already
@@ -206,9 +226,9 @@ export async function publishFinding(
     body: buildIssueBody(description, parentTaskId, effort),
     labels: [LABEL_FINDING, LABEL_READY],
   })
-  // The preflight list is not a lock: workers can both observe no match and create.
-  // Re-read shared forge state and deterministically retain the lower issue number.
-  const survivor = (await reconcileOpenFindings(forge, fingerprint, issueNumber)) ?? issueNumber
+  // The preflight list is not a lock, and post-create listings can lag too. Re-read
+  // shared forge state over a bounded window and retain the lower issue number.
+  const survivor = await reconcileCreatedFinding(forge, fingerprint, issueNumber)
   recordFingerprint(paths, fingerprint, survivor)
   return survivor === issueNumber
     ? { outcome: 'created', issueNumber }
