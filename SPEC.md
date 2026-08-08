@@ -206,10 +206,11 @@ from or equivalent to `orchestration/tests/*.sh`.
     merged-but-not-promoted window. A promotion delayed beyond `ISSUE_LEASE_HOURS` is
     the residual gap. A forge outage degrades a poll to local-only work; it never stops
     the loop. Labels are ensured at loop startup. The daemon records issue mode in
-    `queue/issue-mode` so a separate `delegate` process can file its locally enqueued
-    work as an issue already assigned to the current user with `loop:finding` +
-    `loop:in-progress`. Delegation remains local-only with a warning if the forge is
-    unavailable, and fingerprint duplicates link the local task to the existing issue.
+    `queue/issue-mode` so a separate `delegate` process can publish and claim work before
+    materializing it locally. A new issue is assigned to the current user with
+    `loop:finding` + `loop:in-progress`; a matching ready issue is claimed first, while a
+    matching issue already claimed by another worker suppresses the local task. Delegation
+    remains local-only with a warning if the forge is unavailable.
     The marker includes the daemon PID, is removed with the PID lock on every graceful
     exit, and is ignored when its owning process is no longer alive.
 

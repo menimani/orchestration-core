@@ -101,6 +101,10 @@ export type PublishResult
   = { outcome: 'created'; issueNumber: number }
     | { outcome: 'duplicate'; issueNumber: number }
 
+export type DelegatedPublishResult
+  = PublishResult & { materialize: true }
+    | PublishResult & { materialize: false }
+
 function fingerprintLedgerFile(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-fingerprints')
 }
@@ -314,17 +318,37 @@ async function claimReadyIssueForDelegation(
   forge: Forge,
   issueNumber: number,
   user: string,
-): Promise<void> {
-  await withIssueCoordination(forge, issueNumber, async () => {
+): Promise<boolean> {
+  return withIssueCoordination(forge, issueNumber, async () => {
     const issue = await forge.getIssue(issueNumber)
-    if (!isReadyToClaim(issue)) return
+    if (!isReadyToClaim(issue)) return false
     await forge.assignIssue(issueNumber, user)
+
+    const afterAssignment = await forge.getIssue(issueNumber)
+    if (afterAssignment.state !== 'open'
+      || !afterAssignment.labels.includes(LABEL_READY)
+      || afterAssignment.labels.includes(LABEL_IN_PROGRESS)
+      || [...afterAssignment.assignees].sort()[0] !== user) {
+      await forge.unassignIssue(issueNumber, user)
+      return false
+    }
+
     await forge.addLabel(issueNumber, LABEL_IN_PROGRESS)
     await forge.removeLabel(issueNumber, LABEL_READY)
+
+    const claimed = await forge.getIssue(issueNumber)
+    if (claimed.state !== 'open'
+      || claimed.labels.includes(LABEL_READY)
+      || !claimed.labels.includes(LABEL_IN_PROGRESS)
+      || [...claimed.assignees].sort()[0] !== user) {
+      await forge.unassignIssue(issueNumber, user)
+      return false
+    }
+    return true
   })
 }
 
-/** File user-delegated work as claimed, or attach the task to its existing issue. */
+/** Publish and claim delegated work before allowing its local task to materialize. */
 export async function publishDelegatedTask(
   forge: Forge,
   paths: OrchPaths,
@@ -332,13 +356,13 @@ export async function publishDelegatedTask(
   taskId: string,
   user: string,
   effort?: string,
-): Promise<PublishResult> {
+): Promise<DelegatedPublishResult> {
   const fingerprint = fingerprintOf(description)
   const existingIssueNumber = await findExistingFinding(forge, paths, fingerprint)
   if (existingIssueNumber !== undefined) {
-    await claimReadyIssueForDelegation(forge, existingIssueNumber, user)
-    recordIssueForTask(paths, taskId, existingIssueNumber)
-    return { outcome: 'duplicate', issueNumber: existingIssueNumber }
+    const materialize = await claimReadyIssueForDelegation(forge, existingIssueNumber, user)
+    if (materialize) recordIssueForTask(paths, taskId, existingIssueNumber)
+    return { outcome: 'duplicate', issueNumber: existingIssueNumber, materialize }
   }
 
   const title = description.length > 90 ? `${description.slice(0, 87)}...` : description
@@ -351,12 +375,12 @@ export async function publishDelegatedTask(
   const survivor = await reconcileCreatedFinding(forge, fingerprint, issueNumber)
   if (survivor !== issueNumber) {
     await closeDuplicate(forge, issueNumber, survivor)
+    recordFingerprint(paths, fingerprint, survivor)
+    return { outcome: 'duplicate', issueNumber: survivor, materialize: false }
   }
-  recordFingerprint(paths, fingerprint, survivor)
-  recordIssueForTask(paths, taskId, survivor)
-  return survivor === issueNumber
-    ? { outcome: 'created', issueNumber }
-    : { outcome: 'duplicate', issueNumber: survivor }
+  recordFingerprint(paths, fingerprint, issueNumber)
+  recordIssueForTask(paths, taskId, issueNumber)
+  return { outcome: 'created', issueNumber, materialize: true }
 }
 
 function issueMapFile(paths: OrchPaths, taskId: string): string {

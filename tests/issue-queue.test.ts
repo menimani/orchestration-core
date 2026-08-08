@@ -410,17 +410,35 @@ describe('issue map', () => {
 })
 
 describe('publishDelegatedTask', () => {
-  it('links a duplicate delegation to the existing issue', async () => {
+  it('suppresses a duplicate delegation when the existing issue is already claimed', async () => {
     const description = '[BUG] `src/a/b.ts` breaks delegated work'
     const first = await publishDelegatedTask(forge, paths, description, 'user-task-1', forge.user)
     const second = await publishDelegatedTask(
       forge, paths, '[BUG] `src/a/b.ts` breaks with new wording', 'user-task-2', forge.user,
     )
 
-    expect(first).toEqual({ outcome: 'created', issueNumber: 1 })
-    expect(second).toEqual({ outcome: 'duplicate', issueNumber: 1 })
+    expect(first).toEqual({ outcome: 'created', issueNumber: 1, materialize: true })
+    expect(second).toEqual({ outcome: 'duplicate', issueNumber: 1, materialize: false })
     expect(forge.issues.size).toBe(1)
-    expect(issueNumberForTask(paths, 'user-task-2')).toBe(1)
+    expect(issueNumberForTask(paths, 'user-task-2')).toBeUndefined()
+  })
+
+  it('does not attach a local task to a matching issue claimed by another worker', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const issueNumber = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'worker-task'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-busy'],
+    })
+
+    const result = await publishDelegatedTask(
+      forge, paths, description, 'user-task', forge.user,
+    )
+
+    expect(result).toEqual({ outcome: 'duplicate', issueNumber, materialize: false })
+    expect(issueNumberForTask(paths, 'user-task')).toBeUndefined()
+    expect((await forge.getIssue(issueNumber)).assignees).toEqual(['worker-busy'])
   })
 })
 

@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
-import { issueNumberForTask, LABEL_FINDING, LABEL_IN_PROGRESS } from '../src/issueQueue.ts'
+import {
+  buildIssueBody, issueNumberForTask, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
+} from '../src/issueQueue.ts'
 import {
   delegateTask, delegateTaskVisible, enqueueTask, isIssueModeActive, newTaskSpec,
   removeIssueModeMarker, specFile, writeIssueModeMarker,
@@ -125,7 +127,7 @@ describe('delegateTask', () => {
     })
 
     expect(queueLines()).toEqual([`${result.taskId}:0`])
-    expect(result.issue).toEqual({ outcome: 'created', issueNumber: 1 })
+    expect(result.issue).toEqual({ outcome: 'created', issueNumber: 1, materialize: true })
     expect(issueNumberForTask(paths, result.taskId)).toBe(1)
     const issue = await forge.getIssue(1)
     expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
@@ -147,6 +149,58 @@ describe('delegateTask', () => {
 
     removeIssueModeMarker(paths, 123)
     expect(existsSync(marker)).toBe(false)
+  })
+
+  it('claims a ready matching issue before enqueueing its local task', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const forge = makeFakeForge('delegator')
+    const issueNumber = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const assignIssue = forge.assignIssue.bind(forge)
+    forge.assignIssue = async (number, user) => {
+      expect(queueLines()).toEqual([])
+      expect(readdirSync(paths.tasksDir)).toEqual([])
+      await assignIssue(number, user)
+    }
+
+    const result = await delegateTaskVisible(paths, description, {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge: async () => forge,
+      warn: () => {},
+    })
+
+    expect(result.issue).toEqual({ outcome: 'duplicate', issueNumber, materialize: true })
+    expect(queueLines()).toEqual([`${result.taskId}:0`])
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['delegator'])
+    expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+  })
+
+  it('does not materialize a task when another worker already claimed its fingerprint', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const forge = makeFakeForge('delegator')
+    const issueNumber = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'worker-task'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-busy'],
+    })
+
+    const result = await delegateTaskVisible(paths, description, {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge: async () => forge,
+      warn: () => {},
+    })
+
+    expect(result.issue).toEqual({ outcome: 'duplicate', issueNumber, materialize: false })
+    expect(result.enqueue).toBeUndefined()
+    expect(queueLines()).toEqual([])
+    expect(existsSync(result.spec)).toBe(false)
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+    expect(issueNumberForTask(paths, result.taskId)).toBeUndefined()
   })
 
   it('still enqueues locally when forge publication fails', async () => {

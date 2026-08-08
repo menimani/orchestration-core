@@ -83,13 +83,28 @@ export interface DelegateOptions {
   inspect?: boolean
 }
 
-export interface DelegateResult {
+interface DelegateResultBase {
   taskId: string
   spec: string
   specReused: boolean
-  enqueue: EnqueueResult
-  issue?: { outcome: 'created' | 'duplicate'; issueNumber: number }
 }
+
+type DelegatedIssueResult = {
+  outcome: 'created' | 'duplicate'
+  issueNumber: number
+} & ({ materialize: true } | { materialize: false })
+
+type MaterializedDelegateResult = DelegateResultBase & {
+  enqueue: EnqueueResult
+  issue?: DelegatedIssueResult
+}
+
+export type DelegateResult
+  = MaterializedDelegateResult
+    | DelegateResultBase & {
+      enqueue?: undefined
+      issue: DelegatedIssueResult & { materialize: false }
+    }
 
 export function issueModeMarkerFile(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-mode')
@@ -142,6 +157,15 @@ export function delegateTask(
     throw new Error('A non-empty description is required')
   }
   const taskId = taskIdForDesc(paths, 'user', description)
+  return materializeDelegatedTask(paths, taskId, description, options)
+}
+
+function materializeDelegatedTask(
+  paths: OrchPaths,
+  taskId: string,
+  description: string,
+  options: DelegateOptions,
+): MaterializedDelegateResult {
   const spec = specFile(paths, taskId)
   const specReused = existsSync(spec)
   if (!specReused) {
@@ -178,27 +202,38 @@ export interface DelegatedIssueOptions {
   warn: (message: string) => void
 }
 
-/** Enqueue locally first, then make the already-claimed work visible on the forge. */
+/** Claim shared work before creating the local task that may execute it. */
 export async function delegateTaskVisible(
   paths: OrchPaths,
   description: string,
   options: DelegateOptions,
   issueOptions: DelegatedIssueOptions,
 ): Promise<DelegateResult> {
-  const result = delegateTask(paths, description, options)
-  if (!isIssueModeActive(paths, issueOptions.env)) return result
+  if (description.trim() === '') {
+    throw new Error('A non-empty description is required')
+  }
+  if (!isIssueModeActive(paths, issueOptions.env)) {
+    return delegateTask(paths, description, options)
+  }
+
+  const taskId = taskIdForDesc(paths, 'user', description)
+  const spec = specFile(paths, taskId)
 
   try {
     const forge = await issueOptions.loadForge()
     const user = await forge.currentUser()
     const { publishDelegatedTask } = await import('./issueQueue.ts')
-    result.issue = await publishDelegatedTask(
-      forge, paths, description, result.taskId, user, options.effort,
+    const issue = await publishDelegatedTask(
+      forge, paths, description, taskId, user, options.effort,
     )
+    if (!issue.materialize) {
+      return { taskId, spec, specReused: existsSync(spec), issue }
+    }
+    return { ...materializeDelegatedTask(paths, taskId, description, options), issue }
   } catch (error) {
     issueOptions.warn(`WARN: Could not publish delegated task to the forge: ${(error as Error).message}`)
+    return materializeDelegatedTask(paths, taskId, description, options)
   }
-  return result
 }
 
 export function isLoopRunning(paths: OrchPaths): boolean {
