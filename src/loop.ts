@@ -799,6 +799,16 @@ export function createLoop(deps: LoopDeps) {
 
   /** One poll iteration. Returns 'stopped' | 'done' | 'continue'. */
   async function poll(): Promise<'stopped' | 'done' | 'continue'> {
+    const currentBranch = git(['branch', '--show-current']).trim()
+    const recordedBranch = existsSync(runBranchFile)
+      ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
+      : ''
+    if (currentBranch !== recordedBranch) {
+      log(`[loop] ERROR: checkout is on ${currentBranch} but this run belongs to ${recordedBranch} — stopping before anything merges into the wrong branch`)
+      writeFileSync(stopFile, '')
+      return 'stopped'
+    }
+
     if (existsSync(stopFile)) {
       log('[loop] A stopped file was detected. Exit the loop.')
       rmSync(stopFile, { force: true })
