@@ -404,6 +404,13 @@ describe('collectDecisions', () => {
 })
 
 describe('failure announcement and burst stop (via poll)', () => {
+  it('includes the current scan cycle in the per-poll status line', async () => {
+    const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6 })
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logText()).toMatch(/\| Cycle=\d+\/\d+ Running=/)
+  })
+
   it('announces a failure once, records it for the cycle, and stops on a burst', async () => {
     const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')

@@ -934,7 +934,8 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const hhmmss = now().toTimeString().slice(0, 8)
-    log(`[loop] ${hhmmss} | Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
+    const cycle = readCount(scanCountFile)
+    log(`[loop] ${hhmmss} | Cycle=${cycle}/${config.maxScanCycles} Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
     return 'continue'
   }
 
