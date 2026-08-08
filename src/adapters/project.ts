@@ -33,7 +33,7 @@ export interface SuiteStep {
 export interface ProjectAdapter {
   name: string
   /** Manual production deployment, when this repository has one. */
-  deployment?: { workflow: string; url: string }
+  deployment?: { workflow: string; revisionUrl: string }
   /** Per-merge verification, selected from the paths the worktree touched. */
   mergeChecks(taskGate: 'full' | 'light'): MergeCheck[]
   /** The full suites the cycle gate runs against the branch tip under light task gates. */

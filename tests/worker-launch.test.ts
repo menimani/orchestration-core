@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { orchPaths } from '../src/paths.ts'
 import {
-  assertWorkerModeSupported, runWorkerCommand, type WorkerCommandDependencies,
+  runWorkerCommand, verifyWorkerModeSupported, type WorkerCommandDependencies,
 } from '../src/worker.ts'
 
 let tempRoot: string
@@ -18,6 +18,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 function commit(cwd: string, file: string, contents: string, message: string): void {
+  mkdirSync(join(cwd, file, '..'), { recursive: true })
   writeFileSync(join(cwd, file), contents)
   git(cwd, ['add', file])
   git(cwd, ['commit', '-qm', message])
@@ -25,10 +26,13 @@ function commit(cwd: string, file: string, contents: string, message: string): v
 
 function dependencies(launchDaemon = vi.fn(() => 0)): WorkerCommandDependencies {
   return {
-    loadConfig: () => ({ workerMode: true }),
+    verifyWorkerSupport: () => {},
     launchDaemon,
   }
 }
+
+const unsupportedConfig = 'export function loadConfig() { return {} }\n'
+const supportedConfig = 'export function loadConfig() { return { workerMode: true } }\n'
 
 beforeEach(() => {
   tempRoot = mkdtempSync(join(tmpdir(), 'orch-worker-launch-'))
@@ -40,6 +44,7 @@ beforeEach(() => {
   git(merger, ['config', 'user.email', 'test@example.com'])
   git(merger, ['config', 'user.name', 'Test'])
   commit(merger, 'README.md', '# repo\n', 'chore: initial commit')
+  commit(merger, 'orchestration/ts/src/config.ts', unsupportedConfig, 'chore: add old config')
   git(merger, ['push', '-q', '-u', 'origin', 'HEAD:main'])
   git(tempRoot, ['clone', '-q', '--branch', 'main', origin, worker])
   git(worker, ['config', 'user.email', 'test@example.com'])
@@ -52,14 +57,19 @@ afterEach(() => {
 
 describe('worker command checkout validation', () => {
   it('fast-forwards a checkout that is strictly behind the base ref before launching', async () => {
-    commit(merger, 'new.txt', 'new code\n', 'feat: add worker support')
+    commit(merger, 'orchestration/ts/src/config.ts', supportedConfig, 'feat: add worker support')
     git(merger, ['push', '-q', 'origin', 'HEAD:main'])
     const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+    const workerDependencies: WorkerCommandDependencies = {
+      verifyWorkerSupport: verifyWorkerModeSupported,
+      launchDaemon: launch,
+    }
 
-    await expect(runWorkerCommand(orchPaths(worker), 'origin/main', dependencies(launch)))
+    await expect(runWorkerCommand(orchPaths(worker), 'origin/main', workerDependencies))
       .resolves.toBe(0)
 
-    expect(readFileSync(join(worker, 'new.txt'), 'utf8').trim()).toBe('new code')
+    expect(readFileSync(join(worker, 'orchestration/ts/src/config.ts'), 'utf8').trim())
+      .toBe(supportedConfig.trim())
     expect(git(worker, ['rev-parse', 'HEAD']).trim()).toBe(git(merger, ['rev-parse', 'HEAD']).trim())
     expect(launch).toHaveBeenCalledOnce()
     expect(launch.mock.calls[0]?.[1]).toMatchObject({
@@ -81,9 +91,18 @@ describe('worker command checkout validation', () => {
 })
 
 describe('worker mode self-check', () => {
-  it('refuses a config implementation that does not carry workerMode', () => {
-    expect(() => assertWorkerModeSupported(() => ({}))).toThrow(
-      /does not support worker mode.*config\.workerMode is missing/,
-    )
+  it('refuses updated checkout code that does not carry workerMode', async () => {
+    commit(merger, 'new.txt', 'new code\n', 'feat: update without worker support')
+    git(merger, ['push', '-q', 'origin', 'HEAD:main'])
+    const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+    const workerDependencies: WorkerCommandDependencies = {
+      verifyWorkerSupport: verifyWorkerModeSupported,
+      launchDaemon: launch,
+    }
+
+    await expect(runWorkerCommand(orchPaths(worker), 'origin/main', workerDependencies))
+      .rejects.toThrow(/updated checkout does not support worker mode.*config\.workerMode is missing/)
+    expect(readFileSync(join(worker, 'new.txt'), 'utf8').trim()).toBe('new code')
+    expect(launch).not.toHaveBeenCalled()
   })
 })

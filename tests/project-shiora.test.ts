@@ -14,7 +14,7 @@ describe('gate commands', () => {
   it('declares the production deployment', () => {
     expect(shioraProject.deployment).toEqual({
       workflow: 'deploy.yml',
-      url: 'https://shiora.jp',
+      revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
     })
   })
 

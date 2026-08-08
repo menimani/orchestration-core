@@ -51,6 +51,7 @@ export interface CreateIssueOptions {
 export interface WorkflowRun {
   id: number
   createdAt: string
+  headSha: string
   status: string
   conclusion: string | null
 }
@@ -68,8 +69,8 @@ export interface Forge {
   markPrReady(branch: string): Promise<void>
 
   /** Dispatch a workflow and locate/observe the exact run created by that dispatch. */
-  dispatchWorkflow(workflow: string, ref: string): Promise<void>
-  findWorkflowRun(workflow: string, createdAfter: Date): Promise<WorkflowRun | undefined>
+  dispatchWorkflow(workflow: string, ref: string, dispatchToken: string): Promise<void>
+  findWorkflowRun(workflow: string, ref: string, dispatchToken: string): Promise<WorkflowRun | undefined>
   getWorkflowRun(runId: number): Promise<WorkflowRun>
 
   // Issue-queue operations. Labels passed anywhere here must already exist —

@@ -2,81 +2,121 @@ import { describe, expect, it, vi } from 'vitest'
 import { deploy, type DeploymentClock } from '../src/deploy.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
-function response(lastModified: string | null) {
+function response(revision: string, status = 200) {
   return {
-    ok: true,
-    status: 200,
-    headers: { get: (name: string) => name === 'last-modified' ? lastModified : null },
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => revision,
   }
 }
 
-function clock(now: string): DeploymentClock {
-  return {
-    now: () => new Date(now),
-    sleep: vi.fn(async () => {}),
-  }
+function clock(): DeploymentClock {
+  return { sleep: vi.fn(async () => {}) }
 }
 
 describe('deploy', () => {
-  it('waits for its new run, polls that run id, and passes fresh content', async () => {
+  it('correlates its token, polls only that run id, and verifies its exact commit', async () => {
     const forge = makeFakeForge()
     const dispatchWorkflow = vi.fn(async () => {})
     const findWorkflowRun = vi.fn()
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({
-        id: 73, createdAt: '2026-08-08T15:00:01Z', status: 'in_progress', conclusion: null,
+        id: 73,
+        createdAt: '2026-08-08T15:00:01Z',
+        headSha: '73aa',
+        status: 'in_progress',
+        conclusion: null,
       })
     const getWorkflowRun = vi.fn(async () => ({
-      id: 73, createdAt: '2026-08-08T15:00:01Z', status: 'completed', conclusion: 'success',
+      id: 73,
+      createdAt: '2026-08-08T15:00:01Z',
+      headSha: '73aa',
+      status: 'completed',
+      conclusion: 'success',
     }))
     Object.assign(forge, { dispatchWorkflow, findWorkflowRun, getWorkflowRun })
-    const deploymentClock = clock('2026-08-08T15:00:00.987Z')
-    const fetcher = vi.fn(async () => response('Sat, 08 Aug 2026 15:00:02 GMT'))
+    const deploymentClock = clock()
+    const fetcher = vi.fn(async () => response('73aa\n'))
 
     const result = await deploy(
-      { workflow: 'deploy.yml', url: 'https://shiora.jp' }, 'main', forge,
-      { clock: deploymentClock, fetcher, pollMilliseconds: 1 },
+      {
+        workflow: 'deploy.yml',
+        revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
+      },
+      'main',
+      forge,
+      {
+        clock: deploymentClock,
+        fetcher,
+        pollMilliseconds: 1,
+        createDispatchToken: () => 'dispatch-73',
+      },
     )
 
-    expect(dispatchWorkflow).toHaveBeenCalledWith('deploy.yml', 'main')
-    expect(findWorkflowRun).toHaveBeenLastCalledWith('deploy.yml', new Date('2026-08-08T15:00:00Z'))
+    expect(dispatchWorkflow).toHaveBeenCalledWith('deploy.yml', 'main', 'dispatch-73')
+    expect(findWorkflowRun).toHaveBeenLastCalledWith('deploy.yml', 'main', 'dispatch-73')
     expect(getWorkflowRun).toHaveBeenCalledWith(73)
-    expect(fetcher).toHaveBeenCalledWith('https://shiora.jp')
-    expect(result).toMatchObject({ verified: true, lastModified: new Date('2026-08-08T15:00:02Z') })
+    expect(fetcher).toHaveBeenCalledWith('https://shiora.jp/.well-known/shiora-revision')
+    expect(result).toMatchObject({
+      dispatchToken: 'dispatch-73',
+      expectedRevision: '73aa',
+      deployedRevision: '73aa',
+      verified: true,
+    })
     expect(deploymentClock.sleep).toHaveBeenCalledTimes(2)
   })
 
-  it('fails verification when Last-Modified predates dispatch', async () => {
+  it('rejects a healthy response from an unrelated deployment', async () => {
     const forge = makeFakeForge()
     forge.findWorkflowRun = async () => ({
-      id: 74, createdAt: '2026-08-08T15:00:00Z', status: 'completed', conclusion: 'success',
+      id: 74,
+      createdAt: '2026-08-08T15:00:00Z',
+      headSha: 'expected-sha',
+      status: 'completed',
+      conclusion: 'success',
     })
 
     const result = await deploy(
-      { workflow: 'deploy.yml', url: 'https://shiora.jp' }, 'main', forge,
       {
-        clock: clock('2026-08-08T15:00:00Z'),
-        fetcher: async () => response('Sat, 08 Aug 2026 14:59:59 GMT'),
+        workflow: 'deploy.yml',
+        revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
+      },
+      'main',
+      forge,
+      {
+        clock: clock(),
+        fetcher: async () => response('other-sha'),
+        createDispatchToken: () => 'dispatch-74',
       },
     )
 
     expect(result.verified).toBe(false)
-    expect(result.dispatchedAt).toEqual(new Date('2026-08-08T15:00:00Z'))
-    expect(result.lastModified).toEqual(new Date('2026-08-08T14:59:59Z'))
+    expect(result.expectedRevision).toBe('expected-sha')
+    expect(result.deployedRevision).toBe('other-sha')
   })
 
-  it('fails verification when Last-Modified is absent', async () => {
+  it('fails the command when the revision endpoint is unavailable', async () => {
     const forge = makeFakeForge()
     forge.findWorkflowRun = async () => ({
-      id: 75, createdAt: '2026-08-08T15:00:00Z', status: 'completed', conclusion: 'success',
+      id: 75,
+      createdAt: '2026-08-08T15:00:00Z',
+      headSha: 'expected-sha',
+      status: 'completed',
+      conclusion: 'success',
     })
 
-    const result = await deploy(
-      { workflow: 'deploy.yml', url: 'https://shiora.jp' }, 'main', forge,
-      { clock: clock('2026-08-08T15:00:00Z'), fetcher: async () => response(null) },
-    )
-
-    expect(result.verified).toBe(false)
-    expect(result.lastModified).toBeUndefined()
+    await expect(deploy(
+      {
+        workflow: 'deploy.yml',
+        revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
+      },
+      'main',
+      forge,
+      {
+        clock: clock(),
+        fetcher: async () => response('', 404),
+        createDispatchToken: () => 'dispatch-75',
+      },
+    )).rejects.toThrow('Deployment verification request failed with HTTP 404.')
   })
 })

@@ -1,12 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { join } from 'node:path'
-import { loadConfig } from './config.ts'
+import { pathToFileURL } from 'node:url'
 import type { OrchPaths } from './paths.ts'
 
-type ConfigLoader = (env: NodeJS.ProcessEnv) => { workerMode?: unknown }
-
 export interface WorkerCommandDependencies {
-  loadConfig: ConfigLoader
+  verifyWorkerSupport: (paths: OrchPaths, env: NodeJS.ProcessEnv) => void
   launchDaemon: (paths: OrchPaths, env: NodeJS.ProcessEnv) => number
 }
 
@@ -70,15 +68,31 @@ export async function updateWorkerCheckout(
   return 'current'
 }
 
-export function assertWorkerModeSupported(configLoader: ConfigLoader = loadConfig): void {
-  const config = configLoader({
-    ...process.env,
-    ISSUE_QUEUE_ENABLED: 'true',
-    WORKER_MODE: 'true',
-  })
-  if (config.workerMode !== true) {
+const WORKER_SUPPORT_CHECK = `
+const { loadConfig } = await import(process.argv[1])
+if (loadConfig().workerMode !== true) {
+  console.error('config.workerMode is missing')
+  process.exitCode = 1
+}
+`
+
+export function verifyWorkerModeSupported(paths: OrchPaths, env: NodeJS.ProcessEnv): void {
+  const configUrl = pathToFileURL(join(paths.root, 'ts', 'src', 'config.ts')).href
+  const result = spawnSync(
+    process.execPath,
+    ['--input-type=module', '--eval', WORKER_SUPPORT_CHECK, configUrl],
+    {
+      cwd: paths.repoRoot,
+      env,
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  )
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout).trim()
     throw new Error(
-      'Refusing to start worker: this checkout does not support worker mode (config.workerMode is missing).',
+      `Refusing to start worker: the updated checkout does not support worker mode${detail === '' ? '.' : `: ${detail}`}`,
     )
   }
 }
@@ -98,7 +112,10 @@ function launchDaemon(paths: OrchPaths, env: NodeJS.ProcessEnv): number {
   return result.status ?? 1
 }
 
-const defaults: WorkerCommandDependencies = { loadConfig, launchDaemon }
+const defaults: WorkerCommandDependencies = {
+  verifyWorkerSupport: verifyWorkerModeSupported,
+  launchDaemon,
+}
 
 export async function runWorkerCommand(
   paths: OrchPaths,
@@ -106,10 +123,11 @@ export async function runWorkerCommand(
   dependencies: WorkerCommandDependencies = defaults,
 ): Promise<number> {
   await updateWorkerCheckout(paths, baseRef)
-  assertWorkerModeSupported(dependencies.loadConfig)
-  return dependencies.launchDaemon(paths, {
+  const workerEnv = {
     ...process.env,
     ISSUE_QUEUE_ENABLED: 'true',
     WORKER_MODE: 'true',
-  })
+  }
+  dependencies.verifyWorkerSupport(paths, workerEnv)
+  return dependencies.launchDaemon(paths, workerEnv)
 }

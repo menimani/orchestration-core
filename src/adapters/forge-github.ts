@@ -20,6 +20,26 @@ export interface RollupEntry {
   state?: string
 }
 
+export interface GithubWorkflowRun {
+  databaseId: number
+  createdAt: string
+  displayTitle: string
+  headBranch: string
+  headSha: string
+  status: string
+  conclusion: string | null
+}
+
+export function workflowRunForDispatch(
+  runs: GithubWorkflowRun[],
+  ref: string,
+  dispatchToken: string,
+): GithubWorkflowRun | undefined {
+  return runs.find(
+    (candidate) => candidate.displayTitle === dispatchToken && candidate.headBranch === ref,
+  )
+}
+
 // Normalization ported 1:1 from check_pr_ci_status in bin/loop.sh:
 // - A running CheckRun has an empty-string conclusion; an empty string must read as
 //   pending, never as success.
@@ -50,14 +70,10 @@ async function gh(repoRoot: string, args: string[]): Promise<string> {
 }
 
 export function createGithubForge(repoRoot: string = process.cwd()): Forge {
-  const parseWorkflowRun = (data: {
-    databaseId: number
-    createdAt: string
-    status: string
-    conclusion: string | null
-  }): WorkflowRun => ({
+  const parseWorkflowRun = (data: GithubWorkflowRun): WorkflowRun => ({
     id: data.databaseId,
     createdAt: data.createdAt,
+    headSha: data.headSha,
     status: data.status,
     conclusion: data.conclusion,
   })
@@ -131,36 +147,32 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
       await gh(repoRoot, ['pr', 'ready', ref])
     },
 
-    async dispatchWorkflow(workflow: string, ref: string): Promise<void> {
-      await gh(repoRoot, ['workflow', 'run', workflow, '--ref', ref])
+    async dispatchWorkflow(workflow: string, ref: string, dispatchToken: string): Promise<void> {
+      await gh(repoRoot, [
+        'workflow', 'run', workflow, '--ref', ref,
+        '--field', `dispatch_token=${dispatchToken}`,
+      ])
     },
 
-    async findWorkflowRun(workflow: string, createdAfter: Date): Promise<WorkflowRun | undefined> {
+    async findWorkflowRun(
+      workflow: string,
+      ref: string,
+      dispatchToken: string,
+    ): Promise<WorkflowRun | undefined> {
       const stdout = await gh(repoRoot, [
-        'run', 'list', '--workflow', workflow, '--limit', '20',
-        '--json', 'databaseId,createdAt,status,conclusion',
+        'run', 'list', '--workflow', workflow, '--event', 'workflow_dispatch', '--limit', '100',
+        '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
       ])
-      const runs = (JSON.parse(stdout) as Array<{
-        databaseId: number
-        createdAt: string
-        status: string
-        conclusion: string | null
-      }>)
-        .filter((run) => new Date(run.createdAt).getTime() >= createdAfter.getTime())
-        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
-      return runs[0] === undefined ? undefined : parseWorkflowRun(runs[0])
+      const run = workflowRunForDispatch(JSON.parse(stdout) as GithubWorkflowRun[], ref, dispatchToken)
+      return run === undefined ? undefined : parseWorkflowRun(run)
     },
 
     async getWorkflowRun(runId: number): Promise<WorkflowRun> {
       const stdout = await gh(repoRoot, [
-        'run', 'view', String(runId), '--json', 'databaseId,createdAt,status,conclusion',
+        'run', 'view', String(runId),
+        '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
       ])
-      return parseWorkflowRun(JSON.parse(stdout) as {
-        databaseId: number
-        createdAt: string
-        status: string
-        conclusion: string | null
-      })
+      return parseWorkflowRun(JSON.parse(stdout) as GithubWorkflowRun)
     },
 
     async currentUser(): Promise<string> {

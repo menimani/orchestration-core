@@ -228,9 +228,8 @@ const cmdDeploy: Command = async (paths, args) => {
   }).trim()
   const forge = await loadForge(config.forge, paths.repoRoot)
   const result = await deploy(project.deployment, ref, forge)
-  const lastModified = result.lastModified?.toISOString() ?? '(missing or invalid)'
   console.log(`Workflow run ${result.run.id} completed successfully.`)
-  console.log(`${result.verified ? 'PASS' : 'FAIL'}: deployment content verification; dispatch=${result.dispatchedAt.toISOString()} Last-Modified=${lastModified}`)
+  console.log(`${result.verified ? 'PASS' : 'FAIL'}: deployed revision verification; expected=${result.expectedRevision} actual=${result.deployedRevision || '(missing)'}`)
   return result.verified ? 0 : 1
 }
 
