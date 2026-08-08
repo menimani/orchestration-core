@@ -139,8 +139,14 @@ export function createLoop(deps: LoopDeps) {
       .filter((desc) => desc !== '' && !hasFormatPlaceholder(desc) && !reportsNothing(desc))
   }
 
-  function appendSharedRequirements(newId: string, parentId: string, desc: string): void {
-    const parts = [`\n## Auto-generated task (parent: ${parentId})\n\n${desc}\n`]
+  function appendSharedRequirements(
+    newId: string,
+    parentId: string,
+    desc: string,
+    includeDescription = true,
+  ): void {
+    const parts = [`\n## Auto-generated task (parent: ${parentId})\n`]
+    if (includeDescription) parts.push(`\n${desc}\n`)
     const requirements = join(paths.root, 'templates', 'task-requirements.md')
     if (existsSync(requirements)) parts.push(`\n${readFileSync(requirements, 'utf8')}`)
     const pitfalls = pitfallsFileForDesc(paths, desc)
@@ -156,6 +162,10 @@ export function createLoop(deps: LoopDeps) {
   async function scanForNextTasks(taskId: string, depth: number): Promise<void> {
     const findings = actionableFindings(finalMessageFile(paths, taskId))
     if (findings.length === 0) return
+    const combinesReviewFindings = isReviewTaskId(taskId) && findings.length > 1
+    const descriptions = combinesReviewFindings
+      ? [findings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
+      : findings
 
     const newDepth = depth + 1
     if (newDepth > config.maxGrowthDepth) {
@@ -168,7 +178,7 @@ export function createLoop(deps: LoopDeps) {
     }
 
     if (config.issueQueueEnabled) {
-      for (const desc of findings) {
+      for (const desc of descriptions) {
         const effort = isReviewTaskId(taskId) ? 'high' : undefined
         try {
           const result = await publishFinding(forge, paths, desc, taskId, effort)
@@ -185,7 +195,7 @@ export function createLoop(deps: LoopDeps) {
       return
     }
 
-    for (const desc of findings) {
+    for (const desc of descriptions) {
       const newId = taskIdForDesc(paths, 'auto', desc)
       log(`[loop] NEXT_TASK detection: ${desc}`)
       log(`[loop]   → New task: ${newId} (depth=${newDepth})`)
@@ -194,7 +204,17 @@ export function createLoop(deps: LoopDeps) {
         // without them produces work whose completion is indistinguishable from a
         // crash, recorded failed with the commits sitting in the worktree.
         newTaskSpec(paths, newId)
-        appendSharedRequirements(newId, taskId, desc)
+        if (combinesReviewFindings) {
+          const file = specFile(paths, newId)
+          const spec = readFileSync(file, 'utf8').replace(
+            '## Requirements\n-\n',
+            `## Requirement\n\n${desc}\n`,
+          )
+          writeFileSync(file, spec)
+          appendSharedRequirements(newId, taskId, desc, false)
+        } else {
+          appendSharedRequirements(newId, taskId, desc)
+        }
       } else {
         log(`[loop]   Reusing existing specification: ${newId}`)
       }
