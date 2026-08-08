@@ -70,10 +70,10 @@ async function main(): Promise<number> {
   }
   const command = commands[commandName]
   if (command === undefined) {
-    console.error(
-      `'${commandName}' is not ported yet — use ./orchestration/orchestrate.sh ${commandName} `
-      + `until the cutover. Ported commands: ${Object.keys(commands).join(', ')}`,
-    )
+    const root = repoRoot()
+    console.error(`Not ported yet: '${commandName}'. Until the cutover, run:`)
+    console.error(`  ${join(root, 'orchestration', 'orchestrate.sh')} ${commandName}`)
+    console.error(`Ported commands: ${Object.keys(commands).join(', ')}`)
     return 1
   }
   return command(orchPaths(repoRoot()), args)
