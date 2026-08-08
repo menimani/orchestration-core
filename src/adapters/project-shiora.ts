@@ -24,6 +24,10 @@ export const shioraProject: ProjectAdapter = {
         command: taskGate === 'light' ? 'npm run lint && npm run build' : 'npm run test',
         appliesTo: (changed) => changed.some((file) => file.startsWith('src/frontend/')),
         requires: 'src/frontend',
+        installWhenMissing: {
+          path: 'src/frontend/node_modules',
+          command: 'npm ci --no-audit --no-fund',
+        },
       },
       {
         // A clean build, because a task that removed a compiled migration to prove its
