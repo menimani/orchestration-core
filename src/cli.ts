@@ -15,6 +15,7 @@ import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { delegateTask, enqueueTask, isLoopRunning, newTaskSpec } from './tasks.ts'
+import { waitForNextPoll } from './wake.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. The key output lines (`Enqueued:`, `Created:`,
@@ -410,7 +411,7 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
   for (;;) {
     const outcome = await loop.poll()
     if (outcome !== 'continue') return 0
-    await new Promise((resolve) => setTimeout(resolve, config.pollIntervalSeconds * 1000))
+    await waitForNextPoll(paths, config.pollIntervalSeconds)
   }
 }
 
