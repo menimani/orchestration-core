@@ -22,8 +22,9 @@ import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import {
-  claimIssue, commentOnIssueMerge, heartbeatIssueForTask, issueNumberForTask,
-  publishFinding, reapStaleLeases, recordIssuePromotion,
+  claimIssue, commentOnIssueMerge, heartbeatIssueForTask, issueMergeComment,
+  issueNumberForTask, issuePromotionForIssue, publishFinding, reapStaleLeases,
+  recordIssueForTask, recordIssuePromotion,
   reconcileFindingFingerprints, unresolvedFindings, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY,
 } from './issueQueue.ts'
@@ -126,6 +127,18 @@ export function createLoop(deps: LoopDeps) {
     return undefined
   }
 
+  async function updateAdoptedIssue(
+    issueNumber: number,
+    mergeCommit: string,
+    runBranch: string,
+  ): Promise<void> {
+    const comment = issueMergeComment(mergeCommit, runBranch)
+    if (!(await forge.listIssueComments(issueNumber)).includes(comment)) {
+      await commentOnIssueMerge(forge, issueNumber, mergeCommit, runBranch)
+    }
+    await forge.removeLabel(issueNumber, LABEL_MERGE_READY)
+  }
+
   async function adoptRemoteTasks(): Promise<void> {
     let issues: Awaited<ReturnType<Forge['listOpenIssues']>>
     try {
@@ -138,6 +151,20 @@ export function createLoop(deps: LoopDeps) {
     for (const issue of issues) {
       if (existsSync(stopFile)) return
       const mergeLog = join(paths.logsDir, `issue-${issue.number}.merge.log`)
+      const adopted = issuePromotionForIssue(paths, issue.number)
+      if (adopted !== undefined) {
+        try {
+          await updateAdoptedIssue(
+            issue.number,
+            adopted.mergeCommit,
+            adopted.runBranch,
+          )
+          log(`[loop] Updated issue metadata for adopted remote task #${issue.number}`)
+        } catch (error) {
+          log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${(error as Error).message}`)
+        }
+        continue
+      }
       try {
         const report = workerBranchReport(await forge.listIssueComments(issue.number))
         if (report === undefined) {
@@ -170,14 +197,12 @@ export function createLoop(deps: LoopDeps) {
           },
         )
         writeFileSync(mergeFailureFile, '0\n')
+        const taskId = report.branch.slice('task/'.length)
+        const runBranch = git(['branch', '--show-current']).trim()
+        recordIssueForTask(paths, taskId, issue.number)
+        recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
         try {
-          await forge.removeLabel(issue.number, LABEL_MERGE_READY)
-          await commentOnIssueMerge(
-            forge,
-            issue.number,
-            mergeCommit,
-            git(['branch', '--show-current']).trim(),
-          )
+          await updateAdoptedIssue(issue.number, mergeCommit, runBranch)
         } catch (error) {
           log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${(error as Error).message}`)
         }

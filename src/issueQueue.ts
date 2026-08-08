@@ -488,7 +488,7 @@ export function issueNumberForTask(paths: OrchPaths, taskId: string): number | u
   return /^\d+$/.test(raw) ? Number(raw) : undefined
 }
 
-interface PromotionPending {
+export interface IssuePromotion {
   taskId: string
   issueNumber: number
   mergeCommit: string
@@ -503,18 +503,21 @@ function promotionFile(paths: OrchPaths, issueNumber: number): string {
   return join(promotionDir(paths), `${issueNumber}.json`)
 }
 
-function promotionForIssue(paths: OrchPaths, issueNumber: number): PromotionPending | undefined {
+export function issuePromotionForIssue(
+  paths: OrchPaths,
+  issueNumber: number,
+): IssuePromotion | undefined {
   const file = promotionFile(paths, issueNumber)
   if (!existsSync(file)) return undefined
   try {
-    const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<PromotionPending>
+    const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<IssuePromotion>
     if (typeof value.taskId !== 'string'
       || value.issueNumber !== issueNumber
       || typeof value.mergeCommit !== 'string'
       || value.mergeCommit === ''
       || typeof value.runBranch !== 'string'
       || value.runBranch === '') return undefined
-    return value as PromotionPending
+    return value as IssuePromotion
   } catch {
     return undefined
   }
@@ -550,7 +553,7 @@ async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Pro
       continue
     }
     if (issue.state !== 'closed') continue
-    const promotion = promotionForIssue(paths, issueNumber)
+    const promotion = issuePromotionForIssue(paths, issueNumber)
     rmSync(join(dir, name), { force: true })
     if (promotion !== undefined) rmSync(issueMapFile(paths, promotion.taskId), { force: true })
   }
@@ -591,8 +594,11 @@ export async function commentOnIssueMerge(
   mergeCommit: string,
   runBranch: string,
 ): Promise<void> {
-  await forge.commentIssue(issueNumber,
-    `Merged as ${mergeCommit} into run branch ${runBranch}. This issue closes on promotion.`)
+  await forge.commentIssue(issueNumber, issueMergeComment(mergeCommit, runBranch))
+}
+
+export function issueMergeComment(mergeCommit: string, runBranch: string): string {
+  return `Merged as ${mergeCommit} into run branch ${runBranch}. This issue closes on promotion.`
 }
 
 export type ClaimResult
@@ -689,7 +695,7 @@ export async function reapStaleLeases(
     if (locallyRunningIssues.has(issue.number)) continue
     const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
     if (ageMs < leaseHours * 3600 * 1000) continue
-    const promotion = promotionForIssue(paths, issue.number)
+    const promotion = issuePromotionForIssue(paths, issue.number)
     if (promotion !== undefined) {
       await commentOnIssueMerge(
         forge, issue.number, promotion.mergeCommit, promotion.runBranch,
