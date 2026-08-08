@@ -88,6 +88,15 @@ describe('worker command checkout validation', () => {
       .rejects.toThrow(/HEAD and base ref 'origin\/main' have diverged/)
     expect(launch).not.toHaveBeenCalled()
   })
+
+  it('refuses a checkout ahead of the base ref, whose local commits would leak into worker branches', async () => {
+    commit(worker, 'ahead.txt', 'ahead\n', 'feat: local-only change')
+    const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+
+    await expect(runWorkerCommand(orchPaths(worker), 'origin/main', dependencies(launch)))
+      .rejects.toThrow(/HEAD is ahead of base ref 'origin\/main'/)
+    expect(launch).not.toHaveBeenCalled()
+  })
 })
 
 describe('worker mode self-check', () => {

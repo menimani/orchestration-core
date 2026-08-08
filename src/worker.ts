@@ -65,6 +65,13 @@ export async function updateWorkerCheckout(
     await git(paths, ['merge', '--ff-only', baseRef])
     return 'fast-forwarded'
   }
+  // A checkout AHEAD of the base carries commits the base never saw; every task
+  // branch would fork from them and the merger would adopt them unreviewed.
+  if (baseBehindHead && !headBehindBase) {
+    throw new Error(
+      `Refusing to start worker: HEAD is ahead of base ref '${baseRef}', so local commits would leak into every worker branch. Start from the base ref itself.`,
+    )
+  }
   return 'current'
 }
 
