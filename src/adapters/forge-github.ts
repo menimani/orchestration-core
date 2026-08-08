@@ -141,9 +141,10 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
 
     async getIssue(issueNumber: number): Promise<ForgeIssue> {
       const stdout = await gh(repoRoot, ['issue', 'view', String(issueNumber),
-        '--json', 'number,title,body,labels,assignees,updatedAt'])
+        '--json', 'number,state,title,body,labels,assignees,updatedAt'])
       const data = JSON.parse(stdout) as {
         number: number
+        state: 'OPEN' | 'CLOSED'
         title: string
         body: string
         labels: Array<{ name: string }>
@@ -152,6 +153,7 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
       }
       return {
         number: data.number,
+        state: data.state.toLowerCase() as ForgeIssue['state'],
         title: data.title,
         body: data.body,
         labels: data.labels.map((label) => label.name),
@@ -163,9 +165,10 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
       const stdout = await gh(repoRoot, ['issue', 'list', '--state', 'open',
         '--label', label, '--limit', '200',
-        '--json', 'number,title,body,labels,assignees,updatedAt'])
+        '--json', 'number,state,title,body,labels,assignees,updatedAt'])
       const data = JSON.parse(stdout) as Array<{
         number: number
+        state: 'OPEN'
         title: string
         body: string
         labels: Array<{ name: string }>
@@ -174,6 +177,7 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
       }>
       return data.map((issue) => ({
         number: issue.number,
+        state: issue.state.toLowerCase() as ForgeIssue['state'],
         title: issue.title,
         body: issue.body,
         labels: issue.labels.map((label_) => label_.name),

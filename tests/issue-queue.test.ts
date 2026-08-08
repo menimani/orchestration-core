@@ -62,20 +62,33 @@ describe('issue body round-trip', () => {
 })
 
 describe('publishFinding', () => {
-  it('files a ready finding once and reports the duplicate afterwards', async () => {
-    const first = await publishFinding(forge, '[BUG] `src/a/b.ts` breaks', 'scan-1')
+  it('reports an immediate duplicate while the remote issue list still lags', async () => {
+    forge.listOpenIssues = async () => []
+    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
     expect(first.outcome).toBe('created')
     const issue = await forge.getIssue(first.issueNumber)
     expect(issue.labels).toEqual([LABEL_FINDING, LABEL_READY])
 
-    const second = await publishFinding(forge, '[BUG] `src/a/b.ts` breaks in a different wording', 'scan-2')
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks in a different wording', 'scan-2')
     expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
     expect(forge.issues.size).toBe(1)
   })
 
+  it('drops a ledger entry for a closed issue and files the finding again', async () => {
+    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
+    await forge.closeIssue(first.issueNumber, 'fixed')
+    forge.listOpenIssues = async () => []
+
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks again', 'scan-2')
+
+    expect(second).toEqual({ outcome: 'created', issueNumber: 2 })
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe('bug:src/a/b.ts 2\n')
+  })
+
   it('lets a distinct finding through', async () => {
-    await publishFinding(forge, '[BUG] `src/a/b.ts` breaks', 'scan-1')
-    const other = await publishFinding(forge, '[TEST] `src/a/b.ts` lacks coverage', 'scan-1')
+    await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
+    const other = await publishFinding(forge, paths, '[TEST] `src/a/b.ts` lacks coverage', 'scan-1')
     expect(other.outcome).toBe('created')
     expect(forge.issues.size).toBe(2)
   })
@@ -83,7 +96,7 @@ describe('publishFinding', () => {
 
 describe('claimIssue', () => {
   async function readyIssue(description: string): Promise<number> {
-    const result = await publishFinding(forge, description, 'scan-1', 'high')
+    const result = await publishFinding(forge, paths, description, 'scan-1', 'high')
     return result.issueNumber
   }
 

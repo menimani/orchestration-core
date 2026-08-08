@@ -31,6 +31,7 @@ export interface CreatePrOptions {
 
 export interface ForgeIssue {
   number: number
+  state: 'open' | 'closed'
   title: string
   body: string
   labels: string[]

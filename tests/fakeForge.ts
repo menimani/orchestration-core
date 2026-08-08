@@ -41,6 +41,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       const issueNumber = nextIssueNumber++
       fake.issues.set(issueNumber, {
         number: issueNumber,
+        state: 'open',
         title: options.title,
         body: options.body,
         labels: [...options.labels],
@@ -56,7 +57,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     },
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
       return [...fake.issues.values()]
-        .filter((issue) => issue.labels.includes(label))
+        .filter((issue) => issue.state === 'open' && issue.labels.includes(label))
         .map((issue) => ({ ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }))
     },
     async assignIssue(issueNumber: number, assignee: string): Promise<void> {
@@ -84,7 +85,8 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       issue.updatedAt = fake.clock().toISOString()
     },
     async closeIssue(issueNumber: number): Promise<void> {
-      fake.issues.delete(issueNumber)
+      const issue = fake.issues.get(issueNumber)
+      if (issue !== undefined) issue.state = 'closed'
     },
   }
   return fake

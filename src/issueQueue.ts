@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import { taskIdForDesc } from './ids.ts'
@@ -66,6 +66,27 @@ export type PublishResult
   = { outcome: 'created'; issueNumber: number }
     | { outcome: 'duplicate'; issueNumber: number }
 
+function fingerprintLedgerFile(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-fingerprints')
+}
+
+function fingerprintLedger(paths: OrchPaths): Array<{ fingerprint: string; issueNumber: number }> {
+  const file = fingerprintLedgerFile(paths)
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8').split(/\r?\n/).flatMap((line) => {
+    const match = /^(\S+) (\d+)$/.exec(line)
+    return match === null ? [] : [{ fingerprint: match[1]!, issueNumber: Number(match[2]) }]
+  })
+}
+
+function writeFingerprintLedger(
+  paths: OrchPaths,
+  entries: Array<{ fingerprint: string; issueNumber: number }>,
+): void {
+  writeFileSync(fingerprintLedgerFile(paths), entries.map((entry) =>
+    `${entry.fingerprint} ${entry.issueNumber}\n`).join(''))
+}
+
 /**
  * File a finding as a ready issue unless an open issue already carries its
  * fingerprint. The check reads open findings only: a closed issue's fix already
@@ -73,11 +94,25 @@ export type PublishResult
  */
 export async function publishFinding(
   forge: Forge,
+  paths: OrchPaths,
   description: string,
   parentTaskId: string,
   effort?: string,
 ): Promise<PublishResult> {
   const fingerprint = fingerprintOf(description)
+  const ledger = fingerprintLedger(paths)
+  const recorded = ledger.find((entry) => entry.fingerprint === fingerprint)
+  if (recorded !== undefined) {
+    try {
+      const issue = await forge.getIssue(recorded.issueNumber)
+      if (issue.state === 'open') {
+        return { outcome: 'duplicate', issueNumber: recorded.issueNumber }
+      }
+    } catch {
+      // A missing issue is stale in the same way as a closed one.
+    }
+    writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
+  }
   const existing = (await forge.listOpenIssues(LABEL_FINDING))
     .find((issue) => issue.body.includes(`Fingerprint: ${fingerprint}`))
   if (existing !== undefined) {
@@ -89,6 +124,7 @@ export async function publishFinding(
     body: buildIssueBody(description, parentTaskId, effort),
     labels: [LABEL_FINDING, LABEL_READY],
   })
+  appendFileSync(fingerprintLedgerFile(paths), `${fingerprint} ${issueNumber}\n`)
   return { outcome: 'created', issueNumber }
 }
 

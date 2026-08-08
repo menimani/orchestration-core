@@ -164,7 +164,7 @@ export function createLoop(deps: LoopDeps) {
       for (const desc of findings) {
         const effort = isReviewTaskId(taskId) ? 'high' : undefined
         try {
-          const result = await publishFinding(forge, desc, taskId, effort)
+          const result = await publishFinding(forge, paths, desc, taskId, effort)
           if (result.outcome === 'created') {
             log(`[loop] NEXT_TASK detection: ${desc}`)
             log(`[loop]   → Issue filed: #${result.issueNumber}`)
