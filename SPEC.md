@@ -205,9 +205,12 @@ from or equivalent to `orchestration/tests/*.sh`.
     the issue when the promotion PR lands the commit on the default branch. Immediately
     after merging, the worker comments with the merge commit and run branch and states
     that closure happens on promotion; this refreshes `updatedAt` across the ordinary
-    merged-but-not-promoted window. A promotion delayed beyond `ISSUE_LEASE_HOURS` is
-    the residual gap. A forge outage degrades a poll to local-only work; it never stops
-    the loop. Labels are ensured at loop startup. The daemon records issue mode in
+    merged-but-not-promoted window. If the issue reaches the lease age before promotion,
+    stale-lease reaping recognizes its linked locally merged task and repeats the merge
+    comment instead of unassigning or relabeling the issue. That refreshes `updatedAt`
+    again, keeping the issue claimed until promotion closes it. A forge outage degrades a
+    poll to local-only work; it never stops the loop. Labels are ensured at loop startup.
+    The daemon records issue mode in
     `queue/issue-mode` so a separate `delegate` process can publish and claim work before
     materializing it locally. A new issue is assigned to the current user with
     `loop:finding` + `loop:in-progress`; a matching ready issue is claimed first, while a
