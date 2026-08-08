@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   buildIssueBody, claimIssue, fingerprintOf, issueNumberForTask, parseIssueBody,
-  publishFinding, reapStaleLeases, recordIssueForTask,
+  publishFinding, reapStaleLeases, reconcileFindingFingerprints, recordIssueForTask,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
@@ -115,6 +115,47 @@ describe('publishFinding', () => {
     expect((await forge.getIssue(2)).state).toBe('closed')
     expect(listCalls).toBeGreaterThanOrEqual(5)
     expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
+    expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
+  })
+
+  it('reconciles concurrent creations on a later poll after the retry window expires', async () => {
+    const otherPaths = orchPaths(join(repoRoot, 'other-checkout'))
+    const listOpenIssues = forge.listOpenIssues.bind(forge)
+    const createIssue = forge.createIssue.bind(forge)
+    let listCalls = 0
+    let creations = 0
+    let releasePreflights: () => void = () => {}
+    let releaseCreations: () => void = () => {}
+    const bothPreflights = new Promise<void>((resolve) => { releasePreflights = resolve })
+    const bothCreations = new Promise<void>((resolve) => { releaseCreations = resolve })
+    forge.listOpenIssues = async () => {
+      if (++listCalls <= 2) {
+        if (listCalls === 2) releasePreflights()
+        await bothPreflights
+      }
+      return []
+    }
+    forge.createIssue = async (options) => {
+      const issueNumber = await createIssue(options)
+      if (++creations === 2) releaseCreations()
+      await bothCreations
+      return issueNumber
+    }
+
+    const results = await Promise.all([
+      publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1'),
+      publishFinding(forge, otherPaths, '[BUG] `src/a/b.ts` breaks differently', 'scan-2'),
+    ])
+    expect(results).toEqual([
+      { outcome: 'created', issueNumber: 1 },
+      { outcome: 'created', issueNumber: 2 },
+    ])
+
+    forge.listOpenIssues = listOpenIssues
+    await reconcileFindingFingerprints(forge, otherPaths)
+
+    expect((await listOpenIssues(LABEL_FINDING)).map((issue) => issue.number)).toEqual([1])
+    expect((await forge.getIssue(2)).state).toBe('closed')
     expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
   })
 
@@ -372,5 +413,15 @@ describe('loop integration in issue mode', () => {
     expect(claimed?.assignees).toEqual(['worker-a'])
     expect(claimed?.labels).toContain(LABEL_IN_PROGRESS)
     expect(claimed?.labels).not.toContain(LABEL_READY)
+
+    // A duplicate hidden beyond the creation retry window is still reconciled by
+    // a later poll, even though the fingerprint is never published again.
+    const duplicate = await forge.createIssue({
+      title: 'late duplicate',
+      body: buildIssueBody('[BUG] `src/a/b.ts` breaks differently', 'another-scan'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    await loop.poll()
+    expect((await forge.getIssue(duplicate)).state).toBe('closed')
   })
 })

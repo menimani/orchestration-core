@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import { taskIdForDesc } from './ids.ts'
@@ -120,8 +120,10 @@ function writeFingerprintLedger(
 
 function recordFingerprint(paths: OrchPaths, fingerprint: string, issueNumber: number): void {
   const ledger = fingerprintLedger(paths)
-  if (ledger.some((entry) => entry.fingerprint === fingerprint && entry.issueNumber === issueNumber)) return
-  appendFileSync(fingerprintLedgerFile(paths), `${fingerprint} ${issueNumber}\n`)
+  const recorded = ledger.filter((entry) => entry.fingerprint === fingerprint)
+  if (recorded.length === 1 && recorded[0]?.issueNumber === issueNumber) return
+  const otherFingerprints = ledger.filter((entry) => entry.fingerprint !== fingerprint)
+  writeFingerprintLedger(paths, [...otherFingerprints, { fingerprint, issueNumber }])
 }
 
 function issueFingerprint(issue: ForgeIssue): string | undefined {
@@ -168,8 +170,9 @@ async function reconcileOpenFindings(
   forge: Forge,
   fingerprint: string,
   createdIssueNumber?: number,
+  knownOpenFindings?: ForgeIssue[],
 ): Promise<number | undefined> {
-  const issues = new Map((await forge.listOpenIssues(LABEL_FINDING))
+  const issues = new Map((knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING))
     .filter((issue) => issueFingerprint(issue) === fingerprint)
     .map((issue) => [issue.number, issue]))
   if (createdIssueNumber !== undefined && !issues.has(createdIssueNumber)) {
@@ -220,6 +223,23 @@ async function reconcileCreatedFinding(
     if (survivor !== undefined && survivor !== createdIssueNumber) return survivor
   }
   return createdIssueNumber
+}
+
+/** Revisit forge-persisted fingerprints on every poll after listing lag has cleared. */
+export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPaths): Promise<void> {
+  const openFindings = await forge.listOpenIssues(LABEL_FINDING)
+  const byFingerprint = new Map<string, ForgeIssue[]>()
+  for (const issue of openFindings) {
+    const fingerprint = issueFingerprint(issue)
+    if (fingerprint === undefined) continue
+    const matches = byFingerprint.get(fingerprint) ?? []
+    matches.push(issue)
+    byFingerprint.set(fingerprint, matches)
+  }
+  for (const [fingerprint, issues] of byFingerprint) {
+    const survivor = await reconcileOpenFindings(forge, fingerprint, undefined, issues)
+    if (survivor !== undefined) recordFingerprint(paths, fingerprint, survivor)
+  }
 }
 
 /**
