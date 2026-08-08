@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -210,6 +210,60 @@ describe('claimIssue', () => {
     const after = await forge.getIssue(issueNumber)
     expect(after.assignees).toEqual(['worker-a'])
     expect(after.labels).toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('serializes a claim with duplicate reconciliation and does not materialize a closed issue', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks'
+    await readyIssue(description)
+    const duplicate = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-2'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const issue = await forge.getIssue(duplicate)
+    const closeIssue = forge.closeIssue.bind(forge)
+    let releaseClose: () => void = () => {}
+    let closeStarted: () => void = () => {}
+    const mayClose = new Promise<void>((resolve) => { releaseClose = resolve })
+    const closing = new Promise<void>((resolve) => { closeStarted = resolve })
+    forge.closeIssue = async (issueNumber, comment) => {
+      if (issueNumber === duplicate) {
+        closeStarted()
+        await mayClose
+      }
+      await closeIssue(issueNumber, comment)
+    }
+
+    const reconciliation = publishFinding(forge, paths, description, 'scan-3')
+    await closing
+    const claim = claimIssue(forge, paths, issue, 'worker-a', appendRequirement)
+    releaseClose()
+
+    await reconciliation
+    expect(await claim).toEqual({ outcome: 'lost-race', issueNumber: duplicate })
+    expect((await forge.getIssue(duplicate)).state).toBe('closed')
+    expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
+  it('revalidates the claimed issue after relabeling and before writing local work', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks during claim')
+    const issue = await forge.getIssue(issueNumber)
+    const removeLabel = forge.removeLabel.bind(forge)
+    const closeIssue = forge.closeIssue.bind(forge)
+    forge.removeLabel = async (number, label) => {
+      await removeLabel(number, label)
+      if (number === issueNumber && label === LABEL_READY) {
+        await closeIssue(number, 'Concurrent reconciliation')
+      }
+    }
+
+    const result = await claimIssue(forge, paths, issue, 'worker-a', appendRequirement)
+
+    expect(result).toEqual({ outcome: 'lost-race', issueNumber })
+    expect((await forge.getIssue(issueNumber)).state).toBe('closed')
+    expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
+    expect(readdirSync(paths.tasksDir)).toEqual([])
   })
 })
 
