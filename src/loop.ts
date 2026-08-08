@@ -130,8 +130,9 @@ export function createLoop(deps: LoopDeps) {
       .includes(normalized)) return true
     const firstSentence = (trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? '')
       .replace(/[.!]+$/, '').toLowerCase()
-    return /^(?:none|no (?:actionable )?(?:issues|findings)(?: (?:were )?found)?|(?:sections? [\w, -]+|the review|review|i|we) found no (?:actionable )?(?:issues|findings)|nothing to report)$/
-      .test(firstSentence)
+    return /^none\b/.test(firstSentence)
+      || /^(?:no (?:actionable )?(?:issues|findings)(?: (?:were )?found)?|(?:sections? [\w, -]+|the review|review|i|we) found no (?:actionable )?(?:issues|findings)|nothing to report)$/
+        .test(firstSentence)
   }
 
   /**

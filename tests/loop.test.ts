@@ -124,10 +124,17 @@ describe('actionable findings', () => {
     writeFinal('t4', [
       'NEXT_TASK: None.',
       'NEXT_TASK: None. Sections 5 and 6 found no actionable issues.',
+      'NEXT_TASK: None for sections 5-6.',
       'NEXT_TASK: Sections 5 and 6 found no actionable issues',
       'NEXT_TASK: nothing to report',
     ].join('\n'))
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
+  })
+
+  it('filters a finding that opens with None even when the remainder sounds actionable', () => {
+    const loop = makeLoop()
+    writeFinal('t-none-prefix', 'NEXT_TASK: None of the export rows carry ids\n')
+    expect(loop.actionableFindings(finalMessageFile(paths, 't-none-prefix'))).toEqual([])
   })
 
   it('keeps findings that describe incorrect no-issue behavior', () => {
