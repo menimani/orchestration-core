@@ -109,7 +109,7 @@ const cmdDelegate: Command = async (paths, args) => {
     warn: (message) => console.warn(message),
   })
   if (result.enqueue === undefined) {
-    console.log(`Not enqueued: issue #${result.issue.issueNumber} is already claimed.`)
+    console.log(`Delegated through issue #${result.issue.issueNumber}; the loop daemon owns local materialization.`)
     return 0
   }
   if (result.specReused) {

@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import {
-  buildIssueBody, issueNumberForTask, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
+  buildIssueBody, issueNumberForTask, parseIssueBody,
+  LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
 } from '../src/issueQueue.ts'
 import {
   delegateTask, delegateTaskVisible, enqueueTask, isIssueModeActive, newTaskSpec,
@@ -117,21 +118,22 @@ describe('delegateTask', () => {
     expect(() => delegateTask(paths, '   ')).toThrow(/description/i)
   })
 
-  it('files delegated work as assigned and in progress when the daemon marker enables issues', async () => {
+  it('publishes delegated work as ready for the daemon when its marker enables issues', async () => {
     writeIssueModeMarker(paths, true)
     const forge = makeFakeForge('delegator')
-    const result = await delegateTaskVisible(paths, DESC, {}, {
+    const result = await delegateTaskVisible(paths, DESC, { effort: 'high', inspect: true }, {
       env: {},
       loadForge: async () => forge,
       warn: () => {},
     })
 
-    expect(queueLines()).toEqual([`${result.taskId}:0`])
-    expect(result.issue).toEqual({ outcome: 'created', issueNumber: 1, materialize: true })
-    expect(issueNumberForTask(paths, result.taskId)).toBe(1)
+    expect(queueLines()).toEqual([])
+    expect(result.issue).toEqual({ outcome: 'created', issueNumber: 1, materialize: false })
+    expect(issueNumberForTask(paths, result.taskId)).toBeUndefined()
     const issue = await forge.getIssue(1)
-    expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
-    expect(issue.assignees).toEqual(['delegator'])
+    expect(issue.labels).toEqual([LABEL_FINDING, LABEL_READY])
+    expect(issue.assignees).toEqual([])
+    expect(parseIssueBody(issue.body)).toMatchObject({ effort: 'high', inspect: true })
   })
 
   it('ignores an issue-mode marker whose daemon is no longer alive', () => {
@@ -151,7 +153,7 @@ describe('delegateTask', () => {
     expect(existsSync(marker)).toBe(false)
   })
 
-  it('claims a ready matching issue before enqueueing its local task', async () => {
+  it('leaves a ready matching issue for the daemon without creating local work', async () => {
     const description = '[BUG] `src/a/b.ts` breaks delegated work'
     const forge = makeFakeForge('delegator')
     const issueNumber = await forge.createIssue({
@@ -159,12 +161,7 @@ describe('delegateTask', () => {
       body: buildIssueBody(description, 'scan-task'),
       labels: [LABEL_FINDING, LABEL_READY],
     })
-    const assignIssue = forge.assignIssue.bind(forge)
-    forge.assignIssue = async (number, user) => {
-      expect(queueLines()).toEqual([])
-      expect(readdirSync(paths.tasksDir)).toEqual([])
-      await assignIssue(number, user)
-    }
+    forge.assignIssue = async () => { throw new Error('delegate must not claim') }
 
     const result = await delegateTaskVisible(paths, description, {}, {
       env: { ISSUE_QUEUE_ENABLED: 'true' },
@@ -172,11 +169,12 @@ describe('delegateTask', () => {
       warn: () => {},
     })
 
-    expect(result.issue).toEqual({ outcome: 'duplicate', issueNumber, materialize: true })
-    expect(queueLines()).toEqual([`${result.taskId}:0`])
+    expect(result.issue).toEqual({ outcome: 'duplicate', issueNumber, materialize: false })
+    expect(queueLines()).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
     const issue = await forge.getIssue(issueNumber)
-    expect(issue.assignees).toEqual(['delegator'])
-    expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toEqual([LABEL_FINDING, LABEL_READY])
   })
 
   it('does not materialize a task when another worker already claimed its fingerprint', async () => {
@@ -235,29 +233,18 @@ describe('delegateTask', () => {
     expect(readdirSync(paths.tasksDir)).toEqual([])
   })
 
-  it('does not fall back locally after assigning an existing issue', async () => {
-    const description = '[BUG] `src/a/b.ts` loses an assignment response'
+  it('does not need a forge identity to publish for the daemon', async () => {
+    const description = '[BUG] `src/a/b.ts` is delegated through the daemon'
     const forge = makeFakeForge('delegator')
-    const issueNumber = await forge.createIssue({
-      title: description,
-      body: buildIssueBody(description, 'scan-task'),
-      labels: [LABEL_FINDING, LABEL_READY],
-    })
-    const getIssue = forge.getIssue.bind(forge)
-    forge.getIssue = async (number) => {
-      if (forge.issues.get(number)?.assignees.includes('delegator') === true) {
-        throw new Error('response lost after assignment')
-      }
-      return getIssue(number)
-    }
+    forge.currentUser = async () => { throw new Error('identity lookup must not run') }
 
-    await expect(delegateTaskVisible(paths, description, {}, {
+    const result = await delegateTaskVisible(paths, description, {}, {
       env: { ISSUE_QUEUE_ENABLED: 'true' },
       loadForge: async () => forge,
       warn: () => {},
-    })).rejects.toThrow(/issue #1.*may have been published/i)
+    })
 
-    expect(forge.issues.get(issueNumber)?.assignees).toEqual(['delegator'])
+    expect(result.issue).toEqual({ outcome: 'created', issueNumber: 1, materialize: false })
     expect(queueLines()).toEqual([])
     expect(readdirSync(paths.tasksDir)).toEqual([])
     expect(existsSync(join(paths.queueDir, 'issue-map'))).toBe(false)

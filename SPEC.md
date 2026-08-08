@@ -187,20 +187,21 @@ from or equivalent to `orchestration/tests/*.sh`.
     names, else the hashed text with whole-line semantics. Review findings are checked
     independently before unresolved findings are combined; a combined issue stores every
     constituent fingerprint, so it also suppresses a later individual report.
-33. Workers claim a ready issue by self-assignment. The forge login is the worker
-    identity, and every process that may claim concurrently must authenticate as a
+33. Worker daemons claim a ready issue by self-assignment. The forge login is the worker
+    identity, and every daemon that may claim concurrently must authenticate as a
     distinct forge account. Under that invariant, a simultaneous claim is settled
     deterministically — the lexicographically first login wins, losers unassign
     themselves — and the winner relabels to `loop:in-progress` and materializes the
     issue as a local task through the standard template (completion marker included),
-    honoring an `Effort:` field. Processes sharing an account are indistinguishable
-    and may both materialize the issue, so that configuration is unsupported. An
+    honoring an `Effort:` field. Daemons sharing an account are indistinguishable
+    and may both materialize the issue, so that configuration is unsupported. A
     running linked task refreshes a `Heartbeat: <ISO timestamp>` line in its issue body
     at least every 30 minutes, moving the forge's `updatedAt` lease clock. Heartbeat
     timestamps are tracked locally under `queue/heartbeat`; one failed forge attempt
-    logs one warning and never fails the poll. An in-progress issue without heartbeats
-    for `ISSUE_LEASE_HOURS` (default 3) is reaped back to ready, unassigned, so lease
-    expiry identifies a worker that is no longer polling rather than a long-running task.
+    logs one warning and never fails the poll. A locally running mapped task is excluded
+    from that poll's reaping even when its heartbeat fails. An in-progress issue without
+    heartbeats for `ISSUE_LEASE_HOURS` (default 3) is reaped back to ready, unassigned, so
+    lease expiry identifies a worker that is no longer polling rather than a long-running task.
 34. The merge commit of an issue-born task carries `closes #N`, so the forge closes
     the issue when the promotion PR lands the commit on the default branch. Immediately
     after merging, the worker comments with the merge commit and run branch and states
@@ -211,13 +212,12 @@ from or equivalent to `orchestration/tests/*.sh`.
     again, keeping the issue claimed until promotion closes it. A forge outage degrades a
     poll to local-only work; it never stops the loop. Labels are ensured at loop startup.
     The daemon records issue mode in
-    `queue/issue-mode` so a separate `delegate` process can publish and claim work before
-    materializing it locally. A new issue is assigned to the current user with
-    `loop:finding` + `loop:in-progress`; a matching ready issue is claimed first, while a
-    matching issue already claimed by another worker suppresses the local task. Delegation
-    remains local-only with a warning only when the forge fails before any remote write;
-    once assignment or creation may have happened, the issue is reconciled and linked or
-    local materialization aborts.
+    `queue/issue-mode` so a separate `delegate` process can publish ready work for the
+    daemon to claim and materialize locally, including any effort or inspection setting.
+    A new issue is unassigned with
+    `loop:finding` + `loop:ready`; a matching open issue is reused without claiming it.
+    Delegation remains local-only with a warning only when the forge fails before any remote write;
+    once creation may have happened, the issue is reconciled or the command aborts.
     The marker includes the daemon PID, is removed with the PID lock on every graceful
     exit, and is ignored when its owning process is no longer alive.
 

@@ -878,6 +878,7 @@ export function createLoop(deps: LoopDeps) {
     }
 
     let burstFailures = 0
+    const locallyRunningIssues = new Set<number>()
     for (const taskId of listTaskIds(paths)) {
       const before = readStatus(paths, taskId)
       if (before === undefined) continue
@@ -886,7 +887,9 @@ export function createLoop(deps: LoopDeps) {
         : before.status
       if (status === undefined) continue
 
-      if (status === 'running' && issueNumberForTask(paths, taskId) !== undefined) {
+      const linkedIssue = status === 'running' ? issueNumberForTask(paths, taskId) : undefined
+      if (linkedIssue !== undefined) {
+        locallyRunningIssues.add(linkedIssue)
         try {
           await heartbeatIssueForTask(forge, paths, taskId, now())
         } catch (error) {
@@ -989,6 +992,7 @@ export function createLoop(deps: LoopDeps) {
             paths,
             config.issueLeaseHours,
             now(),
+            locallyRunningIssues,
           )) {
             log(`[loop] Lease reaped: issue #${reaped} is ready again`)
           }

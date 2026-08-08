@@ -216,7 +216,7 @@ export interface DelegatedIssueOptions {
   warn: (message: string) => void
 }
 
-/** Claim shared work before creating the local task that may execute it. */
+/** Publish shared work for the daemon that exclusively creates its local task. */
 export async function delegateTaskVisible(
   paths: OrchPaths,
   description: string,
@@ -236,10 +236,9 @@ export async function delegateTaskVisible(
 
   try {
     const forge = await issueOptions.loadForge()
-    const user = await forge.currentUser()
     const { publishDelegatedTask } = await import('./issueQueue.ts')
     issue = await publishDelegatedTask(
-      forge, paths, description, taskId, user, options.effort,
+      forge, paths, description, taskId, options.effort, options.inspect,
     )
   } catch (error) {
     // Once a forge write may have happened, a local-only task could run without the
@@ -248,10 +247,7 @@ export async function delegateTaskVisible(
     issueOptions.warn(`WARN: Could not publish delegated task to the forge: ${(error as Error).message}`)
     return materializeDelegatedTask(paths, taskId, description, options)
   }
-  if (!issue.materialize) {
-    return { taskId, spec, specReused: existsSync(spec), issue }
-  }
-  return { ...materializeDelegatedTask(paths, taskId, description, options), issue }
+  return { taskId, spec, specReused: existsSync(spec), issue }
 }
 
 export function isLoopRunning(paths: OrchPaths): boolean {

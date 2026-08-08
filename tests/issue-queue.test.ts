@@ -55,6 +55,7 @@ describe('issue body round-trip', () => {
     const parsed = parseIssueBody(body)
     expect(parsed?.fingerprint).toBe('bug:src/x/y.ts')
     expect(parsed?.effort).toBe('high')
+    expect(parsed?.inspect).toBe(false)
     expect(parsed?.requirement).toBe('[BUG] `src/x/y.ts` does the wrong thing')
   })
 
@@ -521,17 +522,29 @@ describe('issue map', () => {
 })
 
 describe('publishDelegatedTask', () => {
-  it('suppresses a duplicate delegation when the existing issue is already claimed', async () => {
+  it('publishes ready work for the daemon and never materializes under the delegator login', async () => {
     const description = '[BUG] `src/a/b.ts` breaks delegated work'
-    const first = await publishDelegatedTask(forge, paths, description, 'user-task-1', forge.user)
+    const first = await publishDelegatedTask(
+      forge, paths, description, 'user-task-1', 'high', true,
+    )
     const second = await publishDelegatedTask(
-      forge, paths, '[BUG] `src/a/b.ts` breaks with new wording', 'user-task-2', forge.user,
+      forge, paths, '[BUG] `src/a/b.ts` breaks with new wording', 'user-task-2',
     )
 
-    expect(first).toEqual({ outcome: 'created', issueNumber: 1, materialize: true })
+    expect(first).toEqual({ outcome: 'created', issueNumber: 1, materialize: false })
     expect(second).toEqual({ outcome: 'duplicate', issueNumber: 1, materialize: false })
     expect(forge.issues.size).toBe(1)
+    const ready = await forge.getIssue(1)
+    expect(ready.assignees).toEqual([])
+    expect(ready.labels).toEqual([LABEL_FINDING, LABEL_READY])
+    expect(issueNumberForTask(paths, 'user-task-1')).toBeUndefined()
     expect(issueNumberForTask(paths, 'user-task-2')).toBeUndefined()
+
+    const claim = await claimIssue(forge, paths, ready, forge.user, () => {})
+    if (claim.outcome !== 'claimed') throw new Error(`expected a claim, got ${claim.outcome}`)
+    expect((await forge.getIssue(1)).assignees).toEqual([forge.user])
+    expect(readFileSync(join(paths.queueDir, 'effort', claim.taskId), 'utf8')).toBe('high\n')
+    expect(existsSync(join(paths.queueDir, 'inspect', claim.taskId))).toBe(true)
   })
 
   it('does not attach a local task to a matching issue claimed by another worker', async () => {
@@ -544,7 +557,7 @@ describe('publishDelegatedTask', () => {
     })
 
     const result = await publishDelegatedTask(
-      forge, paths, description, 'user-task', forge.user,
+      forge, paths, description, 'user-task',
     )
 
     expect(result).toEqual({ outcome: 'duplicate', issueNumber, materialize: false })
@@ -652,15 +665,17 @@ describe('loop integration in issue mode', () => {
     expect(unlinkedAfter.labels).toContain(LABEL_READY)
   })
 
-  it('continues polling when a heartbeat comment fails', async () => {
-    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+  it('does not reap a locally running task when its stale heartbeat fails', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
       title: 'linked', body: buildIssueBody('[BUG] `src/a.ts` breaks', 'scan'),
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
     })
     recordIssueForTask(paths, 'task-running', issueNumber)
     writeFileSync(join(paths.statusDir, 'task-running.json'),
       JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
     forge.commentIssue = async () => { throw new Error('forge unavailable') }
     const logged: string[] = []
 
@@ -678,6 +693,10 @@ describe('loop integration in issue mode', () => {
 
     await expect(loop.poll()).resolves.toBe('continue')
     expect(logged.filter((line) => line.includes('WARN: heartbeat failed'))).toHaveLength(1)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.labels).not.toContain(LABEL_READY)
   })
 
 })

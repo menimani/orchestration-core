@@ -71,11 +71,13 @@ export function buildIssueBody(
   parentTaskId: string,
   effort?: string,
   fingerprints: string[] = [fingerprintOf(description)],
+  inspect = false,
 ): string {
   return [
     ...[...new Set(fingerprints)].map((fingerprint) => `Fingerprint: ${fingerprint}`),
     `Parent: ${parentTaskId}`,
     ...(effort !== undefined ? [`Effort: ${effort}`] : []),
+    ...(inspect ? ['Inspect: true'] : []),
     '',
     '## Requirement',
     '',
@@ -88,6 +90,7 @@ export interface ParsedIssue {
   fingerprint: string
   fingerprints: string[]
   effort: string | undefined
+  inspect: boolean
   requirement: string
 }
 
@@ -97,6 +100,7 @@ export function parseIssueBody(body: string): ParsedIssue | undefined {
     .map((line) => line.slice('Fingerprint: '.length))
   const fingerprint = fingerprints[0]
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
+  const inspect = lines.includes('Inspect: true')
   const requirementStart = lines.indexOf('## Requirement')
   if (fingerprint === undefined || requirementStart === -1) return undefined
   const requirementLines = lines.slice(requirementStart + 1)
@@ -104,16 +108,14 @@ export function parseIssueBody(body: string): ParsedIssue | undefined {
   if (requirementLines.at(-1)?.startsWith('Heartbeat: ') === true) requirementLines.pop()
   const requirement = requirementLines.join('\n').trim()
   if (requirement === '') return undefined
-  return { fingerprint, fingerprints, effort, requirement }
+  return { fingerprint, fingerprints, effort, inspect, requirement }
 }
 
 export type PublishResult
   = { outcome: 'created'; issueNumber: number }
     | { outcome: 'duplicate'; issueNumber: number }
 
-export type DelegatedPublishResult
-  = PublishResult & { materialize: true }
-    | PublishResult & { materialize: false }
+export type DelegatedPublishResult = PublishResult & { materialize: false }
 
 function fingerprintLedgerFile(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-fingerprints')
@@ -413,56 +415,14 @@ export async function publishFinding(
     : { outcome: 'duplicate', issueNumber: survivor }
 }
 
-async function claimReadyIssueForDelegation(
-  forge: Forge,
-  issueNumber: number,
-  user: string,
-): Promise<boolean> {
-  return withIssueCoordination(forge, issueNumber, async () => {
-    const issue = await forge.getIssue(issueNumber)
-    if (!isReadyToClaim(issue)) return false
-    try {
-      // A rejected write may still have reached the forge. From this point onward the
-      // caller must never fall back to an unlinked local task.
-      await forge.assignIssue(issueNumber, user)
-
-      const afterAssignment = await forge.getIssue(issueNumber)
-      if (afterAssignment.state !== 'open'
-        || !afterAssignment.labels.includes(LABEL_READY)
-        || afterAssignment.labels.includes(LABEL_IN_PROGRESS)
-        || [...afterAssignment.assignees].sort()[0] !== user) {
-        await forge.unassignIssue(issueNumber, user)
-        return false
-      }
-
-      await forge.addLabel(issueNumber, LABEL_IN_PROGRESS)
-      await forge.removeLabel(issueNumber, LABEL_READY)
-
-      const claimed = await forge.getIssue(issueNumber)
-      if (claimed.state !== 'open'
-        || claimed.labels.includes(LABEL_READY)
-        || !claimed.labels.includes(LABEL_IN_PROGRESS)
-        || [...claimed.assignees].sort()[0] !== user) {
-        await forge.unassignIssue(issueNumber, user)
-        return false
-      }
-      return true
-    } catch (error) {
-      throw error instanceof DelegatedTaskMutationError
-        ? error
-        : new DelegatedTaskMutationError(error, issueNumber)
-    }
-  })
-}
-
-/** Publish and claim delegated work before allowing its local task to materialize. */
+/** Publish delegated work for the daemon to claim and materialize. */
 export async function publishDelegatedTask(
   forge: Forge,
   paths: OrchPaths,
   description: string,
   taskId: string,
-  user: string,
   effort?: string,
+  inspect = false,
 ): Promise<DelegatedPublishResult> {
   const fingerprint = fingerprintOf(description)
   let reconciliationMutation: number | undefined
@@ -478,24 +438,7 @@ export async function publishDelegatedTask(
     throw error
   }
   if (existingIssueNumber !== undefined) {
-    let materialize: boolean
-    try {
-      materialize = await claimReadyIssueForDelegation(forge, existingIssueNumber, user)
-    } catch (error) {
-      if (error instanceof DelegatedTaskMutationError) throw error
-      if (reconciliationMutation !== undefined) {
-        throw new DelegatedTaskMutationError(error, reconciliationMutation)
-      }
-      throw error
-    }
-    if (materialize) {
-      try {
-        recordIssueForTask(paths, taskId, existingIssueNumber)
-      } catch (error) {
-        throw new DelegatedTaskMutationError(error, existingIssueNumber)
-      }
-    }
-    return { outcome: 'duplicate', issueNumber: existingIssueNumber, materialize }
+    return { outcome: 'duplicate', issueNumber: existingIssueNumber, materialize: false }
   }
 
   const title = description.length > 90 ? `${description.slice(0, 87)}...` : description
@@ -503,9 +446,8 @@ export async function publishDelegatedTask(
   try {
     issueNumber = await forge.createIssue({
       title,
-      body: buildIssueBody(description, taskId, effort),
-      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-      assignees: [user],
+      body: buildIssueBody(description, taskId, effort, undefined, inspect),
+      labels: [LABEL_FINDING, LABEL_READY],
     })
   } catch (error) {
     // The request may have reached the forge even when its response did not. With no
@@ -520,8 +462,7 @@ export async function publishDelegatedTask(
       return { outcome: 'duplicate', issueNumber: survivor, materialize: false }
     }
     recordFingerprint(paths, fingerprint, issueNumber)
-    recordIssueForTask(paths, taskId, issueNumber)
-    return { outcome: 'created', issueNumber, materialize: true }
+    return { outcome: 'created', issueNumber, materialize: false }
   } catch (error) {
     throw error instanceof DelegatedTaskMutationError
       ? error
@@ -719,6 +660,10 @@ export async function claimIssue(
       mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
       writeFileSync(join(paths.queueDir, 'effort', taskId), `${parsed.effort}\n`)
     }
+    if (parsed.inspect) {
+      mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
+      writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
+    }
     recordIssueForTask(paths, taskId, issue.number)
     return { outcome: 'claimed', taskId, issueNumber: issue.number, enqueue: enqueueTask(paths, taskId, 1) }
   })
@@ -735,9 +680,11 @@ export async function reapStaleLeases(
   paths: OrchPaths,
   leaseHours: number,
   now: Date,
+  locallyRunningIssues: ReadonlySet<number> = new Set(),
 ): Promise<number[]> {
   const reaped: number[] = []
   for (const issue of await forge.listOpenIssues(LABEL_IN_PROGRESS)) {
+    if (locallyRunningIssues.has(issue.number)) continue
     const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
     if (ageMs < leaseHours * 3600 * 1000) continue
     const promotion = promotionForIssue(paths, issue.number)
