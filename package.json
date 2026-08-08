@@ -9,6 +9,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "loop": "node src/cli.ts loop",
+    "worker": "node src/cli.ts worker",
     "loop-status": "node src/cli.ts loop-status",
     "queue": "node src/cli.ts queue",
     "stop": "node src/cli.ts stop",

@@ -42,6 +42,17 @@ describe('command registry', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('deploy')
   })
+
+  it('refuses to start a worker without a base ref', () => {
+    const result = spawnSync(process.execPath, [CLI, 'worker'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Usage: worker <base-ref>')
+  })
 })
 
 describe('manual merge', () => {

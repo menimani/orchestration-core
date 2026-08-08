@@ -21,6 +21,7 @@ import {
   writeIssueModeMarker,
 } from './tasks.ts'
 import { observeNextPoll } from './wake.ts'
+import { runWorkerCommand } from './worker.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. The key output lines (`Enqueued:`, `Created:`,
@@ -391,6 +392,15 @@ const cmdLoop: Command = async (paths, args) => {
   return runLoopDaemon(paths)
 }
 
+const cmdWorker: Command = async (paths, args) => {
+  const baseRef = args[0]
+  if (baseRef === undefined || args.length !== 1) {
+    console.error('Usage: worker <base-ref>')
+    return 1
+  }
+  return await runWorkerCommand(paths, baseRef)
+}
+
 async function runLoopDaemon(paths: OrchPaths): Promise<number> {
   const config = loadConfig()
   const pidFile = join(paths.queueDir, 'loop.pid')
@@ -494,6 +504,7 @@ const commands: Record<string, Command> = {
   'prune': cmdPrune,
   'queue': cmdQueue,
   'loop': cmdLoop,
+  'worker': cmdWorker,
   'loop-status': cmdLoopStatus,
   'stop': cmdStop,
 }
