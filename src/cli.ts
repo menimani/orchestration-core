@@ -8,7 +8,9 @@ import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
 import { loadConfig } from './config.ts'
 import { createLoop } from './loop.ts'
-import { issueNumberForTask } from './issueQueue.ts'
+import {
+  commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
+} from './issueQueue.ts'
 import { mergeTask, MergeError } from './merge.ts'
 import { deploy } from './deploy.ts'
 import { logFile, orchPaths, type OrchPaths } from './paths.ts'
@@ -260,13 +262,30 @@ const cmdMerge: Command = async (paths, args) => {
     }
   }
   try {
-    await mergeTask(paths, taskId, {
+    const linkedIssue = issueNumberForTask(paths, taskId)
+    const mergeCommit = await mergeTask(paths, taskId, {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(config.project),
-      closesIssue: issueNumberForTask(paths, taskId),
+      closesIssue: linkedIssue,
     })
+    if (linkedIssue !== undefined) {
+      const runBranch = execFileSync('git', ['branch', '--show-current'], {
+        cwd: paths.repoRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+      }).trim()
+      recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
+      try {
+        const forge = await loadForge(config.forge, paths.repoRoot)
+        await commentOnIssueMerge(forge, linkedIssue, mergeCommit, runBranch)
+      } catch (error) {
+        console.error(
+          `WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`,
+        )
+      }
+    }
     return 0
   } catch (error) {
     if (error instanceof MergeError) {
