@@ -8,6 +8,7 @@ import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
 import { loadConfig } from './config.ts'
 import { createLoop } from './loop.ts'
+import { issueNumberForTask } from './issueQueue.ts'
 import { mergeTask, MergeError } from './merge.ts'
 import { deploy } from './deploy.ts'
 import { logFile, orchPaths, type OrchPaths } from './paths.ts'
@@ -264,6 +265,7 @@ const cmdMerge: Command = async (paths, args) => {
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(config.project),
+      closesIssue: issueNumberForTask(paths, taskId),
     })
     return 0
   } catch (error) {

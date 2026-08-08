@@ -1,9 +1,12 @@
-import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { recordIssueForTask } from '../src/issueQueue.ts'
+import { branchName, orchPaths, worktreeDir } from '../src/paths.ts'
+import { writeStatus } from '../src/status.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'src', 'cli.ts')
@@ -24,6 +27,10 @@ function daemonFile(name: string): string {
   return join(repoRoot, 'orchestration', 'queue', name)
 }
 
+function git(args: string[], cwd = repoRoot): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })
+}
+
 describe('command registry', () => {
   it('lists deploy as an available command', () => {
     const result = spawnSync(process.execPath, [CLI, 'unknown'], {
@@ -34,6 +41,37 @@ describe('command registry', () => {
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('deploy')
+  })
+})
+
+describe('manual merge', () => {
+  it('builds merge options that close the task-linked issue', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260808_000000_001_user-linked-merge'
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(join(worktree, 'work.txt'), 'done\n')
+    git(['add', '-A'], worktree)
+    git(['commit', '-qm', 'fix: complete linked task'], worktree)
+    await writeStatus(paths, taskId, 'completed')
+    recordIssueForTask(paths, taskId, 197)
+
+    const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(0)
+    expect(git(['log', '-1', '--format=%s']).trim()).toBe(
+      `Merge ${taskId} via Codex (closes #197)`,
+    )
   })
 })
 
