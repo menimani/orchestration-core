@@ -207,13 +207,17 @@ function isReadyToClaim(issue: ForgeIssue): boolean {
 /** Preserve claimed work; otherwise keep the oldest match and close ready duplicates. */
 async function reconcileOpenFindings(
   forge: Forge,
+  paths: OrchPaths,
   fingerprints: string[],
   createdIssueNumber?: number,
   knownOpenFindings?: ForgeIssue[],
   onMutation?: (issueNumber: number) => void,
 ): Promise<number | undefined> {
   const issues = new Map((knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING))
-    .filter((issue) => hasExactFingerprints(issue, fingerprints))
+    .filter((issue) => hasExactFingerprints(issue, fingerprints)
+      // A promoted issue's fix has already merged: it neither suppresses new findings
+      // nor gets closed as a duplicate — the promotion closes it.
+      && issuePromotionForIssue(paths, issue.number) === undefined)
     .map((issue) => [issue.number, issue]))
   if (createdIssueNumber !== undefined && !issues.has(createdIssueNumber)) {
     try {
@@ -254,12 +258,13 @@ function sleep(ms: number): Promise<void> {
 /** Give eventually consistent issue listings a bounded window to expose a racing creation. */
 async function reconcileCreatedFinding(
   forge: Forge,
+  paths: OrchPaths,
   fingerprints: string[],
   createdIssueNumber: number,
 ): Promise<number> {
   for (const delayMs of POST_CREATE_RECONCILE_DELAYS_MS) {
     if (delayMs > 0) await sleep(delayMs)
-    const survivor = await reconcileOpenFindings(forge, fingerprints, createdIssueNumber)
+    const survivor = await reconcileOpenFindings(forge, paths, fingerprints, createdIssueNumber)
     if (survivor !== undefined && survivor !== createdIssueNumber) return survivor
   }
   return createdIssueNumber
@@ -278,7 +283,7 @@ export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPath
     byFingerprintSet.set(key, group)
   }
   for (const { fingerprints, issues } of byFingerprintSet.values()) {
-    const survivor = await reconcileOpenFindings(forge, fingerprints, undefined, issues)
+    const survivor = await reconcileOpenFindings(forge, paths, fingerprints, undefined, issues)
     if (survivor !== undefined) {
       for (const fingerprint of fingerprints) recordFingerprint(paths, fingerprint, survivor)
     }
@@ -338,10 +343,15 @@ async function findExistingFinding(
     }
     if (recordedIssue?.state === 'open'
       && recordedIssue.labels.includes(LABEL_FINDING)
-      && hasIssueFingerprint(recordedIssue, fingerprint)) {
+      && hasIssueFingerprint(recordedIssue, fingerprint)
+      // An issue whose fix already merged must not suppress a new finding with the
+      // same coarse fingerprint: the tag+first-path identity collapses distinct
+      // defects in one file, and a review's fresh finding about new code was eaten
+      // by a merged-but-unpromoted issue exactly this way.
+      && issuePromotionForIssue(paths, recorded.issueNumber) === undefined) {
       const fingerprints = issueFingerprints(recordedIssue)
       const survivor = (await reconcileOpenFindings(
-        forge, fingerprints, recorded.issueNumber, undefined, onMutation,
+        forge, paths, fingerprints, recorded.issueNumber, undefined, onMutation,
       )) ?? recorded.issueNumber
       recordFingerprint(paths, fingerprint, survivor)
       return survivor
@@ -349,12 +359,13 @@ async function findExistingFinding(
     writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
   }
   const matching = (await forge.listOpenIssues(LABEL_FINDING))
-    .filter((issue) => hasIssueFingerprint(issue, fingerprint))
+    .filter((issue) => hasIssueFingerprint(issue, fingerprint)
+      && issuePromotionForIssue(paths, issue.number) === undefined)
     .sort((a, b) => Number(isClaimed(b)) - Number(isClaimed(a)) || a.number - b.number)
   const existing = matching[0]
   if (existing === undefined) return undefined
   const existingIssueNumber = (await reconcileOpenFindings(
-    forge, issueFingerprints(existing), existing.number, undefined, onMutation,
+    forge, paths, issueFingerprints(existing), existing.number, undefined, onMutation,
   )) ?? existing.number
   recordFingerprint(paths, fingerprint, existingIssueNumber)
   return existingIssueNumber
@@ -410,7 +421,7 @@ export async function publishFinding(
   })
   // The preflight list is not a lock, and post-create listings can lag too. Re-read
   // shared forge state over a bounded window and retain the lower issue number.
-  const survivor = await reconcileCreatedFinding(forge, fingerprints, issueNumber)
+  const survivor = await reconcileCreatedFinding(forge, paths, fingerprints, issueNumber)
   for (const fingerprint of fingerprints) recordFingerprint(paths, fingerprint, survivor)
   return survivor === issueNumber
     ? { outcome: 'created', issueNumber }
@@ -457,7 +468,7 @@ export async function publishDelegatedTask(
     throw new DelegatedTaskMutationError(error)
   }
   try {
-    const survivor = await reconcileCreatedFinding(forge, [fingerprint], issueNumber)
+    const survivor = await reconcileCreatedFinding(forge, paths, [fingerprint], issueNumber)
     if (survivor !== issueNumber) {
       await closeDuplicate(forge, issueNumber, survivor)
       recordFingerprint(paths, fingerprint, survivor)

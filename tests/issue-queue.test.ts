@@ -229,6 +229,19 @@ describe('publishFinding', () => {
     expect(claimedAfter.labels).toContain(LABEL_IN_PROGRESS)
   })
 
+  it('does not let a merged-but-unpromoted issue suppress a new same-fingerprint finding', async () => {
+    // The coarse tag+first-path fingerprint collapses distinct defects in one file;
+    // once an issue's fix has merged locally, a fresh finding is new work, not a dup.
+    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-1')
+    recordIssueForTask(paths, 'task-first-fix', first.issueNumber)
+    recordIssuePromotion(paths, 'task-first-fix', 'a'.repeat(40), 'chore/run-branch')
+
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks differently', 'review-2')
+
+    expect(second.outcome).toBe('created')
+    expect(second.issueNumber).not.toBe(first.issueNumber)
+  })
+
   it('drops a ledger entry for a closed issue and files the finding again', async () => {
     const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
     await forge.closeIssue(first.issueNumber, 'fixed')
