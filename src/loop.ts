@@ -13,7 +13,7 @@ import {
 import { mergeTask, MergeError } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
-  type OrchPaths,
+  branchName, worktreeDir, type OrchPaths,
 } from './paths.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds } from './refresh.ts'
@@ -24,7 +24,7 @@ import { pitfallsFileForDesc } from './gates.ts'
 import {
   claimIssue, commentOnIssueMerge, heartbeatIssueForTask, issueNumberForTask,
   publishFinding, reapStaleLeases, recordIssuePromotion,
-  reconcileFindingFingerprints, unresolvedFindings, LABEL_READY,
+  reconcileFindingFingerprints, unresolvedFindings, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_READY,
 } from './issueQueue.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
@@ -79,6 +79,41 @@ export function createLoop(deps: LoopDeps) {
     } catch {
       return ''
     }
+  }
+
+  function gitIn(cwd: string, args: string[]): string {
+    return execFileSync('git', args, {
+      cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    })
+  }
+
+  async function publishWorkerCompletion(taskId: string, issueNumber: number): Promise<void> {
+    const worktree = worktreeDir(paths, taskId)
+    const currentBranch = git(['branch', '--show-current']).trim()
+    if (gitIn(worktree, ['status', '--porcelain']).trim() !== '') {
+      throw new Error(`${taskId} has uncommitted changes`)
+    }
+    const commits = gitIn(worktree, ['log', `${currentBranch}..HEAD`, '--format=%H'])
+      .trim().split(/\r?\n/).filter((line) => line !== '')
+    if (commits.length === 0) {
+      if (!isInspectionTaskId(paths, taskId)) {
+        throw new Error(`${taskId} has no commits and is not an inspection task`)
+      }
+      await forge.closeIssue(issueNumber,
+        `Inspection task ${taskId} completed without commits.`)
+      log(`[loop] Closed issue #${issueNumber} after inspection ${taskId}`)
+      return
+    }
+
+    const branch = branchName(taskId)
+    gitIn(worktree, ['push', 'origin', branch])
+    const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
+    await forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}`)
+    await forge.addLabel(issueNumber, LABEL_MERGE_READY)
+    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+    log(`[loop] Published ${branch} at ${head} for issue #${issueNumber}`)
   }
 
   function countRunning(): number {
@@ -932,6 +967,21 @@ export function createLoop(deps: LoopDeps) {
         const depth = existsSync(depthFile) ? readCount(depthFile) : 0
         log(`[loop] Completed: ${taskId} (depth=${depth})`)
 
+        if (config.workerMode) {
+          const linkedIssue = issueNumberForTask(paths, taskId)
+          if (linkedIssue === undefined) {
+            log(`[loop] WARN: worker task ${taskId} has no linked issue`)
+            continue
+          }
+          try {
+            await publishWorkerCompletion(taskId, linkedIssue)
+            writeFileSync(scannedFlag, '')
+          } catch (error) {
+            log(`[loop] WARN: could not publish ${taskId}: ${(error as Error).message}`)
+          }
+          continue
+        }
+
         await scanForNextTasks(taskId, depth)
         collectDecisions(taskId)
 
@@ -1059,13 +1109,19 @@ export function createLoop(deps: LoopDeps) {
         }
       }
 
-      const outcome = await triggerScanIfIdle()
-      if (outcome === 'done') return 'done'
+      if (!config.workerMode) {
+        const outcome = await triggerScanIfIdle()
+        if (outcome === 'done') return 'done'
+      }
     }
 
     const hhmmss = now().toTimeString().slice(0, 8)
-    const cycle = readCount(scanCountFile)
-    log(`[loop] ${hhmmss} | Cycle=${cycle}/${config.maxScanCycles} Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
+    if (config.workerMode) {
+      log(`[loop] ${hhmmss} | Worker Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
+    } else {
+      const cycle = readCount(scanCountFile)
+      log(`[loop] ${hhmmss} | Cycle=${cycle}/${config.maxScanCycles} Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
+    }
     return 'continue'
   }
 

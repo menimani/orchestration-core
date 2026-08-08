@@ -17,6 +17,7 @@ import {
 export const LABEL_FINDING = 'loop:finding'
 export const LABEL_READY = 'loop:ready'
 export const LABEL_IN_PROGRESS = 'loop:in-progress'
+export const LABEL_MERGE_READY = 'loop:merge-ready'
 export const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
 
 const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
@@ -710,4 +711,5 @@ export async function ensureQueueLabels(forge: Forge): Promise<void> {
   await forge.ensureLabel(LABEL_FINDING, 'Filed by the improvement loop from a scan or review finding')
   await forge.ensureLabel(LABEL_READY, 'Unclaimed loop work: a worker may claim it by self-assigning')
   await forge.ensureLabel(LABEL_IN_PROGRESS, 'Claimed loop work; the assignee holds the lease')
+  await forge.ensureLabel(LABEL_MERGE_READY, 'Completed worker branch waiting for the merger')
 }

@@ -30,6 +30,7 @@ describe('loadConfig', () => {
       taskGate: 'full',
       forge: 'github',
       runner: 'codex',
+      workerMode: false,
     })
   })
 
@@ -62,5 +63,10 @@ describe('loadConfig', () => {
 
   it('rejects a non-integer numeric setting', () => {
     expect(() => loadConfig({ MAX_PARALLEL: 'many' })).toThrow(/MAX_PARALLEL/)
+  })
+
+  it('enables worker mode only with the issue queue', () => {
+    expect(loadConfig({ ISSUE_QUEUE_ENABLED: 'true', WORKER_MODE: 'true' }).workerMode).toBe(true)
+    expect(() => loadConfig({ WORKER_MODE: 'true' })).toThrow(/requires ISSUE_QUEUE_ENABLED=true/)
   })
 })

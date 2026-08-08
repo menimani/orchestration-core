@@ -454,7 +454,7 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
     log(`[loop]      | MAX_BURST_FAILURES=${config.maxBurstFailures} MAX_CONSECUTIVE_MERGE_FAILURES=${config.maxConsecutiveMergeFailures}`)
     log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} REVIEW_EFFORT=${config.reviewEffort} TASK_GATE=${config.taskGate}`
       + `${config.scanModel === '' ? '' : ` SCAN_MODEL=${config.scanModel}`}${config.taskModel === '' ? '' : ` TASK_MODEL=${config.taskModel}`}`)
-    log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project} ISSUE_QUEUE_ENABLED=${config.issueQueueEnabled}`)
+    log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project} ISSUE_QUEUE_ENABLED=${config.issueQueueEnabled} WORKER_MODE=${config.workerMode}`)
     log('[loop] Stop: npm run -C orchestration/ts stop or Ctrl+C')
     log('')
 

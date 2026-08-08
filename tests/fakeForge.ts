@@ -101,9 +101,14 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       issue.labels = issue.labels.filter((name) => name !== label)
       issue.updatedAt = fake.clock().toISOString()
     },
-    async closeIssue(issueNumber: number): Promise<void> {
+    async closeIssue(issueNumber: number, comment: string): Promise<void> {
       const issue = fake.issues.get(issueNumber)
-      if (issue !== undefined) issue.state = 'closed'
+      if (issue !== undefined) {
+        issue.state = 'closed'
+        const comments = fake.issueComments.get(issueNumber) ?? []
+        comments.push(comment)
+        fake.issueComments.set(issueNumber, comments)
+      }
     },
   }
   return fake

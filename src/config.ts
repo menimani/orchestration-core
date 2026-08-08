@@ -37,6 +37,8 @@ export interface LoopConfig {
   project: string
   /** Findings become forge issues that workers claim, instead of direct local enqueues. */
   issueQueueEnabled: boolean
+  /** Claim and execute shared work without scanning, reviewing, or merging it locally. */
+  workerMode: boolean
   /** Hours an in-progress issue may sit unupdated before its lease is reaped. */
   issueLeaseHours: number
 }
@@ -77,6 +79,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
   }
   // SCAN_PARALLEL: checklist groups are defined up to 4, so higher values clamp.
   const scanParallel = Math.min(num(env, 'SCAN_PARALLEL', 2), 4)
+  const issueQueueEnabled = bool(env, 'ISSUE_QUEUE_ENABLED', false)
+  const workerMode = bool(env, 'WORKER_MODE', false)
+  if (workerMode && !issueQueueEnabled) {
+    throw new Error('WORKER_MODE requires ISSUE_QUEUE_ENABLED=true')
+  }
   return {
     maxParallel: num(env, 'MAX_PARALLEL', 3),
     pollIntervalSeconds: num(env, 'POLL_INTERVAL', 30),
@@ -108,7 +115,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     forge: str(env, 'FORGE', 'github'),
     runner: str(env, 'RUNNER', 'codex'),
     project: str(env, 'PROJECT', 'shiora'),
-    issueQueueEnabled: bool(env, 'ISSUE_QUEUE_ENABLED', false),
+    issueQueueEnabled,
+    workerMode,
     issueLeaseHours: num(env, 'ISSUE_LEASE_HOURS', 3),
   }
 }
