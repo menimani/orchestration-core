@@ -4,6 +4,7 @@ import { pitfallsFileForDesc } from './gates.ts'
 import { taskIdForDesc } from './ids.ts'
 import { statusFile, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
+import { signalWake } from './wake.ts'
 import type { Forge } from './adapters/forge.ts'
 
 // The queue-writing commands: new, enqueue, delegate. Everything here prints the exact
@@ -247,6 +248,9 @@ export async function delegateTaskVisible(
     issueOptions.warn(`WARN: Could not publish delegated task to the forge: ${(error as Error).message}`)
     return materializeDelegatedTask(paths, taskId, description, options)
   }
+  // The publication touched only the forge; without a local nudge the daemon's
+  // backlog watcher never fires and the issue waits out the poll interval.
+  signalWake(paths)
   return { taskId, spec, specReused: existsSync(spec), issue }
 }
 

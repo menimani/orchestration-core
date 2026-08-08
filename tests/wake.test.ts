@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
-import { observeNextPoll } from '../src/wake.ts'
+import { observeNextPoll, signalWake } from '../src/wake.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -56,5 +56,13 @@ describe('observeNextPoll', () => {
     observation.cancel()
 
     await expect(observation.outcome).resolves.toBe('cancelled')
+  })
+
+  it('wakes on the wake signal, which forge-only work uses instead of the backlog', async () => {
+    const observation = observeNextPoll(paths, 10)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    signalWake(paths)
+
+    await expect(observation.outcome).resolves.toBe('woken')
   })
 })

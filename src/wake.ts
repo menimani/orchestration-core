@@ -1,5 +1,15 @@
-import { watch, type FSWatcher } from 'node:fs'
+import { watch, writeFileSync, type FSWatcher } from 'node:fs'
+import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
+
+/** Nudge a sleeping daemon: any observer of the queue directory wakes on this file. */
+export function signalWake(paths: OrchPaths): void {
+  try {
+    writeFileSync(join(paths.queueDir, 'wake'), `${Date.now()}\n`)
+  } catch {
+    // a missed nudge costs one poll interval, never correctness
+  }
+}
 
 const WAKE_DEBOUNCE_MS = 500
 
@@ -35,7 +45,10 @@ export function observeNextPoll(paths: OrchPaths, seconds: number): NextPollObse
 
     try {
       watcher = watch(paths.queueDir, (_eventType, filename) => {
-        if (filename !== 'backlog.txt') return
+        // backlog.txt covers local enqueues; the wake file covers work that reaches
+        // the daemon another way — an issue-mode delegation publishes to the forge
+        // without touching the backlog, and would otherwise wait out the full poll.
+        if (filename !== 'backlog.txt' && filename !== 'wake') return
         if (debounce !== undefined) clearTimeout(debounce)
         debounce = setTimeout(() => finish('woken'), WAKE_DEBOUNCE_MS)
       })
