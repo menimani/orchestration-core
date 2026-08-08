@@ -83,6 +83,20 @@ export interface DelegateOptions {
   inspect?: boolean
 }
 
+export class DelegatedTaskMutationError extends Error {
+  readonly issueNumber: number | undefined
+
+  constructor(error: unknown, issueNumber?: number) {
+    const detail = error instanceof Error ? error.message : String(error)
+    const issue = issueNumber === undefined ? 'the forge' : `issue #${issueNumber}`
+    super(`Could not reconcile ${issue} after delegated work may have been published: ${detail}`, {
+      cause: error,
+    })
+    this.name = 'DelegatedTaskMutationError'
+    this.issueNumber = issueNumber
+  }
+}
+
 interface DelegateResultBase {
   taskId: string
   spec: string
@@ -218,22 +232,26 @@ export async function delegateTaskVisible(
 
   const taskId = taskIdForDesc(paths, 'user', description)
   const spec = specFile(paths, taskId)
+  let issue: DelegatedIssueResult
 
   try {
     const forge = await issueOptions.loadForge()
     const user = await forge.currentUser()
     const { publishDelegatedTask } = await import('./issueQueue.ts')
-    const issue = await publishDelegatedTask(
+    issue = await publishDelegatedTask(
       forge, paths, description, taskId, user, options.effort,
     )
-    if (!issue.materialize) {
-      return { taskId, spec, specReused: existsSync(spec), issue }
-    }
-    return { ...materializeDelegatedTask(paths, taskId, description, options), issue }
   } catch (error) {
+    // Once a forge write may have happened, a local-only task could run without the
+    // issue mapping that supplies its heartbeat. Leave it unmaterialized instead.
+    if (error instanceof DelegatedTaskMutationError) throw error
     issueOptions.warn(`WARN: Could not publish delegated task to the forge: ${(error as Error).message}`)
     return materializeDelegatedTask(paths, taskId, description, options)
   }
+  if (!issue.materialize) {
+    return { taskId, spec, specReused: existsSync(spec), issue }
+  }
+  return { ...materializeDelegatedTask(paths, taskId, description, options), issue }
 }
 
 export function isLoopRunning(paths: OrchPaths): boolean {

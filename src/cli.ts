@@ -18,7 +18,7 @@ import {
   delegateTaskVisible, enqueueTask, isLoopRunning, newTaskSpec, removeIssueModeMarker,
   writeIssueModeMarker,
 } from './tasks.ts'
-import { waitForNextPoll } from './wake.ts'
+import { observeNextPoll } from './wake.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. The key output lines (`Enqueued:`, `Created:`,
@@ -432,9 +432,22 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
     log('')
 
     for (;;) {
-      const outcome = await loop.poll()
-      if (outcome !== 'continue') return 0
-      await waitForNextPoll(paths, config.pollIntervalSeconds)
+      // Observe first: delegation may append after poll() returns but before this
+      // process begins waiting, and that edge must not cost a full poll interval.
+      const wake = observeNextPoll(paths, config.pollIntervalSeconds)
+      let outcome: Awaited<ReturnType<typeof loop.poll>>
+      try {
+        outcome = await loop.poll()
+      } catch (error) {
+        wake.cancel()
+        throw error
+      }
+      if (outcome !== 'continue') {
+        wake.cancel()
+        await wake.outcome
+        return 0
+      }
+      await wake.outcome
     }
   } finally {
     releaseDaemonState()

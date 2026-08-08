@@ -629,10 +629,11 @@ describe('scanForNextTasks', () => {
     expect(specs).toHaveLength(1)
     const fixId = (specs[0] as string).replace(/\.md$/, '')
     const descIndexes = readdirSync(join(paths.queueDir, 'desc-index'))
-    expect(descIndexes).toHaveLength(1)
-    expect(descIndexes[0]).toMatch(/^auto-/)
-    expect(readFileSync(join(paths.queueDir, 'desc-index', descIndexes[0] as string), 'utf8').trim())
-      .toBe(fixId)
+    expect(descIndexes).toHaveLength(4)
+    expect(descIndexes.every((name) => name.startsWith('auto-'))).toBe(true)
+    expect(descIndexes.map((name) =>
+      readFileSync(join(paths.queueDir, 'desc-index', name), 'utf8').trim()))
+      .toEqual([fixId, fixId, fixId, fixId])
     const spec = readFileSync(join(paths.tasksDir, `${fixId}.md`), 'utf8')
     expect(spec).toContain('## Requirement\n\n1. [BUG] guard the stale response')
     expect(spec).toContain('2. [BUG] preserve zero in the numeric input')
@@ -641,6 +642,29 @@ describe('scanForNextTasks', () => {
       `${fixId}:1`,
     ])
     expect(readFileSync(join(paths.queueDir, 'effort', fixId), 'utf8').trim()).toBe('high')
+  })
+
+  it('combines only review findings that are not already queued individually', async () => {
+    const loop = makeLoop()
+    const queued = '[BUG] `src/already.ts` was already queued'
+    writeFinal('20250101_000000_020_scan', `NEXT_TASK: ${queued}\n`)
+    await loop.scanForNextTasks('20250101_000000_020_scan', 0)
+
+    writeFinal('20250101_000000_021_review-c1', [
+      `NEXT_TASK: ${queued}`,
+      'NEXT_TASK: [BUG] `src/new-a.ts` needs a fix',
+      'NEXT_TASK: [TEST] `src/new-b.test.ts` needs coverage',
+    ].join('\n'))
+    await loop.scanForNextTasks('20250101_000000_021_review-c1', 0)
+
+    const specs = readdirSync(paths.tasksDir).map((name) =>
+      readFileSync(join(paths.tasksDir, name), 'utf8'))
+    expect(specs).toHaveLength(2)
+    const aggregate = specs.find((spec) => spec.includes('1. [BUG] `src/new-a.ts`'))
+    expect(aggregate).toContain('2. [TEST] `src/new-b.test.ts` needs coverage')
+    expect(aggregate).not.toContain(queued)
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim().split('\n'))
+      .toHaveLength(2)
   })
 
   it('keeps several scan findings as separate tasks', async () => {
@@ -673,6 +697,32 @@ describe('scanForNextTasks', () => {
     expect(issue?.body).toContain('## Requirement\n\n1. [BUG] guard the stale response')
     expect(issue?.body).toContain('2. [BUG] preserve zero in the numeric input')
     expect(issue?.body).toContain('3. [TEST] cover the slow list load')
+  })
+
+  it('filters an open advisory before aggregating the other review findings', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    writeFinal('20250101_000000_022_scan',
+      'NEXT_TASK: [BUG] CVE-2026-22030 remains open\n')
+    await loop.scanForNextTasks('20250101_000000_022_scan', 0)
+
+    writeFinal('20250101_000000_023_review-c1', [
+      'NEXT_TASK: [SECURITY] Different wording for CVE-2026-22030',
+      'NEXT_TASK: [BUG] `src/new-a.ts` needs a fix',
+      'NEXT_TASK: [TEST] `src/new-b.test.ts` needs coverage',
+    ].join('\n'))
+    await loop.scanForNextTasks('20250101_000000_023_review-c1', 0)
+
+    expect(fakeForge.issues.size).toBe(2)
+    const aggregate = await fakeForge.getIssue(2)
+    expect(aggregate.body).not.toContain('Different wording for CVE-2026-22030')
+    expect(aggregate.body).toContain('1. [BUG] `src/new-a.ts` needs a fix')
+    expect(aggregate.body).toContain('2. [TEST] `src/new-b.test.ts` needs coverage')
+    expect(aggregate.body.match(/^Fingerprint: /gm)).toHaveLength(2)
+
+    writeFinal('20250101_000000_024_review-c1',
+      'NEXT_TASK: [TEST] `src/new-b.test.ts` needs coverage\n')
+    await loop.scanForNextTasks('20250101_000000_024_review-c1', 0)
+    expect(fakeForge.issues.size).toBe(2)
   })
 
   it('files several scan findings as separate issues', async () => {

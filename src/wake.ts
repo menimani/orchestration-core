@@ -3,12 +3,21 @@ import type { OrchPaths } from './paths.ts'
 
 const WAKE_DEBOUNCE_MS = 500
 
-export function waitForNextPoll(paths: OrchPaths, seconds: number): Promise<'timeout' | 'woken'> {
-  return new Promise((resolve) => {
-    let watcher: FSWatcher | undefined
-    let debounce: NodeJS.Timeout | undefined
-    let settled = false
+export type WakeOutcome = 'timeout' | 'woken' | 'cancelled'
 
+export interface NextPollObservation {
+  outcome: Promise<WakeOutcome>
+  cancel: () => void
+}
+
+/** Start observing before a poll so an enqueue at the poll/sleep boundary is retained. */
+export function observeNextPoll(paths: OrchPaths, seconds: number): NextPollObservation {
+  let watcher: FSWatcher | undefined
+  let debounce: NodeJS.Timeout | undefined
+  let settled = false
+  let finish: (outcome: WakeOutcome) => void = () => {}
+
+  const outcome = new Promise<WakeOutcome>((resolve) => {
     const disposeWatcher = (): void => {
       if (debounce !== undefined) clearTimeout(debounce)
       debounce = undefined
@@ -16,12 +25,12 @@ export function waitForNextPoll(paths: OrchPaths, seconds: number): Promise<'tim
       watcher = undefined
     }
     const timeout = setTimeout(() => finish('timeout'), seconds * 1000)
-    const finish = (outcome: 'timeout' | 'woken'): void => {
+    finish = (result): void => {
       if (settled) return
       settled = true
       clearTimeout(timeout)
       disposeWatcher()
-      resolve(outcome)
+      resolve(result)
     }
 
     try {
@@ -35,4 +44,6 @@ export function waitForNextPoll(paths: OrchPaths, seconds: number): Promise<'tim
       disposeWatcher()
     }
   })
+
+  return { outcome, cancel: () => finish('cancelled') }
 }

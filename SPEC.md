@@ -184,7 +184,9 @@ from or equivalent to `orchestration/tests/*.sh`.
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
     same growth bounds. An issue is filed once per fingerprint: the advisory
     identifier when one is named, else the finding's tag plus the first path it
-    names, else the hashed text with whole-line semantics.
+    names, else the hashed text with whole-line semantics. Review findings are checked
+    independently before unresolved findings are combined; a combined issue stores every
+    constituent fingerprint, so it also suppresses a later individual report.
 33. Workers claim a ready issue by self-assignment. The forge login is the worker
     identity, and every process that may claim concurrently must authenticate as a
     distinct forge account. Under that invariant, a simultaneous claim is settled
@@ -210,7 +212,9 @@ from or equivalent to `orchestration/tests/*.sh`.
     materializing it locally. A new issue is assigned to the current user with
     `loop:finding` + `loop:in-progress`; a matching ready issue is claimed first, while a
     matching issue already claimed by another worker suppresses the local task. Delegation
-    remains local-only with a warning if the forge is unavailable.
+    remains local-only with a warning only when the forge fails before any remote write;
+    once assignment or creation may have happened, the issue is reconciled and linked or
+    local materialization aborts.
     The marker includes the daemon PID, is removed with the PID lock on every graceful
     exit, and is ignored when its owning process is no longer alive.
 

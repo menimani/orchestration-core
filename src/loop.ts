@@ -7,7 +7,9 @@ import type { Forge } from './adapters/forge.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import type { LoopConfig } from './config.ts'
-import { taskIdForDesc, newTaskId } from './ids.ts'
+import {
+  existingTaskIdForDesc, taskIdForDesc, newTaskId, recordTaskIdForDesc,
+} from './ids.ts'
 import { mergeTask, MergeError } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
@@ -22,7 +24,7 @@ import { pitfallsFileForDesc } from './gates.ts'
 import {
   claimIssue, commentOnIssueMerge, heartbeatIssueForTask, issueNumberForTask,
   publishFinding, reapStaleLeases,
-  reconcileFindingFingerprints, LABEL_READY,
+  reconcileFindingFingerprints, unresolvedFindings, LABEL_READY,
 } from './issueQueue.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
@@ -163,10 +165,7 @@ export function createLoop(deps: LoopDeps) {
   async function scanForNextTasks(taskId: string, depth: number): Promise<void> {
     const findings = actionableFindings(finalMessageFile(paths, taskId))
     if (findings.length === 0) return
-    const combinesReviewFindings = isReviewTaskId(taskId) && findings.length > 1
-    const descriptions = combinesReviewFindings
-      ? [findings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
-      : findings
+    const isReview = isReviewTaskId(taskId)
 
     const newDepth = depth + 1
     if (newDepth > config.maxGrowthDepth) {
@@ -179,11 +178,27 @@ export function createLoop(deps: LoopDeps) {
     }
 
     if (config.issueQueueEnabled) {
+      let pendingFindings = findings
+      if (isReview) {
+        const filtered = await unresolvedFindings(forge, paths, findings)
+        pendingFindings = filtered.unresolved
+        for (const duplicate of filtered.duplicates) {
+          log(`[loop]   Duplicate finding, existing issue #${duplicate.issueNumber}: ${duplicate.finding}`)
+        }
+      }
+      if (pendingFindings.length === 0) return
+      const combinesReviewFindings = isReview && pendingFindings.length > 1
+      const descriptions = combinesReviewFindings
+        ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
+        : pendingFindings
       for (const desc of descriptions) {
-        const effort = isReviewTaskId(taskId) ? 'high' : undefined
+        const effort = isReview ? 'high' : undefined
         const title = combinesReviewFindings ? `Review round fixes (${taskId})` : undefined
         try {
-          const result = await publishFinding(forge, paths, desc, taskId, effort, title)
+          const result = await publishFinding(
+            forge, paths, desc, taskId, effort, title,
+            combinesReviewFindings ? pendingFindings : undefined,
+          )
           if (result.outcome === 'created') {
             log(`[loop] NEXT_TASK detection: ${desc}`)
             log(`[loop]   → Issue filed: #${result.issueNumber}`)
@@ -197,6 +212,21 @@ export function createLoop(deps: LoopDeps) {
       return
     }
 
+    const pendingFindings = isReview
+      ? [...new Set(findings)].filter((finding) => {
+        const existing = existingTaskIdForDesc(paths, 'auto', finding)
+        if (existing !== undefined) {
+          log(`[loop]   Duplicate finding, existing task ${existing}: ${finding}`)
+          return false
+        }
+        return true
+      })
+      : findings
+    if (pendingFindings.length === 0) return
+    const combinesReviewFindings = isReview && pendingFindings.length > 1
+    const descriptions = combinesReviewFindings
+      ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
+      : pendingFindings
     for (const desc of descriptions) {
       const newId = taskIdForDesc(paths, 'auto', desc)
       log(`[loop] NEXT_TASK detection: ${desc}`)
@@ -220,10 +250,15 @@ export function createLoop(deps: LoopDeps) {
       } else {
         log(`[loop]   Reusing existing specification: ${newId}`)
       }
+      if (combinesReviewFindings) {
+        for (const finding of pendingFindings) {
+          recordTaskIdForDesc(paths, 'auto', finding, newId)
+        }
+      }
       // A fix born from a review is repairing something subtle enough to have escaped
       // the implementer once, so review-spawned tasks run at high effort.
       const effortFile = join(paths.queueDir, 'effort', newId)
-      if (isReviewTaskId(taskId) && !existsSync(effortFile)) {
+      if (isReview && !existsSync(effortFile)) {
         mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
         writeFileSync(effortFile, 'high\n')
       }

@@ -47,18 +47,41 @@ export function descSlug(description: string): string {
 // no state across implementations — every entry is validated against its spec file and
 // a miss mints a fresh id — so the algorithm only has to be stable within one
 // implementation, and the cutover happens between runs when the queue is empty.
-export function taskIdForDesc(paths: OrchPaths, origin: string, description: string): string {
+function descIndexFile(paths: OrchPaths, origin: string, description: string): string {
   const hash = createHash('sha256').update(description).digest('hex').slice(0, 8)
   const indexDir = join(paths.queueDir, 'desc-index')
   mkdirSync(indexDir, { recursive: true })
-  const indexFile = join(indexDir, `${origin}-${hash}`)
+  return join(indexDir, `${origin}-${hash}`)
+}
+
+export function existingTaskIdForDesc(
+  paths: OrchPaths,
+  origin: string,
+  description: string,
+): string | undefined {
+  const indexFile = descIndexFile(paths, origin, description)
   if (existsSync(indexFile)) {
     const id = readFileSync(indexFile, 'utf8').replace(/[\s\r\n]/g, '')
     if (id !== '' && existsSync(join(paths.tasksDir, `${id}.md`))) {
       return id
     }
   }
+  return undefined
+}
+
+export function recordTaskIdForDesc(
+  paths: OrchPaths,
+  origin: string,
+  description: string,
+  taskId: string,
+): void {
+  writeFileSync(descIndexFile(paths, origin, description), `${taskId}\n`)
+}
+
+export function taskIdForDesc(paths: OrchPaths, origin: string, description: string): string {
+  const existing = existingTaskIdForDesc(paths, origin, description)
+  if (existing !== undefined) return existing
   const id = newTaskId(paths, `${origin}-${descSlug(description)}`)
-  writeFileSync(indexFile, `${id}\n`)
+  recordTaskIdForDesc(paths, origin, description, id)
   return id
 }

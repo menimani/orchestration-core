@@ -216,6 +216,53 @@ describe('delegateTask', () => {
     expect(warnings).toEqual([expect.stringContaining('forge unavailable')])
   })
 
+  it('does not fall back locally when issue creation may have succeeded remotely', async () => {
+    const forge = makeFakeForge('delegator')
+    const createIssue = forge.createIssue.bind(forge)
+    forge.createIssue = async (issue) => {
+      await createIssue(issue)
+      throw new Error('response lost after creation')
+    }
+
+    await expect(delegateTaskVisible(paths, DESC, {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge: async () => forge,
+      warn: () => {},
+    })).rejects.toThrow(/may have been published/i)
+
+    expect(forge.issues.size).toBe(1)
+    expect(queueLines()).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
+  it('does not fall back locally after assigning an existing issue', async () => {
+    const description = '[BUG] `src/a/b.ts` loses an assignment response'
+    const forge = makeFakeForge('delegator')
+    const issueNumber = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const getIssue = forge.getIssue.bind(forge)
+    forge.getIssue = async (number) => {
+      if (forge.issues.get(number)?.assignees.includes('delegator') === true) {
+        throw new Error('response lost after assignment')
+      }
+      return getIssue(number)
+    }
+
+    await expect(delegateTaskVisible(paths, description, {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge: async () => forge,
+      warn: () => {},
+    })).rejects.toThrow(/issue #1.*may have been published/i)
+
+    expect(forge.issues.get(issueNumber)?.assignees).toEqual(['delegator'])
+    expect(queueLines()).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'issue-map'))).toBe(false)
+  })
+
   it('files nothing when the delegate environment explicitly disables issue mode', async () => {
     writeIssueModeMarker(paths, true)
     let loadedForge = false

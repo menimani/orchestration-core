@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import { taskIdForDesc } from './ids.ts'
 import type { OrchPaths } from './paths.ts'
-import { enqueueTask, newTaskSpec, specFile, type EnqueueResult } from './tasks.ts'
+import {
+  DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
+} from './tasks.ts'
 
 // The issue queue: scan findings become forge issues, workers claim them, and the
 // merge that lands a fix closes its issue through the promotion PR. This is the
@@ -64,9 +66,14 @@ export function fingerprintOf(description: string): string {
   return `text:${createHash('sha256').update(description).digest('hex').slice(0, 16)}`
 }
 
-export function buildIssueBody(description: string, parentTaskId: string, effort?: string): string {
+export function buildIssueBody(
+  description: string,
+  parentTaskId: string,
+  effort?: string,
+  fingerprints: string[] = [fingerprintOf(description)],
+): string {
   return [
-    `Fingerprint: ${fingerprintOf(description)}`,
+    ...[...new Set(fingerprints)].map((fingerprint) => `Fingerprint: ${fingerprint}`),
     `Parent: ${parentTaskId}`,
     ...(effort !== undefined ? [`Effort: ${effort}`] : []),
     '',
@@ -79,13 +86,16 @@ export function buildIssueBody(description: string, parentTaskId: string, effort
 
 export interface ParsedIssue {
   fingerprint: string
+  fingerprints: string[]
   effort: string | undefined
   requirement: string
 }
 
 export function parseIssueBody(body: string): ParsedIssue | undefined {
   const lines = body.split(/\r?\n/)
-  const fingerprint = lines.find((line) => line.startsWith('Fingerprint: '))?.slice('Fingerprint: '.length)
+  const fingerprints = lines.filter((line) => line.startsWith('Fingerprint: '))
+    .map((line) => line.slice('Fingerprint: '.length))
+  const fingerprint = fingerprints[0]
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const requirementStart = lines.indexOf('## Requirement')
   if (fingerprint === undefined || requirementStart === -1) return undefined
@@ -94,7 +104,7 @@ export function parseIssueBody(body: string): ParsedIssue | undefined {
   if (requirementLines.at(-1)?.startsWith('Heartbeat: ') === true) requirementLines.pop()
   const requirement = requirementLines.join('\n').trim()
   if (requirement === '') return undefined
-  return { fingerprint, effort, requirement }
+  return { fingerprint, fingerprints, effort, requirement }
 }
 
 export type PublishResult
@@ -134,12 +144,29 @@ function recordFingerprint(paths: OrchPaths, fingerprint: string, issueNumber: n
   writeFingerprintLedger(paths, [...otherFingerprints, { fingerprint, issueNumber }])
 }
 
-function issueFingerprint(issue: ForgeIssue): string | undefined {
-  return parseIssueBody(issue.body)?.fingerprint
+function issueFingerprints(issue: ForgeIssue): string[] {
+  return parseIssueBody(issue.body)?.fingerprints ?? []
 }
 
-async function closeDuplicate(forge: Forge, issueNumber: number, survivor: number): Promise<void> {
+function hasIssueFingerprint(issue: ForgeIssue, fingerprint: string): boolean {
+  return issueFingerprints(issue).includes(fingerprint)
+}
+
+function hasExactFingerprints(issue: ForgeIssue, fingerprints: string[]): boolean {
+  const expected = [...new Set(fingerprints)].sort()
+  const actual = [...new Set(issueFingerprints(issue))].sort()
+  return actual.length === expected.length
+    && actual.every((fingerprint, index) => fingerprint === expected[index])
+}
+
+async function closeDuplicate(
+  forge: Forge,
+  issueNumber: number,
+  survivor: number,
+  onMutation?: (issueNumber: number) => void,
+): Promise<void> {
   try {
+    onMutation?.(issueNumber)
     await forge.closeIssue(issueNumber,
       `Duplicate of #${survivor}; both issues carry the same loop finding fingerprint.`)
   } catch (error) {
@@ -158,9 +185,9 @@ function isClaimed(issue: ForgeIssue): boolean {
   return issue.assignees.length > 0 || issue.labels.includes(LABEL_IN_PROGRESS)
 }
 
-function isReadyToClose(issue: ForgeIssue, fingerprint: string): boolean {
+function isReadyToClose(issue: ForgeIssue, fingerprints: string[]): boolean {
   return issue.state === 'open'
-    && issueFingerprint(issue) === fingerprint
+    && hasExactFingerprints(issue, fingerprints)
     && issue.assignees.length === 0
     && issue.labels.includes(LABEL_READY)
     && !issue.labels.includes(LABEL_IN_PROGRESS)
@@ -176,17 +203,18 @@ function isReadyToClaim(issue: ForgeIssue): boolean {
 /** Preserve claimed work; otherwise keep the oldest match and close ready duplicates. */
 async function reconcileOpenFindings(
   forge: Forge,
-  fingerprint: string,
+  fingerprints: string[],
   createdIssueNumber?: number,
   knownOpenFindings?: ForgeIssue[],
+  onMutation?: (issueNumber: number) => void,
 ): Promise<number | undefined> {
   const issues = new Map((knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING))
-    .filter((issue) => issueFingerprint(issue) === fingerprint)
+    .filter((issue) => hasExactFingerprints(issue, fingerprints))
     .map((issue) => [issue.number, issue]))
   if (createdIssueNumber !== undefined && !issues.has(createdIssueNumber)) {
     try {
       const created = await forge.getIssue(createdIssueNumber)
-      if (created.state === 'open' && issueFingerprint(created) === fingerprint) {
+      if (created.state === 'open' && hasExactFingerprints(created, fingerprints)) {
         issues.set(created.number, created)
       }
     } catch {
@@ -207,8 +235,8 @@ async function reconcileOpenFindings(
       } catch {
         return
       }
-      if (isReadyToClose(current, fingerprint)) {
-        await closeDuplicate(forge, current.number, survivor)
+      if (isReadyToClose(current, fingerprints)) {
+        await closeDuplicate(forge, current.number, survivor, onMutation)
       }
     })
   }
@@ -222,12 +250,12 @@ function sleep(ms: number): Promise<void> {
 /** Give eventually consistent issue listings a bounded window to expose a racing creation. */
 async function reconcileCreatedFinding(
   forge: Forge,
-  fingerprint: string,
+  fingerprints: string[],
   createdIssueNumber: number,
 ): Promise<number> {
   for (const delayMs of POST_CREATE_RECONCILE_DELAYS_MS) {
     if (delayMs > 0) await sleep(delayMs)
-    const survivor = await reconcileOpenFindings(forge, fingerprint, createdIssueNumber)
+    const survivor = await reconcileOpenFindings(forge, fingerprints, createdIssueNumber)
     if (survivor !== undefined && survivor !== createdIssueNumber) return survivor
   }
   return createdIssueNumber
@@ -236,17 +264,20 @@ async function reconcileCreatedFinding(
 /** Revisit forge-persisted fingerprints on every poll after listing lag has cleared. */
 export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPaths): Promise<void> {
   const openFindings = await forge.listOpenIssues(LABEL_FINDING)
-  const byFingerprint = new Map<string, ForgeIssue[]>()
+  const byFingerprintSet = new Map<string, { fingerprints: string[]; issues: ForgeIssue[] }>()
   for (const issue of openFindings) {
-    const fingerprint = issueFingerprint(issue)
-    if (fingerprint === undefined) continue
-    const matches = byFingerprint.get(fingerprint) ?? []
-    matches.push(issue)
-    byFingerprint.set(fingerprint, matches)
+    const fingerprints = issueFingerprints(issue)
+    if (fingerprints.length === 0) continue
+    const key = JSON.stringify([...new Set(fingerprints)].sort())
+    const group = byFingerprintSet.get(key) ?? { fingerprints, issues: [] }
+    group.issues.push(issue)
+    byFingerprintSet.set(key, group)
   }
-  for (const [fingerprint, issues] of byFingerprint) {
-    const survivor = await reconcileOpenFindings(forge, fingerprint, undefined, issues)
-    if (survivor !== undefined) recordFingerprint(paths, fingerprint, survivor)
+  for (const { fingerprints, issues } of byFingerprintSet.values()) {
+    const survivor = await reconcileOpenFindings(forge, fingerprints, undefined, issues)
+    if (survivor !== undefined) {
+      for (const fingerprint of fingerprints) recordFingerprint(paths, fingerprint, survivor)
+    }
   }
 }
 
@@ -254,6 +285,7 @@ async function findExistingFinding(
   forge: Forge,
   paths: OrchPaths,
   fingerprint: string,
+  onMutation?: (issueNumber: number) => void,
 ): Promise<number | undefined> {
   const ledger = fingerprintLedger(paths)
   const recorded = ledger.find((entry) => entry.fingerprint === fingerprint)
@@ -266,20 +298,45 @@ async function findExistingFinding(
     }
     if (recordedIssue?.state === 'open'
       && recordedIssue.labels.includes(LABEL_FINDING)
-      && issueFingerprint(recordedIssue) === fingerprint) {
+      && hasIssueFingerprint(recordedIssue, fingerprint)) {
+      const fingerprints = issueFingerprints(recordedIssue)
       const survivor = (await reconcileOpenFindings(
-        forge, fingerprint, recorded.issueNumber,
+        forge, fingerprints, recorded.issueNumber, undefined, onMutation,
       )) ?? recorded.issueNumber
       recordFingerprint(paths, fingerprint, survivor)
       return survivor
     }
     writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
   }
-  const existingIssueNumber = await reconcileOpenFindings(forge, fingerprint)
-  if (existingIssueNumber !== undefined) {
-    recordFingerprint(paths, fingerprint, existingIssueNumber)
-  }
+  const matching = (await forge.listOpenIssues(LABEL_FINDING))
+    .filter((issue) => hasIssueFingerprint(issue, fingerprint))
+    .sort((a, b) => Number(isClaimed(b)) - Number(isClaimed(a)) || a.number - b.number)
+  const existing = matching[0]
+  if (existing === undefined) return undefined
+  const existingIssueNumber = (await reconcileOpenFindings(
+    forge, issueFingerprints(existing), existing.number, undefined, onMutation,
+  )) ?? existing.number
+  recordFingerprint(paths, fingerprint, existingIssueNumber)
   return existingIssueNumber
+}
+
+export async function unresolvedFindings(
+  forge: Forge,
+  paths: OrchPaths,
+  findings: string[],
+): Promise<{ unresolved: string[]; duplicates: Array<{ finding: string; issueNumber: number }> }> {
+  const unresolved: string[] = []
+  const duplicates: Array<{ finding: string; issueNumber: number }> = []
+  const seen = new Set<string>()
+  for (const finding of findings) {
+    const fingerprint = fingerprintOf(finding)
+    if (seen.has(fingerprint)) continue
+    seen.add(fingerprint)
+    const issueNumber = await findExistingFinding(forge, paths, fingerprint)
+    if (issueNumber === undefined) unresolved.push(finding)
+    else duplicates.push({ finding, issueNumber })
+  }
+  return { unresolved, duplicates }
 }
 
 /**
@@ -294,22 +351,27 @@ export async function publishFinding(
   parentTaskId: string,
   effort?: string,
   titleText = description,
+  fingerprintDescriptions?: string[],
 ): Promise<PublishResult> {
-  const fingerprint = fingerprintOf(description)
-  const existingIssueNumber = await findExistingFinding(forge, paths, fingerprint)
-  if (existingIssueNumber !== undefined) {
-    return { outcome: 'duplicate', issueNumber: existingIssueNumber }
+  const fingerprints = [...new Set(
+    (fingerprintDescriptions ?? [description]).map((finding) => fingerprintOf(finding)),
+  )]
+  if (fingerprintDescriptions === undefined) {
+    const existingIssueNumber = await findExistingFinding(forge, paths, fingerprints[0] as string)
+    if (existingIssueNumber !== undefined) {
+      return { outcome: 'duplicate', issueNumber: existingIssueNumber }
+    }
   }
   const title = titleText.length > 90 ? `${titleText.slice(0, 87)}...` : titleText
   const issueNumber = await forge.createIssue({
     title,
-    body: buildIssueBody(description, parentTaskId, effort),
+    body: buildIssueBody(description, parentTaskId, effort, fingerprints),
     labels: [LABEL_FINDING, LABEL_READY],
   })
   // The preflight list is not a lock, and post-create listings can lag too. Re-read
   // shared forge state over a bounded window and retain the lower issue number.
-  const survivor = await reconcileCreatedFinding(forge, fingerprint, issueNumber)
-  recordFingerprint(paths, fingerprint, survivor)
+  const survivor = await reconcileCreatedFinding(forge, fingerprints, issueNumber)
+  for (const fingerprint of fingerprints) recordFingerprint(paths, fingerprint, survivor)
   return survivor === issueNumber
     ? { outcome: 'created', issueNumber }
     : { outcome: 'duplicate', issueNumber: survivor }
@@ -323,29 +385,37 @@ async function claimReadyIssueForDelegation(
   return withIssueCoordination(forge, issueNumber, async () => {
     const issue = await forge.getIssue(issueNumber)
     if (!isReadyToClaim(issue)) return false
-    await forge.assignIssue(issueNumber, user)
+    try {
+      // A rejected write may still have reached the forge. From this point onward the
+      // caller must never fall back to an unlinked local task.
+      await forge.assignIssue(issueNumber, user)
 
-    const afterAssignment = await forge.getIssue(issueNumber)
-    if (afterAssignment.state !== 'open'
-      || !afterAssignment.labels.includes(LABEL_READY)
-      || afterAssignment.labels.includes(LABEL_IN_PROGRESS)
-      || [...afterAssignment.assignees].sort()[0] !== user) {
-      await forge.unassignIssue(issueNumber, user)
-      return false
+      const afterAssignment = await forge.getIssue(issueNumber)
+      if (afterAssignment.state !== 'open'
+        || !afterAssignment.labels.includes(LABEL_READY)
+        || afterAssignment.labels.includes(LABEL_IN_PROGRESS)
+        || [...afterAssignment.assignees].sort()[0] !== user) {
+        await forge.unassignIssue(issueNumber, user)
+        return false
+      }
+
+      await forge.addLabel(issueNumber, LABEL_IN_PROGRESS)
+      await forge.removeLabel(issueNumber, LABEL_READY)
+
+      const claimed = await forge.getIssue(issueNumber)
+      if (claimed.state !== 'open'
+        || claimed.labels.includes(LABEL_READY)
+        || !claimed.labels.includes(LABEL_IN_PROGRESS)
+        || [...claimed.assignees].sort()[0] !== user) {
+        await forge.unassignIssue(issueNumber, user)
+        return false
+      }
+      return true
+    } catch (error) {
+      throw error instanceof DelegatedTaskMutationError
+        ? error
+        : new DelegatedTaskMutationError(error, issueNumber)
     }
-
-    await forge.addLabel(issueNumber, LABEL_IN_PROGRESS)
-    await forge.removeLabel(issueNumber, LABEL_READY)
-
-    const claimed = await forge.getIssue(issueNumber)
-    if (claimed.state !== 'open'
-      || claimed.labels.includes(LABEL_READY)
-      || !claimed.labels.includes(LABEL_IN_PROGRESS)
-      || [...claimed.assignees].sort()[0] !== user) {
-      await forge.unassignIssue(issueNumber, user)
-      return false
-    }
-    return true
   })
 }
 
@@ -359,29 +429,68 @@ export async function publishDelegatedTask(
   effort?: string,
 ): Promise<DelegatedPublishResult> {
   const fingerprint = fingerprintOf(description)
-  const existingIssueNumber = await findExistingFinding(forge, paths, fingerprint)
+  let reconciliationMutation: number | undefined
+  let existingIssueNumber: number | undefined
+  try {
+    existingIssueNumber = await findExistingFinding(
+      forge, paths, fingerprint, (issueNumber) => { reconciliationMutation = issueNumber },
+    )
+  } catch (error) {
+    if (reconciliationMutation !== undefined) {
+      throw new DelegatedTaskMutationError(error, reconciliationMutation)
+    }
+    throw error
+  }
   if (existingIssueNumber !== undefined) {
-    const materialize = await claimReadyIssueForDelegation(forge, existingIssueNumber, user)
-    if (materialize) recordIssueForTask(paths, taskId, existingIssueNumber)
+    let materialize: boolean
+    try {
+      materialize = await claimReadyIssueForDelegation(forge, existingIssueNumber, user)
+    } catch (error) {
+      if (error instanceof DelegatedTaskMutationError) throw error
+      if (reconciliationMutation !== undefined) {
+        throw new DelegatedTaskMutationError(error, reconciliationMutation)
+      }
+      throw error
+    }
+    if (materialize) {
+      try {
+        recordIssueForTask(paths, taskId, existingIssueNumber)
+      } catch (error) {
+        throw new DelegatedTaskMutationError(error, existingIssueNumber)
+      }
+    }
     return { outcome: 'duplicate', issueNumber: existingIssueNumber, materialize }
   }
 
   const title = description.length > 90 ? `${description.slice(0, 87)}...` : description
-  const issueNumber = await forge.createIssue({
-    title,
-    body: buildIssueBody(description, taskId, effort),
-    labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-    assignees: [user],
-  })
-  const survivor = await reconcileCreatedFinding(forge, fingerprint, issueNumber)
-  if (survivor !== issueNumber) {
-    await closeDuplicate(forge, issueNumber, survivor)
-    recordFingerprint(paths, fingerprint, survivor)
-    return { outcome: 'duplicate', issueNumber: survivor, materialize: false }
+  let issueNumber: number
+  try {
+    issueNumber = await forge.createIssue({
+      title,
+      body: buildIssueBody(description, taskId, effort),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [user],
+    })
+  } catch (error) {
+    // The request may have reached the forge even when its response did not. With no
+    // issue number available, reconciliation is impossible and materialization aborts.
+    throw new DelegatedTaskMutationError(error)
   }
-  recordFingerprint(paths, fingerprint, issueNumber)
-  recordIssueForTask(paths, taskId, issueNumber)
-  return { outcome: 'created', issueNumber, materialize: true }
+  try {
+    const survivor = await reconcileCreatedFinding(forge, [fingerprint], issueNumber)
+    if (survivor !== issueNumber) {
+      await closeDuplicate(forge, issueNumber, survivor)
+      recordFingerprint(paths, fingerprint, survivor)
+      return { outcome: 'duplicate', issueNumber: survivor, materialize: false }
+    }
+    recordFingerprint(paths, fingerprint, issueNumber)
+    recordIssueForTask(paths, taskId, issueNumber)
+    return { outcome: 'created', issueNumber, materialize: true }
+  } catch (error) {
+    throw error instanceof DelegatedTaskMutationError
+      ? error
+      : new DelegatedTaskMutationError(error, issueNumber)
+  }
 }
 
 function issueMapFile(paths: OrchPaths, taskId: string): string {
