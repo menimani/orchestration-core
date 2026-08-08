@@ -87,6 +87,51 @@ function writeFingerprintLedger(
     `${entry.fingerprint} ${entry.issueNumber}\n`).join(''))
 }
 
+function recordFingerprint(paths: OrchPaths, fingerprint: string, issueNumber: number): void {
+  const ledger = fingerprintLedger(paths)
+  if (ledger.some((entry) => entry.fingerprint === fingerprint && entry.issueNumber === issueNumber)) return
+  appendFileSync(fingerprintLedgerFile(paths), `${fingerprint} ${issueNumber}\n`)
+}
+
+function issueFingerprint(issue: ForgeIssue): string | undefined {
+  return parseIssueBody(issue.body)?.fingerprint
+}
+
+async function closeDuplicate(forge: Forge, issueNumber: number, survivor: number): Promise<void> {
+  try {
+    await forge.closeIssue(issueNumber,
+      `Duplicate of #${survivor}; both issues carry the same loop finding fingerprint.`)
+  } catch (error) {
+    // Concurrent reconcilers can both choose the same survivor. A close that lost
+    // that race is successful for our purposes; only an issue still open is an error.
+    try {
+      if ((await forge.getIssue(issueNumber)).state === 'closed') return
+    } catch {
+      // Preserve the original close failure when its result cannot be verified.
+    }
+    throw error
+  }
+}
+
+/** Keep the oldest matching issue and close later concurrent creations. */
+async function reconcileOpenFindings(
+  forge: Forge,
+  fingerprint: string,
+  createdIssueNumber?: number,
+): Promise<number | undefined> {
+  const issueNumbers = new Set((await forge.listOpenIssues(LABEL_FINDING))
+    .filter((issue) => issueFingerprint(issue) === fingerprint)
+    .map((issue) => issue.number))
+  if (createdIssueNumber !== undefined) issueNumbers.add(createdIssueNumber)
+  const ordered = [...issueNumbers].sort((a, b) => a - b)
+  const survivor = ordered[0]
+  if (survivor === undefined) return undefined
+  for (const duplicate of ordered.slice(1)) {
+    await closeDuplicate(forge, duplicate, survivor)
+  }
+  return survivor
+}
+
 /**
  * File a finding as a ready issue unless an open issue already carries its
  * fingerprint. The check reads open findings only: a closed issue's fix already
@@ -103,20 +148,25 @@ export async function publishFinding(
   const ledger = fingerprintLedger(paths)
   const recorded = ledger.find((entry) => entry.fingerprint === fingerprint)
   if (recorded !== undefined) {
+    let recordedIssue: ForgeIssue | undefined
     try {
-      const issue = await forge.getIssue(recorded.issueNumber)
-      if (issue.state === 'open') {
-        return { outcome: 'duplicate', issueNumber: recorded.issueNumber }
-      }
+      recordedIssue = await forge.getIssue(recorded.issueNumber)
     } catch {
       // A missing issue is stale in the same way as a closed one.
     }
+    if (recordedIssue?.state === 'open') {
+      const survivor = (await reconcileOpenFindings(
+        forge, fingerprint, recorded.issueNumber,
+      )) ?? recorded.issueNumber
+      recordFingerprint(paths, fingerprint, survivor)
+      return { outcome: 'duplicate', issueNumber: survivor }
+    }
     writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
   }
-  const existing = (await forge.listOpenIssues(LABEL_FINDING))
-    .find((issue) => issue.body.includes(`Fingerprint: ${fingerprint}`))
-  if (existing !== undefined) {
-    return { outcome: 'duplicate', issueNumber: existing.number }
+  const existingIssueNumber = await reconcileOpenFindings(forge, fingerprint)
+  if (existingIssueNumber !== undefined) {
+    recordFingerprint(paths, fingerprint, existingIssueNumber)
+    return { outcome: 'duplicate', issueNumber: existingIssueNumber }
   }
   const title = description.length > 90 ? `${description.slice(0, 87)}...` : description
   const issueNumber = await forge.createIssue({
@@ -124,8 +174,13 @@ export async function publishFinding(
     body: buildIssueBody(description, parentTaskId, effort),
     labels: [LABEL_FINDING, LABEL_READY],
   })
-  appendFileSync(fingerprintLedgerFile(paths), `${fingerprint} ${issueNumber}\n`)
-  return { outcome: 'created', issueNumber }
+  // The preflight list is not a lock: workers can both observe no match and create.
+  // Re-read shared forge state and deterministically retain the lower issue number.
+  const survivor = (await reconcileOpenFindings(forge, fingerprint, issueNumber)) ?? issueNumber
+  recordFingerprint(paths, fingerprint, survivor)
+  return survivor === issueNumber
+    ? { outcome: 'created', issueNumber }
+    : { outcome: 'duplicate', issueNumber: survivor }
 }
 
 function issueMapFile(paths: OrchPaths, taskId: string): string {

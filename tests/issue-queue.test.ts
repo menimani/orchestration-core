@@ -74,6 +74,46 @@ describe('publishFinding', () => {
     expect(forge.issues.size).toBe(1)
   })
 
+  it('reconciles concurrent creations from workers with independent ledgers', async () => {
+    const otherPaths = orchPaths(join(repoRoot, 'other-checkout'))
+    const listOpenIssues = forge.listOpenIssues.bind(forge)
+    const createIssue = forge.createIssue.bind(forge)
+    let preflightCalls = 0
+    let creations = 0
+    let releasePreflights: () => void = () => {}
+    let releaseCreations: () => void = () => {}
+    const bothPreflights = new Promise<void>((resolve) => { releasePreflights = resolve })
+    const bothCreations = new Promise<void>((resolve) => { releaseCreations = resolve })
+    forge.listOpenIssues = async (label) => {
+      if (++preflightCalls <= 2) {
+        if (preflightCalls === 2) releasePreflights()
+        await bothPreflights
+        return []
+      }
+      return listOpenIssues(label)
+    }
+    forge.createIssue = async (options) => {
+      const issueNumber = await createIssue(options)
+      if (++creations === 2) releaseCreations()
+      await bothCreations
+      return issueNumber
+    }
+
+    const results = await Promise.all([
+      publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1'),
+      publishFinding(forge, otherPaths, '[BUG] `src/a/b.ts` breaks differently', 'scan-2'),
+    ])
+
+    expect(results).toEqual([
+      { outcome: 'created', issueNumber: 1 },
+      { outcome: 'duplicate', issueNumber: 1 },
+    ])
+    expect((await listOpenIssues(LABEL_FINDING)).map((issue) => issue.number)).toEqual([1])
+    expect((await forge.getIssue(2)).state).toBe('closed')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
+    expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
+  })
+
   it('drops a ledger entry for a closed issue and files the finding again', async () => {
     const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
     await forge.closeIssue(first.issueNumber, 'fixed')
