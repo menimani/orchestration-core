@@ -70,6 +70,7 @@ export function createLoop(deps: LoopDeps) {
       return execFileSync('git', args, {
         cwd: paths.repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
       })
     } catch {
       return ''
@@ -480,7 +481,11 @@ export function createLoop(deps: LoopDeps) {
     }
     log(`[loop] Pushing branch: ${branch}`)
     try {
-      execFileSync('git', ['push', 'origin', branch], { cwd: paths.repoRoot, stdio: 'ignore' })
+      execFileSync('git', ['push', 'origin', branch], {
+        cwd: paths.repoRoot,
+        stdio: 'ignore',
+        windowsHide: true,
+      })
     } catch {
       // the gate re-enters and pushes again; a transient push failure is not fatal here
     }
@@ -614,6 +619,7 @@ export function createLoop(deps: LoopDeps) {
       try {
         const out = execFileSync('bash', ['-c', command], {
           cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
         })
         appendFileSync(suiteLog, out)
         return true

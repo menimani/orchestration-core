@@ -33,7 +33,9 @@ export interface MergeOptions {
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  return execFileSync('git', args, {
+    cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+  })
 }
 
 /**
@@ -51,10 +53,12 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   }
   const run = (cwd: string, command: string): void => {
     if (options.outputFile !== undefined) {
-      const result = execSync(command, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+      const result = execSync(command, {
+        cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+      })
       appendFileSync(options.outputFile, result)
     } else {
-      execSync(command, { cwd, stdio: 'inherit' })
+      execSync(command, { cwd, stdio: 'inherit', windowsHide: true })
     }
   }
   const tryRun = (cwd: string, command: string, label: string): boolean => {

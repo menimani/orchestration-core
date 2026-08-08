@@ -12,7 +12,9 @@ export type Category = 'Features' | 'Bug Fixes' | 'Security' | 'Project Operatio
 
 function git(repoRoot: string, args: string[]): string {
   try {
-    return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    return execFileSync('git', args, {
+      cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+    })
   } catch {
     return ''
   }

@@ -26,7 +26,10 @@ type Command = (paths: OrchPaths, args: string[]) => Promise<number>
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high'])
 
 function repoRoot(): string {
-  return execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
+  return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  }).trim()
 }
 
 function isPidAlive(pid: number): boolean {
@@ -183,7 +186,7 @@ const cmdLogs: Command = async (paths, args) => {
     return 1
   }
   if (args[1] === '-f') {
-    const result = spawnSync('tail', ['-f', log], { stdio: 'inherit' })
+    const result = spawnSync('tail', ['-f', log], { stdio: 'inherit', windowsHide: true })
     return result.status ?? 0
   }
   process.stdout.write(readFileSync(log, 'utf8'))

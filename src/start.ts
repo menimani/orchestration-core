@@ -53,6 +53,7 @@ export async function startTask(
   execFileSync('git', ['worktree', 'add', worktree, '-b', branch], {
     cwd: paths.repoRoot,
     stdio: 'inherit',
+    windowsHide: true,
   })
 
   const log = logFile(paths, taskId)

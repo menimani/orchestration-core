@@ -42,7 +42,7 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
   try {
     trackedSpecs = new Set(
       execFileSync('git', ['ls-files', 'orchestration/tasks/*.md'],
-        { cwd: paths.repoRoot, encoding: 'utf8' })
+        { cwd: paths.repoRoot, encoding: 'utf8', windowsHide: true })
         .split(/\r?\n/).filter((line) => line !== ''),
     )
   } catch {

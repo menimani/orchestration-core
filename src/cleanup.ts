@@ -25,13 +25,19 @@ export function cleanupTask(paths: OrchPaths, taskId: string): void {
   const worktree = worktreeDir(paths, taskId)
   if (existsSync(worktree)) {
     try {
-      execFileSync('git', ['worktree', 'remove', worktree, '--force'], { cwd: paths.repoRoot })
+      execFileSync('git', ['worktree', 'remove', worktree, '--force'], {
+        cwd: paths.repoRoot,
+        windowsHide: true,
+      })
     } catch {
       rmSync(worktree, { recursive: true, force: true })
     }
   }
   try {
-    execFileSync('git', ['branch', '-D', branchName(taskId)], { cwd: paths.repoRoot })
+    execFileSync('git', ['branch', '-D', branchName(taskId)], {
+      cwd: paths.repoRoot,
+      windowsHide: true,
+    })
   } catch {
     // no branch to delete
   }
