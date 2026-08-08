@@ -181,8 +181,9 @@ export function createLoop(deps: LoopDeps) {
     if (config.issueQueueEnabled) {
       for (const desc of descriptions) {
         const effort = isReviewTaskId(taskId) ? 'high' : undefined
+        const title = combinesReviewFindings ? `Review round fixes (${taskId})` : undefined
         try {
-          const result = await publishFinding(forge, paths, desc, taskId, effort)
+          const result = await publishFinding(forge, paths, desc, taskId, effort, title)
           if (result.outcome === 'created') {
             log(`[loop] NEXT_TASK detection: ${desc}`)
             log(`[loop]   → Issue filed: #${result.issueNumber}`)

@@ -10,7 +10,7 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
-import { makeFakeForge } from './fakeForge.ts'
+import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -20,14 +20,15 @@ let logged: string[]
 let forgeStatus: PrStatus
 let prStatusCalls: number
 let runnerStarts: string[]
+let fakeForge: FakeForge
 
 function makeForge(): Forge {
-  const fake = makeFakeForge()
-  fake.prStatus = async () => {
+  fakeForge = makeFakeForge()
+  fakeForge.prStatus = async () => {
     prStatusCalls += 1
     return forgeStatus
   }
-  return fake
+  return fakeForge
 }
 
 function makeRunner(): Runner {
@@ -653,6 +654,41 @@ describe('scanForNextTasks', () => {
 
     expect(readdirSync(paths.tasksDir)).toHaveLength(3)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim().split('\n')).toHaveLength(3)
+  })
+
+  it('files several review findings as one high-effort issue', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    const parentId = '20250101_000000_015_review-c1'
+    writeFinal(parentId, [
+      'NEXT_TASK: [BUG] guard the stale response',
+      'NEXT_TASK: [BUG] preserve zero in the numeric input',
+      'NEXT_TASK: [TEST] cover the slow list load',
+    ].join('\n'))
+    await loop.scanForNextTasks(parentId, 0)
+
+    expect(fakeForge.issues.size).toBe(1)
+    const issue = [...fakeForge.issues.values()][0]
+    expect(issue?.title).toBe(`Review round fixes (${parentId})`)
+    expect(issue?.body).toContain('Effort: high')
+    expect(issue?.body).toContain('## Requirement\n\n1. [BUG] guard the stale response')
+    expect(issue?.body).toContain('2. [BUG] preserve zero in the numeric input')
+    expect(issue?.body).toContain('3. [TEST] cover the slow list load')
+  })
+
+  it('files several scan findings as separate issues', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    writeFinal('20250101_000000_016_scan', [
+      'NEXT_TASK: [BUG] first scan finding',
+      'NEXT_TASK: [BUG] second scan finding',
+      'NEXT_TASK: [TEST] third scan finding',
+    ].join('\n'))
+    await loop.scanForNextTasks('20250101_000000_016_scan', 0)
+
+    expect([...fakeForge.issues.values()].map((issue) => issue.title)).toEqual([
+      '[BUG] first scan finding',
+      '[BUG] second scan finding',
+      '[TEST] third scan finding',
+    ])
   })
 
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {

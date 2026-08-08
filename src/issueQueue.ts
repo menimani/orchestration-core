@@ -293,13 +293,14 @@ export async function publishFinding(
   description: string,
   parentTaskId: string,
   effort?: string,
+  titleText = description,
 ): Promise<PublishResult> {
   const fingerprint = fingerprintOf(description)
   const existingIssueNumber = await findExistingFinding(forge, paths, fingerprint)
   if (existingIssueNumber !== undefined) {
     return { outcome: 'duplicate', issueNumber: existingIssueNumber }
   }
-  const title = description.length > 90 ? `${description.slice(0, 87)}...` : description
+  const title = titleText.length > 90 ? `${titleText.slice(0, 87)}...` : titleText
   const issueNumber = await forge.createIssue({
     title,
     body: buildIssueBody(description, parentTaskId, effort),
