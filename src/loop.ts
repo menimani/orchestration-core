@@ -20,7 +20,8 @@ import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import {
-  claimIssue, issueNumberForTask, publishFinding, reapStaleLeases,
+  claimIssue, commentOnIssueMerge, heartbeatIssueForTask, issueNumberForTask,
+  publishFinding, reapStaleLeases,
   reconcileFindingFingerprints, LABEL_READY,
 } from './issueQueue.ts'
 
@@ -814,6 +815,14 @@ export function createLoop(deps: LoopDeps) {
         : before.status
       if (status === undefined) continue
 
+      if (status === 'running' && issueNumberForTask(paths, taskId) !== undefined) {
+        try {
+          await heartbeatIssueForTask(forge, paths, taskId, now())
+        } catch (error) {
+          log(`[loop] WARN: heartbeat failed for ${taskId}: ${(error as Error).message}`)
+        }
+      }
+
       // A task whose process is gone without the completion marker used to pass in
       // silence. Say so, once per task, and keep the count for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
@@ -839,17 +848,30 @@ export function createLoop(deps: LoopDeps) {
         if (config.autoMerge) {
           log(`[loop] Automatic merge: ${taskId}`)
           const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
+          const linkedIssue = issueNumberForTask(paths, taskId)
           try {
             await mergeTask(paths, taskId, {
               taskGate: config.taskGate,
               testCmd: config.testCmd === '' ? undefined : config.testCmd,
               skipAutoTest: config.skipAutoTest,
               project,
-              closesIssue: config.issueQueueEnabled ? issueNumberForTask(paths, taskId) : undefined,
+              closesIssue: linkedIssue,
               outputFile: mergeLog,
             })
             log(`[loop]   Merge successful: ${taskId}`)
             writeFileSync(mergeFailureFile, '0\n')
+            if (linkedIssue !== undefined) {
+              try {
+                await commentOnIssueMerge(
+                  forge,
+                  linkedIssue,
+                  git(['rev-parse', 'HEAD']).trim(),
+                  git(['branch', '--show-current']).trim(),
+                )
+              } catch (error) {
+                log(`[loop] WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`)
+              }
+            }
             // A task delegated while the gate was waiting merges commits the gate has
             // already pushed past; clearing the flag makes the gate push and verify
             // again with the new commits included.

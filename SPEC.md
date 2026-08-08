@@ -193,16 +193,23 @@ from or equivalent to `orchestration/tests/*.sh`.
     issue as a local task through the standard template (completion marker included),
     honoring an `Effort:` field. Processes sharing an account are indistinguishable
     and may both materialize the issue, so that configuration is unsupported. An
-    in-progress issue untouched for
-    `ISSUE_LEASE_HOURS` (default 3) is reaped back to ready, unassigned.
+    running linked task refreshes a `Heartbeat: <ISO timestamp>` line in its issue body
+    at least every 30 minutes, moving the forge's `updatedAt` lease clock. Heartbeat
+    timestamps are tracked locally under `queue/heartbeat`; one failed forge attempt
+    logs one warning and never fails the poll. An in-progress issue without heartbeats
+    for `ISSUE_LEASE_HOURS` (default 3) is reaped back to ready, unassigned, so lease
+    expiry identifies a worker that is no longer polling rather than a long-running task.
 34. The merge commit of an issue-born task carries `closes #N`, so the forge closes
-    the issue when the promotion PR lands the commit on the default branch. A forge
-    outage degrades a poll to local-only work; it never stops the loop. Labels are
-    ensured at loop startup. The daemon records issue mode in `queue/issue-mode` so a
-    separate `delegate` process can file its locally enqueued work as an issue already
-    assigned to the current user with `loop:finding` + `loop:in-progress`. Delegation
-    remains local-only with a warning if the forge is unavailable, and fingerprint
-    duplicates link the local task to the existing issue.
+    the issue when the promotion PR lands the commit on the default branch. Immediately
+    after merging, the worker comments with the merge commit and run branch and states
+    that closure happens on promotion; this refreshes `updatedAt` across the ordinary
+    merged-but-not-promoted window. A promotion delayed beyond `ISSUE_LEASE_HOURS` is
+    the residual gap. A forge outage degrades a poll to local-only work; it never stops
+    the loop. Labels are ensured at loop startup. The daemon records issue mode in
+    `queue/issue-mode` so a separate `delegate` process can file its locally enqueued
+    work as an issue already assigned to the current user with `loop:finding` +
+    `loop:in-progress`. Delegation remains local-only with a warning if the forge is
+    unavailable, and fingerprint duplicates link the local task to the existing issue.
 
 ## Test parity
 

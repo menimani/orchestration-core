@@ -9,6 +9,7 @@ import type {
 export interface FakeForge extends Forge {
   prStatusValue: PrStatus
   issues: Map<number, ForgeIssue>
+  issueComments: Map<number, string[]>
   user: string
   clock: () => Date
 }
@@ -18,6 +19,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
   const fake: FakeForge = {
     prStatusValue: { state: 'open', isDraft: true, url: 'https://example.test/pull/1', headSha: '', checks: [] },
     issues: new Map(),
+    issueComments: new Map(),
     user,
     clock: () => new Date(),
 
@@ -54,6 +56,20 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       const issue = fake.issues.get(issueNumber)
       if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
       return { ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }
+    },
+    async updateIssueBody(issueNumber: number, body: string): Promise<void> {
+      const issue = fake.issues.get(issueNumber)
+      if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
+      issue.body = body
+      issue.updatedAt = fake.clock().toISOString()
+    },
+    async commentIssue(issueNumber: number, comment: string): Promise<void> {
+      const issue = fake.issues.get(issueNumber)
+      if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
+      const comments = fake.issueComments.get(issueNumber) ?? []
+      comments.push(comment)
+      fake.issueComments.set(issueNumber, comments)
+      issue.updatedAt = fake.clock().toISOString()
     },
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
       return [...fake.issues.values()]

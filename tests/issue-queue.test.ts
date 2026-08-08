@@ -1,10 +1,12 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
-  buildIssueBody, claimIssue, fingerprintOf, issueNumberForTask, parseIssueBody,
-  publishDelegatedTask, publishFinding, reapStaleLeases, reconcileFindingFingerprints, recordIssueForTask,
+  buildIssueBody, claimIssue, commentOnIssueMerge, fingerprintOf, heartbeatIssueForTask,
+  issueNumberForTask, parseIssueBody, publishDelegatedTask, publishFinding,
+  reapStaleLeases, reconcileFindingFingerprints, recordIssueForTask,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
@@ -360,6 +362,45 @@ describe('reapStaleLeases', () => {
   })
 })
 
+describe('worker heartbeats', () => {
+  it('refreshes a linked task after 30 minutes and replaces the previous body line', async () => {
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'linked', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, 'task-linked', issueNumber)
+
+    expect(await heartbeatIssueForTask(forge, paths, 'task-linked', new Date('2026-08-08T12:00:00Z')))
+      .toBe(true)
+    expect(await heartbeatIssueForTask(forge, paths, 'task-linked', new Date('2026-08-08T12:29:59Z')))
+      .toBe(false)
+
+    forge.clock = () => new Date('2026-08-08T12:30:00Z')
+    expect(await heartbeatIssueForTask(forge, paths, 'task-linked', new Date('2026-08-08T12:30:00Z')))
+      .toBe(true)
+    const body = (await forge.getIssue(issueNumber)).body
+    expect(body.match(/^Heartbeat: .*$/gm)).toEqual(['Heartbeat: 2026-08-08T12:30:00.000Z'])
+    expect(parseIssueBody(body)?.requirement).toBe('[BUG] `a/b.ts` x')
+  })
+
+  it('comments with the merge linkage and refreshes the issue timestamp', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+
+    await commentOnIssueMerge(forge, issueNumber, 'abc123', 'feature/run-9')
+
+    expect(forge.issueComments.get(issueNumber)).toEqual([
+      'Merged as abc123 into run branch feature/run-9. This issue closes on promotion.',
+    ])
+    expect((await forge.getIssue(issueNumber)).updatedAt).toBe('2026-08-08T12:00:00.000Z')
+  })
+})
+
 describe('issue map', () => {
   it('records and resolves the task-to-issue mapping', () => {
     recordIssueForTask(paths, 'task-x', 42)
@@ -385,7 +426,6 @@ describe('publishDelegatedTask', () => {
 
 describe('loop integration in issue mode', () => {
   it('publishes findings as issues instead of enqueuing, and claims them back into work', async () => {
-    const { execFileSync } = await import('node:child_process')
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot })
     execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repoRoot })
     execFileSync('git', ['config', 'user.name', 'T'], { cwd: repoRoot })
@@ -439,4 +479,75 @@ describe('loop integration in issue mode', () => {
     await loop.poll()
     expect((await forge.getIssue(duplicate)).state).toBe('closed')
   })
+
+  it('heartbeats a linked running task before reaping while an unlinked stale lease is reaped', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const linked = await forge.createIssue({
+      title: 'linked', body: buildIssueBody('[BUG] `src/a.ts` breaks', 'scan'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    const unlinked = await forge.createIssue({
+      title: 'unlinked', body: buildIssueBody('[BUG] `src/b.ts` breaks', 'scan'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    await forge.assignIssue(linked, 'worker-a')
+    await forge.assignIssue(unlinked, 'worker-gone')
+    recordIssueForTask(paths, 'task-running', linked)
+    writeFileSync(join(paths.statusDir, 'task-running.json'),
+      JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+
+    const { createLoop } = await import('../src/loop.ts')
+    const { loadConfig } = await import('../src/config.ts')
+    const loop = createLoop({
+      paths,
+      config: {
+        ...loadConfig({}), issueQueueEnabled: true, scanEnabled: false,
+        autoMerge: false, maxParallel: 1,
+      },
+      forge,
+      runner: { start: async () => process.pid },
+      project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
+      log: () => {},
+      now: () => new Date('2026-08-08T12:00:00Z'),
+    })
+
+    await expect(loop.poll()).resolves.toBe('continue')
+    const linkedAfter = await forge.getIssue(linked)
+    expect(linkedAfter.assignees).toEqual(['worker-a'])
+    expect(linkedAfter.labels).toContain(LABEL_IN_PROGRESS)
+    expect(linkedAfter.body).toContain('Heartbeat: 2026-08-08T12:00:00.000Z')
+    const unlinkedAfter = await forge.getIssue(unlinked)
+    expect(unlinkedAfter.assignees).toEqual([])
+    expect(unlinkedAfter.labels).toContain(LABEL_READY)
+  })
+
+  it('continues polling when a heartbeat body edit fails', async () => {
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'linked', body: buildIssueBody('[BUG] `src/a.ts` breaks', 'scan'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, 'task-running', issueNumber)
+    writeFileSync(join(paths.statusDir, 'task-running.json'),
+      JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+    forge.updateIssueBody = async () => { throw new Error('forge unavailable') }
+    const logged: string[] = []
+
+    const { createLoop } = await import('../src/loop.ts')
+    const { loadConfig } = await import('../src/config.ts')
+    const loop = createLoop({
+      paths,
+      config: { ...loadConfig({}), issueQueueEnabled: true, scanEnabled: false, autoMerge: false },
+      forge,
+      runner: { start: async () => process.pid },
+      project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
+      log: (line) => logged.push(line),
+      now: () => new Date('2026-08-08T12:00:00Z'),
+    })
+
+    await expect(loop.poll()).resolves.toBe('continue')
+    expect(logged.filter((line) => line.includes('WARN: heartbeat failed'))).toHaveLength(1)
+  })
+
 })

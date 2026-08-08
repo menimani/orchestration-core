@@ -79,6 +79,7 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
       join(paths.queueDir, 'scanned', `${taskId}.depth`),
       join(paths.queueDir, 'effort', taskId),
       join(paths.queueDir, 'inspect', taskId),
+      join(paths.queueDir, 'heartbeat', taskId),
       ...(specTracked ? [] : [spec]),
     )
     report.prunedTasks += 1

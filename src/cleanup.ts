@@ -173,5 +173,6 @@ export function cleanupTask(paths: OrchPaths, taskId: string, runtime: CleanupRu
   runtime.remove(finalMessageFile(paths, taskId), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', taskId), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
+  runtime.remove(join(paths.queueDir, 'heartbeat', taskId), { force: true })
   console.log(`Cleaned up ${taskId}.`)
 }

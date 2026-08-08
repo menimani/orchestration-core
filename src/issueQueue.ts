@@ -15,6 +15,7 @@ import { enqueueTask, newTaskSpec, specFile, type EnqueueResult } from './tasks.
 export const LABEL_FINDING = 'loop:finding'
 export const LABEL_READY = 'loop:ready'
 export const LABEL_IN_PROGRESS = 'loop:in-progress'
+export const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
 
 const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
 
@@ -88,7 +89,10 @@ export function parseIssueBody(body: string): ParsedIssue | undefined {
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const requirementStart = lines.indexOf('## Requirement')
   if (fingerprint === undefined || requirementStart === -1) return undefined
-  const requirement = lines.slice(requirementStart + 1).join('\n').trim()
+  const requirementLines = lines.slice(requirementStart + 1)
+  while (requirementLines.at(-1)?.trim() === '') requirementLines.pop()
+  if (requirementLines.at(-1)?.startsWith('Heartbeat: ') === true) requirementLines.pop()
+  const requirement = requirementLines.join('\n').trim()
   if (requirement === '') return undefined
   return { fingerprint, effort, requirement }
 }
@@ -369,6 +373,50 @@ export function issueNumberForTask(paths: OrchPaths, taskId: string): number | u
   if (!existsSync(file)) return undefined
   const raw = readFileSync(file, 'utf8').trim()
   return /^\d+$/.test(raw) ? Number(raw) : undefined
+}
+
+function heartbeatFile(paths: OrchPaths, taskId: string): string {
+  return join(paths.queueDir, 'heartbeat', taskId)
+}
+
+/** Refresh a linked running task's lease at most once per heartbeat interval. */
+export async function heartbeatIssueForTask(
+  forge: Forge,
+  paths: OrchPaths,
+  taskId: string,
+  now: Date,
+): Promise<boolean> {
+  const issueNumber = issueNumberForTask(paths, taskId)
+  if (issueNumber === undefined) return false
+
+  const file = heartbeatFile(paths, taskId)
+  if (existsSync(file)) {
+    const lastHeartbeat = new Date(readFileSync(file, 'utf8').trim()).getTime()
+    if (Number.isFinite(lastHeartbeat) && now.getTime() - lastHeartbeat < HEARTBEAT_INTERVAL_MS) {
+      return false
+    }
+  }
+
+  const timestamp = now.toISOString()
+  const issue = await forge.getIssue(issueNumber)
+  const heartbeat = `Heartbeat: ${timestamp}`
+  const body = /^Heartbeat: .*$/m.test(issue.body)
+    ? issue.body.replace(/^Heartbeat: .*$/m, heartbeat)
+    : `${issue.body}${issue.body.endsWith('\n') ? '' : '\n'}${heartbeat}\n`
+  await forge.updateIssueBody(issueNumber, body)
+  mkdirSync(join(paths.queueDir, 'heartbeat'), { recursive: true })
+  writeFileSync(file, `${timestamp}\n`)
+  return true
+}
+
+export async function commentOnIssueMerge(
+  forge: Forge,
+  issueNumber: number,
+  mergeCommit: string,
+  runBranch: string,
+): Promise<void> {
+  await forge.commentIssue(issueNumber,
+    `Merged as ${mergeCommit} into run branch ${runBranch}. This issue closes on promotion.`)
 }
 
 export type ClaimResult
