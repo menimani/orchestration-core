@@ -16,6 +16,8 @@ export interface MergeCheck {
   requires?: string
   /** Skip when this worktree-relative path exists — for fallbacks a successor replaces. */
   unless?: string
+  /** Run an install command first when a worktree-relative dependency path is missing. */
+  installWhenMissing?: { path: string; command: string }
 }
 
 export interface SuiteStep {

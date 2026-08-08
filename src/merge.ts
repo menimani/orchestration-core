@@ -102,6 +102,10 @@ function runMergeChecks(
     if (check.appliesTo !== undefined && !check.appliesTo(changed)) continue
     if (check.requires !== undefined && !existsSync(join(worktree, check.requires))) continue
     if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
+    const install = check.installWhenMissing
+    if (install !== undefined && !existsSync(join(worktree, install.path))) {
+      ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) && ok
+    }
     ok = io.tryRun(join(worktree, check.cwd), check.command, check.label) && ok
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')

@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { shioraProject } from '../src/adapters/project-shiora.ts'
+import type { ProjectAdapter } from '../src/adapters/project.ts'
 import { MergeError, mergeTask } from '../src/merge.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
@@ -11,6 +12,20 @@ import { specFile } from '../src/tasks.ts'
 
 let repoRoot: string
 let paths: OrchPaths
+
+const installProject: ProjectAdapter = {
+  name: 'install-test',
+  mergeChecks: () => [{
+    label: 'Fixture check',
+    cwd: '',
+    command: 'node -e "console.log(\'check ran\')"',
+    installWhenMissing: {
+      path: 'dependency-ready',
+      command: 'node -e "console.log(\'install ran\')"',
+    },
+  }],
+  cycleSuite: () => [],
+}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' })
@@ -109,5 +124,37 @@ describe('mergeTask', () => {
     await makeCompletedTask(taskId)
     await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
       .rejects.toBeInstanceOf(MergeError)
+  })
+
+  it('installs before a merge check when its dependency path is absent', async () => {
+    const taskId = '20260808_000000_008_user-needs-install'
+    await makeCompletedTask(taskId, { commit: true })
+    const outputFile = join(repoRoot, 'merge-check.log')
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project: installProject, outputFile,
+    })
+
+    const output = readFileSync(outputFile, 'utf8')
+    const outputLines = output.split(/\r?\n/)
+    expect(outputLines.filter((line) => line === 'install ran')).toHaveLength(1)
+    expect(outputLines.indexOf('install ran')).toBeLessThan(outputLines.indexOf('check ran'))
+  })
+
+  it('skips installation when the merge check dependency path is present', async () => {
+    const taskId = '20260808_000000_009_user-has-dependency'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'dependency-ready'), 'ready\n')
+    git(worktree, ['add', 'dependency-ready'])
+    git(worktree, ['commit', '-qm', 'test: add dependency fixture'])
+    const outputFile = join(repoRoot, 'merge-check.log')
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project: installProject, outputFile,
+    })
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).not.toContain('install ran')
+    expect(output.split(/\r?\n/).filter((line) => line === 'check ran')).toHaveLength(1)
   })
 })

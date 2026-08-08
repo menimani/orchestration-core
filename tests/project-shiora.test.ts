@@ -19,8 +19,14 @@ describe('gate commands', () => {
   })
 
   it('runs the full suites by default', () => {
-    expect(check('Frontend gate', 'full').command).toBe('npm run test')
+    const frontend = check('Frontend gate', 'full')
+    expect(frontend.command).toBe('npm run test')
+    expect(frontend.installWhenMissing).toEqual({
+      path: 'src/frontend/node_modules',
+      command: 'npm ci --no-audit --no-fund',
+    })
     expect(check('Backend gate', 'full').command).toBe('mvn clean test -q')
+    expect(check('Backend gate', 'full').installWhenMissing).toBeUndefined()
   })
 
   it('only builds and lints under the light gate', () => {
