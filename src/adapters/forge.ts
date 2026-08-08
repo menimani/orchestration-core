@@ -32,6 +32,8 @@ export interface CreatePrOptions {
 export interface Forge {
   /** Find the open PR for a branch, or state 'none' when there is not one. */
   prStatus(branch: string): Promise<PrStatus>
+  /** The current body text of the PR for a branch or URL. */
+  prBody(ref: string): Promise<string>
   /** Create a PR and return its URL. */
   createPr(options: CreatePrOptions): Promise<string>
   /** Replace title and/or body of the PR for a branch. */

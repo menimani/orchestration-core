@@ -9,7 +9,7 @@ const execFileAsync = promisify(execFile)
 // asked gh about a pull request called "check your internet connection".
 const PR_URL_PATTERN = /^https:\/\/\S+\/pull\/\d+$/
 
-interface RollupEntry {
+export interface RollupEntry {
   __typename?: string
   name?: string
   context?: string
@@ -24,7 +24,7 @@ interface RollupEntry {
 // - The rollup may contain StatusContext entries, which carry `state` instead of the
 //   CheckRun fields.
 // - Anything unclassifiable is pending, not success, so the caller keeps waiting.
-function normalizeEntry(entry: RollupEntry): CheckConclusion {
+export function normalizeEntry(entry: RollupEntry): CheckConclusion {
   const raw
     = entry.status !== undefined && entry.status !== ''
       ? entry.status === 'COMPLETED'
@@ -80,6 +80,11 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
           conclusion: normalizeEntry(entry),
         })),
       }
+    },
+
+    async prBody(ref: string): Promise<string> {
+      const stdout = await gh(repoRoot, ['pr', 'view', ref, '--json', 'body', '--jq', '.body'])
+      return stdout
     },
 
     async createPr(options: CreatePrOptions): Promise<string> {

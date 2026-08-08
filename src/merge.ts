@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, rmSync } from 'node:fs'
+import { appendFileSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { backendGateCmd, frontendGateCmd } from './gates.ts'
 import { branchName, isInspectionTaskId, logFile, worktreeDir, type OrchPaths } from './paths.ts'
@@ -18,24 +18,15 @@ export interface MergeOptions {
   testCmd?: string | undefined
   skipAutoTest?: boolean
   taskGate: 'full' | 'light'
+  /**
+   * When set, everything the merge prints — including test output — goes to this file
+   * instead of stdout, so a loop's log stays readable and the details stay findable.
+   */
+  outputFile?: string | undefined
 }
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-}
-
-function run(cwd: string, command: string): void {
-  execSync(command, { cwd, stdio: 'inherit' })
-}
-
-function tryRun(cwd: string, command: string, label: string): boolean {
-  console.log(`=== ${label}: ${command} ===`)
-  try {
-    run(cwd, command)
-    return true
-  } catch {
-    return false
-  }
 }
 
 /**
@@ -65,6 +56,35 @@ export function selectChecks(changedFiles: string[]): {
  * because removing it would lose work an agent forgot to commit.
  */
 export async function mergeTask(paths: OrchPaths, taskId: string, options: MergeOptions): Promise<void> {
+  const out = (text: string): void => {
+    if (options.outputFile !== undefined) {
+      appendFileSync(options.outputFile, `${text}\n`)
+    } else {
+      console.log(text)
+    }
+  }
+  const run = (cwd: string, command: string): void => {
+    if (options.outputFile !== undefined) {
+      const result = execSync(command, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+      appendFileSync(options.outputFile, result)
+    } else {
+      execSync(command, { cwd, stdio: 'inherit' })
+    }
+  }
+  const tryRun = (cwd: string, command: string, label: string): boolean => {
+    out(`=== ${label}: ${command} ===`)
+    try {
+      run(cwd, command)
+      return true
+    } catch (error) {
+      const failed = error as { stdout?: string; stderr?: string }
+      if (options.outputFile !== undefined) {
+        appendFileSync(options.outputFile, `${failed.stdout ?? ''}${failed.stderr ?? ''}`)
+      }
+      return false
+    }
+  }
+
   const status = readStatus(paths, taskId)
   if (status === undefined) {
     throw new MergeError(`Task not found: ${taskId}`)
@@ -93,15 +113,15 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     )
   }
 
-  console.log(`=== ${taskId} diff (against ${currentBranch}) ===`)
+  out(`=== ${taskId} diff (against ${currentBranch}) ===`)
   try {
-    console.log(git(worktree, ['diff', `${currentBranch}...HEAD`]))
+    out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
   } catch {
     // an empty inspection diff is fine
   }
 
   if (options.testCmd !== undefined && options.testCmd !== '') {
-    console.log(`=== Running tests in worktree: ${options.testCmd} ===`)
+    out(`=== Running tests in worktree: ${options.testCmd} ===`)
     try {
       run(worktree, options.testCmd)
     } catch {
@@ -159,7 +179,7 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     try {
       rmSync(worktree, { recursive: true, force: true })
     } catch {
-      console.warn(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`)
+      out(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`)
       try {
         git(paths.repoRoot, ['worktree', 'prune'])
       } catch {
@@ -177,5 +197,5 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     }
   }
   await writeStatus(paths, taskId, 'merged')
-  console.log(`Merged ${taskId} and removed the worktree.`)
+  out(`Merged ${taskId} and removed the worktree.`)
 }
