@@ -11,6 +11,7 @@ const I18N_PATHS = /^src\/frontend\/src\/i18n\/|^src\/backend\/src\/main\/resour
 
 export const shioraProject: ProjectAdapter = {
   name: 'shiora',
+  deployment: { workflow: 'deploy.yml', url: 'https://shiora.jp' },
 
   mergeChecks(taskGate: 'full' | 'light'): MergeCheck[] {
     return [

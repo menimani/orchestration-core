@@ -8,7 +8,9 @@ import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
 import { loadConfig } from './config.ts'
 import { createLoop } from './loop.ts'
+import { issueNumberForTask } from './issueQueue.ts'
 import { mergeTask, MergeError } from './merge.ts'
+import { deploy } from './deploy.ts'
 import { logFile, orchPaths, type OrchPaths } from './paths.ts'
 import { pruneTasks } from './prune.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
@@ -207,6 +209,30 @@ const cmdLogs: Command = async (paths, args) => {
   return 0
 }
 
+const cmdDeploy: Command = async (paths, args) => {
+  if (args.length !== 0) {
+    console.error('Usage: deploy')
+    return 1
+  }
+  const config = loadConfig()
+  const project = await loadProject(config.project)
+  if (project.deployment === undefined) {
+    console.error(`Project '${project.name}' does not define a deployment.`)
+    return 1
+  }
+  const ref = execFileSync('git', ['branch', '--show-current'], {
+    cwd: paths.repoRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+  }).trim()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  const result = await deploy(project.deployment, ref, forge)
+  const lastModified = result.lastModified?.toISOString() ?? '(missing or invalid)'
+  console.log(`Workflow run ${result.run.id} completed successfully.`)
+  console.log(`${result.verified ? 'PASS' : 'FAIL'}: deployment content verification; dispatch=${result.dispatchedAt.toISOString()} Last-Modified=${lastModified}`)
+  return result.verified ? 0 : 1
+}
+
 const cmdMerge: Command = async (paths, args) => {
   const taskId = args[0]
   if (taskId === undefined) {
@@ -239,6 +265,7 @@ const cmdMerge: Command = async (paths, args) => {
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(config.project),
+      closesIssue: issueNumberForTask(paths, taskId),
     })
     return 0
   } catch (error) {
@@ -425,7 +452,7 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
     log(`[loop]      | AUTO_PR=${config.autoPr} REVIEW_ENABLED=${config.reviewEnabled} CI_GATE_ENABLED=${config.ciGateEnabled}`)
     log(`[loop]      | AUTO_REVIEW=${config.autoReview} MAX_REVIEW_ROUNDS=${config.maxReviewRounds} REVIEW_EVERY_N_CYCLES=${config.reviewEveryNCycles} MAX_FINAL_REVIEW_ROUNDS=${config.maxFinalReviewRounds}`)
     log(`[loop]      | MAX_BURST_FAILURES=${config.maxBurstFailures} MAX_CONSECUTIVE_MERGE_FAILURES=${config.maxConsecutiveMergeFailures}`)
-    log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} TASK_GATE=${config.taskGate}`
+    log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} REVIEW_EFFORT=${config.reviewEffort} TASK_GATE=${config.taskGate}`
       + `${config.scanModel === '' ? '' : ` SCAN_MODEL=${config.scanModel}`}${config.taskModel === '' ? '' : ` TASK_MODEL=${config.taskModel}`}`)
     log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project} ISSUE_QUEUE_ENABLED=${config.issueQueueEnabled}`)
     log('[loop] Stop: npm run -C orchestration/ts stop or Ctrl+C')
@@ -461,6 +488,7 @@ const commands: Record<string, Command> = {
   'start': cmdStart,
   'status': cmdStatus,
   'logs': cmdLogs,
+  'deploy': cmdDeploy,
   'merge': cmdMerge,
   'cleanup': cmdCleanup,
   'prune': cmdPrune,

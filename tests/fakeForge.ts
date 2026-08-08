@@ -34,6 +34,13 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     },
     async updatePr(): Promise<void> {},
     async markPrReady(): Promise<void> {},
+    async dispatchWorkflow(): Promise<void> {},
+    async findWorkflowRun(): Promise<undefined> {
+      return undefined
+    },
+    async getWorkflowRun(): Promise<never> {
+      throw new Error('no workflow run configured')
+    },
 
     async currentUser(): Promise<string> {
       return fake.user

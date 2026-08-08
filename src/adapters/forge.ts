@@ -48,6 +48,13 @@ export interface CreateIssueOptions {
   assignees?: string[]
 }
 
+export interface WorkflowRun {
+  id: number
+  createdAt: string
+  status: string
+  conclusion: string | null
+}
+
 export interface Forge {
   /** Find the open PR for a branch, or state 'none' when there is not one. */
   prStatus(branch: string): Promise<PrStatus>
@@ -59,6 +66,11 @@ export interface Forge {
   updatePr(branch: string, fields: { title?: string; body?: string }): Promise<void>
   /** Promote a draft PR to ready for review. */
   markPrReady(branch: string): Promise<void>
+
+  /** Dispatch a workflow and locate/observe the exact run created by that dispatch. */
+  dispatchWorkflow(workflow: string, ref: string): Promise<void>
+  findWorkflowRun(workflow: string, createdAfter: Date): Promise<WorkflowRun | undefined>
+  getWorkflowRun(runId: number): Promise<WorkflowRun>
 
   // Issue-queue operations. Labels passed anywhere here must already exist —
   // call ensureLabel first; creating them lazily inside every call would cost a
