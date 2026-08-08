@@ -221,6 +221,26 @@ from or equivalent to `orchestration/tests/*.sh`.
     once creation may have happened, the issue is reconciled or the command aborts.
     The marker includes the daemon PID, is removed with the PID lock on every graceful
     exit, and is ignored when its owning process is no longer alive.
+35. `WORKER_MODE=true` defaults off and requires `ISSUE_QUEUE_ENABLED=true`. A worker-mode
+    daemon is execution-only: it never scans, enters a cycle gate, creates or updates a
+    pull request, runs a review, or merges. It claims and heartbeats ready issues through
+    the standard path and starts their local tasks. A completed task with commits pushes
+    `task/<id>` to `origin`, comments the branch and exact head commit on its issue, and
+    swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection with no
+    commits comments and closes its issue instead. Its poll status uses `Worker` in place
+    of the cycle counter.
+36. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
+    processing local completions, each stop-file-free poll adopts open
+    `loop:merge-ready` issues: it reads the reported branch and head, fetches that branch
+    from `origin`, verifies the head and that it adds commits to the current branch, runs
+    the project adapter's path-selected checks in a detached worktree, and merges with
+    `--no-ff` and `closes #N`. A successful adoption logs
+    `[loop] Adopted remote task from issue #N`; promotion closes the issue. A failure is
+    commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
+    through the consecutive-merge-failure limit instead of returning work to ready.
+    The shared-work label state machine is `loop:ready` → `loop:in-progress` →
+    `loop:merge-ready` → closed or `loop:merge-failed`; inspections take the intentional
+    `loop:in-progress` → closed shortcut.
 
 ## Test parity
 
