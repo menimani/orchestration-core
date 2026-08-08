@@ -105,6 +105,18 @@ describe('actionable findings', () => {
     writeFinal('t2', 'done\n')
     expect(loop.actionableFindings(finalMessageFile(paths, 't2'))).toEqual([])
   })
+
+  it('ignores bare markers and trims a normal finding', () => {
+    const loop = makeLoop()
+    writeFinal('t3', [
+      'NEXT_TASK:',
+      'NEXT_TASK:   ',
+      'NEXT_TASK:   [BUG] an ordinary finding   ',
+    ].join('\n'))
+    expect(loop.actionableFindings(finalMessageFile(paths, 't3'))).toEqual([
+      '[BUG] an ordinary finding',
+    ])
+  })
 })
 
 describe('CI check normalization (forge adapter)', () => {
@@ -380,6 +392,13 @@ describe('collectDecisions', () => {
     const loop = makeLoop()
     writeFinal('d6', 'DECISION_REQUIRED: what the choice is <and what it costs>\n')
     loop.collectDecisions('d6')
+    expect(existsSync(decisionsFile())).toBe(false)
+  })
+
+  it('ignores a bare decision marker', () => {
+    const loop = makeLoop()
+    writeFinal('d7', 'DECISION_REQUIRED:\n')
+    loop.collectDecisions('d7')
     expect(existsSync(decisionsFile())).toBe(false)
   })
 })

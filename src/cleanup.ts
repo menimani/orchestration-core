@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { branchName, finalMessageFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
@@ -13,12 +13,17 @@ import { readStatus } from './status.ts'
 export function cleanupTask(paths: OrchPaths, taskId: string): void {
   const status = readStatus(paths, taskId)
   if (status !== undefined && status.pid !== null) {
-    try {
-      process.kill(status.pid, 0)
+    if (process.platform === 'win32') {
       console.log(`Stopping running process: pid=${status.pid}`)
-      process.kill(status.pid)
-    } catch {
-      // already gone
+      spawnSync('taskkill', ['/PID', String(status.pid), '/T', '/F'], { windowsHide: true })
+    } else {
+      try {
+        process.kill(status.pid, 0)
+        console.log(`Stopping running process: pid=${status.pid}`)
+        process.kill(status.pid)
+      } catch {
+        // already gone
+      }
     }
   }
 
@@ -30,7 +35,11 @@ export function cleanupTask(paths: OrchPaths, taskId: string): void {
         windowsHide: true,
       })
     } catch {
-      rmSync(worktree, { recursive: true, force: true })
+      try {
+        rmSync(worktree, { recursive: true, force: true })
+      } catch {
+        // Report below after the rest of the task state has been cleaned up.
+      }
     }
   }
   try {
@@ -46,5 +55,6 @@ export function cleanupTask(paths: OrchPaths, taskId: string): void {
   rmSync(finalMessageFile(paths, taskId), { force: true })
   rmSync(join(paths.queueDir, 'scanned', taskId), { force: true })
   rmSync(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
+  if (existsSync(worktree)) console.warn(`Worktree could not be removed and remains at ${worktree}`)
   console.log(`Cleaned up ${taskId}.`)
 }

@@ -128,7 +128,7 @@ export function createLoop(deps: LoopDeps) {
     if (!existsSync(finalFile)) return []
     return readFileSync(finalFile, 'utf8').split(/\r?\n/)
       .filter((line) => line.startsWith('NEXT_TASK:'))
-      .map((line) => line.replace(/^NEXT_TASK: /, ''))
+      .map((line) => line.replace(/^NEXT_TASK:\s*/, '').trim())
       .filter((desc) => desc !== '' && !hasFormatPlaceholder(desc))
   }
 
@@ -236,7 +236,7 @@ export function createLoop(deps: LoopDeps) {
     if (!existsSync(finalFile)) return
     for (const line of readFileSync(finalFile, 'utf8').split(/\r?\n/)) {
       if (!line.startsWith('DECISION_REQUIRED:')) continue
-      const text = line.replace(/^DECISION_REQUIRED: /, '')
+      const text = line.replace(/^DECISION_REQUIRED:\s*/, '').trim()
       if (text === '') continue
       if (hasFormatPlaceholder(text)) {
         log(`[loop] Ignore DECISION_REQUIRED placeholder: ${text}`)
