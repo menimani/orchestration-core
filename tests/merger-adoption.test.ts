@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
-import { LABEL_MERGE_FAILED, LABEL_MERGE_READY } from '../src/issueQueue.ts'
+import {
+  issuePromotionForIssue, LABEL_MERGE_FAILED, LABEL_MERGE_READY,
+} from '../src/issueQueue.ts'
 import { createLoop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
@@ -125,5 +127,52 @@ describe('remote task adoption', () => {
     expect(forge.issueComments.get(failedIssueNumber)?.join('\n'))
       .toContain('Remote task adoption failed')
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('1')
+  })
+
+  it('retries issue updates for a persisted adoption without merging it again', async () => {
+    const task = pushWorkerBranch('20260809_000000_005_auto-retry-adoption')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    let mergeChecks = 0
+    const project: ProjectAdapter = {
+      name: 'adoption-retry-test',
+      mergeChecks: () => [{
+        label: 'Count merge checks',
+        cwd: '',
+        command: 'node -e "process.exit(0)"',
+        appliesTo: () => {
+          mergeChecks += 1
+          return true
+        },
+      }],
+      cycleSuite: () => [],
+    }
+    const removeLabel = forge.removeLabel.bind(forge)
+    let mergeReadyRemovals = 0
+    forge.removeLabel = async (number, label) => {
+      if (number === issueNumber && label === LABEL_MERGE_READY && mergeReadyRemovals++ === 0) {
+        throw new Error('temporary label failure')
+      }
+      await removeLabel(number, label)
+    }
+    expect(await makeLoop(project).poll()).toBe('continue')
+
+    const mergedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({
+      issueNumber,
+      mergeCommit: mergedHead,
+      runBranch: 'main',
+    })
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_READY)
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_FAILED)
+
+    expect(await makeLoop(project).poll()).toBe('continue')
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(mergedHead)
+    expect(mergeChecks).toBe(1)
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_FAILED)
+    expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('Merged as ')))
+      .toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
   })
 })

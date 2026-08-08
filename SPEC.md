@@ -234,8 +234,10 @@ from or equivalent to `orchestration/tests/*.sh`.
     `loop:merge-ready` issues: it reads the reported branch and head, fetches that branch
     from `origin`, verifies the head and that it adds commits to the current branch, runs
     the project adapter's path-selected checks in a detached worktree, and merges with
-    `--no-ff` and `closes #N`. A successful adoption logs
-    `[loop] Adopted remote task from issue #N`; promotion closes the issue. A failure is
+    `--no-ff` and `closes #N`. It persists a successful adoption before updating the
+    issue, so a later poll retries failed metadata updates without merging again. A
+    successful adoption logs `[loop] Adopted remote task from issue #N`; promotion closes
+    the issue. A failure is
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
     through the consecutive-merge-failure limit instead of returning work to ready.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
