@@ -32,9 +32,12 @@ export const shioraProject: ProjectAdapter = {
         requires: 'src/backend',
       },
       {
+        // npm ci first: the gate runs in a fresh task worktree, which has the lockfile
+        // but no node_modules — without the install every orchestration-touching merge
+        // fails on missing tools, not on its diff.
         label: 'Orchestration gate',
         cwd: 'orchestration/ts',
-        command: 'npm run typecheck && npm run test',
+        command: 'npm ci --no-audit --no-fund && npm run typecheck && npm run test',
         appliesTo: (changed) => changed.some((file) => file.startsWith('orchestration/')),
         requires: 'orchestration/ts/package.json',
       },
