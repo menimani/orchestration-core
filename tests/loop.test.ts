@@ -10,6 +10,7 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import { makeFakeForge } from './fakeForge.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -21,16 +22,12 @@ let prStatusCalls: number
 let runnerStarts: string[]
 
 function makeForge(): Forge {
-  return {
-    prStatus: async () => {
-      prStatusCalls += 1
-      return forgeStatus
-    },
-    prBody: async () => '',
-    createPr: async () => 'https://example.test/pull/1',
-    updatePr: async () => {},
-    markPrReady: async () => {},
+  const fake = makeFakeForge()
+  fake.prStatus = async () => {
+    prStatusCalls += 1
+    return forgeStatus
   }
+  return fake
 }
 
 function makeRunner(): Runner {
@@ -553,10 +550,10 @@ describe('scanForNextTasks', () => {
     writeFileSync(join(paths.root, 'templates', 'task-requirements.md'), 'Shared requirements.\n')
   })
 
-  it('gives a review-spawned fix high effort and the code pitfall list', () => {
+  it('gives a review-spawned fix high effort and the code pitfall list', async () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_010_review-c1', 'NEXT_TASK: [BUG] a defect a review found\n')
-    loop.scanForNextTasks('20250101_000000_010_review-c1', 0)
+    await loop.scanForNextTasks('20250101_000000_010_review-c1', 0)
 
     const specs = readdirSync(paths.tasksDir)
     expect(specs).toHaveLength(1)
@@ -565,20 +562,20 @@ describe('scanForNextTasks', () => {
     expect(readFileSync(join(paths.tasksDir, `${fixId}.md`), 'utf8')).toContain('Stale async responses')
   })
 
-  it('writes specs that instruct the completion marker — its absence records finished work as failed', () => {
+  it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_012_scan', 'NEXT_TASK: [BUG] a finding whose fix must be detectable\n')
-    loop.scanForNextTasks('20250101_000000_012_scan', 0)
+    await loop.scanForNextTasks('20250101_000000_012_scan', 0)
     const specs = readdirSync(paths.tasksDir)
     const spec = readFileSync(join(paths.tasksDir, specs[0] as string), 'utf8')
     expect(spec).toContain('TASK_COMPLETE')
     expect(spec).toMatch(/## Commit/)
   })
 
-  it('gives a scan-spawned test task no override and the tests pitfall list', () => {
+  it('gives a scan-spawned test task no override and the tests pitfall list', async () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_011_scan', 'NEXT_TASK: [TEST] a coverage gap a scan found\n')
-    loop.scanForNextTasks('20250101_000000_011_scan', 0)
+    await loop.scanForNextTasks('20250101_000000_011_scan', 0)
 
     const specs = readdirSync(paths.tasksDir)
     expect(specs).toHaveLength(1)
@@ -587,10 +584,10 @@ describe('scanForNextTasks', () => {
     expect(readFileSync(join(paths.tasksDir, `${testId}.md`), 'utf8')).toContain('clearAllMocks keeps implementations')
   })
 
-  it('bounds growth by depth and by total task count', () => {
+  it('bounds growth by depth and by total task count', async () => {
     const loop = makeLoop({ maxGrowthDepth: 1 })
     writeFinal('deep-parent', 'NEXT_TASK: [BUG] too deep\n')
-    loop.scanForNextTasks('deep-parent', 1)
+    await loop.scanForNextTasks('deep-parent', 1)
     expect(readdirSync(paths.tasksDir)).toHaveLength(0)
     expect(logText()).toContain('Growth depth limit reached')
   })

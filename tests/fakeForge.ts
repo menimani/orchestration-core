@@ -1,0 +1,91 @@
+import type {
+  CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus,
+} from '../src/adapters/forge.ts'
+
+// An in-memory forge for tests: PR calls answer from a settable status, and the issue
+// operations behave like a real tracker — including multiple simultaneous assignees,
+// which is what makes the claim tie-break testable.
+
+export interface FakeForge extends Forge {
+  prStatusValue: PrStatus
+  issues: Map<number, ForgeIssue>
+  user: string
+  clock: () => Date
+}
+
+export function makeFakeForge(user = 'worker-a'): FakeForge {
+  let nextIssueNumber = 1
+  const fake: FakeForge = {
+    prStatusValue: { state: 'open', isDraft: true, url: 'https://example.test/pull/1', headSha: '', checks: [] },
+    issues: new Map(),
+    user,
+    clock: () => new Date(),
+
+    async prStatus(): Promise<PrStatus> {
+      return fake.prStatusValue
+    },
+    async prBody(): Promise<string> {
+      return ''
+    },
+    async createPr(_options: CreatePrOptions): Promise<string> {
+      return 'https://example.test/pull/1'
+    },
+    async updatePr(): Promise<void> {},
+    async markPrReady(): Promise<void> {},
+
+    async currentUser(): Promise<string> {
+      return fake.user
+    },
+    async ensureLabel(): Promise<void> {},
+    async createIssue(options: CreateIssueOptions): Promise<number> {
+      const issueNumber = nextIssueNumber++
+      fake.issues.set(issueNumber, {
+        number: issueNumber,
+        title: options.title,
+        body: options.body,
+        labels: [...options.labels],
+        assignees: [],
+        updatedAt: fake.clock().toISOString(),
+      })
+      return issueNumber
+    },
+    async getIssue(issueNumber: number): Promise<ForgeIssue> {
+      const issue = fake.issues.get(issueNumber)
+      if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
+      return { ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }
+    },
+    async listOpenIssues(label: string): Promise<ForgeIssue[]> {
+      return [...fake.issues.values()]
+        .filter((issue) => issue.labels.includes(label))
+        .map((issue) => ({ ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }))
+    },
+    async assignIssue(issueNumber: number, assignee: string): Promise<void> {
+      const issue = fake.issues.get(issueNumber)
+      if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
+      if (!issue.assignees.includes(assignee)) issue.assignees.push(assignee)
+      issue.updatedAt = fake.clock().toISOString()
+    },
+    async unassignIssue(issueNumber: number, assignee: string): Promise<void> {
+      const issue = fake.issues.get(issueNumber)
+      if (issue === undefined) return
+      issue.assignees = issue.assignees.filter((login) => login !== assignee)
+      issue.updatedAt = fake.clock().toISOString()
+    },
+    async addLabel(issueNumber: number, label: string): Promise<void> {
+      const issue = fake.issues.get(issueNumber)
+      if (issue === undefined) return
+      if (!issue.labels.includes(label)) issue.labels.push(label)
+      issue.updatedAt = fake.clock().toISOString()
+    },
+    async removeLabel(issueNumber: number, label: string): Promise<void> {
+      const issue = fake.issues.get(issueNumber)
+      if (issue === undefined) return
+      issue.labels = issue.labels.filter((name) => name !== label)
+      issue.updatedAt = fake.clock().toISOString()
+    },
+    async closeIssue(issueNumber: number): Promise<void> {
+      fake.issues.delete(issueNumber)
+    },
+  }
+  return fake
+}

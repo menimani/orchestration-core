@@ -29,6 +29,22 @@ export interface CreatePrOptions {
   draft: boolean
 }
 
+export interface ForgeIssue {
+  number: number
+  title: string
+  body: string
+  labels: string[]
+  assignees: string[]
+  /** ISO timestamp of the last update — the stale-lease clock. */
+  updatedAt: string
+}
+
+export interface CreateIssueOptions {
+  title: string
+  body: string
+  labels: string[]
+}
+
 export interface Forge {
   /** Find the open PR for a branch, or state 'none' when there is not one. */
   prStatus(branch: string): Promise<PrStatus>
@@ -40,6 +56,21 @@ export interface Forge {
   updatePr(branch: string, fields: { title?: string; body?: string }): Promise<void>
   /** Promote a draft PR to ready for review. */
   markPrReady(branch: string): Promise<void>
+
+  // Issue-queue operations. Labels passed anywhere here must already exist —
+  // call ensureLabel first; creating them lazily inside every call would cost a
+  // round-trip per operation.
+  currentUser(): Promise<string>
+  ensureLabel(name: string, description: string): Promise<void>
+  createIssue(options: CreateIssueOptions): Promise<number>
+  getIssue(issueNumber: number): Promise<ForgeIssue>
+  /** Open issues carrying the label, newest first. */
+  listOpenIssues(label: string): Promise<ForgeIssue[]>
+  assignIssue(issueNumber: number, user: string): Promise<void>
+  unassignIssue(issueNumber: number, user: string): Promise<void>
+  addLabel(issueNumber: number, label: string): Promise<void>
+  removeLabel(issueNumber: number, label: string): Promise<void>
+  closeIssue(issueNumber: number, comment: string): Promise<void>
 }
 
 export async function loadForge(name: string, repoRoot: string): Promise<Forge> {

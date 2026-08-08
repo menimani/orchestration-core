@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { loadConfig } from '../src/config.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
+import { makeFakeForge } from './fakeForge.ts'
 
 // The branch-state rules ported from test-loop-branch-state.sh: a stopped loop keeps
 // its cycle state so it can resume after an environment repair, but that state belongs
@@ -19,13 +20,7 @@ function makeLoop(): Loop {
   return createLoop({
     paths,
     config: loadConfig({}),
-    forge: {
-      prStatus: async () => ({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] }),
-      prBody: async () => '',
-      createPr: async () => '',
-      updatePr: async () => {},
-      markPrReady: async () => {},
-    },
+    forge: makeFakeForge(),
     runner: { start: async () => process.pid },
     project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
     log: (line) => logged.push(line),

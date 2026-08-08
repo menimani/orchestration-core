@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import type { CheckConclusion, CreatePrOptions, Forge, PrStatus } from './forge.ts'
+import type {
+  CheckConclusion, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus,
+} from './forge.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -115,6 +117,89 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
 
     async markPrReady(ref: string): Promise<void> {
       await gh(repoRoot, ['pr', 'ready', ref])
+    },
+
+    async currentUser(): Promise<string> {
+      return (await gh(repoRoot, ['api', 'user', '--jq', '.login'])).trim()
+    },
+
+    async ensureLabel(name: string, description: string): Promise<void> {
+      // --force updates an existing label instead of failing on it.
+      await gh(repoRoot, ['label', 'create', name, '--description', description, '--force'])
+    },
+
+    async createIssue(options: CreateIssueOptions): Promise<number> {
+      const args = ['issue', 'create', '--title', options.title, '--body', options.body]
+      for (const label of options.labels) args.push('--label', label)
+      const stdout = await gh(repoRoot, args)
+      const match = /\/issues\/(\d+)\s*$/.exec(stdout.trim())
+      if (match === null) {
+        throw new Error(`gh issue create returned no issue URL: ${stdout.trim()}`)
+      }
+      return Number(match[1])
+    },
+
+    async getIssue(issueNumber: number): Promise<ForgeIssue> {
+      const stdout = await gh(repoRoot, ['issue', 'view', String(issueNumber),
+        '--json', 'number,title,body,labels,assignees,updatedAt'])
+      const data = JSON.parse(stdout) as {
+        number: number
+        title: string
+        body: string
+        labels: Array<{ name: string }>
+        assignees: Array<{ login: string }>
+        updatedAt: string
+      }
+      return {
+        number: data.number,
+        title: data.title,
+        body: data.body,
+        labels: data.labels.map((label) => label.name),
+        assignees: data.assignees.map((assignee) => assignee.login),
+        updatedAt: data.updatedAt,
+      }
+    },
+
+    async listOpenIssues(label: string): Promise<ForgeIssue[]> {
+      const stdout = await gh(repoRoot, ['issue', 'list', '--state', 'open',
+        '--label', label, '--limit', '200',
+        '--json', 'number,title,body,labels,assignees,updatedAt'])
+      const data = JSON.parse(stdout) as Array<{
+        number: number
+        title: string
+        body: string
+        labels: Array<{ name: string }>
+        assignees: Array<{ login: string }>
+        updatedAt: string
+      }>
+      return data.map((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        body: issue.body,
+        labels: issue.labels.map((label_) => label_.name),
+        assignees: issue.assignees.map((assignee) => assignee.login),
+        updatedAt: issue.updatedAt,
+      }))
+    },
+
+    async assignIssue(issueNumber: number, user: string): Promise<void> {
+      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-assignee', user])
+    },
+
+    async unassignIssue(issueNumber: number, user: string): Promise<void> {
+      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-assignee', user])
+    },
+
+    async addLabel(issueNumber: number, label: string): Promise<void> {
+      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-label', label])
+    },
+
+    async removeLabel(issueNumber: number, label: string): Promise<void> {
+      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-label', label])
+    },
+
+    async closeIssue(issueNumber: number, comment: string): Promise<void> {
+      await gh(repoRoot, ['issue', 'close', String(issueNumber), '--comment', comment])
     },
   }
 }

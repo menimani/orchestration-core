@@ -21,6 +21,11 @@ export interface MergeOptions {
   /** The repository's own knowledge: which checks verify a merge, and when. */
   project: ProjectAdapter
   /**
+   * Issue this merge resolves. The reference rides the merge commit, so the forge
+   * closes the issue when the promotion PR lands the commit on the default branch.
+   */
+  closesIssue?: number | undefined
+  /**
    * When set, everything the merge prints — including test output — goes to this file
    * instead of stdout, so a loop's log stays readable and the details stay findable.
    */
@@ -123,8 +128,11 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     }
   }
 
+  const mergeMessage = options.closesIssue === undefined
+    ? `Merge ${taskId} via Codex`
+    : `Merge ${taskId} via Codex (closes #${options.closesIssue})`
   try {
-    git(paths.repoRoot, ['merge', '--no-ff', branch, '-m', `Merge ${taskId} via Codex`])
+    git(paths.repoRoot, ['merge', '--no-ff', branch, '-m', mergeMessage])
   } catch {
     try {
       git(paths.repoRoot, ['merge', '--abort'])

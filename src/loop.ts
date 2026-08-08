@@ -19,6 +19,9 @@ import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
+import {
+  claimIssue, issueNumberForTask, publishFinding, reapStaleLeases, LABEL_READY,
+} from './issueQueue.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
 // carry the incident, SPEC.md carries the checklist, and the gate tests pin the sum.
@@ -52,6 +55,9 @@ export function createLoop(deps: LoopDeps) {
 
   mkdirSync(scannedDir, { recursive: true })
   if (!existsSync(queueFile)) writeFileSync(queueFile, '')
+
+  // Resolved once per process; the login cannot change under a running loop.
+  let cachedUser: string | undefined
 
   function readCount(file: string): number {
     if (!existsSync(file)) return 0
@@ -134,8 +140,12 @@ export function createLoop(deps: LoopDeps) {
     appendFileSync(specFile(paths, newId), parts.join(''))
   }
 
-  /** Turn a finished task's NEXT_TASK lines into queued tasks, bounded by depth and total. */
-  function scanForNextTasks(taskId: string, depth: number): void {
+  /**
+   * Turn a finished task's NEXT_TASK lines into queued tasks, bounded by depth and
+   * total. In issue mode the findings become forge issues instead — the shared
+   * backlog other workers can claim — under the same growth bounds.
+   */
+  async function scanForNextTasks(taskId: string, depth: number): Promise<void> {
     const findings = actionableFindings(finalMessageFile(paths, taskId))
     if (findings.length === 0) return
 
@@ -146,6 +156,24 @@ export function createLoop(deps: LoopDeps) {
     }
     if (countAllTasks() >= config.maxTotalTasks) {
       log(`[loop] Task limit reached (${config.maxTotalTasks}) — NEXT_TASK from ${taskId} will be ignored`)
+      return
+    }
+
+    if (config.issueQueueEnabled) {
+      for (const desc of findings) {
+        const effort = isReviewTaskId(taskId) ? 'high' : undefined
+        try {
+          const result = await publishFinding(forge, desc, taskId, effort)
+          if (result.outcome === 'created') {
+            log(`[loop] NEXT_TASK detection: ${desc}`)
+            log(`[loop]   → Issue filed: #${result.issueNumber}`)
+          } else {
+            log(`[loop]   Duplicate finding, existing issue #${result.issueNumber}: ${desc}`)
+          }
+        } catch (error) {
+          log(`[loop] WARN: could not file the finding as an issue: ${(error as Error).message}`)
+        }
+      }
       return
     }
 
@@ -790,7 +818,7 @@ export function createLoop(deps: LoopDeps) {
         const depth = existsSync(depthFile) ? readCount(depthFile) : 0
         log(`[loop] Completed: ${taskId} (depth=${depth})`)
 
-        scanForNextTasks(taskId, depth)
+        await scanForNextTasks(taskId, depth)
         collectDecisions(taskId)
 
         recordScanYield(taskId)
@@ -804,6 +832,7 @@ export function createLoop(deps: LoopDeps) {
               testCmd: config.testCmd === '' ? undefined : config.testCmd,
               skipAutoTest: config.skipAutoTest,
               project,
+              closesIssue: config.issueQueueEnabled ? issueNumberForTask(paths, taskId) : undefined,
               outputFile: mergeLog,
             })
             log(`[loop]   Merge successful: ${taskId}`)
@@ -841,6 +870,37 @@ export function createLoop(deps: LoopDeps) {
     // Nothing new starts while a stop is pending: without this the burst detector above
     // would fill the parallel slots with the very outage it just stopped for.
     if (!existsSync(stopFile)) {
+      if (config.issueQueueEnabled) {
+        // The shared backlog: reap quiet leases, then claim ready issues into the
+        // local queue up to capacity. A forge outage degrades to local-only work for
+        // this poll rather than stopping anything.
+        try {
+          for (const reaped of await reapStaleLeases(forge, config.issueLeaseHours, now())) {
+            log(`[loop] Lease reaped: issue #${reaped} is ready again`)
+          }
+          let capacity = config.maxParallel - running - queueLength()
+          if (capacity > 0) {
+            if (cachedUser === undefined) cachedUser = await forge.currentUser()
+            for (const issue of await forge.listOpenIssues(LABEL_READY)) {
+              if (capacity <= 0) break
+              if (issue.assignees.length > 0) continue
+              const result = await claimIssue(forge, paths, issue, cachedUser,
+                (newTaskId_, requirement) => appendSharedRequirements(newTaskId_, `issue-${issue.number}`, requirement))
+              if (result.outcome === 'claimed') {
+                log(`[loop] Claimed issue #${issue.number} → task ${result.taskId}`)
+                capacity -= 1
+              } else if (result.outcome === 'lost-race') {
+                log(`[loop]   Lost the claim race for issue #${issue.number}`)
+              } else {
+                log(`[loop] WARN: issue #${issue.number} has no parseable requirement — left claimed for a person`)
+              }
+            }
+          }
+        } catch (error) {
+          log(`[loop] WARN: the issue queue is unreachable this poll: ${(error as Error).message}`)
+        }
+      }
+
       for (;;) {
         if (running >= config.maxParallel) break
         const entry = dequeueNext()

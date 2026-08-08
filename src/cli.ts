@@ -384,6 +384,10 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
   const runner = await loadRunner(config.runner)
   const project = await loadProject(config.project)
   const log = (line: string): void => console.log(line)
+  if (config.issueQueueEnabled) {
+    const { ensureQueueLabels } = await import('./issueQueue.ts')
+    await ensureQueueLabels(forge)
+  }
   const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
 
   loop.initializeSessionStateForBranch()
@@ -396,7 +400,7 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
   log(`[loop]      | MAX_BURST_FAILURES=${config.maxBurstFailures} MAX_CONSECUTIVE_MERGE_FAILURES=${config.maxConsecutiveMergeFailures}`)
   log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} TASK_GATE=${config.taskGate}`
     + `${config.scanModel === '' ? '' : ` SCAN_MODEL=${config.scanModel}`}${config.taskModel === '' ? '' : ` TASK_MODEL=${config.taskModel}`}`)
-  log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project}`)
+  log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project} ISSUE_QUEUE_ENABLED=${config.issueQueueEnabled}`)
   log('[loop] Stop: npm run -C orchestration/ts stop or Ctrl+C')
   log('')
 

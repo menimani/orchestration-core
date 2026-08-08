@@ -32,6 +32,10 @@ export interface LoopConfig {
   forge: string
   runner: string
   project: string
+  /** Findings become forge issues that workers claim, instead of direct local enqueues. */
+  issueQueueEnabled: boolean
+  /** Hours an in-progress issue may sit unupdated before its lease is reaped. */
+  issueLeaseHours: number
 }
 
 function num(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -92,5 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     forge: str(env, 'FORGE', 'github'),
     runner: str(env, 'RUNNER', 'codex'),
     project: str(env, 'PROJECT', 'shiora'),
+    issueQueueEnabled: bool(env, 'ISSUE_QUEUE_ENABLED', false),
+    issueLeaseHours: num(env, 'ISSUE_LEASE_HOURS', 3),
   }
 }
