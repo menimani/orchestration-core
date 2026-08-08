@@ -1,0 +1,71 @@
+import { execFileSync } from 'node:child_process'
+import { existsSync, rmSync, writeFileSync } from 'node:fs'
+import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
+import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
+import { readStatus, writeStatus } from './status.ts'
+import { specFile } from './tasks.ts'
+
+export type StartResult
+  = { outcome: 'started'; pid: number }
+    | { outcome: 'already-running' }
+
+export interface StartOptions {
+  effort: RunnerStartOptions['effort']
+  model?: string | undefined
+}
+
+/**
+ * Create the task's worktree and hand it to the runner. Ported from task-start.sh:
+ * a worktree whose task is already running is a skip, not an error, so the loop
+ * does not retry endlessly; any other leftover worktree needs cleanup first.
+ */
+export async function startTask(
+  paths: OrchPaths,
+  runner: Runner,
+  taskId: string,
+  options: StartOptions,
+): Promise<StartResult> {
+  const spec = specFile(paths, taskId)
+  if (!existsSync(spec)) {
+    throw new Error(
+      `Task specification not found: ${spec}\nCreate the specification first with the 'new' command.`,
+    )
+  }
+
+  const worktree = worktreeDir(paths, taskId)
+  const branch = branchName(taskId)
+  if (existsSync(worktree)) {
+    if (readStatus(paths, taskId)?.status === 'running') {
+      return { outcome: 'already-running' }
+    }
+    throw new Error(
+      `Worktree already exists: ${worktree}\nIf this task was abandoned, run cleanup first.`,
+    )
+  }
+
+  console.log(`Creating worktree: ${worktree} (branch: ${branch})`)
+  execFileSync('git', ['worktree', 'add', worktree, '-b', branch], {
+    cwd: paths.repoRoot,
+    stdio: 'inherit',
+  })
+
+  const log = logFile(paths, taskId)
+  const finalMessage = finalMessageFile(paths, taskId)
+  writeFileSync(log, '')
+  rmSync(finalMessage, { force: true })
+
+  console.log(`Starting task execution: ${taskId}`
+    + (options.model !== undefined && options.model !== '' ? ` model=${options.model}` : '')
+    + ` effort=${options.effort}`)
+  const pid = await runner.start({
+    worktree,
+    specFile: spec,
+    finalMessageFile: finalMessage,
+    logFile: log,
+    effort: options.effort,
+    model: options.model,
+  })
+  await writeStatus(paths, taskId, 'running', pid)
+  console.log(`Started. task_id=${taskId} pid=${pid} log=${log}`)
+  return { outcome: 'started', pid }
+}

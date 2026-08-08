@@ -1,0 +1,123 @@
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { orchPaths, type OrchPaths } from '../src/paths.ts'
+import { delegateTask, enqueueTask, newTaskSpec, specFile } from '../src/tasks.ts'
+
+let repoRoot: string
+let paths: OrchPaths
+
+function queueLines(): string[] {
+  const backlog = join(paths.queueDir, 'backlog.txt')
+  if (!existsSync(backlog)) return []
+  return readFileSync(backlog, 'utf8').split(/\r?\n/).filter((line) => line !== '')
+}
+
+function createSpec(taskId: string): void {
+  writeFileSync(specFile(paths, taskId), '# Test task\n')
+}
+
+function writeTestStatus(taskId: string, status: string): void {
+  writeFileSync(join(paths.statusDir, `${taskId}.json`), JSON.stringify({ task_id: taskId, status }))
+}
+
+beforeEach(() => {
+  repoRoot = mkdtempSync(join(tmpdir(), 'orch-tasks-'))
+  paths = orchPaths(repoRoot)
+})
+
+afterEach(() => {
+  rmSync(repoRoot, { recursive: true, force: true })
+})
+
+describe('enqueueTask', () => {
+  it('leaves exactly one entry for a duplicate enqueue', () => {
+    createSpec('duplicate-task')
+    enqueueTask(paths, 'duplicate-task')
+    const second = enqueueTask(paths, 'duplicate-task')
+    expect(second.outcome).toBe('already-queued')
+    expect(queueLines()).toEqual(['duplicate-task:0'])
+  })
+
+  it.each(['merged', 'running', 'completed'])('skips a task whose status is %s', (status) => {
+    const taskId = `${status}-task`
+    createSpec(taskId)
+    writeTestStatus(taskId, status)
+    const result = enqueueTask(paths, taskId)
+    expect(result.outcome).toBe('already-processed')
+    expect(queueLines()).toEqual([])
+  })
+
+  it('enqueues a failed task for retry at the default depth', () => {
+    createSpec('failed-task')
+    writeTestStatus('failed-task', 'failed')
+    const result = enqueueTask(paths, 'failed-task')
+    expect(result.outcome).toBe('enqueued')
+    expect(queueLines()).toEqual(['failed-task:0'])
+  })
+
+  it('rejects a task without a specification', () => {
+    expect(() => enqueueTask(paths, 'missing-task')).toThrow(/specification not found/i)
+  })
+})
+
+describe('delegateTask', () => {
+  const DESC = 'Add an index on event.artist_id and prove it with the existing repository test'
+
+  beforeEach(() => {
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'task-requirements.md'),
+      '## Before reporting this done\n\n- Run the tests.\n',
+    )
+  })
+
+  it('creates a spec and enqueues exactly one task at depth 0', () => {
+    const result = delegateTask(paths, DESC)
+    expect(queueLines()).toHaveLength(1)
+    expect(result.taskId).toMatch(/^\d{8}_\d{6}_\d{3}_user-/)
+    expect(queueLines()[0]).toBe(`${result.taskId}:0`)
+
+    const spec = readFileSync(result.spec, 'utf8')
+    expect(spec).toContain(DESC)
+    expect(spec).toMatch(/^## Before reporting this done$/m)
+    const lines = spec.trimEnd().split('\n')
+    expect(lines[lines.length - 1]).toBe('TASK_COMPLETE')
+  })
+
+  it('resolves the same description to the one existing task and spec', () => {
+    delegateTask(paths, DESC)
+    delegateTask(paths, DESC)
+    expect(queueLines()).toHaveLength(1)
+    expect(readdirSync(paths.tasksDir)).toHaveLength(1)
+  })
+
+  it('writes the effort override file for --effort', () => {
+    delegateTask(paths, 'Rename the expense label helper for clarity', { effort: 'high' })
+    const effortDir = join(paths.queueDir, 'effort')
+    const files = readdirSync(effortDir)
+    expect(files).toHaveLength(1)
+    expect(readFileSync(join(effortDir, files[0] as string), 'utf8').trim()).toBe('high')
+  })
+
+  it('writes the inspect marker for --inspect', () => {
+    const result = delegateTask(paths, 'Report which pages skip the layout component', { inspect: true })
+    expect(existsSync(join(paths.queueDir, 'inspect', result.taskId))).toBe(true)
+  })
+
+  it('rejects a blank description', () => {
+    expect(() => delegateTask(paths, '   ')).toThrow(/description/i)
+  })
+})
+
+describe('newTaskSpec', () => {
+  it('writes the template and refuses to overwrite', () => {
+    const file = newTaskSpec(paths, 'manual-task')
+    const spec = readFileSync(file, 'utf8')
+    expect(spec).toContain('# manual-task')
+    expect(spec).toContain('## Completion Criteria')
+    expect(spec.trimEnd().endsWith('TASK_COMPLETE')).toBe(true)
+    expect(() => newTaskSpec(paths, 'manual-task')).toThrow(/already exists/)
+  })
+})
