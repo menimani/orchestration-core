@@ -912,7 +912,18 @@ export function createLoop(deps: LoopDeps) {
           forge.listOpenIssues(LABEL_IN_PROGRESS),
           forge.listOpenIssues(LABEL_MERGE_READY),
         ])
-        const remoteCount = new Set(issues.flat().map((issue) => issue.number)).size
+        const openIssues = new Map(issues.flat().map((issue) => [issue.number, issue]))
+        const pendingIssues = await Promise.all([...openIssues.values()].map(async (issue) => {
+          if (issuePromotionForIssue(paths, issue.number) !== undefined) return undefined
+          try {
+            const comments = await forge.listIssueComments(issue.number)
+            if (comments.some((comment) => /^MERGED: /.test(comment))) return undefined
+          } catch (error) {
+            log(`[loop] WARN: could not inspect issue #${issue.number} for merge metadata: ${(error as Error).message}`)
+          }
+          return issue.number
+        }))
+        const remoteCount = pendingIssues.filter((issueNumber) => issueNumber !== undefined).length
         if (remoteCount > 0) {
           log(`[loop] Waiting for ${remoteCount} remote issue-queue task(s) before entering the cycle gate`)
           return 'continue'

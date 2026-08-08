@@ -8,6 +8,7 @@ import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
+import { recordIssueForTask, recordIssuePromotion } from '../src/issueQueue.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
@@ -446,6 +447,33 @@ describe('remote issue queue idle detection', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
     expect(logText()).toContain('Waiting for 1 remote issue-queue task')
+  })
+
+  it('enters the gate when an in-progress issue has a local promotion record', async () => {
+    const loop = makeReviewLoop(true)
+    const issueNumber = await fakeForge.createIssue({
+      title: 'locally merged fix', body: '', labels: ['loop:in-progress'],
+    })
+    recordIssueForTask(paths, 'merged-task', issueNumber)
+    recordIssuePromotion(paths, 'merged-task', 'abc123', 'feature/run-9')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
+  })
+
+  it('enters the gate when an in-progress issue has a forge-visible merge marker', async () => {
+    const loop = makeReviewLoop(true)
+    const issueNumber = await fakeForge.createIssue({
+      title: 'remotely merged fix', body: '', labels: ['loop:in-progress'],
+    })
+    await fakeForge.commentIssue(issueNumber, 'MERGED: remote-task\nMerged by another checkout.')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
   })
 
   it('enters the gate and dispatches the review when no remote issue is open', async () => {
