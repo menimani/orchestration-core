@@ -16,6 +16,7 @@
     "start": "node src/cli.ts start",
     "status": "node src/cli.ts status",
     "logs": "node src/cli.ts logs",
+    "deploy": "node src/cli.ts deploy",
     "merge": "node src/cli.ts merge",
     "cleanup": "node src/cli.ts cleanup",
     "prune": "node src/cli.ts prune",

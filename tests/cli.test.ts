@@ -24,6 +24,19 @@ function daemonFile(name: string): string {
   return join(repoRoot, 'orchestration', 'queue', name)
 }
 
+describe('command registry', () => {
+  it('lists deploy as an available command', () => {
+    const result = spawnSync(process.execPath, [CLI, 'unknown'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('deploy')
+  })
+})
+
 describe('loop daemon ownership', () => {
   it('removes the PID and issue marker after a startup failure', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop'], {

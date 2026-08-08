@@ -9,6 +9,7 @@ import { cleanupTask } from './cleanup.ts'
 import { loadConfig } from './config.ts'
 import { createLoop } from './loop.ts'
 import { mergeTask, MergeError } from './merge.ts'
+import { deploy } from './deploy.ts'
 import { logFile, orchPaths, type OrchPaths } from './paths.ts'
 import { pruneTasks } from './prune.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
@@ -205,6 +206,30 @@ const cmdLogs: Command = async (paths, args) => {
   }
   process.stdout.write(readFileSync(log, 'utf8'))
   return 0
+}
+
+const cmdDeploy: Command = async (paths, args) => {
+  if (args.length !== 0) {
+    console.error('Usage: deploy')
+    return 1
+  }
+  const config = loadConfig()
+  const project = await loadProject(config.project)
+  if (project.deployment === undefined) {
+    console.error(`Project '${project.name}' does not define a deployment.`)
+    return 1
+  }
+  const ref = execFileSync('git', ['branch', '--show-current'], {
+    cwd: paths.repoRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+  }).trim()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  const result = await deploy(project.deployment, ref, forge)
+  const lastModified = result.lastModified?.toISOString() ?? '(missing or invalid)'
+  console.log(`Workflow run ${result.run.id} completed successfully.`)
+  console.log(`${result.verified ? 'PASS' : 'FAIL'}: deployment content verification; dispatch=${result.dispatchedAt.toISOString()} Last-Modified=${lastModified}`)
+  return result.verified ? 0 : 1
 }
 
 const cmdMerge: Command = async (paths, args) => {
@@ -461,6 +486,7 @@ const commands: Record<string, Command> = {
   'start': cmdStart,
   'status': cmdStatus,
   'logs': cmdLogs,
+  'deploy': cmdDeploy,
   'merge': cmdMerge,
   'cleanup': cmdCleanup,
   'prune': cmdPrune,

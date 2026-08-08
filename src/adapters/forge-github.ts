@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type {
-  CheckConclusion, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus,
+  CheckConclusion, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus, WorkflowRun,
 } from './forge.ts'
 
 const execFileAsync = promisify(execFile)
@@ -50,6 +50,18 @@ async function gh(repoRoot: string, args: string[]): Promise<string> {
 }
 
 export function createGithubForge(repoRoot: string = process.cwd()): Forge {
+  const parseWorkflowRun = (data: {
+    databaseId: number
+    createdAt: string
+    status: string
+    conclusion: string | null
+  }): WorkflowRun => ({
+    id: data.databaseId,
+    createdAt: data.createdAt,
+    status: data.status,
+    conclusion: data.conclusion,
+  })
+
   return {
     async prStatus(ref: string): Promise<PrStatus> {
       let stdout: string
@@ -117,6 +129,38 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
 
     async markPrReady(ref: string): Promise<void> {
       await gh(repoRoot, ['pr', 'ready', ref])
+    },
+
+    async dispatchWorkflow(workflow: string, ref: string): Promise<void> {
+      await gh(repoRoot, ['workflow', 'run', workflow, '--ref', ref])
+    },
+
+    async findWorkflowRun(workflow: string, createdAfter: Date): Promise<WorkflowRun | undefined> {
+      const stdout = await gh(repoRoot, [
+        'run', 'list', '--workflow', workflow, '--limit', '20',
+        '--json', 'databaseId,createdAt,status,conclusion',
+      ])
+      const runs = (JSON.parse(stdout) as Array<{
+        databaseId: number
+        createdAt: string
+        status: string
+        conclusion: string | null
+      }>)
+        .filter((run) => new Date(run.createdAt).getTime() >= createdAfter.getTime())
+        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      return runs[0] === undefined ? undefined : parseWorkflowRun(runs[0])
+    },
+
+    async getWorkflowRun(runId: number): Promise<WorkflowRun> {
+      const stdout = await gh(repoRoot, [
+        'run', 'view', String(runId), '--json', 'databaseId,createdAt,status,conclusion',
+      ])
+      return parseWorkflowRun(JSON.parse(stdout) as {
+        databaseId: number
+        createdAt: string
+        status: string
+        conclusion: string | null
+      })
     },
 
     async currentUser(): Promise<string> {

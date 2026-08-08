@@ -11,6 +11,13 @@ function check(label: string, taskGate: 'full' | 'light' = 'full') {
 }
 
 describe('gate commands', () => {
+  it('declares the production deployment', () => {
+    expect(shioraProject.deployment).toEqual({
+      workflow: 'deploy.yml',
+      url: 'https://shiora.jp',
+    })
+  })
+
   it('runs the full suites by default', () => {
     expect(check('Frontend gate', 'full').command).toBe('npm run test')
     expect(check('Backend gate', 'full').command).toBe('mvn clean test -q')
