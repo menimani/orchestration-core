@@ -1,10 +1,9 @@
 # Orchestration TypeScript rewrite — behavior specification
 
 This is the completion checklist for the big-bang rewrite decided on 2026-08-08. The
-rewrite ships as a single cutover: `orchestrate.sh` becomes a thin wrapper invoking
-`node orchestration/ts/src/cli.ts`, and the old `bin/*.sh` implementation is deleted only
-after one full TS-driven run completes and ships cleanly. Until then it stays in-tree,
-uncalled.
+cutover is complete: the TS-driven validation run (run 9) completed and shipped on
+2026-08-08, and the bash implementation was deleted. Every numbered behavior below now
+lives only here and in the vitest suite that pins it.
 
 Every numbered item below is a behavior the bash implementation learned the hard way
 (sources: `orchestration/CLAUDE.md`, `docs/orchestration/*.html`, `bin/*.sh`). The

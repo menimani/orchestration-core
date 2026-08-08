@@ -42,9 +42,7 @@ describe('check selection', () => {
     expect(check('English only').appliesTo).toBeUndefined()
   })
 
-  it('keeps the bash harness as a fallback only while the TS gate is absent', () => {
-    const bash = check('Orchestration tests')
-    expect(bash.unless).toBe('orchestration/ts/package.json')
+  it('gates orchestration changes on the TS suite', () => {
     expect(check('Orchestration gate').requires).toBe('orchestration/ts/package.json')
   })
 })

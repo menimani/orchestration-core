@@ -42,16 +42,6 @@ export const shioraProject: ProjectAdapter = {
         requires: 'orchestration/ts/package.json',
       },
       {
-        // The bash test harness stays the gate only while the old implementation is
-        // still in the tree and the TS one is not.
-        label: 'Orchestration tests',
-        cwd: '',
-        command: 'bash orchestration/tests/run-all.sh',
-        appliesTo: (changed) => changed.some((file) => file.startsWith('orchestration/')),
-        requires: 'orchestration/tests/run-all.sh',
-        unless: 'orchestration/ts/package.json',
-      },
-      {
         label: 'Translation completeness',
         cwd: '',
         command: 'node checks/i18n-keys.js',
