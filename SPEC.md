@@ -18,9 +18,16 @@ from or equivalent to `orchestration/tests/*.sh`.
 - `tsc --noEmit` joins the repository checks; vitest runs the test suite.
 - No `jq` dependency anywhere (this deletes the Windows-jq-CRLF bug class; the invariant
   it protected — values read from status files compare clean — still holds and is tested).
-- The `orchestrate.sh` command surface is frozen: same commands, same arguments, same
-  environment variables, same output lines the skills and tests key on (`Enqueued:`,
-  `Created:`, `CYCLE_COMPLETE:`, `LOOP_DONE:`, `FAILED:`, `[loop]` prefixes).
+- The command surface is the `scripts` block of `orchestration/ts/package.json` —
+  `orchestrate.sh` is not kept (decided 2026-08-08; supersedes the frozen-wrapper plan).
+  Each current command maps to a script of the same name (`npm run -C orchestration/ts
+  loop`, `... delegate -- "<description>"`, `... loop-status`, `queue`, `stop`, `start`,
+  `status`, `logs`, `merge`, `cleanup`, `prune`, `new`, `enqueue`), all dispatching into
+  `src/cli.ts`. The skills (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
+  the npm form as part of the cutover. What stays frozen: the environment variable
+  names (they pass through npm unchanged, so launch commands keep their shape) and the
+  output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
+  `LOOP_DONE:`, `FAILED:`, `[loop]` prefixes).
 
 ## Task lifecycle
 

@@ -7,7 +7,20 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "loop": "node src/cli.ts loop",
+    "loop-status": "node src/cli.ts loop-status",
+    "queue": "node src/cli.ts queue",
+    "stop": "node src/cli.ts stop",
+    "delegate": "node src/cli.ts delegate",
+    "start": "node src/cli.ts start",
+    "status": "node src/cli.ts status",
+    "logs": "node src/cli.ts logs",
+    "merge": "node src/cli.ts merge",
+    "cleanup": "node src/cli.ts cleanup",
+    "prune": "node src/cli.ts prune",
+    "new": "node src/cli.ts new",
+    "enqueue": "node src/cli.ts enqueue"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
