@@ -602,14 +602,15 @@ export async function heartbeatIssueForTask(
 export async function commentOnIssueMerge(
   forge: Forge,
   issueNumber: number,
+  taskId: string,
   mergeCommit: string,
   runBranch: string,
 ): Promise<void> {
-  await forge.commentIssue(issueNumber, issueMergeComment(mergeCommit, runBranch))
+  await forge.commentIssue(issueNumber, issueMergeComment(taskId, mergeCommit, runBranch))
 }
 
-export function issueMergeComment(mergeCommit: string, runBranch: string): string {
-  return `Merged as ${mergeCommit} into run branch ${runBranch}. This issue closes on promotion.`
+export function issueMergeComment(taskId: string, mergeCommit: string, runBranch: string): string {
+  return `MERGED: ${taskId}\nMerged as ${mergeCommit} into run branch ${runBranch}. This issue closes on promotion.`
 }
 
 export type ClaimResult
@@ -691,8 +692,9 @@ export async function claimIssue(
 /**
  * Return leases whose holder went quiet: in-progress issues not updated for the lease
  * window go back to ready, unassigned. A locally merged task instead refreshes its
- * issue until promotion closes it. A crashed worker leaves no other trace — on a
- * single machine a leftover worktree is visible, across machines only this is.
+ * issue until promotion closes it; a forge-visible merge marker protects the same
+ * issue in other checkouts. A crashed worker leaves no other trace — on a single
+ * machine a leftover worktree is visible, across machines only this is.
  */
 export async function reapStaleLeases(
   forge: Forge,
@@ -709,8 +711,11 @@ export async function reapStaleLeases(
     const promotion = issuePromotionForIssue(paths, issue.number)
     if (promotion !== undefined) {
       await commentOnIssueMerge(
-        forge, issue.number, promotion.mergeCommit, promotion.runBranch,
+        forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
       )
+      continue
+    }
+    if ((await forge.listIssueComments(issue.number)).some((comment) => /^MERGED: /.test(comment))) {
       continue
     }
     for (const assignee of issue.assignees) {
