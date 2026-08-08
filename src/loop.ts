@@ -119,6 +119,12 @@ export function createLoop(deps: LoopDeps) {
       .some((placeholder) => decoded.includes(placeholder))
   }
 
+  function reportsNothing(text: string): boolean {
+    const normalized = text.trim().replace(/[.!]+$/, '').toLowerCase()
+    return ['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
+      .includes(normalized)
+  }
+
   /**
    * The concrete NEXT_TASK findings in a final response. Enqueueing, review gating and
    * scan-yield accounting all consume this filter, so a line ignored by one cannot hold
@@ -129,7 +135,7 @@ export function createLoop(deps: LoopDeps) {
     return readFileSync(finalFile, 'utf8').split(/\r?\n/)
       .filter((line) => line.startsWith('NEXT_TASK:'))
       .map((line) => line.replace(/^NEXT_TASK:\s*/, '').trim())
-      .filter((desc) => desc !== '' && !hasFormatPlaceholder(desc))
+      .filter((desc) => desc !== '' && !hasFormatPlaceholder(desc) && !reportsNothing(desc))
   }
 
   function appendSharedRequirements(newId: string, parentId: string, desc: string): void {

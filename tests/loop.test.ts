@@ -117,6 +117,22 @@ describe('actionable findings', () => {
       '[BUG] an ordinary finding',
     ])
   })
+
+  it('ignores descriptions that only report no findings', () => {
+    const loop = makeLoop()
+    writeFinal('t4', [
+      'NEXT_TASK: None.',
+      'NEXT_TASK: nothing to report',
+    ].join('\n'))
+    expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
+  })
+
+  it('keeps a real finding that contains None', () => {
+    const loop = makeLoop()
+    const finding = '[BUG] `src/x.ts` returns None instead of an empty list'
+    writeFinal('t5', `NEXT_TASK: ${finding}\n`)
+    expect(loop.actionableFindings(finalMessageFile(paths, 't5'))).toEqual([finding])
+  })
 })
 
 describe('CI check normalization (forge adapter)', () => {
@@ -205,6 +221,17 @@ describe('scan yield', () => {
     loop.recordScanYield('20250101_000000_003_scan')
     const lines = readFileSync(join(paths.queueDir, 'scan-yield-3'), 'utf8').trim().split('\n')
     expect(lines[lines.length - 1]).toBe('empty')
+  })
+
+  it('records empty when the final message only reports no findings', () => {
+    const loop = makeLoop()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '3\n')
+    writeFinal('20250101_000000_004_scan', [
+      'NEXT_TASK: None.',
+      'NEXT_TASK: nothing to report',
+    ].join('\n'))
+    loop.recordScanYield('20250101_000000_004_scan')
+    expect(readFileSync(join(paths.queueDir, 'scan-yield-3'), 'utf8')).toContain('empty')
   })
 
   it('folds: findings reset the counter, all-empty increments once, no record leaves it alone', () => {
