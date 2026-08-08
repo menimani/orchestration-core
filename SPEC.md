@@ -195,13 +195,14 @@ from or equivalent to `orchestration/tests/*.sh`.
     issue as a local task through the standard template (completion marker included),
     honoring an `Effort:` field. Daemons sharing an account are indistinguishable
     and may both materialize the issue, so that configuration is unsupported. A
-    running linked task refreshes a `Heartbeat: <ISO timestamp>` line in its issue body
-    at least every 30 minutes, moving the forge's `updatedAt` lease clock. Heartbeat
-    timestamps are tracked locally under `queue/heartbeat`; one failed forge attempt
-    logs one warning and never fails the poll. A locally running mapped task is excluded
-    from that poll's reaping even when its heartbeat fails. An in-progress issue without
-    heartbeats for `ISSUE_LEASE_HOURS` (default 3) is reaped back to ready, unassigned, so
-    lease expiry identifies a worker that is no longer polling rather than a long-running task.
+    running linked task adds a `Heartbeat: <ISO timestamp>` issue comment at least every
+    30 minutes, moving the forge's `updatedAt` lease clock without changing the issue
+    body. Heartbeat timestamps are tracked locally under `queue/heartbeat`; one failed
+    forge attempt logs one warning and never fails the poll. A locally running mapped
+    task is excluded from that poll's reaping even when its heartbeat fails. An in-progress
+    issue without heartbeats for `ISSUE_LEASE_HOURS` (default 3) is reaped back to
+    ready, unassigned, so lease expiry identifies a worker that is no longer polling
+    rather than a long-running task.
 34. The merge commit of an issue-born task carries `closes #N`, so the forge closes
     the issue when the promotion PR lands the commit on the default branch. Immediately
     after merging, the worker comments with the merge commit and run branch and states
