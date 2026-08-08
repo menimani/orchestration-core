@@ -37,7 +37,7 @@ export const shioraProject: ProjectAdapter = {
         // fails on missing tools, not on its diff.
         label: 'Orchestration gate',
         cwd: 'orchestration/ts',
-        command: 'npm ci --no-audit --no-fund && npm run typecheck && npm run test',
+        command: 'npm ci --no-audit --no-fund && npm run typecheck && npm run test -- --pool=threads --poolOptions.threads.singleThread',
         appliesTo: (changed) => changed.some((file) => file.startsWith('orchestration/')),
         requires: 'orchestration/ts/package.json',
       },

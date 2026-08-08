@@ -43,7 +43,11 @@ describe('check selection', () => {
   })
 
   it('gates orchestration changes on the TS suite', () => {
-    expect(check('Orchestration gate').requires).toBe('orchestration/ts/package.json')
+    const orchestration = check('Orchestration gate')
+    expect(orchestration.command).toBe(
+      'npm ci --no-audit --no-fund && npm run typecheck && npm run test -- --pool=threads --poolOptions.threads.singleThread',
+    )
+    expect(orchestration.requires).toBe('orchestration/ts/package.json')
   })
 })
 
