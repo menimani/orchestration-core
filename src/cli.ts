@@ -1,14 +1,28 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { spawn, execFileSync, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { orchPaths, type OrchPaths } from './paths.ts'
+import { createInterface } from 'node:readline/promises'
+import { loadForge } from './adapters/forge.ts'
+import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
+import { cleanupTask } from './cleanup.ts'
+import { loadConfig } from './config.ts'
+import { createLoop } from './loop.ts'
+import { mergeTask, MergeError } from './merge.ts'
+import { logFile, orchPaths, type OrchPaths } from './paths.ts'
+import { pruneTasks } from './prune.ts'
+import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
+import { startTask } from './start.ts'
+import { delegateTask, enqueueTask, isLoopRunning, newTaskSpec } from './tasks.ts'
 
 // The command surface: each package.json script dispatches here with the command name
-// as the first argument. Commands are registered as they are ported from bin/*.sh; an
-// unported name fails loudly with the list of what exists, so nothing pretends to work.
+// as the first argument. The key output lines (`Enqueued:`, `Created:`,
+// `CYCLE_COMPLETE:`, `LOOP_DONE:`, `FAILED:`) are frozen contract — skills and tests
+// key on them.
 
 type Command = (paths: OrchPaths, args: string[]) => Promise<number>
+
+const EFFORTS = new Set(['minimal', 'low', 'medium', 'high'])
 
 function repoRoot(): string {
   return execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
@@ -23,43 +37,387 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-const loopStatus: Command = async (paths) => {
-  const pidFile = join(paths.queueDir, 'loop.pid')
-  let running = false
-  let pid = ''
-  if (existsSync(pidFile)) {
-    pid = readFileSync(pidFile, 'utf8').trim()
-    running = /^\d+$/.test(pid) && isPidAlive(Number(pid))
+const cmdNew: Command = async (paths, args) => {
+  const taskId = args[0]
+  if (taskId === undefined) {
+    console.error('Usage: new <task-id>')
+    return 1
   }
-  console.log(running ? `loop: running (PID=${pid})` : 'loop: not running')
+  const file = newTaskSpec(paths, taskId)
+  console.log(`Created: ${file}`)
+  return 0
+}
 
-  const backlogFile = join(paths.queueDir, 'backlog.txt')
-  const queued = existsSync(backlogFile)
-    ? readFileSync(backlogFile, 'utf8').split(/\r?\n/).filter((line) => line !== '')
-    : []
-  console.log(queued.length === 0
-    ? 'queued: none'
-    : `queued: ${queued.map((line) => line.split(':')[0]).join(', ')}`)
-
-  console.log('in flight:')
-  const { readdirSync } = await import('node:fs')
-  const inFlight = readdirSync(paths.statusDir)
-    .filter((name) => name.endsWith('.json'))
-    .map((name) => readStatus(paths, name.replace(/\.json$/, '')))
-    .filter((status) => status !== undefined && status.status === 'running'
-      && status.pid !== null && isPidAlive(status.pid))
-  if (inFlight.length === 0) {
-    console.log('  (nothing)')
+const cmdEnqueue: Command = async (paths, args) => {
+  const taskId = args[0]
+  if (taskId === undefined) {
+    console.error('Usage: enqueue <task-id> [depth]')
+    return 1
+  }
+  const depth = args[1] !== undefined && /^\d+$/.test(args[1]) ? Number(args[1]) : 0
+  const result = enqueueTask(paths, taskId, depth)
+  if (result.outcome === 'already-queued') {
+    console.log(`WARN: ${taskId} is already in the queue`)
+  } else if (result.outcome === 'already-processed') {
+    console.log(`WARN: ${taskId} has already been processed or is running (status=${result.status}) — skipping`)
   } else {
-    for (const status of inFlight) {
-      console.log(`  ${status?.task_id} (pid=${status?.pid})`)
-    }
+    console.log(`Enqueued: ${taskId} (depth=${depth})`)
   }
   return 0
 }
 
+const cmdDelegate: Command = async (paths, args) => {
+  let description = ''
+  let effort: ReasoningEffort | undefined
+  let inspect = false
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === '--effort') {
+      const value = args[++i]
+      if (value === undefined || !EFFORTS.has(value)) {
+        console.error('ERROR: --effort must be minimal, low, medium or high')
+        return 1
+      }
+      effort = value as ReasoningEffort
+    } else if (arg === '--inspect') {
+      inspect = true
+    } else if (description !== '') {
+      console.error('ERROR: only one description is accepted; quote it as a single argument')
+      return 1
+    } else {
+      description = arg
+    }
+  }
+  if (description.trim() === '') {
+    console.error('Usage: delegate "<description>" [--effort minimal|low|medium|high] [--inspect]')
+    return 1
+  }
+
+  const result = delegateTask(paths, description, { effort, inspect })
+  if (result.specReused) {
+    console.log(`Reusing existing specification: ${result.spec}`)
+  } else {
+    console.log(`Created: ${result.spec}`)
+  }
+  if (effort !== undefined) console.log(`Effort override: ${effort}`)
+  if (inspect) console.log('Marked as an inspection: no commits expected')
+  if (result.enqueue.outcome === 'enqueued') {
+    console.log(`Enqueued: ${result.taskId} (depth=0)`)
+  } else if (result.enqueue.outcome === 'already-queued') {
+    console.log(`WARN: ${result.taskId} is already in the queue`)
+  }
+  if (isLoopRunning(paths)) {
+    console.log('The loop is running and starts this task on its next poll.')
+  } else {
+    console.log('The loop is not running. The task waits in the backlog until the loop starts,')
+    console.log(`or run the start command with ${result.taskId} to run it now.`)
+  }
+  return 0
+}
+
+const cmdStart: Command = async (paths, args) => {
+  const taskId = args[0]
+  if (taskId === undefined) {
+    console.error('Usage: start <task-id> [--effort minimal|low|medium|high] [--model <model>]')
+    return 1
+  }
+  let effort = (process.env['CODEX_EFFORT'] ?? '') as ReasoningEffort | ''
+  let model = process.env['CODEX_MODEL'] ?? ''
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--effort') {
+      const value = args[++i]
+      if (value === undefined || !EFFORTS.has(value)) {
+        console.error('Error: --effort must be minimal, low, medium or high')
+        return 1
+      }
+      effort = value as ReasoningEffort
+    } else if (args[i] === '--model') {
+      model = args[++i] ?? ''
+    } else {
+      console.error(`Error: unknown option: ${args[i]}`)
+      return 1
+    }
+  }
+  const config = loadConfig()
+  const runner = await loadRunner(config.runner)
+  const result = await startTask(paths, runner, taskId, {
+    effort: effort === '' ? 'medium' : effort,
+    model: model === '' ? undefined : model,
+  })
+  if (result.outcome === 'already-running') {
+    console.log(`[start] ${taskId} is already running (skipping)`)
+  }
+  return 0
+}
+
+const cmdStatus: Command = async (paths, args) => {
+  const taskId = args[0]
+  if (taskId !== undefined) {
+    const status = await refreshTask(paths, taskId)
+    if (status === undefined) {
+      console.error(`Task not found: ${taskId}`)
+      return 1
+    }
+    console.log(`${taskId.padEnd(20)} ${status.status.padEnd(10)} pid=${status.pid ?? ''}`)
+    return 0
+  }
+  const lines = await refreshAll(paths)
+  if (lines.length === 0) {
+    console.log('There are no running or completed tasks.')
+    return 0
+  }
+  for (const line of lines) console.log(line)
+  return 0
+}
+
+const cmdLogs: Command = async (paths, args) => {
+  const taskId = args[0]
+  if (taskId === undefined) {
+    console.error('Usage: logs <task-id> [-f]')
+    return 1
+  }
+  const log = logFile(paths, taskId)
+  if (!existsSync(log)) {
+    console.error(`Log not found: ${log}`)
+    return 1
+  }
+  if (args[1] === '-f') {
+    const result = spawnSync('tail', ['-f', log], { stdio: 'inherit' })
+    return result.status ?? 0
+  }
+  process.stdout.write(readFileSync(log, 'utf8'))
+  return 0
+}
+
+const cmdMerge: Command = async (paths, args) => {
+  const taskId = args[0]
+  if (taskId === undefined) {
+    console.error('Usage: merge <task-id> [--yes] [--test-cmd "cmd"]')
+    return 1
+  }
+  let autoYes = false
+  let testCmd: string | undefined
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--yes') autoYes = true
+    else if (args[i] === '--test-cmd') testCmd = args[++i]
+    else {
+      console.error(`Unknown option: ${args[i]}`)
+      return 1
+    }
+  }
+  const config = loadConfig()
+  if (!autoYes) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    const answer = await rl.question(`Merge task/${taskId} into the current branch? [y/N] `)
+    rl.close()
+    if (answer !== 'y' && answer !== 'Y') {
+      console.log('Aborted.')
+      return 0
+    }
+  }
+  try {
+    await mergeTask(paths, taskId, {
+      taskGate: config.taskGate,
+      testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
+      skipAutoTest: config.skipAutoTest,
+    })
+    return 0
+  } catch (error) {
+    if (error instanceof MergeError) {
+      console.error(error.message)
+      return 1
+    }
+    throw error
+  }
+}
+
+const cmdCleanup: Command = async (paths, args) => {
+  const taskId = args[0]
+  if (taskId === undefined) {
+    console.error('Usage: cleanup <task-id>')
+    return 1
+  }
+  cleanupTask(paths, taskId)
+  return 0
+}
+
+const cmdPrune: Command = async (paths, args) => {
+  let days = 14
+  let dryRun = false
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--days') {
+      const value = args[++i]
+      if (value === undefined || !/^\d+$/.test(value)) {
+        console.error('ERROR: --days requires a number')
+        return 1
+      }
+      days = Number(value)
+    } else if (args[i] === '--dry-run') {
+      dryRun = true
+    } else {
+      console.error('Usage: prune [--days N] [--dry-run]')
+      return 1
+    }
+  }
+  const report = pruneTasks(paths, { days, dryRun })
+  for (const kept of report.kept) console.log(kept)
+  for (const removed of report.removed) {
+    console.log(`${dryRun ? 'would remove' : 'removed'}: ${removed}`)
+  }
+  console.log(`Pruned the artifacts of ${report.prunedTasks} finished tasks older than ${days} days.`)
+  if (dryRun) console.log('Dry run: nothing was actually deleted.')
+  return 0
+}
+
+const cmdQueue: Command = async (paths) => {
+  const backlog = join(paths.queueDir, 'backlog.txt')
+  console.log('=== Queue (backlog) ===')
+  const lines = existsSync(backlog)
+    ? readFileSync(backlog, 'utf8').split(/\r?\n/).filter((line) => line !== '')
+    : []
+  if (lines.length === 0) {
+    console.log('  (empty)')
+  } else {
+    for (const line of lines) {
+      const sep = line.indexOf(':')
+      console.log(`  ${line.slice(0, sep).padEnd(30)} depth=${line.slice(sep + 1)}`)
+    }
+  }
+  console.log('')
+  console.log('=== Task Status ===')
+  return cmdStatus(paths, [])
+}
+
+const cmdLoopStatus: Command = async (paths) => {
+  // A compact answer to "is it running, and what is in flight". Always exits 0 so it
+  // is safe to embed in a skill preamble.
+  const pidFile = join(paths.queueDir, 'loop.pid')
+  const pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8').trim() : ''
+  if (/^\d+$/.test(pid) && isPidAlive(Number(pid))) {
+    console.log(`loop: running (PID=${pid})`)
+  } else {
+    console.log('loop: not running')
+  }
+
+  const backlog = join(paths.queueDir, 'backlog.txt')
+  const queued = existsSync(backlog)
+    ? readFileSync(backlog, 'utf8').split(/\r?\n/).filter((line) => line !== '').length
+    : 0
+  console.log(queued === 0 ? 'queued: none' : `queued: ${queued}`)
+
+  // Only tasks that still need a decision; merged and cleaned-up ones need none.
+  console.log('in flight:')
+  let found = false
+  for (const taskId of listTaskIds(paths)) {
+    const status = readStatus(paths, taskId)?.status
+    if (status === 'running' || status === 'completed' || status === 'failed') {
+      console.log(`  ${taskId.padEnd(46)} ${status}`)
+      found = true
+    }
+  }
+  if (!found) console.log('  (nothing)')
+  return 0
+}
+
+const cmdStop: Command = async (paths) => {
+  writeFileSync(join(paths.queueDir, 'stop'), '')
+  console.log('Created the stop file. The loop will exit on the next poll.')
+  return 0
+}
+
+const cmdLoop: Command = async (paths, args) => {
+  const loopLog = join(paths.logsDir, 'loop.log')
+  if (args[0] === '--daemon' || args[0] === '-d') {
+    const fd = openSync(loopLog, 'a')
+    const child = spawn(process.execPath, [join(paths.root, 'ts', 'src', 'cli.ts'), 'loop'], {
+      cwd: paths.repoRoot,
+      detached: true,
+      stdio: ['ignore', fd, fd],
+      windowsHide: true,
+    })
+    child.unref()
+    console.log(`Started the loop in the background (PID=${child.pid})`)
+    console.log(`Log: ${loopLog}`)
+    console.log('Check: npm run -C orchestration/ts loop-status')
+    console.log('Stop: npm run -C orchestration/ts stop')
+    return 0
+  }
+  return runLoopDaemon(paths)
+}
+
+async function runLoopDaemon(paths: OrchPaths): Promise<number> {
+  const config = loadConfig()
+  const pidFile = join(paths.queueDir, 'loop.pid')
+  const stopFile = join(paths.queueDir, 'stop')
+  const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+
+  // PID lock: one loop per repository.
+  if (existsSync(pidFile)) {
+    const existing = readFileSync(pidFile, 'utf8').trim()
+    if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
+      console.error(`[loop] ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
+      return 1
+    }
+    console.log('[loop] WARN: Removing stale PID file')
+    rmSync(pidFile, { force: true })
+  }
+  writeFileSync(pidFile, `${process.pid}\n`)
+  const releasePid = (): void => {
+    try {
+      rmSync(pidFile, { force: true })
+    } catch {
+      // nothing to release
+    }
+  }
+  process.on('exit', releasePid)
+  process.on('SIGINT', () => process.exit(0))
+  process.on('SIGTERM', () => process.exit(0))
+
+  // A stale stop file is cleared only after the PID lock is taken, so another
+  // instance's signal is never removed.
+  rmSync(stopFile, { force: true })
+  if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
+
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  const runner = await loadRunner(config.runner)
+  const log = (line: string): void => console.log(line)
+  const loop = createLoop({ paths, config, forge, runner, log, now: () => new Date() })
+
+  loop.initializeSessionStateForBranch()
+
+  log(`[loop] Start | MAX_PARALLEL=${config.maxParallel} POLL_INTERVAL=${config.pollIntervalSeconds}s AUTO_MERGE=${config.autoMerge}`)
+  log(`[loop]      | MAX_GROWTH_DEPTH=${config.maxGrowthDepth} MAX_TOTAL_TASKS=${config.maxTotalTasks}`)
+  log(`[loop]      | SCAN_ENABLED=${config.scanEnabled} MAX_SCAN_CYCLES=${config.maxScanCycles}`)
+  log(`[loop]      | AUTO_PR=${config.autoPr} REVIEW_ENABLED=${config.reviewEnabled} CI_GATE_ENABLED=${config.ciGateEnabled}`)
+  log(`[loop]      | AUTO_REVIEW=${config.autoReview} MAX_REVIEW_ROUNDS=${config.maxReviewRounds} REVIEW_EVERY_N_CYCLES=${config.reviewEveryNCycles} MAX_FINAL_REVIEW_ROUNDS=${config.maxFinalReviewRounds}`)
+  log(`[loop]      | MAX_BURST_FAILURES=${config.maxBurstFailures} MAX_CONSECUTIVE_MERGE_FAILURES=${config.maxConsecutiveMergeFailures}`)
+  log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} TASK_GATE=${config.taskGate}`
+    + `${config.scanModel === '' ? '' : ` SCAN_MODEL=${config.scanModel}`}${config.taskModel === '' ? '' : ` TASK_MODEL=${config.taskModel}`}`)
+  log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner}`)
+  log('[loop] Stop: npm run -C orchestration/ts stop or Ctrl+C')
+  log('')
+
+  for (;;) {
+    const outcome = await loop.poll()
+    if (outcome !== 'continue') return 0
+    await new Promise((resolve) => setTimeout(resolve, config.pollIntervalSeconds * 1000))
+  }
+}
+
 const commands: Record<string, Command> = {
-  'loop-status': loopStatus,
+  'new': cmdNew,
+  'enqueue': cmdEnqueue,
+  'delegate': cmdDelegate,
+  'start': cmdStart,
+  'status': cmdStatus,
+  'logs': cmdLogs,
+  'merge': cmdMerge,
+  'cleanup': cmdCleanup,
+  'prune': cmdPrune,
+  'queue': cmdQueue,
+  'loop': cmdLoop,
+  'loop-status': cmdLoopStatus,
+  'stop': cmdStop,
 }
 
 async function main(): Promise<number> {
@@ -70,22 +428,17 @@ async function main(): Promise<number> {
   }
   const command = commands[commandName]
   if (command === undefined) {
-    // Two different situations end up here, and only one of them is transitional.
-    // While the bash implementation is still in the tree, a name it knows is simply
-    // not ported yet, and pointing at it helps. Once the cutover has deleted it, a
-    // name reaching this branch is a missing or mistyped command, and the last thing
-    // the message may do is recommend a file that no longer exists.
-    const bashEntry = join(repoRoot(), 'orchestration', 'orchestrate.sh')
-    if (existsSync(bashEntry)) {
-      console.error(`Not ported yet: '${commandName}'. Until the cutover, run:`)
-      console.error(`  ${bashEntry} ${commandName}`)
-    } else {
-      console.error(`Unknown command: '${commandName}'.`)
-    }
+    console.error(`Unknown command: '${commandName}'.`)
     console.error(`Available commands: ${Object.keys(commands).join(', ')}`)
     return 1
   }
-  return command(orchPaths(repoRoot()), args)
+  const paths = orchPaths(repoRoot())
+  try {
+    return await command(paths, args)
+  } catch (error) {
+    console.error((error as Error).message)
+    return 1
+  }
 }
 
 process.exitCode = await main()
