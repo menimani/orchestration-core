@@ -25,6 +25,7 @@ describe('loadConfig', () => {
       maxConsecutiveMergeFailures: 3,
       scanEffort: 'high',
       taskEffort: 'medium',
+      reviewEffort: 'high',
       scanParallel: 2,
       taskGate: 'full',
       forge: 'github',
@@ -38,11 +39,13 @@ describe('loadConfig', () => {
       REVIEW_EVERY_N_CYCLES: '3',
       TASK_GATE: 'light',
       AUTO_REVIEW: 'true',
+      REVIEW_EFFORT: 'low',
     })
     expect(config.maxParallel).toBe(12)
     expect(config.reviewEveryNCycles).toBe(3)
     expect(config.taskGate).toBe('light')
     expect(config.autoReview).toBe(true)
+    expect(config.reviewEffort).toBe('low')
   })
 
   it('clamps SCAN_PARALLEL to the four defined checklist groups', () => {
@@ -51,6 +54,10 @@ describe('loadConfig', () => {
 
   it('rejects a TASK_GATE value that is neither full nor light', () => {
     expect(() => loadConfig({ TASK_GATE: 'fast' })).toThrow(/TASK_GATE/)
+  })
+
+  it('rejects an unsupported reasoning effort', () => {
+    expect(() => loadConfig({ REVIEW_EFFORT: 'maximum' })).toThrow(/REVIEW_EFFORT/)
   })
 
   it('rejects a non-integer numeric setting', () => {

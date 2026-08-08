@@ -279,11 +279,12 @@ describe('runAutoReview', () => {
   }
 
   it('dispatches a review on first entry and resumes after a clean one', () => {
-    const loop = makeLoop()
+    const loop = makeLoop({ reviewEffort: 'low' })
     expect(loop.runAutoReview(7, false)).toBe(false)
     expect(readFileSync(join(paths.queueDir, 'review-round-7'), 'utf8').trim()).toBe('1')
     const reviewId = lastReviewId(7)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(reviewId)
+    expect(readFileSync(join(paths.queueDir, 'effort', reviewId), 'utf8').trim()).toBe('low')
 
     writeRawStatus(reviewId, 'completed')
     writeFinal(reviewId, '')

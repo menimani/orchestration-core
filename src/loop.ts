@@ -488,6 +488,9 @@ export function createLoop(deps: LoopDeps) {
       log('[loop] WARN: Could not write the review specification — resuming without review')
       return true
     }
+    const effortDir = join(paths.queueDir, 'effort')
+    mkdirSync(effortDir, { recursive: true })
+    writeFileSync(join(effortDir, reviewId), `${config.reviewEffort}\n`)
     writeFileSync(roundFile, `${rounds + 1}\n`)
     writeFileSync(idFile, `${reviewId}\n`)
     try {

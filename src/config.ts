@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from './adapters/runner.ts'
+
 // Every setting the loop honors, with the defaults the bash implementation shipped.
 // The environment variable names are part of the frozen CLI contract (SPEC.md,
 // "Runtime"): launch commands and the loop-start skill keep working unchanged.
@@ -23,8 +25,9 @@ export interface LoopConfig {
   maxFinalReviewRounds: number
   maxBurstFailures: number
   maxConsecutiveMergeFailures: number
-  scanEffort: string
-  taskEffort: string
+  scanEffort: ReasoningEffort
+  taskEffort: ReasoningEffort
+  reviewEffort: ReasoningEffort
   scanModel: string
   taskModel: string
   scanParallel: number
@@ -59,6 +62,14 @@ function str(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
   return raw === undefined || raw === '' ? fallback : raw
 }
 
+function effort(env: NodeJS.ProcessEnv, name: string, fallback: ReasoningEffort): ReasoningEffort {
+  const value = str(env, name, fallback)
+  if (!['minimal', 'low', 'medium', 'high'].includes(value)) {
+    throw new Error(`${name} must be minimal, low, medium or high, got '${value}'`)
+  }
+  return value as ReasoningEffort
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
   const taskGate = str(env, 'TASK_GATE', 'full')
   if (taskGate !== 'full' && taskGate !== 'light') {
@@ -87,8 +98,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     maxFinalReviewRounds: num(env, 'MAX_FINAL_REVIEW_ROUNDS', 4),
     maxBurstFailures: num(env, 'MAX_BURST_FAILURES', 3),
     maxConsecutiveMergeFailures: num(env, 'MAX_CONSECUTIVE_MERGE_FAILURES', 3),
-    scanEffort: str(env, 'SCAN_EFFORT', 'high'),
-    taskEffort: str(env, 'TASK_EFFORT', 'medium'),
+    scanEffort: effort(env, 'SCAN_EFFORT', 'high'),
+    taskEffort: effort(env, 'TASK_EFFORT', 'medium'),
+    reviewEffort: effort(env, 'REVIEW_EFFORT', 'high'),
     scanModel: str(env, 'SCAN_MODEL', ''),
     taskModel: str(env, 'TASK_MODEL', ''),
     scanParallel,
