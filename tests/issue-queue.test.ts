@@ -351,7 +351,7 @@ describe('reapStaleLeases', () => {
     })
     await forge.assignIssue(live, 'worker-busy')
 
-    const reaped = await reapStaleLeases(forge, 3, base)
+    const reaped = await reapStaleLeases(forge, paths, 3, base, 'abc123', 'feature/run-9')
     expect(reaped).toEqual([stale])
     const staleAfter = await forge.getIssue(stale)
     expect(staleAfter.assignees).toEqual([])
@@ -359,6 +359,50 @@ describe('reapStaleLeases', () => {
     const liveAfter = await forge.getIssue(live)
     expect(liveAfter.assignees).toEqual(['worker-busy'])
     expect(liveAfter.labels).toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('refreshes a stale lease linked to a merged task instead of reaping it', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssueForTask(paths, 'task-merged', issueNumber)
+    writeFileSync(join(paths.statusDir, 'task-merged.json'),
+      JSON.stringify({ task_id: 'task-merged', status: 'merged' }))
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+
+    const reap = () => reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'), 'abc123', 'feature/run-9',
+    )
+    await expect(reap()).resolves.toEqual([])
+    await expect(reap()).resolves.toEqual([])
+
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(forge.issueComments.get(issueNumber)).toEqual([
+      'Merged as abc123 into run branch feature/run-9. This issue closes on promotion.',
+    ])
+  })
+
+  it('reaps a stale mapped lease when its local task is not merged', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'quiet', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    recordIssueForTask(paths, 'task-completed', issueNumber)
+    writeFileSync(join(paths.statusDir, 'task-completed.json'),
+      JSON.stringify({ task_id: 'task-completed', status: 'completed' }))
+
+    const reaped = await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'), 'abc123', 'feature/run-9',
+    )
+
+    expect(reaped).toEqual([issueNumber])
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
+    expect(forge.issueComments.has(issueNumber)).toBe(false)
   })
 })
 

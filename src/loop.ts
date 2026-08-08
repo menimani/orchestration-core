@@ -983,7 +983,14 @@ export function createLoop(deps: LoopDeps) {
         // this poll rather than stopping anything.
         try {
           await reconcileFindingFingerprints(forge, paths)
-          for (const reaped of await reapStaleLeases(forge, config.issueLeaseHours, now())) {
+          for (const reaped of await reapStaleLeases(
+            forge,
+            paths,
+            config.issueLeaseHours,
+            now(),
+            git(['rev-parse', 'HEAD']).trim(),
+            currentBranch,
+          )) {
             log(`[loop] Lease reaped: issue #${reaped} is ready again`)
           }
           let capacity = config.maxParallel - running - queueLength()

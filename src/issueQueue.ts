@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import { taskIdForDesc } from './ids.ts'
 import type { OrchPaths } from './paths.ts'
+import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
 } from './tasks.ts'
@@ -509,6 +510,14 @@ export function issueNumberForTask(paths: OrchPaths, taskId: string): number | u
   return /^\d+$/.test(raw) ? Number(raw) : undefined
 }
 
+function mergedTaskForIssue(paths: OrchPaths, issueNumber: number): string | undefined {
+  const dir = join(paths.queueDir, 'issue-map')
+  if (!existsSync(dir)) return undefined
+  return readdirSync(dir).find((taskId) =>
+    issueNumberForTask(paths, taskId) === issueNumber
+      && readStatus(paths, taskId)?.status === 'merged')
+}
+
 function heartbeatFile(paths: OrchPaths, taskId: string): string {
   return join(paths.queueDir, 'heartbeat', taskId)
 }
@@ -627,18 +636,26 @@ export async function claimIssue(
 
 /**
  * Return leases whose holder went quiet: in-progress issues not updated for the lease
- * window go back to ready, unassigned. A crashed worker leaves no other trace — on a
+ * window go back to ready, unassigned. A locally merged task instead refreshes its
+ * issue until promotion closes it. A crashed worker leaves no other trace — on a
  * single machine a leftover worktree is visible, across machines only this is.
  */
 export async function reapStaleLeases(
   forge: Forge,
+  paths: OrchPaths,
   leaseHours: number,
   now: Date,
+  mergeCommit: string,
+  runBranch: string,
 ): Promise<number[]> {
   const reaped: number[] = []
   for (const issue of await forge.listOpenIssues(LABEL_IN_PROGRESS)) {
     const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
     if (ageMs < leaseHours * 3600 * 1000) continue
+    if (mergedTaskForIssue(paths, issue.number) !== undefined) {
+      await commentOnIssueMerge(forge, issue.number, mergeCommit, runBranch)
+      continue
+    }
     for (const assignee of issue.assignees) {
       await forge.unassignIssue(issue.number, assignee)
     }
