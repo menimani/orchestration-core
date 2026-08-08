@@ -1018,13 +1018,13 @@ export function createLoop(deps: LoopDeps) {
     writeFileSync(scanCountFile, `${nextCycle}\n`)
     const nScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
 
-    // Disjoint groups of the checklist's nine sections, balanced so the deep reads
+    // Disjoint groups of the checklist's ten sections, balanced so the deep reads
     // (bugs, tests) do not share a scan at higher parallelism.
     const sectionGroups: Record<number, string[]> = {
       1: [''],
-      2: ['1, 2, 5 and 6', '3, 4, 7, 8 and 9'],
-      3: ['1 and 2', '3, 4, 5 and 6', '7, 8 and 9'],
-      4: ['1 and 2', '5 and 6', '3 and 4', '7, 8 and 9'],
+      2: ['1, 2, 5 and 6', '3, 4, 7, 8, 9 and 10'],
+      3: ['1 and 2', '3, 4, 5 and 6', '7, 8, 9 and 10'],
+      4: ['1 and 2', '5 and 6', '3 and 4', '7, 8, 9 and 10'],
     }
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
