@@ -565,6 +565,16 @@ describe('scanForNextTasks', () => {
     expect(readFileSync(join(paths.tasksDir, `${fixId}.md`), 'utf8')).toContain('Stale async responses')
   })
 
+  it('writes specs that instruct the completion marker — its absence records finished work as failed', () => {
+    const loop = makeLoop()
+    writeFinal('20250101_000000_012_scan', 'NEXT_TASK: [BUG] a finding whose fix must be detectable\n')
+    loop.scanForNextTasks('20250101_000000_012_scan', 0)
+    const specs = readdirSync(paths.tasksDir)
+    const spec = readFileSync(join(paths.tasksDir, specs[0] as string), 'utf8')
+    expect(spec).toContain('TASK_COMPLETE')
+    expect(spec).toMatch(/## Commit/)
+  })
+
   it('gives a scan-spawned test task no override and the tests pitfall list', () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_011_scan', 'NEXT_TASK: [TEST] a coverage gap a scan found\n')

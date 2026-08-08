@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pitfallsFileForDesc } from './gates.ts'
 import { taskIdForDesc } from './ids.ts'
@@ -71,7 +71,9 @@ export function enqueueTask(paths: OrchPaths, taskId: string, depth = 0): Enqueu
   if (status === 'merged' || status === 'running' || status === 'completed') {
     return { outcome: 'already-processed', taskId, status }
   }
-  writeFileSync(backlog, [...lines, `${taskId}:${depth}`].map((line) => `${line}\n`).join(''))
+  // Appended, not rewritten: a delegate from another process races the loop's own
+  // queue writes, and an append cannot erase what a concurrent writer added.
+  appendFileSync(backlog, `${taskId}:${depth}\n`)
   return { outcome: 'enqueued', taskId, depth }
 }
 

@@ -25,6 +25,12 @@ export async function startTask(
   taskId: string,
   options: StartOptions,
 ): Promise<StartResult> {
+  // Validated here, not only in the CLI: the loop reaches this directly with values
+  // from environment settings and per-task effort files, and an unvalidated value
+  // would travel into the runner's flags.
+  if (!['minimal', 'low', 'medium', 'high'].includes(options.effort)) {
+    throw new Error(`effort must be minimal, low, medium or high, got '${options.effort}'`)
+  }
   const spec = specFile(paths, taskId)
   if (!existsSync(spec)) {
     throw new Error(

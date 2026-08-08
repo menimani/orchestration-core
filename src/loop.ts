@@ -17,7 +17,7 @@ import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
-import { enqueueTask, specFile } from './tasks.ts'
+import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
@@ -154,7 +154,10 @@ export function createLoop(deps: LoopDeps) {
       log(`[loop] NEXT_TASK detection: ${desc}`)
       log(`[loop]   → New task: ${newId} (depth=${newDepth})`)
       if (!existsSync(specFile(paths, newId))) {
-        writeFileSync(specFile(paths, newId), `# ${newId}\n`)
+        // The template carries the Commit and TASK_COMPLETE instructions — a spec
+        // without them produces work whose completion is indistinguishable from a
+        // crash, recorded failed with the commits sitting in the worktree.
+        newTaskSpec(paths, newId)
         appendSharedRequirements(newId, taskId, desc)
       } else {
         log(`[loop]   Reusing existing specification: ${newId}`)
