@@ -206,7 +206,9 @@ export async function publishFinding(
     } catch {
       // A missing issue is stale in the same way as a closed one.
     }
-    if (recordedIssue?.state === 'open') {
+    if (recordedIssue?.state === 'open'
+      && recordedIssue.labels.includes(LABEL_FINDING)
+      && issueFingerprint(recordedIssue) === fingerprint) {
       const survivor = (await reconcileOpenFindings(
         forge, fingerprint, recorded.issueNumber,
       )) ?? recorded.issueNumber

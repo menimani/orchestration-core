@@ -150,6 +150,32 @@ describe('publishFinding', () => {
       .toBe('bug:src/a/b.ts 2\n')
   })
 
+  it('drops a ledger entry when the open issue no longer carries its fingerprint', async () => {
+    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
+    const issue = forge.issues.get(first.issueNumber)
+    if (issue === undefined) throw new Error('expected the published issue')
+    issue.body = buildIssueBody('[BUG] `src/other.ts` breaks', 'edited')
+
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks again', 'scan-2')
+
+    expect(second).toEqual({ outcome: 'created', issueNumber: 2 })
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe('bug:src/a/b.ts 2\n')
+  })
+
+  it('drops a ledger entry when the open issue is no longer a finding', async () => {
+    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
+    const issue = forge.issues.get(first.issueNumber)
+    if (issue === undefined) throw new Error('expected the published issue')
+    issue.labels = issue.labels.filter((label) => label !== LABEL_FINDING)
+
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks again', 'scan-2')
+
+    expect(second).toEqual({ outcome: 'created', issueNumber: 2 })
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe('bug:src/a/b.ts 2\n')
+  })
+
   it('lets a distinct finding through', async () => {
     await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
     const other = await publishFinding(forge, paths, '[TEST] `src/a/b.ts` lacks coverage', 'scan-1')
