@@ -186,11 +186,15 @@ from or equivalent to `orchestration/tests/*.sh`.
     same growth bounds. An issue is filed once per fingerprint: the advisory
     identifier when one is named, else the finding's tag plus the first path it
     names, else the hashed text with whole-line semantics.
-33. Workers claim a ready issue by self-assignment. A simultaneous claim is settled
+33. Workers claim a ready issue by self-assignment. The forge login is the worker
+    identity, and every process that may claim concurrently must authenticate as a
+    distinct forge account. Under that invariant, a simultaneous claim is settled
     deterministically — the lexicographically first login wins, losers unassign
     themselves — and the winner relabels to `loop:in-progress` and materializes the
     issue as a local task through the standard template (completion marker included),
-    honoring an `Effort:` field. An in-progress issue untouched for
+    honoring an `Effort:` field. Processes sharing an account are indistinguishable
+    and may both materialize the issue, so that configuration is unsupported. An
+    in-progress issue untouched for
     `ISSUE_LEASE_HOURS` (default 3) is reaped back to ready, unassigned.
 34. The merge commit of an issue-born task carries `closes #N`, so the forge closes
     the issue when the promotion PR lands the commit on the default branch. A forge

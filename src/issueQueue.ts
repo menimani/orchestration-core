@@ -301,6 +301,8 @@ export type ClaimResult
  * exclusivity primitive; because a forge allows several assignees, a simultaneous
  * claim is settled deterministically — the lexicographically first login wins and
  * every loser removes itself — so both sides compute the same verdict without a lock.
+ * The login is the worker identity: concurrently claiming processes must use distinct
+ * forge accounts because assignment cannot distinguish processes sharing an account.
  */
 export async function claimIssue(
   forge: Forge,
