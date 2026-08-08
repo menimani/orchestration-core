@@ -4,46 +4,118 @@ import { join } from 'node:path'
 import { branchName, finalMessageFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
 
+const PROCESS_EXIT_TIMEOUT_MS = 5_000
+const PROCESS_EXIT_POLL_MS = 50
+
+interface CommandOptions {
+  cwd?: string
+  windowsHide?: boolean
+}
+
+interface RemoveOptions {
+  force?: boolean
+  recursive?: boolean
+}
+
+export interface CleanupRuntime {
+  platform: NodeJS.Platform
+  spawn(command: string, args: readonly string[]): void
+  kill(pid: number, signal?: NodeJS.Signals | number): void
+  execFile(command: string, args: readonly string[], options: CommandOptions): void
+  exists(path: string): boolean
+  remove(path: string, options: RemoveOptions): void
+  now(): number
+  sleep(milliseconds: number): void
+}
+
+const systemRuntime: CleanupRuntime = {
+  platform: process.platform,
+  spawn: (command, args) => {
+    spawnSync(command, [...args], { windowsHide: true })
+  },
+  kill: (pid, signal) => {
+    process.kill(pid, signal)
+  },
+  execFile: (command, args, options) => {
+    execFileSync(command, [...args], options)
+  },
+  exists: existsSync,
+  remove: rmSync,
+  now: Date.now,
+  sleep: (milliseconds) => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
+  },
+}
+
+function processIsAlive(runtime: CleanupRuntime, pid: number): boolean {
+  try {
+    runtime.kill(pid, 0)
+    return true
+  } catch (error) {
+    // A permission or other probe failure does not prove that the process stopped.
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+function stopProcess(runtime: CleanupRuntime, pid: number): void {
+  if (!processIsAlive(runtime, pid)) return
+
+  console.log(`Stopping running process: pid=${pid}`)
+  try {
+    if (runtime.platform === 'win32') {
+      runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
+    } else {
+      runtime.kill(pid)
+    }
+  } catch {
+    // The command result is not authoritative: verify the process below.
+  }
+
+  const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
+  while (processIsAlive(runtime, pid) && runtime.now() < deadline) {
+    runtime.sleep(PROCESS_EXIT_POLL_MS)
+  }
+  if (processIsAlive(runtime, pid)) {
+    throw new Error(`Could not stop process ${pid}; task state was retained.`)
+  }
+}
+
 /**
  * Stop a task's process and remove its worktree, branch, status and markers.
  * Cleanup precedes a retry, so the announce markers under queue/scanned go too —
  * leaving them would let the loop watch the retry in silence, completed and failed
  * alike.
  */
-export function cleanupTask(paths: OrchPaths, taskId: string): void {
+export function cleanupTask(paths: OrchPaths, taskId: string, runtime: CleanupRuntime = systemRuntime): void {
   const status = readStatus(paths, taskId)
   if (status !== undefined && status.pid !== null) {
-    if (process.platform === 'win32') {
-      console.log(`Stopping running process: pid=${status.pid}`)
-      spawnSync('taskkill', ['/PID', String(status.pid), '/T', '/F'], { windowsHide: true })
-    } else {
-      try {
-        process.kill(status.pid, 0)
-        console.log(`Stopping running process: pid=${status.pid}`)
-        process.kill(status.pid)
-      } catch {
-        // already gone
-      }
-    }
+    stopProcess(runtime, status.pid)
   }
 
   const worktree = worktreeDir(paths, taskId)
-  if (existsSync(worktree)) {
+  if (runtime.exists(worktree)) {
     try {
-      execFileSync('git', ['worktree', 'remove', worktree, '--force'], {
+      runtime.execFile('git', ['worktree', 'remove', worktree, '--force'], {
         cwd: paths.repoRoot,
         windowsHide: true,
       })
     } catch {
+      // Fall back to removing the directory directly below.
+    }
+    if (runtime.exists(worktree)) {
       try {
-        rmSync(worktree, { recursive: true, force: true })
+        runtime.remove(worktree, { recursive: true, force: true })
       } catch {
-        // Report below after the rest of the task state has been cleaned up.
+        // The existence check below is authoritative.
       }
     }
   }
+  if (runtime.exists(worktree)) {
+    throw new Error(`Could not remove worktree ${worktree}; task state was retained.`)
+  }
+
   try {
-    execFileSync('git', ['branch', '-D', branchName(taskId)], {
+    runtime.execFile('git', ['branch', '-D', branchName(taskId)], {
       cwd: paths.repoRoot,
       windowsHide: true,
     })
@@ -51,10 +123,9 @@ export function cleanupTask(paths: OrchPaths, taskId: string): void {
     // no branch to delete
   }
 
-  rmSync(statusFile(paths, taskId), { force: true })
-  rmSync(finalMessageFile(paths, taskId), { force: true })
-  rmSync(join(paths.queueDir, 'scanned', taskId), { force: true })
-  rmSync(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
-  if (existsSync(worktree)) console.warn(`Worktree could not be removed and remains at ${worktree}`)
+  runtime.remove(statusFile(paths, taskId), { force: true })
+  runtime.remove(finalMessageFile(paths, taskId), { force: true })
+  runtime.remove(join(paths.queueDir, 'scanned', taskId), { force: true })
+  runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
   console.log(`Cleaned up ${taskId}.`)
 }
