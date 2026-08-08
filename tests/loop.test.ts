@@ -615,6 +615,46 @@ describe('scanForNextTasks', () => {
     expect(readFileSync(join(paths.tasksDir, `${fixId}.md`), 'utf8')).toContain('Stale async responses')
   })
 
+  it('combines several findings from one review into one high-effort fix task', async () => {
+    const loop = makeLoop()
+    writeFinal('20250101_000000_013_review-c1', [
+      'NEXT_TASK: [BUG] guard the stale response',
+      'NEXT_TASK: [BUG] preserve zero in the numeric input',
+      'NEXT_TASK: [TEST] cover the slow list load',
+    ].join('\n'))
+    await loop.scanForNextTasks('20250101_000000_013_review-c1', 0)
+
+    const specs = readdirSync(paths.tasksDir)
+    expect(specs).toHaveLength(1)
+    const fixId = (specs[0] as string).replace(/\.md$/, '')
+    const descIndexes = readdirSync(join(paths.queueDir, 'desc-index'))
+    expect(descIndexes).toHaveLength(1)
+    expect(descIndexes[0]).toMatch(/^auto-/)
+    expect(readFileSync(join(paths.queueDir, 'desc-index', descIndexes[0] as string), 'utf8').trim())
+      .toBe(fixId)
+    const spec = readFileSync(join(paths.tasksDir, `${fixId}.md`), 'utf8')
+    expect(spec).toContain('## Requirement\n\n1. [BUG] guard the stale response')
+    expect(spec).toContain('2. [BUG] preserve zero in the numeric input')
+    expect(spec).toContain('3. [TEST] cover the slow list load')
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim().split('\n')).toEqual([
+      `${fixId}:1`,
+    ])
+    expect(readFileSync(join(paths.queueDir, 'effort', fixId), 'utf8').trim()).toBe('high')
+  })
+
+  it('keeps several scan findings as separate tasks', async () => {
+    const loop = makeLoop()
+    writeFinal('20250101_000000_014_scan', [
+      'NEXT_TASK: [BUG] first scan finding',
+      'NEXT_TASK: [BUG] second scan finding',
+      'NEXT_TASK: [TEST] third scan finding',
+    ].join('\n'))
+    await loop.scanForNextTasks('20250101_000000_014_scan', 0)
+
+    expect(readdirSync(paths.tasksDir)).toHaveLength(3)
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim().split('\n')).toHaveLength(3)
+  })
+
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_012_scan', 'NEXT_TASK: [BUG] a finding whose fix must be detectable\n')

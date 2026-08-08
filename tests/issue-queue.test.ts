@@ -452,6 +452,7 @@ describe('loop integration in issue mode', () => {
       log: () => {},
       now: () => new Date('2026-08-08T12:00:00Z'),
     })
+    loop.initializeSessionStateForBranch()
 
     // A completed scan's finding becomes an issue, not a local queue entry.
     writeFileSync(finalMessageFile(paths, '20260808_000000_001_scan'),

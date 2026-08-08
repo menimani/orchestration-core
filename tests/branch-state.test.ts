@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { loadConfig } from '../src/config.ts'
+import { loadConfig, type LoopConfig } from '../src/config.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
@@ -15,13 +15,19 @@ import { makeFakeForge } from './fakeForge.ts'
 let repoRoot: string
 let paths: OrchPaths
 let logged: string[]
+let runnerStarts: string[]
 
-function makeLoop(): Loop {
+function makeLoop(overrides: Partial<LoopConfig> = {}): Loop {
   return createLoop({
     paths,
-    config: loadConfig({}),
+    config: { ...loadConfig({}), ...overrides },
     forge: makeFakeForge(),
-    runner: { start: async () => process.pid },
+    runner: {
+      start: async (options) => {
+        runnerStarts.push(options.specFile)
+        return process.pid
+      },
+    },
     project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
     log: (line) => logged.push(line),
     now: () => new Date(),
@@ -67,6 +73,7 @@ beforeEach(() => {
   execFileSync('git', ['init', '-q', '-b', 'current-branch'], { cwd: repoRoot })
   paths = orchPaths(repoRoot)
   logged = []
+  runnerStarts = []
 })
 
 afterEach(() => {
@@ -103,5 +110,35 @@ describe('initializeSessionStateForBranch', () => {
       expect(readFileSync(join(paths.queueDir, name), 'utf8').trim()).toBe('cycle state')
     }
     assertPersistentState()
+  })
+})
+
+describe('poll branch guard', () => {
+  it('stops before starting or processing tasks when the checkout branch mismatches the run', async () => {
+    writeFileSync(join(paths.queueDir, 'run-branch.txt'), 'recorded-branch\n')
+    writeFileSync(join(paths.tasksDir, 'queued-task.md'), '# queued task\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), 'queued-task:0\n')
+    writeFileSync(join(paths.statusDir, 'completed-task.json'),
+      '{"task_id":"completed-task","status":"completed","pid":null}')
+
+    expect(await makeLoop({ autoMerge: true, scanEnabled: false }).poll()).toBe('stopped')
+
+    expect(logged).toContain('[loop] ERROR: checkout is on current-branch but this run belongs to recorded-branch — stopping before anything merges into the wrong branch')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(runnerStarts).toHaveLength(0)
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe('queued-task:0\n')
+    expect(existsSync(join(paths.queueDir, 'scanned', 'completed-task'))).toBe(false)
+  })
+
+  it('continues processing when the checkout branch matches the run', async () => {
+    writeFileSync(join(paths.queueDir, 'run-branch.txt'), 'current-branch\n')
+    writeFileSync(join(paths.tasksDir, 'queued-task.md'), '# queued task\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), 'queued-task:0\n')
+
+    expect(await makeLoop({ autoMerge: false, scanEnabled: false }).poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe('')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 })
