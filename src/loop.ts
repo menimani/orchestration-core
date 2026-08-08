@@ -20,7 +20,8 @@ import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import {
-  claimIssue, issueNumberForTask, publishFinding, reapStaleLeases, LABEL_READY,
+  claimIssue, issueNumberForTask, publishFinding, reapStaleLeases,
+  reconcileFindingFingerprints, LABEL_READY,
 } from './issueQueue.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
@@ -887,6 +888,7 @@ export function createLoop(deps: LoopDeps) {
         // local queue up to capacity. A forge outage degrades to local-only work for
         // this poll rather than stopping anything.
         try {
+          await reconcileFindingFingerprints(forge, paths)
           for (const reaped of await reapStaleLeases(forge, config.issueLeaseHours, now())) {
             log(`[loop] Lease reaped: issue #${reaped} is ready again`)
           }
