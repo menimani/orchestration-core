@@ -11,6 +11,14 @@ const I18N_PATHS = /^src\/frontend\/src\/i18n\/|^src\/backend\/src\/main\/resour
 
 export const shioraProject: ProjectAdapter = {
   name: 'shiora',
+  scanWorktreeSetup: [
+    {
+      label: 'Frontend dependencies',
+      cwd: 'src/frontend',
+      command: 'npm ci --no-audit --no-fund',
+      requires: 'src/frontend/package-lock.json',
+    },
+  ],
   deployment: {
     workflow: 'deploy.yml',
     revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',

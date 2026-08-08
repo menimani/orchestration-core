@@ -32,6 +32,15 @@ export interface SuiteStep {
   repairWhenMissing?: { path: string; command: string; message: string }
 }
 
+export interface WorktreeSetupStep {
+  label: string
+  /** Directory the command runs in, relative to the new worktree root. */
+  cwd: string
+  command: string
+  /** Skip silently when this worktree-relative path does not exist. */
+  requires?: string
+}
+
 export interface ProjectAdapter {
   name: string
   /** Manual production deployment, when this repository has one. */
@@ -40,6 +49,8 @@ export interface ProjectAdapter {
   mergeChecks(taskGate: 'full' | 'light'): MergeCheck[]
   /** The full suites the cycle gate runs against the branch tip under light task gates. */
   cycleSuite(): SuiteStep[]
+  /** Repository-specific preparation required before a scan can inspect a fresh worktree. */
+  scanWorktreeSetup?: WorktreeSetupStep[]
 }
 
 export async function loadProject(name: string): Promise<ProjectAdapter> {

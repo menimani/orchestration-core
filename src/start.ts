@@ -1,5 +1,7 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus, writeStatus } from './status.ts'
@@ -12,6 +14,7 @@ export type StartResult
 export interface StartOptions {
   effort: RunnerStartOptions['effort']
   model?: string | undefined
+  setup?: WorktreeSetupStep[] | undefined
 }
 
 /**
@@ -55,6 +58,16 @@ export async function startTask(
     stdio: 'inherit',
     windowsHide: true,
   })
+
+  for (const step of options.setup ?? []) {
+    if (step.requires !== undefined && !existsSync(join(worktree, step.requires))) continue
+    console.log(`Preparing worktree: ${step.label}`)
+    execSync(step.command, {
+      cwd: join(worktree, step.cwd),
+      stdio: 'inherit',
+      windowsHide: true,
+    })
+  }
 
   const log = logFile(paths, taskId)
   const finalMessage = finalMessageFile(paths, taskId)

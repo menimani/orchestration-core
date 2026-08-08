@@ -13,7 +13,7 @@ import {
 } from './issueQueue.ts'
 import { mergeTask, MergeError } from './merge.ts'
 import { deploy } from './deploy.ts'
-import { logFile, orchPaths, type OrchPaths } from './paths.ts'
+import { isScanTaskId, logFile, orchPaths, type OrchPaths } from './paths.ts'
 import { pruneTasks } from './prune.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
@@ -163,9 +163,11 @@ const cmdStart: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const runner = await loadRunner(config.runner)
+  const project = await loadProject(config.project)
   const result = await startTask(paths, runner, taskId, {
     effort: effort === '' ? 'medium' : effort,
     model: model === '' ? undefined : model,
+    setup: isScanTaskId(taskId) ? project.scanWorktreeSetup : undefined,
   })
   if (result.outcome === 'already-running') {
     console.log(`[start] ${taskId} is already running (skipping)`)

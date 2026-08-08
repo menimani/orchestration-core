@@ -11,6 +11,17 @@ function check(label: string, taskGate: 'full' | 'light' = 'full') {
 }
 
 describe('gate commands', () => {
+  it('installs frontend dependencies before a scan starts', () => {
+    expect(shioraProject.scanWorktreeSetup).toEqual([
+      {
+        label: 'Frontend dependencies',
+        cwd: 'src/frontend',
+        command: 'npm ci --no-audit --no-fund',
+        requires: 'src/frontend/package-lock.json',
+      },
+    ])
+  })
+
   it('declares the production deployment', () => {
     expect(shioraProject.deployment).toEqual({
       workflow: 'deploy.yml',

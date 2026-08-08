@@ -1036,6 +1036,7 @@ export function createLoop(deps: LoopDeps) {
           await startTask(paths, runner, scanId, {
             effort: config.scanEffort as 'high',
             model: config.scanModel === '' ? undefined : config.scanModel,
+            setup: project.scanWorktreeSetup,
           })
         } catch {
           log('[loop] WARN: Scan startup failure')
