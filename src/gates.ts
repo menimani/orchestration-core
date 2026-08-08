@@ -1,19 +1,9 @@
 import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
 
-// Per-task gate commands, selected by TASK_GATE. "full" runs the suites on every task
-// merge; "light" proves the tree builds and lints, and leaves the suites to run once at
-// the cycle gate, so a cycle pays for them once instead of once per task. Failure
-// attribution survives because a semantic conflict or broken build still stops the task
-// that introduced it.
-
-export function frontendGateCmd(taskGate: 'full' | 'light'): string {
-  return taskGate === 'light' ? 'npm run lint && npm run build' : 'npm run test'
-}
-
-export function backendGateCmd(taskGate: 'full' | 'light'): string {
-  return taskGate === 'light' ? 'mvn clean test-compile -q' : 'mvn clean test -q'
-}
+// Which commands verify a merge, and when, is project knowledge — it lives in the
+// project adapter (adapters/project-shiora.ts), not here. What remains in this file is
+// orchestration-generic.
 
 // Maps a finding's tag to the pitfall list its implementer checks a diff against.
 // The lists are curated by hand: at most 20 entries each, a pattern admitted only

@@ -31,6 +31,7 @@ export interface LoopConfig {
   taskGate: 'full' | 'light'
   forge: string
   runner: string
+  project: string
 }
 
 function num(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -90,5 +91,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     taskGate,
     forge: str(env, 'FORGE', 'github'),
     runner: str(env, 'RUNNER', 'codex'),
+    project: str(env, 'PROJECT', 'shiora'),
   }
 }

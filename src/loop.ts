@@ -4,6 +4,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
+import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import type { LoopConfig } from './config.ts'
 import { taskIdForDesc, newTaskId } from './ids.ts'
@@ -27,6 +28,7 @@ export interface LoopDeps {
   config: LoopConfig
   forge: Forge
   runner: Runner
+  project: ProjectAdapter
   log: (line: string) => void
   now: () => Date
 }
@@ -37,7 +39,7 @@ interface QueueEntry {
 }
 
 export function createLoop(deps: LoopDeps) {
-  const { paths, config, forge, runner, log, now } = deps
+  const { paths, config, forge, runner, project, log, now } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
   const scannedDir = join(paths.queueDir, 'scanned')
@@ -591,27 +593,20 @@ export function createLoop(deps: LoopDeps) {
       }
     }
 
-    // The vitest launcher shims in node_modules/.bin vanished twice while the package
-    // itself stayed installed, and each time the suite reported the tree as failing
-    // when only the environment was broken. Reinstalling is cheap against an intact
-    // lockfile, so a missing launcher is repaired here instead of stopping the loop.
-    const frontend = join(paths.repoRoot, 'src', 'frontend')
-    if (existsSync(frontend) && !existsSync(join(frontend, 'node_modules', '.bin', 'vitest'))) {
-      log('[loop] Cycle suite: the vitest launcher is missing — running npm install to restore it')
-      if (!runStep(frontend, 'npm install --no-audit --no-fund')) {
-        log('[loop] WARN: npm install could not restore the frontend toolchain')
-      }
-    }
-
     let ok = true
-    if (existsSync(frontend)) ok = runStep(frontend, 'npm run test')
-    const backend = join(paths.repoRoot, 'src', 'backend')
-    if (ok && existsSync(backend)) ok = runStep(backend, 'mvn clean test -q')
-    if (ok && existsSync(join(paths.repoRoot, 'checks', 'i18n-keys.js'))) {
-      ok = runStep(paths.repoRoot, 'node checks/i18n-keys.js')
-    }
-    if (ok && existsSync(join(paths.repoRoot, 'checks', 'english-only.mjs'))) {
-      ok = runStep(paths.repoRoot, 'node checks/english-only.mjs')
+    for (const step of project.cycleSuite()) {
+      if (step.requires !== undefined && !existsSync(join(paths.repoRoot, step.requires))) continue
+      // A toolchain that broke in a way reinstalling fixes is the environment, not the
+      // branch; the repair keeps the suite's verdict about the code.
+      const repair = step.repairWhenMissing
+      if (repair !== undefined && !existsSync(join(paths.repoRoot, repair.path))) {
+        log(`[loop] Cycle suite: ${repair.message}`)
+        if (!runStep(join(paths.repoRoot, step.cwd), repair.command)) {
+          log('[loop] WARN: the repair command could not restore the toolchain')
+        }
+      }
+      ok = runStep(join(paths.repoRoot, step.cwd), step.command)
+      if (!ok) break
     }
 
     if (!ok) {
@@ -805,6 +800,7 @@ export function createLoop(deps: LoopDeps) {
               taskGate: config.taskGate,
               testCmd: config.testCmd === '' ? undefined : config.testCmd,
               skipAutoTest: config.skipAutoTest,
+              project,
               outputFile: mergeLog,
             })
             log(`[loop]   Merge successful: ${taskId}`)

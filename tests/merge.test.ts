@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { MergeError, mergeTask, selectChecks } from '../src/merge.ts'
+import { shioraProject } from '../src/adapters/project-shiora.ts'
+import { MergeError, mergeTask } from '../src/merge.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
@@ -51,7 +52,7 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_001_user-adds-a-file'
     const worktree = await makeCompletedTask(taskId, { commit: true })
 
-    await mergeTask(paths, taskId, { taskGate: 'light' })
+    await mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject })
 
     expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(`Merge ${taskId} via Codex`)
     expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(true)
@@ -63,7 +64,7 @@ describe('mergeTask', () => {
   it('stops on uncommitted changes and keeps the worktree', async () => {
     const taskId = '20260808_000000_002_user-forgot-commit'
     const worktree = await makeCompletedTask(taskId, { commit: true, dirty: true })
-    await expect(mergeTask(paths, taskId, { taskGate: 'light' }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
       .rejects.toThrow(/uncommitted changes/)
     expect(existsSync(worktree)).toBe(true)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
@@ -72,7 +73,7 @@ describe('mergeTask', () => {
   it('stops a non-inspection task that produced no commits', async () => {
     const taskId = '20260808_000000_003_user-empty-handed'
     const worktree = await makeCompletedTask(taskId)
-    await expect(mergeTask(paths, taskId, { taskGate: 'light' }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
       .rejects.toThrow(/no new commits/)
     expect(existsSync(worktree)).toBe(true)
   })
@@ -80,7 +81,7 @@ describe('mergeTask', () => {
   it('lets a scan through without commits', async () => {
     const taskId = '20260808_000000_004_scan'
     await makeCompletedTask(taskId)
-    await mergeTask(paths, taskId, { taskGate: 'light' })
+    await mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject })
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
@@ -88,14 +89,14 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_005_user-still-going'
     await makeCompletedTask(taskId, { commit: true })
     await writeStatus(paths, taskId, 'running', process.pid)
-    await expect(mergeTask(paths, taskId, { taskGate: 'light' }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
       .rejects.toThrow(/not 'completed'/)
   })
 
   it('aborts the merge when the explicit test command fails', async () => {
     const taskId = '20260808_000000_006_user-tests-fail'
     await makeCompletedTask(taskId, { commit: true })
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', testCmd: 'node -e "process.exit(1)"' }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject, testCmd: 'node -e "process.exit(1)"' }))
       .rejects.toThrow(/Tests failed/)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
@@ -103,24 +104,8 @@ describe('mergeTask', () => {
   it('throws MergeError instances so callers can count merge failures', async () => {
     const taskId = '20260808_000000_007_user-error-type'
     await makeCompletedTask(taskId)
-    await expect(mergeTask(paths, taskId, { taskGate: 'light' }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
       .rejects.toBeInstanceOf(MergeError)
   })
 })
 
-describe('selectChecks', () => {
-  it('selects suites from the touched paths', () => {
-    expect(selectChecks(['src/frontend/src/App.tsx'])).toMatchObject({ frontend: true, backend: false })
-    expect(selectChecks(['src/backend/pom.xml'])).toMatchObject({ backend: true, frontend: false })
-    expect(selectChecks(['orchestration/ts/src/cli.ts'])).toMatchObject({ orchestration: true })
-    expect(selectChecks(['docs/index.html'])).toMatchObject({
-      frontend: false, backend: false, orchestration: false, i18n: false,
-    })
-  })
-
-  it('runs the i18n check for either side of the translation contract', () => {
-    expect(selectChecks(['src/frontend/src/i18n/ja.json']).i18n).toBe(true)
-    expect(selectChecks(['src/backend/src/main/resources/messages.properties']).i18n).toBe(true)
-    expect(selectChecks(['src/backend/src/main/java/App.java']).i18n).toBe(false)
-  })
-})

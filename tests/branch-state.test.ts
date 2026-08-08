@@ -27,6 +27,7 @@ function makeLoop(): Loop {
       markPrReady: async () => {},
     },
     runner: { start: async () => process.pid },
+    project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
     log: (line) => logged.push(line),
     now: () => new Date(),
   })

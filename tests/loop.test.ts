@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Forge, PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
+import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
@@ -41,13 +42,20 @@ function makeRunner(): Runner {
   }
 }
 
-function makeLoop(overrides: Partial<LoopConfig> = {}): Loop {
+const stubProject: ProjectAdapter = {
+  name: 'stub',
+  mergeChecks: () => [],
+  cycleSuite: () => [],
+}
+
+function makeLoop(overrides: Partial<LoopConfig> = {}, project: ProjectAdapter = stubProject): Loop {
   const config = { ...loadConfig({}), ...overrides }
   return createLoop({
     paths,
     config,
     forge: makeForge(),
     runner: makeRunner(),
+    project,
     log: (line) => logged.push(line),
     now: () => new Date(2026, 7, 8, 12, 0, 0),
   })
@@ -455,6 +463,83 @@ describe('noteMergeFailure', () => {
     writeFileSync(mergeLog(), 'Could not transfer artifact org.example:thing from central\n')
     loop.noteMergeFailure(mergeLog())
     expect(logText()).toContain('unreachable')
+  })
+})
+
+describe('runCycleSuite', () => {
+  const stopFile = (): string => join(paths.queueDir, 'stop')
+
+  it('is a no-op under full task gates', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{ label: 'Marker', cwd: '', command: 'touch suite-ran' }],
+    }
+    const loop = makeLoop({ taskGate: 'full' }, suiteProject)
+    expect(loop.runCycleSuite(1)).toBe(true)
+    expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(false)
+  })
+
+  it('runs the project suite under light gates and continues on a pass', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{ label: 'Marker', cwd: '', command: 'touch suite-ran' }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+    expect(loop.runCycleSuite(1)).toBe(true)
+    expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(true)
+    expect(existsSync(stopFile())).toBe(false)
+  })
+
+  it('stops the loop rather than promote a failing tip', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{ label: 'Failing', cwd: '', command: 'echo "Tests run: 4, Failures: 1"; exit 1' }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+    expect(loop.runCycleSuite(2)).toBe(false)
+    expect(existsSync(stopFile())).toBe(true)
+    expect(logText()).toContain('stopping rather than promoting a failing tip')
+  })
+
+  it('attributes a tool-not-found failure to the environment, not the branch', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Broken toolchain', cwd: '',
+        command: 'echo "vitest is not recognized as an internal or external command"; exit 1',
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+    expect(loop.runCycleSuite(5)).toBe(false)
+    expect(logText()).toContain('the environment broke, not the branch')
+    expect(existsSync(stopFile())).toBe(true)
+  })
+
+  it('runs the repair when its marker path is missing and skips it when present', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Repairable', cwd: '', command: 'touch suite-ran',
+        repairWhenMissing: { path: 'launcher-shim', command: 'touch repaired', message: 'the launcher is missing' },
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+    expect(loop.runCycleSuite(3)).toBe(true)
+    expect(existsSync(join(repoRoot, 'repaired'))).toBe(true)
+
+    rmSync(join(repoRoot, 'repaired'))
+    writeFileSync(join(repoRoot, 'launcher-shim'), '')
+    expect(loop.runCycleSuite(4)).toBe(true)
+    expect(existsSync(join(repoRoot, 'repaired'))).toBe(false)
+  })
+
+  it('skips a step whose required path is absent', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{ label: 'Absent', cwd: 'nowhere', command: 'exit 1', requires: 'nowhere' }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+    expect(loop.runCycleSuite(6)).toBe(true)
   })
 })
 

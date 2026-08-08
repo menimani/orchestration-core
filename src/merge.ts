@@ -1,7 +1,7 @@
 import { execFileSync, execSync } from 'node:child_process'
 import { appendFileSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { backendGateCmd, frontendGateCmd } from './gates.ts'
+import type { ProjectAdapter } from './adapters/project.ts'
 import { branchName, isInspectionTaskId, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus, writeStatus } from './status.ts'
 
@@ -14,10 +14,12 @@ export class MergeError extends Error {
 }
 
 export interface MergeOptions {
-  /** Explicit test command; overrides path-based selection. */
+  /** Explicit test command; overrides the project's check selection. */
   testCmd?: string | undefined
   skipAutoTest?: boolean
   taskGate: 'full' | 'light'
+  /** The repository's own knowledge: which checks verify a merge, and when. */
+  project: ProjectAdapter
   /**
    * When set, everything the merge prints — including test output — goes to this file
    * instead of stdout, so a loop's log stays readable and the details stay findable.
@@ -27,27 +29,6 @@ export interface MergeOptions {
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-}
-
-/**
- * Choose pre-merge checks from the paths the worktree touched, ported from
- * task-merge.sh. The i18n check runs on either side of the translation contract,
- * because a backend-only change can still leave a user looking at a raw messageId.
- * The English check is repository-wide and cheap, so it runs whatever changed.
- */
-export function selectChecks(changedFiles: string[]): {
-  frontend: boolean
-  backend: boolean
-  orchestration: boolean
-  i18n: boolean
-} {
-  return {
-    frontend: changedFiles.some((file) => file.startsWith('src/frontend/')),
-    backend: changedFiles.some((file) => file.startsWith('src/backend/')),
-    orchestration: changedFiles.some((file) => file.startsWith('orchestration/')),
-    i18n: changedFiles.some((file) =>
-      /^src\/frontend\/src\/i18n\/|^src\/backend\/src\/main\/resources\/messages/.test(file)),
-  }
 }
 
 /**
@@ -130,29 +111,12 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   } else if (options.skipAutoTest !== true) {
     const changed = git(worktree, ['diff', '--name-only', `${currentBranch}...HEAD`])
       .split(/\r?\n/).filter((line) => line !== '')
-    const checks = selectChecks(changed)
     let ok = true
-    if (checks.frontend && existsSync(join(worktree, 'src', 'frontend'))) {
-      ok = tryRun(join(worktree, 'src', 'frontend'), frontendGateCmd(options.taskGate), 'Frontend gate') && ok
-    }
-    if (checks.backend && existsSync(join(worktree, 'src', 'backend'))) {
-      ok = tryRun(join(worktree, 'src', 'backend'), backendGateCmd(options.taskGate), 'Backend gate') && ok
-    }
-    if (checks.orchestration) {
-      // The TS implementation carries its own gate; the bash test harness stays the
-      // gate only while it is still in the tree.
-      if (existsSync(join(worktree, 'orchestration', 'ts', 'package.json'))) {
-        ok = tryRun(join(worktree, 'orchestration', 'ts'),
-          'npm run typecheck && npm run test', 'Orchestration gate') && ok
-      } else if (existsSync(join(worktree, 'orchestration', 'tests', 'run-all.sh'))) {
-        ok = tryRun(worktree, 'bash orchestration/tests/run-all.sh', 'Orchestration tests') && ok
-      }
-    }
-    if (checks.i18n && existsSync(join(worktree, 'checks', 'i18n-keys.js'))) {
-      ok = tryRun(worktree, 'node checks/i18n-keys.js', 'Translation completeness') && ok
-    }
-    if (existsSync(join(worktree, 'checks', 'english-only.mjs'))) {
-      ok = tryRun(worktree, 'node checks/english-only.mjs', 'English only') && ok
+    for (const check of options.project.mergeChecks(options.taskGate)) {
+      if (check.appliesTo !== undefined && !check.appliesTo(changed)) continue
+      if (check.requires !== undefined && !existsSync(join(worktree, check.requires))) continue
+      if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
+      ok = tryRun(join(worktree, check.cwd), check.command, check.label) && ok
     }
     if (!ok) {
       throw new MergeError('Tests failed. Aborting merge.')

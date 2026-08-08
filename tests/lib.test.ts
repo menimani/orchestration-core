@@ -8,7 +8,6 @@ import {
   orchPaths, statusFile, type OrchPaths,
 } from '../src/paths.ts'
 import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
-import { backendGateCmd, frontendGateCmd } from '../src/gates.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -151,18 +150,6 @@ describe('task id classes', () => {
     mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
     writeFileSync(join(paths.queueDir, 'inspect', id), '')
     expect(isInspectionTaskId(paths, id)).toBe(true)
-  })
-})
-
-describe('gate commands', () => {
-  it('runs the full suites by default', () => {
-    expect(frontendGateCmd('full')).toBe('npm run test')
-    expect(backendGateCmd('full')).toBe('mvn clean test -q')
-  })
-
-  it('only builds and lints under the light gate', () => {
-    expect(frontendGateCmd('light')).toBe('npm run lint && npm run build')
-    expect(backendGateCmd('light')).toBe('mvn clean test-compile -q')
   })
 })
 

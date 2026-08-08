@@ -168,6 +168,13 @@ from or equivalent to `orchestration/tests/*.sh`.
     `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags inside the adapter. Any runner honoring the contract
     is substitutable.
+31. Everything the orchestration knows about the repository it runs in — which commands
+    verify a merge, which paths make each check relevant, which suites prove a cycle's
+    tip, and which toolchain breakage a reinstall repairs — lives in the project
+    adapter (`adapters/project.ts`, `PROJECT=shiora` selects `project-shiora.ts`). The
+    core executes the declarations and owns the generic behavior: output capture,
+    failure attribution, and stop decisions. Porting the orchestration to another
+    repository means writing a project adapter and nothing else.
 
 ## Test parity
 
