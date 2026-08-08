@@ -252,13 +252,23 @@ export async function mergeRemoteTask(
   const taskId = branch.slice('task/'.length)
   const worktree = join(paths.worktreesDir, `.adopt-${issueNumber}-${process.pid}-${Date.now()}`)
   const io = mergeIo(options.outputFile)
+  const mergeMessage = `Merge ${taskId} via Codex (closes #${issueNumber})`
   try {
-    git(paths.repoRoot, ['worktree', 'add', '--detach', worktree, remoteRef])
+    git(paths.repoRoot, ['worktree', 'add', '--detach', worktree, currentBranch])
+    try {
+      git(worktree, ['merge', '--no-ff', remoteRef, '-m', mergeMessage])
+    } catch {
+      try {
+        git(worktree, ['merge', '--abort'])
+      } catch {
+        // nothing to abort
+      }
+      throw new MergeError(`A merge conflict occurred while adopting ${branch}.`)
+    }
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
     runMergeChecks(worktree, currentBranch, options, io)
 
-    const mergeMessage = `Merge ${taskId} via Codex (closes #${issueNumber})`
     try {
       git(paths.repoRoot, ['merge', '--no-ff', remoteRef, '-m', mergeMessage])
     } catch {

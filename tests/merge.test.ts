@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { shioraProject } from '../src/adapters/project-shiora.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
-import { MergeError, mergeTask } from '../src/merge.ts'
+import { MergeError, mergeRemoteTask, mergeTask } from '../src/merge.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
@@ -156,5 +156,32 @@ describe('mergeTask', () => {
     const output = readFileSync(outputFile, 'utf8')
     expect(output).not.toContain('install ran')
     expect(output.split(/\r?\n/).filter((line) => line === 'check ran')).toHaveLength(1)
+  })
+})
+
+describe('mergeRemoteTask', () => {
+  it('runs checks against the worker branch merged with the current branch', async () => {
+    const branch = 'task/remote-combined-check'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    writeFileSync(join(repoRoot, 'run.txt'), 'newer run work\n')
+    git(repoRoot, ['add', 'run.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add newer run work'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeRemoteTask(paths, 220, branch, expectedHead, {
+      taskGate: 'light',
+      project: shioraProject,
+      testCmd: 'node -e "const fs=require(\'node:fs\'); process.exit(fs.existsSync(\'run.txt\') && fs.existsSync(\'task.txt\') ? 1 : 0)"',
+    })).rejects.toThrow(/Tests failed/)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(join(repoRoot, 'run.txt'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'task.txt'))).toBe(false)
   })
 })
