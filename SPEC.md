@@ -46,8 +46,9 @@ from or equivalent to `orchestration/tests/*.sh`.
 5. Failure handling: print `FAILED: <id>` with the log path, record the loss against the
    current cycle (`queue/failed-<cycle>`, once per task), never retry automatically.
    `cleanup` clears the announce markers so a manual retry is watched, not silent, but
-   only after verifying that the task process stopped and its worktree was removed; a
-   failed cleanup returns non-zero and retains the task state for a safe retry.
+   only after verifying that the task process stopped, the worktree directory and Git
+   registration were removed, and the task branch was deleted; a failed cleanup returns
+   non-zero and retains the task state for a safe retry.
 
 ## Growth and decisions
 
