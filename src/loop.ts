@@ -417,11 +417,16 @@ export function createLoop(deps: LoopDeps) {
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
     const baseBranch = git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']).trim()
       || 'origin/main'
+    const acceptedLimitsFile = join(paths.root, 'accepted-limits.md')
+    const acceptedLimits = existsSync(acceptedLimitsFile)
+      ? readFileSync(acceptedLimitsFile, 'utf8').trim() || '(none)'
+      : '(none)'
     const text = renderTemplate('review-template.md', {
       REVIEW_ID: reviewId,
       CYCLE: String(cycle),
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       BASE_BRANCH: baseBranch,
+      ACCEPTED_LIMITS: acceptedLimits,
     })
     if (text === undefined) return false
     writeFileSync(specFile(paths, reviewId), text)

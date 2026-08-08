@@ -278,6 +278,29 @@ describe('runAutoReview', () => {
     return readFileSync(join(paths.queueDir, `review-id-${cycle}`), 'utf8').trim()
   }
 
+  it('includes the curated accepted limits in a generated review spec', () => {
+    const acceptedLimitsFile = join(HERE, '..', '..', 'accepted-limits.md')
+    copyFileSync(join(HERE, '..', '..', 'templates', 'review-template.md'),
+      join(paths.root, 'templates', 'review-template.md'))
+    copyFileSync(acceptedLimitsFile, join(paths.root, 'accepted-limits.md'))
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+    expect(spec).toContain(readFileSync(acceptedLimitsFile, 'utf8').trim())
+    expect(spec).not.toContain('{{ACCEPTED_LIMITS}}')
+  })
+
+  it('marks accepted limits as none when the file is missing', () => {
+    copyFileSync(join(HERE, '..', '..', 'templates', 'review-template.md'),
+      join(paths.root, 'templates', 'review-template.md'))
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+    expect(spec).toContain('## Accepted limits')
+    expect(spec).toContain('(none)')
+    expect(spec).not.toContain('{{ACCEPTED_LIMITS}}')
+  })
+
   it('dispatches a review on first entry and resumes after a clean one', () => {
     const loop = makeLoop({ reviewEffort: 'low' })
     expect(loop.runAutoReview(7, false)).toBe(false)
