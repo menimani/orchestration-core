@@ -1,0 +1,115 @@
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import type { CheckConclusion, CreatePrOptions, Forge, PrStatus } from './forge.ts'
+
+const execFileAsync = promisify(execFile)
+
+// gh writes its errors to stdout too, and one of them names githubstatus.com — close
+// enough to a URL that a looser match once stored the error text and every later cycle
+// asked gh about a pull request called "check your internet connection".
+const PR_URL_PATTERN = /^https:\/\/\S+\/pull\/\d+$/
+
+interface RollupEntry {
+  __typename?: string
+  name?: string
+  context?: string
+  status?: string
+  conclusion?: string
+  state?: string
+}
+
+// Normalization ported 1:1 from check_pr_ci_status in bin/loop.sh:
+// - A running CheckRun has an empty-string conclusion; an empty string must read as
+//   pending, never as success.
+// - The rollup may contain StatusContext entries, which carry `state` instead of the
+//   CheckRun fields.
+// - Anything unclassifiable is pending, not success, so the caller keeps waiting.
+function normalizeEntry(entry: RollupEntry): CheckConclusion {
+  const raw
+    = entry.status !== undefined && entry.status !== ''
+      ? entry.status === 'COMPLETED'
+        ? (entry.conclusion ?? '') === '' ? 'UNKNOWN' : (entry.conclusion as string)
+        : 'PENDING'
+      : (entry.state ?? '') === '' ? 'UNKNOWN' : (entry.state as string)
+  if (raw === 'SUCCESS' || raw === 'NEUTRAL' || raw === 'SKIPPED') return 'success'
+  if (raw === 'FAILURE' || raw === 'ERROR' || raw === 'CANCELLED' || raw === 'TIMED_OUT') {
+    return 'failure'
+  }
+  return 'pending'
+}
+
+async function gh(repoRoot: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('gh', args, {
+    cwd: repoRoot,
+    windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  return stdout
+}
+
+export function createGithubForge(repoRoot: string = process.cwd()): Forge {
+  return {
+    async prStatus(ref: string): Promise<PrStatus> {
+      let stdout: string
+      try {
+        stdout = await gh(repoRoot, [
+          'pr', 'view', ref,
+          '--json', 'url,state,isDraft,headRefOid,statusCheckRollup',
+        ])
+      } catch {
+        return { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+      }
+      const data = JSON.parse(stdout) as {
+        url: string
+        state: string
+        isDraft: boolean
+        headRefOid: string
+        statusCheckRollup: RollupEntry[] | null
+      }
+      const state
+        = data.state === 'OPEN' ? 'open'
+          : data.state === 'MERGED' ? 'merged'
+            : 'closed'
+      return {
+        state,
+        isDraft: data.isDraft,
+        url: data.url,
+        headSha: data.headRefOid,
+        checks: (data.statusCheckRollup ?? []).map((entry) => ({
+          name: entry.name ?? entry.context ?? '(unnamed)',
+          conclusion: normalizeEntry(entry),
+        })),
+      }
+    },
+
+    async createPr(options: CreatePrOptions): Promise<string> {
+      const args = [
+        'pr', 'create',
+        '--base', options.base,
+        '--head', options.branch,
+        '--title', options.title,
+        '--body', options.body,
+      ]
+      if (options.draft) args.push('--draft')
+      const stdout = await gh(repoRoot, args)
+      const url = stdout.split(/\r?\n/).map((line) => line.trim())
+        .find((line) => PR_URL_PATTERN.test(line))
+      if (url === undefined) {
+        throw new Error(`gh pr create returned no pull request URL: ${stdout.trim()}`)
+      }
+      return url
+    },
+
+    async updatePr(ref: string, fields: { title?: string; body?: string }): Promise<void> {
+      const args = ['pr', 'edit', ref]
+      if (fields.title !== undefined) args.push('--title', fields.title)
+      if (fields.body !== undefined) args.push('--body', fields.body)
+      if (args.length === 3) return
+      await gh(repoRoot, args)
+    },
+
+    async markPrReady(ref: string): Promise<void> {
+      await gh(repoRoot, ['pr', 'ready', ref])
+    },
+  }
+}
