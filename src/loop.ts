@@ -92,11 +92,14 @@ export function createLoop(deps: LoopDeps) {
 
   async function publishWorkerCompletion(taskId: string, issueNumber: number): Promise<void> {
     const worktree = worktreeDir(paths, taskId)
-    const currentBranch = git(['branch', '--show-current']).trim()
+    // The comparison base is the checkout's HEAD SHA, not its branch name: a detached
+    // worker checkout has an empty branch name, which read as zero commits and left
+    // completed work permanently unpublished.
+    const baseSha = git(['rev-parse', 'HEAD']).trim()
     if (gitIn(worktree, ['status', '--porcelain']).trim() !== '') {
       throw new Error(`${taskId} has uncommitted changes`)
     }
-    const commits = gitIn(worktree, ['log', `${currentBranch}..HEAD`, '--format=%H'])
+    const commits = gitIn(worktree, ['log', `${baseSha}..HEAD`, '--format=%H'])
       .trim().split(/\r?\n/).filter((line) => line !== '')
     if (commits.length === 0) {
       if (!isInspectionTaskId(paths, taskId)) {
