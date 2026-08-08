@@ -123,6 +123,8 @@ describe('actionable findings', () => {
     const loop = makeLoop()
     writeFinal('t4', [
       'NEXT_TASK: None.',
+      'NEXT_TASK: None. Sections 5 and 6 found no actionable issues.',
+      'NEXT_TASK: Sections 5 and 6 found no actionable issues',
       'NEXT_TASK: nothing to report',
     ].join('\n'))
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
@@ -130,9 +132,12 @@ describe('actionable findings', () => {
 
   it('keeps a real finding that contains None', () => {
     const loop = makeLoop()
-    const finding = '[BUG] `src/x.ts` returns None instead of an empty list'
-    writeFinal('t5', `NEXT_TASK: ${finding}\n`)
-    expect(loop.actionableFindings(finalMessageFile(paths, 't5'))).toEqual([finding])
+    const findings = [
+      '[BUG] `src/x.ts` returns None instead of an empty list',
+      '[TEST] `src/a.ts` covers the None branch',
+    ]
+    writeFinal('t5', findings.map((finding) => `NEXT_TASK: ${finding}`).join('\n'))
+    expect(loop.actionableFindings(finalMessageFile(paths, 't5'))).toEqual(findings)
   })
 })
 

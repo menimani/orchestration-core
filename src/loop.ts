@@ -124,9 +124,15 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function reportsNothing(text: string): boolean {
-    const normalized = text.trim().replace(/[.!]+$/, '').toLowerCase()
-    return ['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
-      .includes(normalized)
+    const trimmed = text.trim()
+    const normalized = trimmed.replace(/[.!]+$/, '').toLowerCase()
+    if (['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
+      .includes(normalized)) return true
+    if (/^none\b/i.test(trimmed)) return true
+
+    const firstSentence = trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? ''
+    return /\b(?:no (?:actionable )?(?:issues|findings)|found no (?:actionable )?(?:issues|findings)|nothing to report)\b/i
+      .test(firstSentence)
   }
 
   /**
