@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -61,6 +61,7 @@ describe('manual merge', () => {
     git(['commit', '-qm', 'fix: complete linked task'], worktree)
     await writeStatus(paths, taskId, 'completed')
     recordIssueForTask(paths, taskId, 197)
+    const runBranch = git(['branch', '--show-current']).trim()
 
     const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
       cwd: repoRoot,
@@ -72,6 +73,15 @@ describe('manual merge', () => {
     expect(git(['log', '-1', '--format=%s']).trim()).toBe(
       `Merge ${taskId} via Codex (closes #197)`,
     )
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    expect(JSON.parse(readFileSync(
+      join(paths.queueDir, 'issue-promotion', '197.json'), 'utf8',
+    ))).toEqual({
+      taskId,
+      issueNumber: 197,
+      mergeCommit,
+      runBranch,
+    })
   })
 })
 
