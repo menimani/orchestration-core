@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, openSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
@@ -52,40 +52,52 @@ export async function startTask(
     )
   }
 
-  console.log(`Creating worktree: ${worktree} (branch: ${branch})`)
-  execFileSync('git', ['worktree', 'add', worktree, '-b', branch], {
-    cwd: paths.repoRoot,
-    stdio: 'inherit',
-    windowsHide: true,
-  })
-
-  for (const step of options.setup ?? []) {
-    if (step.requires !== undefined && !existsSync(join(worktree, step.requires))) continue
-    console.log(`Preparing worktree: ${step.label}`)
-    execSync(step.command, {
-      cwd: join(worktree, step.cwd),
-      stdio: 'inherit',
-      windowsHide: true,
-    })
-  }
-
   const log = logFile(paths, taskId)
   const finalMessage = finalMessageFile(paths, taskId)
   writeFileSync(log, '')
   rmSync(finalMessage, { force: true })
 
-  console.log(`Starting task execution: ${taskId}`
-    + (options.model !== undefined && options.model !== '' ? ` model=${options.model}` : '')
-    + ` effort=${options.effort}`)
-  const pid = await runner.start({
-    worktree,
-    specFile: spec,
-    finalMessageFile: finalMessage,
-    logFile: log,
-    effort: options.effort,
-    model: options.model,
-  })
-  await writeStatus(paths, taskId, 'running', pid)
-  console.log(`Started. task_id=${taskId} pid=${pid} log=${log}`)
-  return { outcome: 'started', pid }
+  try {
+    console.log(`Creating worktree: ${worktree} (branch: ${branch})`)
+    execFileSync('git', ['worktree', 'add', worktree, '-b', branch], {
+      cwd: paths.repoRoot,
+      stdio: 'inherit',
+      windowsHide: true,
+    })
+
+    for (const step of options.setup ?? []) {
+      if (step.requires !== undefined && !existsSync(join(worktree, step.requires))) continue
+      console.log(`Preparing worktree: ${step.label}`)
+      const setupLogFd = openSync(log, 'a')
+      try {
+        execSync(step.command, {
+          cwd: join(worktree, step.cwd),
+          stdio: ['ignore', setupLogFd, setupLogFd],
+          windowsHide: true,
+        })
+      } finally {
+        closeSync(setupLogFd)
+      }
+    }
+
+    console.log(`Starting task execution: ${taskId}`
+      + (options.model !== undefined && options.model !== '' ? ` model=${options.model}` : '')
+      + ` effort=${options.effort}`)
+    const pid = await runner.start({
+      worktree,
+      specFile: spec,
+      finalMessageFile: finalMessage,
+      logFile: log,
+      effort: options.effort,
+      model: options.model,
+    })
+    await writeStatus(paths, taskId, 'running', pid)
+    console.log(`Started. task_id=${taskId} pid=${pid} log=${log}`)
+    return { outcome: 'started', pid }
+  } catch (error) {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error)
+    appendFileSync(log, `Task startup failed:\n${detail}\n`)
+    await writeStatus(paths, taskId, 'failed')
+    throw error
+  }
 }

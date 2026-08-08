@@ -909,6 +909,7 @@ export function createLoop(deps: LoopDeps) {
       try {
         const issues = await Promise.all([
           forge.listOpenIssues(LABEL_READY),
+          forge.listOpenIssues(LABEL_IN_PROGRESS),
           forge.listOpenIssues(LABEL_MERGE_READY),
         ])
         const remoteCount = new Set(issues.flat().map((issue) => issue.number)).size
@@ -1038,8 +1039,9 @@ export function createLoop(deps: LoopDeps) {
             model: config.scanModel === '' ? undefined : config.scanModel,
             setup: project.scanWorktreeSetup,
           })
-        } catch {
-          log('[loop] WARN: Scan startup failure')
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          log(`[loop] WARN: Scan startup failure: ${message} — Log: ${logFile(paths, scanId)}`)
         }
       }
     }
@@ -1243,8 +1245,9 @@ export function createLoop(deps: LoopDeps) {
             model: config.taskModel === '' ? undefined : config.taskModel,
           })
           running += 1
-        } catch {
-          log(`[loop] WARN: ${entry.taskId} startup failure`)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          log(`[loop] WARN: ${entry.taskId} startup failure: ${message} — Log: ${logFile(paths, entry.taskId)}`)
         }
       }
 

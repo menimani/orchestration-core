@@ -424,7 +424,22 @@ describe('remote issue queue idle detection', () => {
 
   it('defers the cycle gate and review while a ready issue is open', async () => {
     const loop = makeReviewLoop(true)
-    await fakeForge.createIssue({ title: 'pending fix', body: '', labels: ['loop:ready'] })
+    await fakeForge.createIssue({
+      title: 'pending fix',
+      body: '',
+      labels: ['loop:ready', 'loop:in-progress'],
+    })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(logText()).toContain('Waiting for 1 remote issue-queue task')
+  })
+
+  it('defers the cycle gate and review while an in-progress issue is open', async () => {
+    const loop = makeReviewLoop(true)
+    await fakeForge.createIssue({ title: 'claimed fix', body: '', labels: ['loop:in-progress'] })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
@@ -553,6 +568,23 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(await loop.poll()).toBe('stopped')
     expect(logText()).not.toContain('FAILED: f1')
     expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n')).toHaveLength(3)
+  })
+
+  it('records a failed scan in its cycle before entering the cycle gate', async () => {
+    const taskId = '20260809_000000_001_scan'
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: false,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeRawStatus(taskId, 'failed')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe(`${taskId}\n`)
+    expect(logged.indexOf(`[loop] FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`))
+      .toBeLessThan(logged.findIndex((line) => line.includes('CYCLE_COMPLETE: 1/')))
   })
 
   it('does not start queued work or scans while a stop is pending', async () => {
