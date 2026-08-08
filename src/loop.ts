@@ -10,7 +10,7 @@ import type { LoopConfig } from './config.ts'
 import {
   existingTaskIdForDesc, taskIdForDesc, newTaskId, recordTaskIdForDesc,
 } from './ids.ts'
-import { mergeTask, MergeError } from './merge.ts'
+import { mergeRemoteTask, mergeTask, MergeError } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
   branchName, worktreeDir, type OrchPaths,
@@ -24,7 +24,8 @@ import { pitfallsFileForDesc } from './gates.ts'
 import {
   claimIssue, commentOnIssueMerge, heartbeatIssueForTask, issueNumberForTask,
   publishFinding, reapStaleLeases, recordIssuePromotion,
-  reconcileFindingFingerprints, unresolvedFindings, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_READY,
+  reconcileFindingFingerprints, unresolvedFindings, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
+  LABEL_MERGE_READY, LABEL_READY,
 } from './issueQueue.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
@@ -114,6 +115,93 @@ export function createLoop(deps: LoopDeps) {
     await forge.addLabel(issueNumber, LABEL_MERGE_READY)
     await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
     log(`[loop] Published ${branch} at ${head} for issue #${issueNumber}`)
+  }
+
+  function workerBranchReport(comments: string[]): { branch: string; head: string } | undefined {
+    for (const comment of [...comments].reverse()) {
+      const branch = /^Branch: (task\/[A-Za-z0-9][A-Za-z0-9._-]*)$/m.exec(comment)?.[1]
+      const head = /^Head commit: ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/m.exec(comment)?.[1]
+      if (branch !== undefined && head !== undefined) return { branch, head }
+    }
+    return undefined
+  }
+
+  async function adoptRemoteTasks(): Promise<void> {
+    let issues: Awaited<ReturnType<Forge['listOpenIssues']>>
+    try {
+      issues = await forge.listOpenIssues(LABEL_MERGE_READY)
+    } catch (error) {
+      log(`[loop] WARN: could not list merge-ready issues: ${(error as Error).message}`)
+      return
+    }
+
+    for (const issue of issues) {
+      if (existsSync(stopFile)) return
+      const mergeLog = join(paths.logsDir, `issue-${issue.number}.merge.log`)
+      try {
+        const report = workerBranchReport(await forge.listIssueComments(issue.number))
+        if (report === undefined) {
+          throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
+        }
+        try {
+          execFileSync('git', [
+            'fetch', 'origin',
+            `+refs/heads/${report.branch}:refs/remotes/origin/${report.branch}`,
+          ], {
+            cwd: paths.repoRoot,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+          })
+        } catch {
+          throw new MergeError(`Could not fetch ${report.branch} from origin.`)
+        }
+
+        const mergeCommit = await mergeRemoteTask(
+          paths,
+          issue.number,
+          report.branch,
+          report.head,
+          {
+            taskGate: config.taskGate,
+            testCmd: config.testCmd === '' ? undefined : config.testCmd,
+            skipAutoTest: config.skipAutoTest,
+            project,
+            outputFile: mergeLog,
+          },
+        )
+        writeFileSync(mergeFailureFile, '0\n')
+        try {
+          await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+          await commentOnIssueMerge(
+            forge,
+            issue.number,
+            mergeCommit,
+            git(['branch', '--show-current']).trim(),
+          )
+        } catch (error) {
+          log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${(error as Error).message}`)
+        }
+        const cycle = readCount(scanCountFile)
+        if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+        log(`[loop] Adopted remote task from issue #${issue.number}`)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        appendFileSync(mergeLog, `${message}\n`)
+        log(`[loop] WARN: Remote adoption failure for issue #${issue.number} — Log: ${mergeLog}`)
+        try {
+          await forge.commentIssue(issue.number, `Remote task adoption failed: ${message}`)
+        } catch (commentError) {
+          log(`[loop] WARN: could not comment on issue #${issue.number}: ${(commentError as Error).message}`)
+        }
+        try {
+          await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
+          await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+        } catch (labelError) {
+          log(`[loop] WARN: could not relabel issue #${issue.number}: ${(labelError as Error).message}`)
+        }
+        noteMergeFailure(mergeLog)
+      }
+    }
   }
 
   function countRunning(): number {
@@ -1044,6 +1132,10 @@ export function createLoop(deps: LoopDeps) {
       writeFileSync(stopFile, '')
     }
 
+    if (!config.workerMode && config.issueQueueEnabled && !existsSync(stopFile)) {
+      await adoptRemoteTasks()
+    }
+
     let running = countRunning()
 
     // Nothing new starts while a stop is pending: without this the burst detector above
@@ -1139,6 +1231,8 @@ export function createLoop(deps: LoopDeps) {
     decisionIdentifiers,
     decisionAlreadyRecorded,
     noteMergeFailure,
+    workerBranchReport,
+    adoptRemoteTasks,
     cycleIsFinal,
     runAutoReview,
     runCycleSuite,

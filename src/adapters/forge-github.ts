@@ -211,6 +211,14 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
       await gh(repoRoot, ['issue', 'comment', String(issueNumber), '--body', comment])
     },
 
+    async listIssueComments(issueNumber: number): Promise<string[]> {
+      const stdout = await gh(repoRoot, [
+        'issue', 'view', String(issueNumber), '--json', 'comments',
+      ])
+      const data = JSON.parse(stdout) as { comments: Array<{ body: string }> }
+      return data.comments.map((comment) => comment.body)
+    },
+
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
       const stdout = await gh(repoRoot, ['issue', 'list', '--state', 'open',
         '--label', label, '--limit', '200',

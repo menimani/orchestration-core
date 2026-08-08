@@ -72,6 +72,9 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       fake.issueComments.set(issueNumber, comments)
       issue.updatedAt = fake.clock().toISOString()
     },
+    async listIssueComments(issueNumber: number): Promise<string[]> {
+      return [...(fake.issueComments.get(issueNumber) ?? [])]
+    },
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
       return [...fake.issues.values()]
         .filter((issue) => issue.state === 'open' && issue.labels.includes(label))

@@ -32,31 +32,32 @@ export interface MergeOptions {
   outputFile?: string | undefined
 }
 
+interface MergeIo {
+  out: (text: string) => void
+  run: (cwd: string, command: string) => void
+  tryRun: (cwd: string, command: string, label: string) => boolean
+}
+
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
   })
 }
 
-/**
- * Merge a completed task into the current branch. Ported from task-merge.sh:
- * uncommitted changes or a missing deliverable stop the merge and keep the worktree,
- * because removing it would lose work an agent forgot to commit.
- */
-export async function mergeTask(paths: OrchPaths, taskId: string, options: MergeOptions): Promise<string> {
+function mergeIo(outputFile?: string): MergeIo {
   const out = (text: string): void => {
-    if (options.outputFile !== undefined) {
-      appendFileSync(options.outputFile, `${text}\n`)
+    if (outputFile !== undefined) {
+      appendFileSync(outputFile, `${text}\n`)
     } else {
       console.log(text)
     }
   }
   const run = (cwd: string, command: string): void => {
-    if (options.outputFile !== undefined) {
+    if (outputFile !== undefined) {
       const result = execSync(command, {
         cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
       })
-      appendFileSync(options.outputFile, result)
+      appendFileSync(outputFile, result)
     } else {
       execSync(command, { cwd, stdio: 'inherit', windowsHide: true })
     }
@@ -68,12 +69,64 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
       return true
     } catch (error) {
       const failed = error as { stdout?: string; stderr?: string }
-      if (options.outputFile !== undefined) {
-        appendFileSync(options.outputFile, `${failed.stdout ?? ''}${failed.stderr ?? ''}`)
+      if (outputFile !== undefined) {
+        appendFileSync(outputFile, `${failed.stdout ?? ''}${failed.stderr ?? ''}`)
       }
       return false
     }
   }
+  return { out, run, tryRun }
+}
+
+function runMergeChecks(
+  worktree: string,
+  baseRef: string,
+  options: MergeOptions,
+  io: MergeIo,
+): void {
+  if (options.testCmd !== undefined && options.testCmd !== '') {
+    io.out(`=== Running tests in worktree: ${options.testCmd} ===`)
+    try {
+      io.run(worktree, options.testCmd)
+    } catch {
+      throw new MergeError('Tests failed. Aborting merge.')
+    }
+    return
+  }
+  if (options.skipAutoTest === true) return
+
+  const changed = git(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
+    .split(/\r?\n/).filter((line) => line !== '')
+  let ok = true
+  for (const check of options.project.mergeChecks(options.taskGate)) {
+    if (check.appliesTo !== undefined && !check.appliesTo(changed)) continue
+    if (check.requires !== undefined && !existsSync(join(worktree, check.requires))) continue
+    if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
+    ok = io.tryRun(join(worktree, check.cwd), check.command, check.label) && ok
+  }
+  if (!ok) throw new MergeError('Tests failed. Aborting merge.')
+}
+
+function removeTemporaryWorktree(paths: OrchPaths, worktree: string): void {
+  try {
+    git(paths.repoRoot, ['worktree', 'remove', worktree, '--force'])
+  } catch {
+    try {
+      rmSync(worktree, { recursive: true, force: true })
+      git(paths.repoRoot, ['worktree', 'prune'])
+    } catch {
+      // cleanup is best effort; the merge verdict is already known
+    }
+  }
+}
+
+/**
+ * Merge a completed task into the current branch. Ported from task-merge.sh:
+ * uncommitted changes or a missing deliverable stop the merge and keep the worktree,
+ * because removing it would lose work an agent forgot to commit.
+ */
+export async function mergeTask(paths: OrchPaths, taskId: string, options: MergeOptions): Promise<string> {
+  const io = mergeIo(options.outputFile)
 
   const status = readStatus(paths, taskId)
   if (status === undefined) {
@@ -103,34 +156,13 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     )
   }
 
-  out(`=== ${taskId} diff (against ${currentBranch}) ===`)
+  io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
   try {
-    out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
+    io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
   } catch {
     // an empty inspection diff is fine
   }
-
-  if (options.testCmd !== undefined && options.testCmd !== '') {
-    out(`=== Running tests in worktree: ${options.testCmd} ===`)
-    try {
-      run(worktree, options.testCmd)
-    } catch {
-      throw new MergeError('Tests failed. Aborting merge.')
-    }
-  } else if (options.skipAutoTest !== true) {
-    const changed = git(worktree, ['diff', '--name-only', `${currentBranch}...HEAD`])
-      .split(/\r?\n/).filter((line) => line !== '')
-    let ok = true
-    for (const check of options.project.mergeChecks(options.taskGate)) {
-      if (check.appliesTo !== undefined && !check.appliesTo(changed)) continue
-      if (check.requires !== undefined && !existsSync(join(worktree, check.requires))) continue
-      if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
-      ok = tryRun(join(worktree, check.cwd), check.command, check.label) && ok
-    }
-    if (!ok) {
-      throw new MergeError('Tests failed. Aborting merge.')
-    }
-  }
+  runMergeChecks(worktree, currentBranch, options, io)
 
   const mergeMessage = options.closesIssue === undefined
     ? `Merge ${taskId} via Codex`
@@ -155,7 +187,7 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     try {
       rmSync(worktree, { recursive: true, force: true })
     } catch {
-      out(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`)
+      io.out(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`)
       try {
         git(paths.repoRoot, ['worktree', 'prune'])
       } catch {
@@ -173,6 +205,68 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     }
   }
   await writeStatus(paths, taskId, 'merged')
-  out(`Merged ${taskId} and removed the worktree.`)
+  io.out(`Merged ${taskId} and removed the worktree.`)
   return git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+}
+
+/** Merge an already-fetched worker branch through the same selected checks as a local task. */
+export async function mergeRemoteTask(
+  paths: OrchPaths,
+  issueNumber: number,
+  branch: string,
+  expectedHead: string,
+  options: MergeOptions,
+): Promise<string> {
+  if (!/^task\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(branch)) {
+    throw new MergeError(`Issue #${issueNumber} reported an invalid task branch: ${branch}`)
+  }
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(expectedHead)) {
+    throw new MergeError(`Issue #${issueNumber} reported an invalid head commit: ${expectedHead}`)
+  }
+
+  const remoteRef = `refs/remotes/origin/${branch}`
+  let fetchedHead: string
+  try {
+    fetchedHead = git(paths.repoRoot, ['rev-parse', '--verify', remoteRef]).trim()
+  } catch {
+    throw new MergeError(`Remote branch ${branch} does not exist after fetch.`)
+  }
+  if (fetchedHead !== expectedHead) {
+    throw new MergeError(
+      `Remote branch ${branch} is at ${fetchedHead}, not the reported ${expectedHead}.`,
+    )
+  }
+
+  const currentBranch = git(paths.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+  const commitCount = Number(git(paths.repoRoot, [
+    'rev-list', '--count', `${currentBranch}..${remoteRef}`,
+  ]).trim())
+  if (!Number.isInteger(commitCount) || commitCount < 1) {
+    throw new MergeError(`${branch} has no new commits relative to ${currentBranch}.`)
+  }
+
+  const taskId = branch.slice('task/'.length)
+  const worktree = join(paths.worktreesDir, `.adopt-${issueNumber}-${process.pid}-${Date.now()}`)
+  const io = mergeIo(options.outputFile)
+  try {
+    git(paths.repoRoot, ['worktree', 'add', '--detach', worktree, remoteRef])
+    io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
+    io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
+    runMergeChecks(worktree, currentBranch, options, io)
+
+    const mergeMessage = `Merge ${taskId} via Codex (closes #${issueNumber})`
+    try {
+      git(paths.repoRoot, ['merge', '--no-ff', remoteRef, '-m', mergeMessage])
+    } catch {
+      try {
+        git(paths.repoRoot, ['merge', '--abort'])
+      } catch {
+        // nothing to abort
+      }
+      throw new MergeError(`A merge conflict occurred while adopting ${branch}.`)
+    }
+    return git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  } finally {
+    removeTemporaryWorktree(paths, worktree)
+  }
 }

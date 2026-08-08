@@ -81,6 +81,8 @@ export interface Forge {
   getIssue(issueNumber: number): Promise<ForgeIssue>
   /** Add a comment to an issue. */
   commentIssue(issueNumber: number, comment: string): Promise<void>
+  /** Issue comment bodies, oldest first. */
+  listIssueComments(issueNumber: number): Promise<string[]>
   /** Open issues carrying the label, newest first. */
   listOpenIssues(label: string): Promise<ForgeIssue[]>
   assignIssue(issueNumber: number, user: string): Promise<void>
