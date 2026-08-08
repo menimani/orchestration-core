@@ -131,6 +131,7 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
     async createIssue(options: CreateIssueOptions): Promise<number> {
       const args = ['issue', 'create', '--title', options.title, '--body', options.body]
       for (const label of options.labels) args.push('--label', label)
+      for (const assignee of options.assignees ?? []) args.push('--assignee', assignee)
       const stdout = await gh(repoRoot, args)
       const match = /\/issues\/(\d+)\s*$/.exec(stdout.trim())
       if (match === null) {

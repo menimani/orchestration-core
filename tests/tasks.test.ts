@@ -3,7 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
-import { delegateTask, enqueueTask, newTaskSpec, specFile } from '../src/tasks.ts'
+import { issueNumberForTask, LABEL_FINDING, LABEL_IN_PROGRESS } from '../src/issueQueue.ts'
+import {
+  delegateTask, delegateTaskVisible, enqueueTask, newTaskSpec, specFile, writeIssueModeMarker,
+} from '../src/tasks.ts'
+import { makeFakeForge } from './fakeForge.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -108,6 +112,50 @@ describe('delegateTask', () => {
 
   it('rejects a blank description', () => {
     expect(() => delegateTask(paths, '   ')).toThrow(/description/i)
+  })
+
+  it('files delegated work as assigned and in progress when the daemon marker enables issues', async () => {
+    writeIssueModeMarker(paths, true)
+    const forge = makeFakeForge('delegator')
+    const result = await delegateTaskVisible(paths, DESC, {}, {
+      env: {},
+      loadForge: async () => forge,
+      warn: () => {},
+    })
+
+    expect(queueLines()).toEqual([`${result.taskId}:0`])
+    expect(result.issue).toEqual({ outcome: 'created', issueNumber: 1 })
+    expect(issueNumberForTask(paths, result.taskId)).toBe(1)
+    const issue = await forge.getIssue(1)
+    expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+    expect(issue.assignees).toEqual(['delegator'])
+  })
+
+  it('still enqueues locally when forge publication fails', async () => {
+    const warnings: string[] = []
+    const result = await delegateTaskVisible(paths, DESC, {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge: async () => { throw new Error('forge unavailable') },
+      warn: (message) => warnings.push(message),
+    })
+
+    expect(queueLines()).toEqual([`${result.taskId}:0`])
+    expect(result.issue).toBeUndefined()
+    expect(warnings).toEqual([expect.stringContaining('forge unavailable')])
+  })
+
+  it('files nothing when the delegate environment explicitly disables issue mode', async () => {
+    writeIssueModeMarker(paths, true)
+    let loadedForge = false
+    const result = await delegateTaskVisible(paths, DESC, {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'false' },
+      loadForge: async () => { loadedForge = true; return makeFakeForge() },
+      warn: () => {},
+    })
+
+    expect(queueLines()).toEqual([`${result.taskId}:0`])
+    expect(result.issue).toBeUndefined()
+    expect(loadedForge).toBe(false)
   })
 })
 

@@ -44,6 +44,8 @@ export interface CreateIssueOptions {
   title: string
   body: string
   labels: string[]
+  /** Assignees applied atomically when the forge creates the issue. */
+  assignees?: string[]
 }
 
 export interface Forge {

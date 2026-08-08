@@ -242,19 +242,11 @@ export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPath
   }
 }
 
-/**
- * File a finding as a ready issue unless an open issue already carries its
- * fingerprint. The check reads open findings only: a closed issue's fix already
- * landed, and a finding that genuinely resurfaces deserves a fresh issue.
- */
-export async function publishFinding(
+async function findExistingFinding(
   forge: Forge,
   paths: OrchPaths,
-  description: string,
-  parentTaskId: string,
-  effort?: string,
-): Promise<PublishResult> {
-  const fingerprint = fingerprintOf(description)
+  fingerprint: string,
+): Promise<number | undefined> {
   const ledger = fingerprintLedger(paths)
   const recorded = ledger.find((entry) => entry.fingerprint === fingerprint)
   if (recorded !== undefined) {
@@ -271,13 +263,32 @@ export async function publishFinding(
         forge, fingerprint, recorded.issueNumber,
       )) ?? recorded.issueNumber
       recordFingerprint(paths, fingerprint, survivor)
-      return { outcome: 'duplicate', issueNumber: survivor }
+      return survivor
     }
     writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
   }
   const existingIssueNumber = await reconcileOpenFindings(forge, fingerprint)
   if (existingIssueNumber !== undefined) {
     recordFingerprint(paths, fingerprint, existingIssueNumber)
+  }
+  return existingIssueNumber
+}
+
+/**
+ * File a finding as a ready issue unless an open issue already carries its
+ * fingerprint. The check reads open findings only: a closed issue's fix already
+ * landed, and a finding that genuinely resurfaces deserves a fresh issue.
+ */
+export async function publishFinding(
+  forge: Forge,
+  paths: OrchPaths,
+  description: string,
+  parentTaskId: string,
+  effort?: string,
+): Promise<PublishResult> {
+  const fingerprint = fingerprintOf(description)
+  const existingIssueNumber = await findExistingFinding(forge, paths, fingerprint)
+  if (existingIssueNumber !== undefined) {
     return { outcome: 'duplicate', issueNumber: existingIssueNumber }
   }
   const title = description.length > 90 ? `${description.slice(0, 87)}...` : description
@@ -290,6 +301,55 @@ export async function publishFinding(
   // shared forge state over a bounded window and retain the lower issue number.
   const survivor = await reconcileCreatedFinding(forge, fingerprint, issueNumber)
   recordFingerprint(paths, fingerprint, survivor)
+  return survivor === issueNumber
+    ? { outcome: 'created', issueNumber }
+    : { outcome: 'duplicate', issueNumber: survivor }
+}
+
+async function claimReadyIssueForDelegation(
+  forge: Forge,
+  issueNumber: number,
+  user: string,
+): Promise<void> {
+  await withIssueCoordination(forge, issueNumber, async () => {
+    const issue = await forge.getIssue(issueNumber)
+    if (!isReadyToClaim(issue)) return
+    await forge.assignIssue(issueNumber, user)
+    await forge.addLabel(issueNumber, LABEL_IN_PROGRESS)
+    await forge.removeLabel(issueNumber, LABEL_READY)
+  })
+}
+
+/** File user-delegated work as claimed, or attach the task to its existing issue. */
+export async function publishDelegatedTask(
+  forge: Forge,
+  paths: OrchPaths,
+  description: string,
+  taskId: string,
+  user: string,
+  effort?: string,
+): Promise<PublishResult> {
+  const fingerprint = fingerprintOf(description)
+  const existingIssueNumber = await findExistingFinding(forge, paths, fingerprint)
+  if (existingIssueNumber !== undefined) {
+    await claimReadyIssueForDelegation(forge, existingIssueNumber, user)
+    recordIssueForTask(paths, taskId, existingIssueNumber)
+    return { outcome: 'duplicate', issueNumber: existingIssueNumber }
+  }
+
+  const title = description.length > 90 ? `${description.slice(0, 87)}...` : description
+  const issueNumber = await forge.createIssue({
+    title,
+    body: buildIssueBody(description, taskId, effort),
+    labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    assignees: [user],
+  })
+  const survivor = await reconcileCreatedFinding(forge, fingerprint, issueNumber)
+  if (survivor !== issueNumber) {
+    await closeDuplicate(forge, issueNumber, survivor)
+  }
+  recordFingerprint(paths, fingerprint, survivor)
+  recordIssueForTask(paths, taskId, survivor)
   return survivor === issueNumber
     ? { outcome: 'created', issueNumber }
     : { outcome: 'duplicate', issueNumber: survivor }

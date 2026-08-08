@@ -45,7 +45,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
         title: options.title,
         body: options.body,
         labels: [...options.labels],
-        assignees: [],
+        assignees: [...(options.assignees ?? [])],
         updatedAt: fake.clock().toISOString(),
       })
       return issueNumber

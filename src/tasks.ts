@@ -4,6 +4,7 @@ import { pitfallsFileForDesc } from './gates.ts'
 import { taskIdForDesc } from './ids.ts'
 import { statusFile, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
+import type { Forge } from './adapters/forge.ts'
 
 // The queue-writing commands: new, enqueue, delegate. Everything here prints the exact
 // lines the bash implementation printed (`Created:`, `Enqueued:`, `WARN:`), because the
@@ -87,6 +88,26 @@ export interface DelegateResult {
   spec: string
   specReused: boolean
   enqueue: EnqueueResult
+  issue?: { outcome: 'created' | 'duplicate'; issueNumber: number }
+}
+
+export function issueModeMarkerFile(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-mode')
+}
+
+export function writeIssueModeMarker(paths: OrchPaths, enabled: boolean): void {
+  writeFileSync(issueModeMarkerFile(paths), `${enabled}\n`)
+}
+
+/** The delegate process prefers its own explicit setting, then the daemon marker. */
+export function isIssueModeActive(
+  paths: OrchPaths,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const configured = env['ISSUE_QUEUE_ENABLED']
+  if (configured !== undefined) return configured === 'true'
+  const marker = issueModeMarkerFile(paths)
+  return existsSync(marker) && readFileSync(marker, 'utf8').trim() === 'true'
 }
 
 /**
@@ -130,6 +151,35 @@ export function delegateTask(
     writeFileSync(join(inspectDir, taskId), '')
   }
   return { taskId, spec, specReused, enqueue: enqueueTask(paths, taskId, 0) }
+}
+
+export interface DelegatedIssueOptions {
+  env?: NodeJS.ProcessEnv
+  loadForge: () => Promise<Forge>
+  warn: (message: string) => void
+}
+
+/** Enqueue locally first, then make the already-claimed work visible on the forge. */
+export async function delegateTaskVisible(
+  paths: OrchPaths,
+  description: string,
+  options: DelegateOptions,
+  issueOptions: DelegatedIssueOptions,
+): Promise<DelegateResult> {
+  const result = delegateTask(paths, description, options)
+  if (!isIssueModeActive(paths, issueOptions.env)) return result
+
+  try {
+    const forge = await issueOptions.loadForge()
+    const user = await forge.currentUser()
+    const { publishDelegatedTask } = await import('./issueQueue.ts')
+    result.issue = await publishDelegatedTask(
+      forge, paths, description, result.taskId, user, options.effort,
+    )
+  } catch (error) {
+    issueOptions.warn(`WARN: Could not publish delegated task to the forge: ${(error as Error).message}`)
+  }
+  return result
 }
 
 export function isLoopRunning(paths: OrchPaths): boolean {

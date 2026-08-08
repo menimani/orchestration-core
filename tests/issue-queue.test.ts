@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   buildIssueBody, claimIssue, fingerprintOf, issueNumberForTask, parseIssueBody,
-  publishFinding, reapStaleLeases, reconcileFindingFingerprints, recordIssueForTask,
+  publishDelegatedTask, publishFinding, reapStaleLeases, reconcileFindingFingerprints, recordIssueForTask,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
@@ -365,6 +365,21 @@ describe('issue map', () => {
     recordIssueForTask(paths, 'task-x', 42)
     expect(issueNumberForTask(paths, 'task-x')).toBe(42)
     expect(issueNumberForTask(paths, 'task-unknown')).toBeUndefined()
+  })
+})
+
+describe('publishDelegatedTask', () => {
+  it('links a duplicate delegation to the existing issue', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const first = await publishDelegatedTask(forge, paths, description, 'user-task-1', forge.user)
+    const second = await publishDelegatedTask(
+      forge, paths, '[BUG] `src/a/b.ts` breaks with new wording', 'user-task-2', forge.user,
+    )
+
+    expect(first).toEqual({ outcome: 'created', issueNumber: 1 })
+    expect(second).toEqual({ outcome: 'duplicate', issueNumber: 1 })
+    expect(forge.issues.size).toBe(1)
+    expect(issueNumberForTask(paths, 'user-task-2')).toBe(1)
   })
 })
 

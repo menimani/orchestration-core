@@ -198,7 +198,11 @@ from or equivalent to `orchestration/tests/*.sh`.
 34. The merge commit of an issue-born task carries `closes #N`, so the forge closes
     the issue when the promotion PR lands the commit on the default branch. A forge
     outage degrades a poll to local-only work; it never stops the loop. Labels are
-    ensured at loop startup. `delegate` stays local by design.
+    ensured at loop startup. The daemon records issue mode in `queue/issue-mode` so a
+    separate `delegate` process can file its locally enqueued work as an issue already
+    assigned to the current user with `loop:finding` + `loop:in-progress`. Delegation
+    remains local-only with a warning if the forge is unavailable, and fingerprint
+    duplicates link the local task to the existing issue.
 
 ## Test parity
 

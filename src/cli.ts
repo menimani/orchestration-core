@@ -14,7 +14,9 @@ import { pruneTasks } from './prune.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
-import { delegateTask, enqueueTask, isLoopRunning, newTaskSpec } from './tasks.ts'
+import {
+  delegateTaskVisible, enqueueTask, isLoopRunning, newTaskSpec, writeIssueModeMarker,
+} from './tasks.ts'
 import { waitForNextPoll } from './wake.ts'
 
 // The command surface: each package.json script dispatches here with the command name
@@ -98,7 +100,13 @@ const cmdDelegate: Command = async (paths, args) => {
     return 1
   }
 
-  const result = delegateTask(paths, description, { effort, inspect })
+  const result = await delegateTaskVisible(paths, description, { effort, inspect }, {
+    loadForge: async () => {
+      const config = loadConfig()
+      return loadForge(config.forge, paths.repoRoot)
+    },
+    warn: (message) => console.warn(message),
+  })
   if (result.specReused) {
     console.log(`Reusing existing specification: ${result.spec}`)
   } else {
@@ -368,6 +376,7 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
     rmSync(pidFile, { force: true })
   }
   writeFileSync(pidFile, `${process.pid}\n`)
+  writeIssueModeMarker(paths, config.issueQueueEnabled)
   const releasePid = (): void => {
     try {
       rmSync(pidFile, { force: true })
