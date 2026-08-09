@@ -2,13 +2,14 @@ import { execFileSync } from 'node:child_process'
 import {
   appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import type { LoopConfig } from './config.ts'
 import {
   descSlug, existingTaskIdForDesc, taskIdForDesc, newTaskId, recordTaskIdForDesc,
+  shortTaskId,
 } from './ids.ts'
 import { mergeRemoteTask, mergeTask, MergeError } from './merge.ts'
 import {
@@ -48,6 +49,11 @@ interface QueueEntry {
   depth: number
 }
 
+interface FindingDispatch {
+  findings: string[]
+  destinations: string[]
+}
+
 export function createLoop(deps: LoopDeps) {
   const { paths, config, forge, runner, project, log, now } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
@@ -65,6 +71,14 @@ export function createLoop(deps: LoopDeps) {
 
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
+
+  function event(name: string, subject = ''): void {
+    log(subject === '' ? name : `${name} ${subject}`)
+  }
+
+  function shortLogPath(file: string): string {
+    return relative(paths.root, file).replaceAll('\\', '/')
+  }
 
   function errorSummary(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error)
@@ -114,7 +128,6 @@ export function createLoop(deps: LoopDeps) {
       }
       await closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
         `Inspection task ${taskId} completed without commits.`)
-      log(`[loop] Closed issue #${issueNumber} after inspection ${taskId}`)
       return
     }
 
@@ -125,7 +138,6 @@ export function createLoop(deps: LoopDeps) {
       `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}`)
     await forge.addLabel(issueNumber, LABEL_MERGE_READY)
     await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
-    log(`[loop] Published ${branch} at ${head} for issue #${issueNumber}`)
   }
 
   function workerBranchReport(comments: string[]): { branch: string; head: string } | undefined {
@@ -155,7 +167,7 @@ export function createLoop(deps: LoopDeps) {
     try {
       issues = await forge.listOpenIssues(LABEL_MERGE_READY)
     } catch (error) {
-      log(`[loop] WARN: could not list merge-ready issues: ${errorSummary(error)}`)
+      event('WARN', `could not list merge-ready issues: ${errorSummary(error)}`)
       return
     }
 
@@ -171,17 +183,20 @@ export function createLoop(deps: LoopDeps) {
             adopted.mergeCommit,
             adopted.runBranch,
           )
-          log(`[loop] Updated issue metadata for adopted remote task #${issue.number}`)
         } catch (error) {
-          log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${errorSummary(error)}`)
+          event('WARN', `could not update adopted issue #${issue.number}: ${errorSummary(error)}`)
         }
         continue
       }
+      let adoptionTaskId: string | undefined
       try {
         const report = workerBranchReport(await forge.listIssueComments(issue.number))
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
         }
+        const taskId = report.branch.slice('task/'.length)
+        adoptionTaskId = taskId
+        event('Merge started', shortTaskId(taskId))
         try {
           execFileSync('git', [
             'fetch', '--quiet', 'origin',
@@ -209,32 +224,35 @@ export function createLoop(deps: LoopDeps) {
           },
         )
         writeFileSync(mergeFailureFile, '0\n')
-        const taskId = report.branch.slice('task/'.length)
         const runBranch = git(['branch', '--show-current']).trim()
         recordIssueForTask(paths, taskId, issue.number)
         recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
         try {
           await updateAdoptedIssue(issue.number, taskId, mergeCommit, runBranch)
         } catch (error) {
-          log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${errorSummary(error)}`)
+          event('WARN', `could not update adopted issue #${issue.number}: ${errorSummary(error)}`)
         }
         const cycle = readCount(scanCountFile)
         if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
-        log(`[loop] Adopted remote task from issue #${issue.number}`)
+        event('Merge completed', `${shortTaskId(taskId)} (${mergeCommit.slice(0, 8)})`)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         appendFileSync(mergeLog, `${message}\n`)
-        log(`[loop] WARN: Remote adoption failure for issue #${issue.number} — Log: ${mergeLog}`)
+        if (adoptionTaskId === undefined) {
+          event('WARN', `remote adoption failed for issue #${issue.number}`)
+        } else {
+          event('Merge failed', shortTaskId(adoptionTaskId))
+        }
         try {
           await forge.commentIssue(issue.number, `Remote task adoption failed: ${message}`)
         } catch (commentError) {
-          log(`[loop] WARN: could not comment on issue #${issue.number}: ${errorSummary(commentError)}`)
+          event('WARN', `could not comment on issue #${issue.number}: ${errorSummary(commentError)}`)
         }
         try {
           await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
           await forge.removeLabel(issue.number, LABEL_MERGE_READY)
         } catch (labelError) {
-          log(`[loop] WARN: could not relabel issue #${issue.number}: ${errorSummary(labelError)}`)
+          event('WARN', `could not relabel issue #${issue.number}: ${errorSummary(labelError)}`)
         }
         noteMergeFailure(mergeLog)
       }
@@ -312,7 +330,7 @@ export function createLoop(deps: LoopDeps) {
     const lines = readFileSync(finalFile, 'utf8').split(/\r?\n/)
     if (lines.some((line) => line === 'NO_FINDINGS')
       && lines.some((line) => line.startsWith('NEXT_TASK:'))) {
-      log('[loop] WARN: final message contains both NO_FINDINGS and NEXT_TASK lines; keeping the actionable findings')
+      event('WARN', 'final message has NO_FINDINGS and NEXT_TASK; keeping findings')
     }
     return lines
       .filter((line) => line.startsWith('NEXT_TASK:'))
@@ -320,7 +338,7 @@ export function createLoop(deps: LoopDeps) {
       .filter((desc) => {
         if (desc === '' || hasFormatPlaceholder(desc) || reportsNothing(desc)) return false
         if (!/[a-z0-9]/.test(descSlug(desc))) {
-          log(`[loop] WARN: ignored finding with an empty slug: ${desc}`)
+          event('WARN', `ignored finding with an empty slug: ${desc}`)
           return false
         }
         return true
@@ -347,19 +365,20 @@ export function createLoop(deps: LoopDeps) {
    * total. In issue mode the findings become forge issues instead — the shared
    * backlog other workers can claim — under the same growth bounds.
    */
-  async function scanForNextTasks(taskId: string, depth: number): Promise<void> {
+  async function scanForNextTasks(taskId: string, depth: number): Promise<FindingDispatch> {
     const findings = actionableFindings(finalMessageFile(paths, taskId))
-    if (findings.length === 0) return
+    const destinations: string[] = []
+    if (findings.length === 0) return { findings, destinations }
     const isReview = isReviewTaskId(taskId)
 
     const newDepth = depth + 1
     if (newDepth > config.maxGrowthDepth) {
-      log(`[loop] Growth depth limit reached (${config.maxGrowthDepth}) — ignore NEXT_TASK from ${taskId}`)
-      return
+      event('WARN', `growth depth limit ${config.maxGrowthDepth} ignored findings from ${shortTaskId(taskId)}`)
+      return { findings, destinations }
     }
     if (countAllTasks() >= config.maxTotalTasks) {
-      log(`[loop] Task limit reached (${config.maxTotalTasks}) — NEXT_TASK from ${taskId} will be ignored`)
-      return
+      event('WARN', `task limit ${config.maxTotalTasks} ignored findings from ${shortTaskId(taskId)}`)
+      return { findings, destinations }
     }
 
     if (config.issueQueueEnabled) {
@@ -368,10 +387,10 @@ export function createLoop(deps: LoopDeps) {
         const filtered = await unresolvedFindings(forge, paths, findings)
         pendingFindings = filtered.unresolved
         for (const duplicate of filtered.duplicates) {
-          log(`[loop]   Duplicate finding, existing issue #${duplicate.issueNumber}: ${duplicate.finding}`)
+          destinations.push(`#${duplicate.issueNumber}`)
         }
       }
-      if (pendingFindings.length === 0) return
+      if (pendingFindings.length === 0) return { findings, destinations }
       const combinesReviewFindings = isReview && pendingFindings.length > 1
       const descriptions = combinesReviewFindings
         ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
@@ -384,17 +403,15 @@ export function createLoop(deps: LoopDeps) {
             forge, paths, desc, taskId, effort, title,
             combinesReviewFindings ? pendingFindings : undefined,
           )
+          destinations.push(`#${result.issueNumber}`)
           if (result.outcome === 'created') {
-            log(`[loop] NEXT_TASK detection: ${desc}`)
-            log(`[loop]   → Issue filed: #${result.issueNumber}`)
-          } else {
-            log(`[loop]   Duplicate finding, existing issue #${result.issueNumber}: ${desc}`)
+            event('Issue filed', `#${result.issueNumber} (by ${shortTaskId(taskId)})`)
           }
         } catch (error) {
-          log(`[loop] WARN: could not file the finding as an issue: ${errorSummary(error)}`)
+          event('WARN', `could not file finding: ${errorSummary(error)}`)
         }
       }
-      return
+      return { findings, destinations }
     }
 
     const pendingFindings = isReview
@@ -411,14 +428,14 @@ export function createLoop(deps: LoopDeps) {
           const mergedAdvisory = status === 'merged'
             && fingerprintOf(finding).startsWith('advisory:')
           if (queued || status === 'running' || status === 'completed' || mergedAdvisory) {
-            log(`[loop]   Duplicate finding, existing task ${existing}: ${finding}`)
+            destinations.push(shortTaskId(existing))
             return false
           }
         }
         return true
       })
       : findings
-    if (pendingFindings.length === 0) return
+    if (pendingFindings.length === 0) return { findings, destinations }
     const combinesReviewFindings = isReview && pendingFindings.length > 1
     const descriptions = combinesReviewFindings
       ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
@@ -432,8 +449,7 @@ export function createLoop(deps: LoopDeps) {
         ? newTaskId(paths, `auto-${descSlug(desc)}`)
         : taskIdForDesc(paths, 'auto', desc)
       if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', desc, newId)
-      log(`[loop] NEXT_TASK detection: ${desc}`)
-      log(`[loop]   → New task: ${newId} (depth=${newDepth})`)
+      destinations.push(shortTaskId(newId))
       if (!existsSync(specFile(paths, newId))) {
         // The template carries the Commit and TASK_COMPLETE instructions — a spec
         // without them produces work whose completion is indistinguishable from a
@@ -450,8 +466,6 @@ export function createLoop(deps: LoopDeps) {
         } else {
           appendSharedRequirements(newId, taskId, desc)
         }
-      } else {
-        log(`[loop]   Reusing existing specification: ${newId}`)
       }
       if (combinesReviewFindings) {
         for (const finding of pendingFindings) {
@@ -466,12 +480,12 @@ export function createLoop(deps: LoopDeps) {
         writeFileSync(effortFile, 'high\n')
       }
       try {
-        const result = enqueueTask(paths, newId, newDepth)
-        if (result.outcome === 'enqueued') log(`[loop] Enqueued: ${newId} (depth=${newDepth})`)
+        enqueueTask(paths, newId, newDepth)
       } catch {
         // an unenqueueable finding is not worth stopping the poll for
       }
     }
+    return { findings, destinations }
   }
 
   // A scan writes its findings in prose, so the same advisory comes back worded
@@ -506,12 +520,11 @@ export function createLoop(deps: LoopDeps) {
       const text = line.replace(/^DECISION_REQUIRED:\s*/, '').trim()
       if (text === '') continue
       if (hasFormatPlaceholder(text)) {
-        log(`[loop] Ignore DECISION_REQUIRED placeholder: ${text}`)
         continue
       }
       if (decisionAlreadyRecorded(text)) continue
       appendFileSync(decisionsFile, `${text}\n`)
-      log(`[loop] DECISION REQUIRED (${taskId}): ${text}`)
+      event('DECISION_REQUIRED', `${shortTaskId(taskId)} ${text}`)
     }
   }
 
@@ -533,12 +546,10 @@ export function createLoop(deps: LoopDeps) {
         diagnosis = 'the network or a package registry is unreachable'
       }
     }
-    if (diagnosis !== '') log(`[loop]   Looks like ${diagnosis}`)
+    if (diagnosis !== '') event('WARN', diagnosis)
 
     if (failures >= config.maxConsecutiveMergeFailures) {
-      log(`[loop] ${failures} merges failed in a row (limit ${config.maxConsecutiveMergeFailures}).`)
-      log('[loop] Tasks are finishing and their verification is not, so nothing is landing.')
-      log('[loop] Stopping: fix what the merge logs name, then merge them by hand and restart.')
+      event('ERROR', `${failures} consecutive merge failures; stopping the loop`)
       writeFileSync(stopFile, '')
     }
   }
@@ -561,7 +572,6 @@ export function createLoop(deps: LoopDeps) {
       appendFileSync(yieldFile, 'found\n')
     } else {
       appendFileSync(yieldFile, 'empty\n')
-      log('[loop]   This scan detected no issues')
     }
   }
 
@@ -578,7 +588,6 @@ export function createLoop(deps: LoopDeps) {
     } else {
       const total = readCount(emptyScanFile) + 1
       writeFileSync(emptyScanFile, `${total}\n`)
-      log(`[loop]   Cycle ${cycle} scans found nothing (consecutive ${total}/${config.maxEmptyScans})`)
     }
     rmSync(yieldFile, { force: true })
   }
@@ -586,7 +595,7 @@ export function createLoop(deps: LoopDeps) {
   function renderTemplate(templateName: string, replacements: Record<string, string>): string | undefined {
     const template = join(paths.root, 'templates', templateName)
     if (!existsSync(template)) {
-      log(`[loop] WARN: template not found: ${template}`)
+      event('WARN', `template not found: ${shortLogPath(template)}`)
       return undefined
     }
     let text = readFileSync(template, 'utf8')
@@ -646,7 +655,6 @@ export function createLoop(deps: LoopDeps) {
     const idFile = join(paths.queueDir, `review-id-${cycle}`)
 
     if (!isFinal && cycle % config.reviewEveryNCycles !== 0) {
-      log(`[loop] Review cadence: cycle ${cycle} resumes unreviewed (reviewing every ${config.reviewEveryNCycles} cycles, the final cycle always)`)
       return true
     }
 
@@ -659,13 +667,10 @@ export function createLoop(deps: LoopDeps) {
       if (status !== 'completed' && status !== 'merged') {
         // A review that crashed says nothing about the diff. Resuming is the honest
         // outcome: blocking the cycle on it would stall the loop on a broken reviewer.
-        log(`[loop] Review ${lastId} ended as '${status ?? 'unknown'}' — resuming without its verdict (cycle=${cycle})`)
+        event('WARN', `review ${shortTaskId(lastId)} ended ${status ?? 'unknown'} without a verdict`)
         return true
       }
-      if (actionableFindings(finalMessageFile(paths, lastId)).length > 0) {
-        log(`[loop] Review ${lastId} raised findings — they have been queued as fix tasks (cycle=${cycle})`)
-      } else {
-        log(`[loop] Review ${lastId} found nothing — cycle ${cycle} passes review`)
+      if (actionableFindings(finalMessageFile(paths, lastId)).length === 0) {
         return true
       }
     }
@@ -675,20 +680,18 @@ export function createLoop(deps: LoopDeps) {
         // Promoting here would ship findings nobody resolved — the failure the round
         // cap used to allow. Rounds this persistent signal something structural, which
         // is a person's call, so the loop stops instead of promoting.
-        log(`[loop] Final review still raising findings after ${rounds} rounds (cycle=${cycle}).`)
-        log('[loop] Stopping rather than promoting a branch its own review keeps rejecting.')
+        event('ERROR', `final review still has findings after ${rounds} rounds; stopping`)
         writeFileSync(stopFile, '')
         return false
       }
-      log(`[loop] Review still raising findings after ${rounds} rounds (cycle=${cycle}).`)
-      log('[loop] Resuming rather than reviewing the same diff again — a later review reads this work again.')
+      event('WARN', `review still has findings after ${rounds} rounds; resuming`)
       return true
     }
 
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     const reviewId = newTaskId(paths, `review-c${cycle}`, now())
     if (!generateReviewTask(reviewId, cycle, prUrl)) {
-      log('[loop] WARN: Could not write the review specification — resuming without review')
+      event('WARN', 'could not write review specification; resuming without review')
       return true
     }
     const effortDir = join(paths.queueDir, 'effort')
@@ -698,17 +701,13 @@ export function createLoop(deps: LoopDeps) {
     writeFileSync(idFile, `${reviewId}\n`)
     try {
       enqueueTask(paths, reviewId, 0)
-      log(`[loop] Enqueued: ${reviewId} (depth=0)`)
     } catch {
       // enqueue of a just-written spec cannot fail for a missing spec
     }
-    const finalLabel = isFinal ? ' (final)' : ''
-    log(`[loop] CI successful — review round ${rounds + 1}/${maxRounds}${finalLabel}: ${reviewId} (cycle=${cycle})`)
     return false
   }
 
   function cleanupSessionState(preserveTaskMarkers = false): void {
-    log('[loop] reset session state')
     for (const name of readdirSync(paths.queueDir)) {
       if (/^(cycle-complete-|cycle-resume-|ci-fix-emitted-|review-round-|review-id-|failed-|scan-yield-)/.test(name)
         || name === 'decisions.txt' || name === 'pr-url.txt'
@@ -733,7 +732,6 @@ export function createLoop(deps: LoopDeps) {
     if (existsSync(runBranchFile)) {
       const previous = readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
       if (previous !== currentBranch) {
-        log(`[loop] Branch changed from '${previous}' to '${currentBranch}' — resetting session state`)
         // Status files span branches, so their announcement markers must span branches
         // too; explicit task cleanup removes a marker when a retry is wanted.
         cleanupSessionState(true)
@@ -751,10 +749,9 @@ export function createLoop(deps: LoopDeps) {
   async function ensureDraftPr(mode: 'cycle' | 'final'): Promise<boolean> {
     const branch = git(['branch', '--show-current']).trim()
     if (branch === '') {
-      log('[loop] WARN: Failed to get branch name, PR skipped')
+      event('WARN', 'could not get branch name; PR skipped')
       return false
     }
-    log(`[loop] Pushing branch: ${branch}`)
     try {
       execFileSync('git', ['push', '--quiet', 'origin', branch], {
         cwd: paths.repoRoot,
@@ -772,7 +769,6 @@ export function createLoop(deps: LoopDeps) {
 
     const status = await forge.prStatus(branch)
     if (status.state === 'open') {
-      log(`[loop] Existing PR: ${status.url}`)
       // A body left as created stops at the first cycle's content, so it is rebuilt
       // every cycle — unless a person edited it, which removes the generated marker.
       let body = ''
@@ -784,18 +780,14 @@ export function createLoop(deps: LoopDeps) {
       if (body.includes(GENERATED_BODY_MARKER)) {
         try {
           await forge.updatePr(branch, { title, body: buildPrBody(paths.repoRoot, readDecisions()) })
-          log('[loop]   Updated PR body')
         } catch {
-          log('[loop]   WARN: Failed to update PR body')
+          event('WARN', 'could not update PR body')
         }
-      } else {
-        log('[loop]   PR body was edited manually; it will not be updated')
       }
       writeFileSync(prUrlFile, `${status.url}\n`)
       return true
     }
 
-    log('[loop] Creating Draft PR...')
     try {
       const url = await forge.createPr({
         branch,
@@ -804,11 +796,10 @@ export function createLoop(deps: LoopDeps) {
         body: buildPrBody(paths.repoRoot, readDecisions()),
         draft: true,
       })
-      log(`[loop] Draft PR created: ${url}`)
       writeFileSync(prUrlFile, `${url}\n`)
       return true
     } catch (error) {
-      log(`[loop]   WARN: could not create the PR: ${errorSummary(error)}`)
+      event('WARN', `could not create PR: ${errorSummary(error)}`)
       return false
     }
   }
@@ -857,7 +848,6 @@ export function createLoop(deps: LoopDeps) {
     } catch {
       // spec was just written; enqueue cannot miss it
     }
-    log(`[loop] CI fix task generation: ${fixId} (cycle=${cycle})`)
   }
 
   /** After the final gate: promote the draft PR and print LOOP_DONE. */
@@ -868,7 +858,6 @@ export function createLoop(deps: LoopDeps) {
     const branch = git(['branch', '--show-current']).trim()
     const status = await forge.prStatus(branch)
     if (status.isDraft) {
-      log(`[loop] Promote Draft PR to ready: ${prUrl}`)
       try {
         await forge.markPrReady(branch)
       } catch {
@@ -877,7 +866,7 @@ export function createLoop(deps: LoopDeps) {
     }
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
-    log(`[loop] LOOP_DONE: ${prUrl} — The body still reflects history and must be rewritten as a final summary.`)
+    log(`LOOP_DONE: ${prUrl} — The body still reflects history and must be rewritten as a final summary.`)
   }
 
   /**
@@ -889,7 +878,6 @@ export function createLoop(deps: LoopDeps) {
     if (config.taskGate !== 'light') return true
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
     writeFileSync(suiteLog, '')
-    log(`[loop] Cycle suite: full tests against the branch tip (task gates were light) — Log: ${suiteLog}`)
 
     const runStep = (cwd: string, command: string): boolean => {
       try {
@@ -913,9 +901,8 @@ export function createLoop(deps: LoopDeps) {
       // branch; the repair keeps the suite's verdict about the code.
       const repair = step.repairWhenMissing
       if (repair !== undefined && !existsSync(join(paths.repoRoot, repair.path))) {
-        log(`[loop] Cycle suite: ${repair.message}`)
         if (!runStep(join(paths.repoRoot, step.cwd), repair.command)) {
-          log('[loop] WARN: the repair command could not restore the toolchain')
+          event('WARN', 'repair command could not restore the toolchain')
         }
       }
       ok = runStep(join(paths.repoRoot, step.cwd), step.command)
@@ -925,14 +912,13 @@ export function createLoop(deps: LoopDeps) {
     if (!ok) {
       const logText = existsSync(suiteLog) ? readFileSync(suiteLog, 'utf8') : ''
       if (/is not recognized|command not found|ENOENT/i.test(logText)) {
-        log(`[loop] Cycle suite failed because a tool is missing — the environment broke, not the branch. Log: ${suiteLog}`)
+        event('ERROR', `cycle suite tool missing (log: ${shortLogPath(suiteLog)})`)
       } else {
-        log(`[loop] Cycle suite failed — stopping rather than promoting a failing tip. Log: ${suiteLog}`)
+        event('ERROR', `cycle suite failed (log: ${shortLogPath(suiteLog)})`)
       }
       writeFileSync(stopFile, '')
       return false
     }
-    log('[loop] Cycle suite passed.')
     return true
   }
 
@@ -945,7 +931,7 @@ export function createLoop(deps: LoopDeps) {
       try {
         await reconcileClosedIssueLifecycleLabels(forge)
       } catch (error) {
-        log(`[loop] WARN: could not reconcile closed issue lifecycle labels: ${errorSummary(error)}`)
+        event('WARN', `could not reconcile closed issue labels: ${errorSummary(error)}`)
       }
       try {
         const issues = await Promise.all([
@@ -965,17 +951,16 @@ export function createLoop(deps: LoopDeps) {
                 && git(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
             if (mergeSha !== undefined) return undefined
           } catch (error) {
-            log(`[loop] WARN: could not inspect issue #${issue.number} for merge metadata: ${errorSummary(error)}`)
+            event('WARN', `could not inspect issue #${issue.number}: ${errorSummary(error)}`)
           }
           return issue.number
         }))
         const remoteCount = pendingIssues.filter((issueNumber) => issueNumber !== undefined).length
         if (remoteCount > 0) {
-          log(`[loop] Waiting for ${remoteCount} remote issue-queue task(s) labeled ${LABEL_READY}, ${LABEL_IN_PROGRESS}, ${LABEL_MERGE_READY}, or ${LABEL_MERGE_FAILED} before entering the cycle gate`)
           return 'continue'
         }
       } catch (error) {
-        log(`[loop] WARN: could not count remote issue-queue work: ${errorSummary(error)}`)
+        event('WARN', `could not count remote issue work: ${errorSummary(error)}`)
         return 'continue'
       }
     }
@@ -995,8 +980,6 @@ export function createLoop(deps: LoopDeps) {
           if (existsSync(failedFile)) {
             const failed = readFileSync(failedFile, 'utf8').split(/\r?\n/).filter((line) => line !== '')
             if (failed.length > 0) {
-              log(`[loop] Cycle ${currentScans} lost ${failed.length} task(s) to failure; their findings were never applied:`)
-              for (const taskId of failed) log(`[loop]   ${taskId}`)
               const lossNote = `Cycle ${currentScans} lost ${failed.length} task(s) to failure, so their findings are not in this branch: ${failed.join(' ')}`
               if (!decisionAlreadyRecorded(lossNote)) {
                 appendFileSync(decisionsFile, `${lossNote}\n`)
@@ -1008,20 +991,18 @@ export function createLoop(deps: LoopDeps) {
 
           if (config.autoPr) await ensureDraftPr('cycle')
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
-          log(`[loop] CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
+          event('CYCLE_COMPLETE', `${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
           writeFileSync(completeFlag, '')
         }
 
         const ciStatus = config.ciGateEnabled ? await checkPrCiStatus() : 'success'
         if (ciStatus === 'pending' || ciStatus === 'unknown') {
-          log(`[loop] CI running (cycle=${currentScans}) ...`)
           return 'continue'
         }
         if (ciStatus === 'failure') {
           const attempts = readCount(ciFixFlag)
           if (attempts < config.maxCiFixAttempts) {
             const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
-            log(`[loop] CI failure — generate fix task ${attempts + 1}/${config.maxCiFixAttempts} (cycle=${currentScans})`)
             let failSummary = ''
             try {
               const status = await forge.prStatus(prUrl)
@@ -1033,8 +1014,7 @@ export function createLoop(deps: LoopDeps) {
             writeFileSync(ciFixFlag, `${attempts + 1}\n`)
             rmSync(completeFlag, { force: true })
           } else {
-            log(`[loop] CI still failing after ${attempts} fix attempts (cycle=${currentScans}).`)
-            log('[loop] Stopping rather than polling a gate that cannot pass on its own.')
+            event('ERROR', `CI still failing after ${attempts} fixes; stopping the loop`)
             writeFileSync(stopFile, '')
           }
           return 'continue'
@@ -1043,10 +1023,8 @@ export function createLoop(deps: LoopDeps) {
           if (!runAutoReview(currentScans, cycleIsFinal(currentScans))) return 'continue'
           writeFileSync(resumeFlag, '')
         } else if (config.reviewEnabled) {
-          log(`[loop] CI successful — waiting for review (cycle=${currentScans}) ...`)
           return 'continue'
         } else {
-          log(`[loop] CI success — automatic resume (cycle=${currentScans})`)
           writeFileSync(resumeFlag, '')
         }
       }
@@ -1055,20 +1033,15 @@ export function createLoop(deps: LoopDeps) {
     foldScanYields(currentScans)
 
     if (currentScans >= config.maxScanCycles) {
-      log(`[loop] Scan cycle limit (${config.maxScanCycles}) has been reached.`)
       if (config.autoPr) await postLoopPr()
       cleanupSessionState()
-      log('[loop] End the loop.')
       return 'done'
     }
 
     const emptyScans = readCount(emptyScanFile)
     if (emptyScans >= config.maxEmptyScans) {
-      log(`[loop] The scan did not detect any issues ${emptyScans} times in a row.`)
-      log('[loop] Further automatic scanning will end as no harvest is expected.')
       if (config.autoPr) await postLoopPr()
       cleanupSessionState()
-      log('[loop] End the loop.')
       return 'done'
     }
 
@@ -1089,7 +1062,6 @@ export function createLoop(deps: LoopDeps) {
       const scope = nScans === 1
         ? 'Perform every numbered section below.'
         : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${(sectionGroups[nScans] as string[])[i - 1]}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
-      log(`[loop] Idle detection → Scan start (cycle=${nextCycle}/${config.maxScanCycles}, scan ${i}/${nScans}): ${scanId}`)
       if (generateScanTask(scanId, scope)) {
         try {
           await startTask(paths, runner, scanId, {
@@ -1097,8 +1069,9 @@ export function createLoop(deps: LoopDeps) {
             model: config.scanModel === '' ? undefined : config.scanModel,
             setup: project.scanWorktreeSetup,
           })
+          event('Scan started', `${shortTaskId(scanId)} (cycle ${nextCycle}/${config.maxScanCycles}, ${i}/${nScans})`)
         } catch (error) {
-          log(`[loop] WARN: Scan startup failure: ${errorSummary(error)} — Log: ${logFile(paths, scanId)}`)
+          event('WARN', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))})`)
         }
       }
     }
@@ -1112,13 +1085,12 @@ export function createLoop(deps: LoopDeps) {
       ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
       : ''
     if (currentBranch !== recordedBranch) {
-      log(`[loop] ERROR: checkout is on ${currentBranch} but this run belongs to ${recordedBranch} — stopping before anything merges into the wrong branch`)
+      event('ERROR', `checkout ${currentBranch} does not match run branch ${recordedBranch}`)
       writeFileSync(stopFile, '')
       return 'stopped'
     }
 
     if (existsSync(stopFile)) {
-      log('[loop] A stopped file was detected. Exit the loop.')
       rmSync(stopFile, { force: true })
       return 'stopped'
     }
@@ -1139,7 +1111,7 @@ export function createLoop(deps: LoopDeps) {
         try {
           await heartbeatIssueForTask(forge, paths, taskId, now())
         } catch (error) {
-          log(`[loop] WARN: heartbeat failed for ${taskId}: ${errorSummary(error)}`)
+          event('WARN', `heartbeat failed for ${shortTaskId(taskId)}: ${errorSummary(error)}`)
         }
       }
 
@@ -1148,7 +1120,7 @@ export function createLoop(deps: LoopDeps) {
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       if (status === 'failed' && !existsSync(failedFlag)) {
         const cycleNow = readCount(scanCountFile)
-        log(`[loop] FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
+        event('Task failed', `${shortTaskId(taskId)} (log: ${shortLogPath(logFile(paths, taskId))})`)
         appendFileSync(join(paths.queueDir, `failed-${cycleNow}`), `${taskId}\n`)
         writeFileSync(failedFlag, '')
         burstFailures += 1
@@ -1158,30 +1130,40 @@ export function createLoop(deps: LoopDeps) {
       if (status === 'completed' && !existsSync(scannedFlag)) {
         const depthFile = join(scannedDir, `${taskId}.depth`)
         const depth = existsSync(depthFile) ? readCount(depthFile) : 0
-        log(`[loop] Completed: ${taskId} (depth=${depth})`)
 
         if (config.workerMode) {
+          event('Task completed', shortTaskId(taskId))
           const linkedIssue = issueNumberForTask(paths, taskId)
           if (linkedIssue === undefined) {
-            log(`[loop] WARN: worker task ${taskId} has no linked issue`)
+            event('WARN', `worker task ${shortTaskId(taskId)} has no linked issue`)
             continue
           }
           try {
             await publishWorkerCompletion(taskId, linkedIssue)
             writeFileSync(scannedFlag, '')
           } catch (error) {
-            log(`[loop] WARN: could not publish ${taskId}: ${errorSummary(error)}`)
+            event('WARN', `could not publish ${shortTaskId(taskId)}: ${errorSummary(error)}`)
           }
           continue
         }
 
-        await scanForNextTasks(taskId, depth)
+        const dispatch = await scanForNextTasks(taskId, depth)
+        if (isScanTaskId(taskId)) {
+          const detail = dispatch.findings.length === 0
+            ? 'NO_FINDINGS'
+            : `${dispatch.findings.length} findings${dispatch.destinations.length === 0
+                ? ''
+                : ` -> ${dispatch.destinations.join(' ')}`}`
+          event('Scan completed', `${shortTaskId(taskId)} (${detail})`)
+        } else {
+          event('Task completed', shortTaskId(taskId))
+        }
         collectDecisions(taskId)
 
         recordScanYield(taskId)
 
         if (config.autoMerge) {
-          log(`[loop] Automatic merge: ${taskId}`)
+          event('Merge started', shortTaskId(taskId))
           const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
           const linkedIssue = issueNumberForTask(paths, taskId)
           try {
@@ -1193,7 +1175,7 @@ export function createLoop(deps: LoopDeps) {
               closesIssue: linkedIssue,
               outputFile: mergeLog,
             })
-            log(`[loop]   Merge successful: ${taskId}`)
+            event('Merge completed', `${shortTaskId(taskId)} (${mergeCommit.slice(0, 8)})`)
             writeFileSync(mergeFailureFile, '0\n')
             if (linkedIssue !== undefined) {
               const runBranch = git(['branch', '--show-current']).trim()
@@ -1207,7 +1189,7 @@ export function createLoop(deps: LoopDeps) {
                   runBranch,
                 )
               } catch (error) {
-                log(`[loop] WARN: could not link issue #${linkedIssue} to its merge: ${errorSummary(error)}`)
+                event('WARN', `could not link issue #${linkedIssue} to merge: ${errorSummary(error)}`)
               }
             }
             // A task delegated while the gate was waiting merges commits the gate has
@@ -1219,7 +1201,7 @@ export function createLoop(deps: LoopDeps) {
             }
           } catch (error) {
             if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
-            log(`[loop] WARN: Automerge failure for ${taskId} — Log: ${mergeLog}`)
+            event('Merge failed', shortTaskId(taskId))
             noteMergeFailure(mergeLog)
           }
         }
@@ -1231,10 +1213,7 @@ export function createLoop(deps: LoopDeps) {
     // died together because DNS stopped resolving the Codex endpoint; the loop carried
     // on starting more, and each burned its tokens reaching the same wall.
     if (burstFailures >= config.maxBurstFailures) {
-      log(`[loop] ${burstFailures} tasks failed in one poll (limit ${config.maxBurstFailures}).`)
-      log('[loop] That pattern is an environment failure — network, credentials, or the runner CLI.')
-      log('[loop] Stopping so the cause is fixed before more tasks are spent on it.')
-      log('[loop] Recover with: cleanup <task-id> then enqueue <task-id>')
+      event('ERROR', `${burstFailures} tasks failed in one poll; stopping for environment repair`)
       writeFileSync(stopFile, '')
     }
 
@@ -1253,15 +1232,13 @@ export function createLoop(deps: LoopDeps) {
         // this poll rather than stopping anything.
         try {
           await reconcileFindingFingerprints(forge, paths)
-          for (const reaped of await reapStaleLeases(
+          await reapStaleLeases(
             forge,
             paths,
             config.issueLeaseHours,
             now(),
             locallyRunningIssues,
-          )) {
-            log(`[loop] Lease reaped: issue #${reaped} is ready again`)
-          }
+          )
           let capacity = config.maxParallel - running - queueLength()
           if (capacity > 0) {
             if (cachedUser === undefined) cachedUser = await forge.currentUser()
@@ -1271,17 +1248,17 @@ export function createLoop(deps: LoopDeps) {
               const result = await claimIssue(forge, paths, issue, cachedUser,
                 (newTaskId_, requirement) => appendSharedRequirements(newTaskId_, `issue-${issue.number}`, requirement))
               if (result.outcome === 'claimed') {
-                log(`[loop] Claimed issue #${issue.number} → task ${result.taskId}`)
+                event('Issue claimed', `#${issue.number} -> ${shortTaskId(result.taskId)}`)
                 capacity -= 1
-              } else if (result.outcome === 'lost-race') {
-                log(`[loop]   Lost the claim race for issue #${issue.number}`)
               } else {
-                log(`[loop] WARN: issue #${issue.number} has no parseable requirement — left claimed for a person`)
+                if (result.outcome !== 'lost-race') {
+                  event('WARN', `issue #${issue.number} has no parseable requirement`)
+                }
               }
             }
           }
         } catch (error) {
-          log(`[loop] WARN: the issue queue is unreachable this poll: ${errorSummary(error)}`)
+          event('WARN', `issue queue unreachable: ${errorSummary(error)}`)
         }
       }
 
@@ -1295,15 +1272,23 @@ export function createLoop(deps: LoopDeps) {
         const effort = existsSync(effortFile)
           ? readFileSync(effortFile, 'utf8').replace(/[\s\r\n]/g, '')
           : config.taskEffort
-        log(`[loop] Start: ${entry.taskId} (depth=${entry.depth} effort=${effort})`)
         try {
           await startTask(paths, runner, entry.taskId, {
             effort: effort as 'medium',
             model: config.taskModel === '' ? undefined : config.taskModel,
           })
+          if (isReviewTaskId(entry.taskId)) {
+            const cycle = Number(/_review-c(\d+)/.exec(entry.taskId)?.[1] ?? 0)
+            const round = readCount(join(paths.queueDir, `review-round-${cycle}`))
+            const final = cycleIsFinal(cycle)
+            const maxRounds = final ? config.maxFinalReviewRounds : config.maxReviewRounds
+            event('Review started', `${shortTaskId(entry.taskId)} (round ${round}/${maxRounds}${final ? ', final' : ''})`)
+          } else {
+            event('Task started', `${shortTaskId(entry.taskId)} (${effort})`)
+          }
           running += 1
         } catch (error) {
-          log(`[loop] WARN: ${entry.taskId} startup failure: ${errorSummary(error)} — Log: ${logFile(paths, entry.taskId)}`)
+          event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)
         }
       }
 
@@ -1314,10 +1299,13 @@ export function createLoop(deps: LoopDeps) {
     }
 
     if (config.workerMode) {
-      log(`[loop] | Worker Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
+      event('Status', `worker  running ${running}  queue ${queueLength()}`)
     } else {
       const cycle = readCount(scanCountFile)
-      log(`[loop] | Cycle=${cycle}/${config.maxScanCycles} Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
+      const scans = listTaskIds(paths)
+        .filter((taskId) => isScanTaskId(taskId) && readStatus(paths, taskId)?.status === 'running')
+        .length
+      event('Status', `cycle ${cycle}/${config.maxScanCycles}  running ${running}  scan ${scans}  queue ${queueLength()}`)
     }
     return 'continue'
   }

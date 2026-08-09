@@ -122,8 +122,8 @@ describe('worker mode', () => {
     expect(forge.issueComments.get(issueNumber)?.join('\n')).toContain(`Branch: ${branchName(taskId)}`)
     expect(forge.issueComments.get(issueNumber)?.join('\n')).toContain(`Head commit: ${localTaskHead}`)
     expect(existsSync(join(repoRoot, 'worker-change.txt'))).toBe(false)
-    expect(logged.join('\n')).toContain('| Worker Running=')
-    expect(logged.join('\n')).not.toContain('Cycle=')
+    expect(logged.join('\n')).toContain('Status worker  running 0  queue 0')
+    expect(logged.join('\n')).not.toContain('cycle')
   })
 
   it('closes a completed inspection issue without pushing a branch', async () => {

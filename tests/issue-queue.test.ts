@@ -723,6 +723,7 @@ describe('loop integration in issue mode', () => {
     const { loadConfig } = await import('../src/config.ts')
     const { finalMessageFile } = await import('../src/paths.ts')
     const started: string[] = []
+    const logged: string[] = []
     const loop = createLoop({
       paths,
       config: {
@@ -735,7 +736,7 @@ describe('loop integration in issue mode', () => {
       forge,
       runner: { start: async (options) => { started.push(options.specFile); return process.pid } },
       project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
-      log: () => {},
+      log: (line) => logged.push(line),
       now: () => new Date('2026-08-08T12:00:00Z'),
     })
     loop.initializeSessionStateForBranch()
@@ -755,6 +756,9 @@ describe('loop integration in issue mode', () => {
     expect(claimed?.assignees).toEqual(['worker-a'])
     expect(claimed?.labels).toContain(LABEL_IN_PROGRESS)
     expect(claimed?.labels).not.toContain(LABEL_READY)
+    expect(logged).toContain('Issue filed #1 (by 001_scan)')
+    expect(logged).toContain('Scan completed 001_scan (1 findings -> #1)')
+    expect(logged.some((line) => line.includes('NEXT_TASK detection'))).toBe(false)
 
     // A duplicate hidden beyond the creation retry window is still reconciled by
     // a later poll, even though the fingerprint is never published again.
@@ -836,7 +840,7 @@ describe('loop integration in issue mode', () => {
     })
 
     await expect(loop.poll()).resolves.toBe('continue')
-    expect(logged.filter((line) => line.includes('WARN: heartbeat failed'))).toHaveLength(1)
+    expect(logged.filter((line) => line.includes('WARN heartbeat failed'))).toHaveLength(1)
     const issue = await forge.getIssue(issueNumber)
     expect(issue.assignees).toEqual(['worker-a'])
     expect(issue.labels).toContain(LABEL_IN_PROGRESS)

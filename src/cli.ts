@@ -28,9 +28,9 @@ import { observeNextPoll } from './wake.ts'
 import { runWorkerCommand } from './worker.ts'
 
 // The command surface: each package.json script dispatches here with the command name
-// as the first argument. The key output lines (`Enqueued:`, `Created:`,
-// `CYCLE_COMPLETE:`, `LOOP_DONE:`, `FAILED:`) are frozen contract — skills and tests
-// key on them.
+// as the first argument. CLI tokens such as `Enqueued:` and `Created:`, and loop event
+// names such as `CYCLE_COMPLETE`, `LOOP_DONE`, `FAILED`, and `DECISION_REQUIRED`, are
+// frozen contracts that skills and tests key on.
 
 type Command = (paths: OrchPaths, args: string[]) => Promise<number>
 
@@ -517,24 +517,12 @@ async function runLoopDaemon(paths: OrchPaths, log: (line: string) => void): Pro
       try {
         await reconcileClosedIssueLifecycleLabels(forge)
       } catch (error) {
-        log(`[loop] WARN: could not reconcile closed issue lifecycle labels: ${(error as Error).message}`)
+        log(`WARN could not reconcile closed issue lifecycle labels: ${(error as Error).message}`)
       }
     }
     const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
 
     loop.initializeSessionStateForBranch()
-
-    log(`[loop] Start | MAX_PARALLEL=${config.maxParallel} POLL_INTERVAL=${config.pollIntervalSeconds}s AUTO_MERGE=${config.autoMerge}`)
-    log(`[loop]      | MAX_GROWTH_DEPTH=${config.maxGrowthDepth} MAX_TOTAL_TASKS=${config.maxTotalTasks}`)
-    log(`[loop]      | SCAN_ENABLED=${config.scanEnabled} MAX_SCAN_CYCLES=${config.maxScanCycles}`)
-    log(`[loop]      | AUTO_PR=${config.autoPr} REVIEW_ENABLED=${config.reviewEnabled} CI_GATE_ENABLED=${config.ciGateEnabled}`)
-    log(`[loop]      | AUTO_REVIEW=${config.autoReview} MAX_REVIEW_ROUNDS=${config.maxReviewRounds} REVIEW_EVERY_N_CYCLES=${config.reviewEveryNCycles} MAX_FINAL_REVIEW_ROUNDS=${config.maxFinalReviewRounds}`)
-    log(`[loop]      | MAX_BURST_FAILURES=${config.maxBurstFailures} MAX_CONSECUTIVE_MERGE_FAILURES=${config.maxConsecutiveMergeFailures}`)
-    log(`[loop]      | SCAN_PARALLEL=${config.scanParallel} SCAN_EFFORT=${config.scanEffort} TASK_EFFORT=${config.taskEffort} REVIEW_EFFORT=${config.reviewEffort} TASK_GATE=${config.taskGate}`
-      + `${config.scanModel === '' ? '' : ` SCAN_MODEL=${config.scanModel}`}${config.taskModel === '' ? '' : ` TASK_MODEL=${config.taskModel}`}`)
-    log(`[loop]      | FORGE=${config.forge} RUNNER=${config.runner} PROJECT=${config.project} ISSUE_QUEUE_ENABLED=${config.issueQueueEnabled} WORKER_MODE=${config.workerMode}`)
-    log('[loop] Stop: npm run -C orchestration/ts stop or Ctrl+C')
-    log('')
 
     for (;;) {
       // Observe first: delegation may append after poll() returns but before this

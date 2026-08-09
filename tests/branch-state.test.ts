@@ -87,9 +87,7 @@ describe('initializeSessionStateForBranch', () => {
 
     makeLoop().initializeSessionStateForBranch()
 
-    const output = logged.join('\n')
-    expect(output).toContain('previous-branch')
-    expect(output).toContain('current-branch')
+    expect(logged).toEqual([])
     expect(readFileSync(join(paths.queueDir, 'run-branch.txt'), 'utf8').trim()).toBe('current-branch')
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8').trim()).toBe('0')
     for (const name of cycleFileNames) {
@@ -123,7 +121,7 @@ describe('poll branch guard', () => {
 
     expect(await makeLoop({ autoMerge: true, scanEnabled: false }).poll()).toBe('stopped')
 
-    expect(logged).toContain('[loop] ERROR: checkout is on current-branch but this run belongs to recorded-branch — stopping before anything merges into the wrong branch')
+    expect(logged).toContain('ERROR checkout current-branch does not match run branch recorded-branch')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(runnerStarts).toHaveLength(0)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe('queued-task:0\n')

@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { descSlug, newTaskId, taskIdForDesc } from '../src/ids.ts'
+import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
   branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId,
   orchPaths, statusFile, type OrchPaths,
@@ -99,6 +99,16 @@ describe('status files', () => {
 })
 
 describe('task ids', () => {
+  it.each([
+    ['20260810_024957_030_scan', '030_scan'],
+    ['20260810_024957_031_auto-redesign-looplog', '031_auto'],
+    ['20260810_024957_005_user-add-export', '005_user'],
+    ['20260810_024957_012_ci-fix-c4', '012_ci-fix'],
+    ['20260810_024957_227_review-c4', '227_review'],
+  ])('derives the run-local id from %s', (full, short) => {
+    expect(shortTaskId(full)).toBe(short)
+  })
+
   it('mints ids as timestamp, per-day sequence and name', () => {
     const now = new Date(2026, 7, 8, 9, 30, 5)
     expect(newTaskId(paths, 'auto-fix-something', now))

@@ -31,6 +31,12 @@ export function newTaskId(paths: OrchPaths, taskName: string, now: Date = new Da
   return `${full}_${String(seq).padStart(3, '0')}_${taskName}`
 }
 
+/** The run-local id used in loop.log; the full id remains the on-disk identity. */
+export function shortTaskId(taskId: string): string {
+  const match = /^\d{8}_\d{6}_(\d{3})_(ci-fix|[^-]+)(?:-|$)/.exec(taskId)
+  return match === null ? taskId : `${match[1]}_${match[2]}`
+}
+
 export function descSlug(description: string): string {
   return description
     .toLowerCase()

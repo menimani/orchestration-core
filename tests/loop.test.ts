@@ -154,7 +154,7 @@ describe('actionable findings', () => {
     writeFinal('t-contradiction', `NO_FINDINGS\nNEXT_TASK: ${finding}\n`)
 
     expect(loop.actionableFindings(finalMessageFile(paths, 't-contradiction'))).toEqual([finding])
-    expect(logText()).toContain('WARN: final message contains both NO_FINDINGS and NEXT_TASK lines')
+    expect(logText()).toContain('WARN final message has NO_FINDINGS and NEXT_TASK')
   })
 
   it('ignores descriptions that only report no findings', () => {
@@ -191,7 +191,7 @@ describe('actionable findings', () => {
     writeFinal('t-empty-slug', `NEXT_TASK: ${finding}\n`)
 
     expect(loop.actionableFindings(finalMessageFile(paths, 't-empty-slug'))).toEqual([])
-    expect(logText()).toContain(`[loop] WARN: ignored finding with an empty slug: ${finding}`)
+    expect(logText()).toContain(`WARN ignored finding with an empty slug: ${finding}`)
   })
 
   it('keeps a normal English finding after applying the slug guard', () => {
@@ -416,7 +416,7 @@ describe('runAutoReview', () => {
     writeFinal(reviewId, 'NO_FINDINGS\n')
 
     expect(loop.runAutoReview(7, false)).toBe(true)
-    expect(logText()).toContain(`Review ${reviewId} found nothing`)
+    expect(logText()).toBe('')
   })
 
   it('does not let a placeholder finding hold the gate open', () => {
@@ -459,7 +459,7 @@ describe('runAutoReview', () => {
     const reviewId = lastReviewId(9)
     writeRawStatus(reviewId, 'failed')
     expect(loop.runAutoReview(9, false)).toBe(true)
-    expect(logText()).toContain('resuming without its verdict')
+    expect(logText()).toContain('WARN review 001_review ended failed without a verdict')
   })
 
   it('skips off-cadence cycles and reviews on-cadence ones', () => {
@@ -532,7 +532,7 @@ describe('remote issue queue idle detection', () => {
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toContain('Waiting for 1 remote issue-queue task')
+    expect(logText()).toBe('')
   })
 
   it('defers the cycle gate and review while an in-progress issue is open', async () => {
@@ -543,7 +543,7 @@ describe('remote issue queue idle detection', () => {
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toContain('Waiting for 1 remote issue-queue task')
+    expect(logText()).toBe('')
   })
 
   it('defers the cycle gate and review while a merge-failed issue is open', async () => {
@@ -554,7 +554,7 @@ describe('remote issue queue idle detection', () => {
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toContain('loop:merge-failed')
+    expect(logText()).toBe('')
   })
 
   it('defers the cycle gate and review when remote issue listing fails', async () => {
@@ -567,7 +567,7 @@ describe('remote issue queue idle detection', () => {
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toContain('WARN: could not count remote issue-queue work: forge unavailable')
+    expect(logText()).toContain('WARN could not count remote issue work: forge unavailable')
   })
 
   it('enters the gate when an in-progress issue has a local promotion record', async () => {
@@ -733,7 +733,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6 })
 
     expect(await loop.poll()).toBe('continue')
-    expect(logText()).toMatch(/^\[loop\] \| Cycle=\d+\/\d+ Running=/m)
+    expect(logText()).toMatch(/^Status cycle \d+\/\d+  running \d+  scan \d+  queue \d+$/m)
   })
 
   it('announces a failure once, records it for the cycle, and stops on a burst', async () => {
@@ -745,17 +745,17 @@ describe('failure announcement and burst stop (via poll)', () => {
 
     expect(await loop.poll()).toBe('continue')
     for (const taskId of ['f1', 'f2', 'f3']) {
-      expect(logText()).toContain(`[loop] FAILED: ${taskId}`)
+      expect(logText()).toContain(`Task failed ${taskId} (log: logs/${taskId}.log)`)
     }
     const failedRecord = readFileSync(join(paths.queueDir, 'failed-4'), 'utf8')
     expect(failedRecord.trim().split('\n')).toHaveLength(3)
-    expect(logText()).toContain('environment failure')
+    expect(logText()).toContain('ERROR 3 tasks failed in one poll; stopping for environment repair')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
 
     // The next poll consumes the stop and exits; the failures are not announced again.
     logged = []
     expect(await loop.poll()).toBe('stopped')
-    expect(logText()).not.toContain('FAILED: f1')
+    expect(logText()).not.toContain('Task failed f1')
     expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n')).toHaveLength(3)
   })
 
@@ -772,8 +772,8 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe(`${taskId}\n`)
-    expect(logged.indexOf(`[loop] FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`))
-      .toBeLessThan(logged.findIndex((line) => line.includes('CYCLE_COMPLETE: 1/')))
+    expect(logged.indexOf('Task failed 001_scan (log: logs/20260809_000000_001_scan.log)'))
+      .toBeLessThan(logged.findIndex((line) => line.includes('CYCLE_COMPLETE 1/')))
   })
 
   it('does not start queued work or scans while a stop is pending', async () => {
@@ -804,7 +804,7 @@ describe('noteMergeFailure', () => {
     expect(existsSync(stopFile())).toBe(false)
     loop.noteMergeFailure(mergeLog())
     expect(existsSync(stopFile())).toBe(true)
-    expect(logText()).toContain('nothing is landing')
+    expect(logText()).toContain('ERROR 3 consecutive merge failures; stopping the loop')
   })
 
   it('restarts the count after a successful merge cleared it', () => {
@@ -863,7 +863,7 @@ describe('runCycleSuite', () => {
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
     expect(loop.runCycleSuite(2)).toBe(false)
     expect(existsSync(stopFile())).toBe(true)
-    expect(logText()).toContain('stopping rather than promoting a failing tip')
+    expect(logText()).toContain('ERROR cycle suite failed')
   })
 
   it('attributes a tool-not-found failure to the environment, not the branch', () => {
@@ -876,7 +876,7 @@ describe('runCycleSuite', () => {
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
     expect(loop.runCycleSuite(5)).toBe(false)
-    expect(logText()).toContain('the environment broke, not the branch')
+    expect(logText()).toContain('ERROR cycle suite tool missing')
     expect(existsSync(stopFile())).toBe(true)
   })
 
@@ -893,8 +893,8 @@ describe('runCycleSuite', () => {
 
     expect(loop.runCycleSuite(6)).toBe(false)
 
-    expect(logText()).toContain('stopping rather than promoting a failing tip')
-    expect(logText()).not.toContain('the environment broke, not the branch')
+    expect(logText()).toContain('ERROR cycle suite failed')
+    expect(logText()).not.toContain('tool missing')
     expect(readFileSync(suiteLog, 'utf8')).toContain('Tests run: 4, Failures: 1')
     expect(readFileSync(suiteLog, 'utf8')).not.toContain('vitest is not recognized')
   })
@@ -1101,7 +1101,7 @@ describe('scanForNextTasks', () => {
     writeFinal('deep-parent', 'NEXT_TASK: [BUG] too deep\n')
     await loop.scanForNextTasks('deep-parent', 1)
     expect(readdirSync(paths.tasksDir)).toHaveLength(0)
-    expect(logText()).toContain('Growth depth limit reached')
+    expect(logText()).toContain('WARN growth depth limit 1 ignored findings from deep-parent')
   })
 
   it('re-admits a review finding whose indexed task failed or already merged', async () => {

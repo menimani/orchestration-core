@@ -3,6 +3,28 @@ import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
 
 const MAX_MESSAGE_LENGTH = 80
+export const LOOP_EVENT_NAME_WIDTH = 'DECISION_REQUIRED'.length
+
+const EVENT_NAMES = [
+  'DECISION_REQUIRED',
+  'CYCLE_COMPLETE',
+  'Merge completed',
+  'Review started',
+  'Scan completed',
+  'Merge started',
+  'Merge failed',
+  'Issue claimed',
+  'Issue filed',
+  'Task failed',
+  'Task completed',
+  'Task started',
+  'Scan started',
+  'LOOP_DONE',
+  'FAILED',
+  'Status',
+  'ERROR',
+  'WARN',
+] as const
 
 function timestamp(now: Date): string {
   const pad = (value: number): string => String(value).padStart(2, '0')
@@ -25,13 +47,35 @@ export interface PrepareLoopLogOptions {
   runBranch?: string
 }
 
-/** Normalize even multiline failures so every physical daemon-log line is identifiable. */
+function splitEvent(message: string): { event: string; subject: string } {
+  const content = message.startsWith('[loop] ')
+    ? message.slice('[loop] '.length)
+    : message === '[loop]' ? '' : message
+  for (const event of EVENT_NAMES) {
+    // The lifecycle phrase is "Task failed", while FAILED remains a frozen log token.
+    const loggedEvent = event === 'Task failed' ? 'FAILED' : event
+    if (content === event) return { event: loggedEvent, subject: '' }
+    if (content.startsWith(`${event} `)) {
+      return { event: loggedEvent, subject: content.slice(event.length + 1) }
+    }
+    if (['WARN', 'ERROR', 'CYCLE_COMPLETE', 'LOOP_DONE', 'FAILED', 'DECISION_REQUIRED']
+      .includes(event) && content.startsWith(`${event}:`)) {
+      return { event, subject: content.slice(event.length + 1).trimStart() }
+    }
+  }
+  const separator = content.indexOf(' ')
+  return separator === -1
+    ? { event: content, subject: '' }
+    : { event: content.slice(0, separator), subject: content.slice(separator + 1) }
+}
+
+/** Align every physical daemon-log line under the event that produced the message. */
 export function loopLogLines(message: string, now: Date = new Date()): string[] {
-  const prefix = `[loop] ${logTimestamp(now)} `
-  return message.split(/\r?\n/).map((line) => {
-    const content = line.startsWith('[loop] ')
-      ? line.slice('[loop] '.length)
-      : line === '[loop]' ? '' : line
+  const prefix = `[loop] ${logTimestamp(now)} | `
+  const physicalLines = message.split(/\r?\n/)
+  const { event, subject } = splitEvent(physicalLines[0] ?? '')
+  return [subject, ...physicalLines.slice(1)].map((line) => {
+    const content = `${event.padEnd(LOOP_EVENT_NAME_WIDTH)}${line === '' ? '' : ` ${line}`}`
     const capped = content.length > MAX_MESSAGE_LENGTH
       ? `${content.slice(0, MAX_MESSAGE_LENGTH - 1)}…`
       : content

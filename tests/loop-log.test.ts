@@ -101,16 +101,30 @@ describe('loopLogLines', () => {
   it('prefixes every physical line with a local date and time', () => {
     const now = new Date(2026, 7, 10, 1, 2, 3)
 
-    expect(loopLogLines('[loop] WARN: git failed\nraw stderr\n', now)).toEqual([
-      '[loop] 2026-08-10 01:02:03 WARN: git failed',
-      '[loop] 2026-08-10 01:02:03 raw stderr',
-      '[loop] 2026-08-10 01:02:03 ',
+    expect(loopLogLines('WARN git failed\nraw stderr\n', now)).toEqual([
+      '[loop] 2026-08-10 01:02:03 | WARN              git failed',
+      '[loop] 2026-08-10 01:02:03 | WARN              raw stderr',
+      '[loop] 2026-08-10 01:02:03 | WARN             ',
     ])
   })
 
   it('uses the timestamp prefix shape required by loop.log consumers', () => {
-    expect(loopLogLines('CYCLE_COMPLETE: 1/2')[0])
-      .toMatch(/^\[loop\] \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} CYCLE_COMPLETE: 1\/2$/)
+    expect(loopLogLines('CYCLE_COMPLETE 1/2')[0])
+      .toMatch(/^\[loop\] \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| CYCLE_COMPLETE\s+1\/2$/)
+  })
+
+  it('keeps FAILED as the event-name contract for a task failure', () => {
+    expect(loopLogLines('Task failed 031_auto (log: logs/full-id.log)',
+      new Date(2026, 7, 10, 1, 2, 3))[0])
+      .toBe('[loop] 2026-08-10 01:02:03 | FAILED            031_auto (log: logs/full-id.log)')
+  })
+
+  it('aligns subjects for event names of different lengths', () => {
+    const now = new Date(2026, 7, 10, 1, 2, 3)
+    const scan = loopLogLines('Scan started 030_scan', now)[0]!
+    const decision = loopLogLines('DECISION_REQUIRED choose a database', now)[0]!
+
+    expect(scan.indexOf('030_scan')).toBe(decision.indexOf('choose a database'))
   })
 
   it('caps an over-length message at 79 characters plus an ellipsis', () => {
@@ -118,25 +132,25 @@ describe('loopLogLines', () => {
 
     const line = loopLogLines(content, new Date(2026, 7, 10, 1, 2, 3))[0]!
 
-    expect(line).toBe(`[loop] 2026-08-10 01:02:03 ${'a'.repeat(79)}…`)
-    expect(line.slice('[loop] 2026-08-10 01:02:03 '.length)).toHaveLength(80)
+    expect(line).toBe(`[loop] 2026-08-10 01:02:03 | ${'a'.repeat(79)}…`)
+    expect(line.slice('[loop] 2026-08-10 01:02:03 | '.length)).toHaveLength(80)
   })
 
   it.each([79, 80])('leaves a %i-character message unchanged', (length) => {
     const content = 'a'.repeat(length)
 
     expect(loopLogLines(content, new Date(2026, 7, 10, 1, 2, 3)))
-      .toEqual([`[loop] 2026-08-10 01:02:03 ${content}`])
+      .toEqual([`[loop] 2026-08-10 01:02:03 | ${content}`])
   })
 
   it('caps each line of a multiline message independently', () => {
     expect(loopLogLines(
-      `${'a'.repeat(81)}\n${'b'.repeat(80)}\n${'c'.repeat(100)}`,
+      `WARN ${'a'.repeat(81)}\n${'b'.repeat(80)}\n${'c'.repeat(100)}`,
       new Date(2026, 7, 10, 1, 2, 3),
     )).toEqual([
-      `[loop] 2026-08-10 01:02:03 ${'a'.repeat(79)}…`,
-      `[loop] 2026-08-10 01:02:03 ${'b'.repeat(80)}`,
-      `[loop] 2026-08-10 01:02:03 ${'c'.repeat(79)}…`,
+      `[loop] 2026-08-10 01:02:03 | WARN              ${'a'.repeat(61)}…`,
+      `[loop] 2026-08-10 01:02:03 | WARN              ${'b'.repeat(61)}…`,
+      `[loop] 2026-08-10 01:02:03 | WARN              ${'c'.repeat(61)}…`,
     ])
   })
 })
