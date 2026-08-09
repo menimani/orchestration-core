@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CheckConclusion, PrStatus } from '../src/adapters/forge.ts'
+import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import { waitForCi } from '../src/ciWait.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
@@ -78,6 +79,18 @@ describe('CI wait', () => {
     await expect(wait.run()).resolves.toBe(1)
     expect(wait.output).toEqual(['test: failure'])
   })
+
+  it.each(['ACTION_REQUIRED', 'STARTUP_FAILURE', 'STALE'])(
+    'returns failure for a stable completed %s check',
+    async (conclusion) => {
+      const normalized = normalizeEntry({ status: 'COMPLETED', conclusion })
+      const checks = status([['test', normalized, '2026-08-09T01:00:00Z']])
+      const wait = scriptedWait([checks, checks])
+
+      await expect(wait.run()).resolves.toBe(1)
+      expect(wait.output).toEqual(['test: failure'])
+    },
+  )
 
   it('waits for a non-empty check rollup before returning a verdict', async () => {
     const checks = status([['test', 'success', '2026-08-09T01:00:00Z']])

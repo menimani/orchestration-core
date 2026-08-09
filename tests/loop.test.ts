@@ -237,9 +237,12 @@ describe('CI check normalization (forge adapter)', () => {
   it('reads a completed check with an empty conclusion as pending', () => {
     expect(normalizeEntry({ status: 'COMPLETED', conclusion: '' })).toBe('pending')
   })
-  it('reads failures and cancellations as failure', () => {
+  it('reads terminal unsuccessful conclusions as failure', () => {
     expect(normalizeEntry({ status: 'COMPLETED', conclusion: 'FAILURE' })).toBe('failure')
     expect(normalizeEntry({ status: 'COMPLETED', conclusion: 'TIMED_OUT' })).toBe('failure')
+    expect(normalizeEntry({ status: 'COMPLETED', conclusion: 'ACTION_REQUIRED' })).toBe('failure')
+    expect(normalizeEntry({ status: 'COMPLETED', conclusion: 'STARTUP_FAILURE' })).toBe('failure')
+    expect(normalizeEntry({ status: 'COMPLETED', conclusion: 'STALE' })).toBe('failure')
   })
   it('reads a StatusContext by its state and the unclassifiable as pending', () => {
     expect(normalizeEntry({ state: 'SUCCESS' })).toBe('success')

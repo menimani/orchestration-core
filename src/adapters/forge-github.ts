@@ -56,7 +56,8 @@ export function normalizeEntry(entry: RollupEntry): CheckConclusion {
       : (entry.state ?? '') === '' ? 'UNKNOWN' : (entry.state as string)
   if (raw === 'SUCCESS' || raw === 'NEUTRAL') return 'success'
   if (raw === 'SKIPPED') return 'skipped'
-  if (raw === 'FAILURE' || raw === 'ERROR' || raw === 'CANCELLED' || raw === 'TIMED_OUT') {
+  if (raw === 'FAILURE' || raw === 'ERROR' || raw === 'CANCELLED' || raw === 'TIMED_OUT'
+    || raw === 'ACTION_REQUIRED' || raw === 'STARTUP_FAILURE' || raw === 'STALE') {
     return 'failure'
   }
   return 'pending'
