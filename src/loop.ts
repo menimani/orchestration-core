@@ -22,6 +22,7 @@ import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
+import { LoopWarningLog } from './loopLog.ts'
 import {
   claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, heartbeatIssueForTask,
   fingerprintOf, issueMergeComment,
@@ -71,9 +72,19 @@ export function createLoop(deps: LoopDeps) {
 
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
+  const warningLog = new LoopWarningLog(paths, log, now)
 
   function event(name: string, subject = ''): void {
+    if (name === 'WARN') {
+      const caller = new Error().stack?.split(/\r?\n/)[2]?.trim() ?? subject
+      warningLog.warn(caller, subject.split(':', 1)[0] || 'operation', subject)
+      return
+    }
     log(subject === '' ? name : `${name} ${subject}`)
+  }
+
+  function warning(callSite: string, operation: string, subject: string): void {
+    warningLog.warn(callSite, operation, subject)
   }
 
   function shortLogPath(file: string): string {
@@ -82,7 +93,7 @@ export function createLoop(deps: LoopDeps) {
 
   function errorSummary(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error)
-    return (message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'
+    return message.trim() || 'unknown error'
   }
 
   function readCount(file: string): number {
@@ -166,8 +177,10 @@ export function createLoop(deps: LoopDeps) {
     let issues: Awaited<ReturnType<Forge['listOpenIssues']>>
     try {
       issues = await forge.listOpenIssues(LABEL_MERGE_READY)
+      warningLog.recovered('list-merge-ready-issues')
     } catch (error) {
-      event('WARN', `could not list merge-ready issues: ${errorSummary(error)}`)
+      warning('list-merge-ready-issues', 'listing merge-ready issues',
+        `could not list merge-ready issues: ${errorSummary(error)}`)
       return
     }
 
@@ -930,8 +943,10 @@ export function createLoop(deps: LoopDeps) {
     if (config.issueQueueEnabled) {
       try {
         await reconcileClosedIssueLifecycleLabels(forge)
+        warningLog.recovered('reconcile-closed-issue-labels')
       } catch (error) {
-        event('WARN', `could not reconcile closed issue labels: ${errorSummary(error)}`)
+        warning('reconcile-closed-issue-labels', 'reconciling closed issue labels',
+          `could not reconcile closed issue labels: ${errorSummary(error)}`)
       }
       try {
         const issues = await Promise.all([
@@ -956,11 +971,13 @@ export function createLoop(deps: LoopDeps) {
           return issue.number
         }))
         const remoteCount = pendingIssues.filter((issueNumber) => issueNumber !== undefined).length
+        warningLog.recovered('count-remote-issue-work')
         if (remoteCount > 0) {
           return 'continue'
         }
       } catch (error) {
-        event('WARN', `could not count remote issue work: ${errorSummary(error)}`)
+        warning('count-remote-issue-work', 'counting remote issue work',
+          `could not count remote issue work: ${errorSummary(error)}`)
         return 'continue'
       }
     }
@@ -1111,8 +1128,10 @@ export function createLoop(deps: LoopDeps) {
         locallyRunningIssues.add(linkedIssue)
         try {
           await heartbeatIssueForTask(forge, paths, taskId, now())
+          warningLog.recovered(`heartbeat-${taskId}`)
         } catch (error) {
-          event('WARN', `heartbeat failed for ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+          warning(`heartbeat-${taskId}`, `heartbeat for ${shortTaskId(taskId)}`,
+            `heartbeat failed for ${shortTaskId(taskId)}: ${errorSummary(error)}`)
         }
       }
 
@@ -1256,8 +1275,10 @@ export function createLoop(deps: LoopDeps) {
               }
             }
           }
+          warningLog.recovered('issue-queue-sync')
         } catch (error) {
-          event('WARN', `issue queue unreachable: ${errorSummary(error)}`)
+          warning('issue-queue-sync', 'syncing the issue queue',
+            `issue queue unreachable: ${errorSummary(error)}`)
         }
       }
 

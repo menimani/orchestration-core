@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFil
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { loopLogLines, prepareLoopLog } from '../src/loopLog.ts'
+import { LoopWarningLog, loopLogLines, prepareLoopLog } from '../src/loopLog.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 
 let repoRoot: string
@@ -172,5 +172,66 @@ describe('loopLogLines', () => {
       `2026-08-10 01:02:03 [loop 04/12] WARN       ${'b'.repeat(68)}…`,
       `2026-08-10 01:02:03 [loop 04/12] WARN       ${'c'.repeat(68)}…`,
     ])
+  })
+})
+
+describe('LoopWarningLog', () => {
+  let now: Date
+  let logged: string[]
+  let warnings: LoopWarningLog
+
+  beforeEach(() => {
+    now = new Date(2026, 7, 10, 4, 57, 0)
+    logged = []
+    warnings = new LoopWarningLog(paths, (line) => logged.push(line), () => now)
+  })
+
+  it('collapses identical warnings and summarizes continued repetition after ten minutes', () => {
+    const message = `forge unavailable: ${'connection refused '.repeat(6)}`
+
+    warnings.warn('poll-forge', 'polling the forge', message)
+    warnings.warn('poll-forge', 'polling the forge', message)
+    now = new Date(2026, 7, 10, 5, 7, 0)
+    warnings.warn('poll-forge', 'polling the forge', message)
+
+    expect(logged).toHaveLength(2)
+    expect(logged[0]).toBe(`WARN ${message}`)
+    expect(logged[1]).toMatch(/^WARN forge unavailable: .*… repeated 2 times$/)
+    expect(loopLogLines(logged[1]!, { currentCycle: 1, cycleCap: 12, now })[0])
+      .toContain('repeated 2 times')
+  })
+
+  it('tracks interleaved warning call sites independently', () => {
+    warnings.warn('poll-forge', 'polling the forge', 'forge unavailable')
+    warnings.warn('heartbeat', 'sending a heartbeat', 'heartbeat unavailable')
+    warnings.warn('poll-forge', 'polling the forge', 'forge unavailable')
+
+    expect(logged).toEqual([
+      'WARN forge unavailable',
+      'WARN heartbeat unavailable',
+    ])
+  })
+
+  it('announces recovery once with the warning duration', () => {
+    warnings.warn('poll-forge', 'polling the forge', 'forge unavailable')
+    now = new Date(2026, 7, 10, 5, 9, 59)
+
+    warnings.recovered('poll-forge')
+    warnings.recovered('poll-forge')
+
+    expect(logged).toEqual([
+      'WARN forge unavailable',
+      'Recovered polling the forge after 12 minutes',
+    ])
+  })
+
+  it('writes the first occurrence with full text to warn-detail.log', () => {
+    const message = `forge unavailable: ${'detailed cause '.repeat(10)}`
+
+    warnings.warn('poll-forge', 'polling the forge', message)
+    warnings.warn('poll-forge', 'polling the forge', message)
+
+    expect(readFileSync(join(paths.logsDir, 'warn-detail.log'), 'utf8'))
+      .toBe(`2026-08-10 04:57:00 WARN ${message}\n`)
   })
 })
