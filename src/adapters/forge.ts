@@ -5,11 +5,13 @@
 
 export type PrState = 'open' | 'closed' | 'merged' | 'none'
 
-export type CheckConclusion = 'success' | 'failure' | 'pending'
+export type CheckConclusion = 'success' | 'failure' | 'pending' | 'skipped'
 
 export interface PrCheck {
   name: string
   conclusion: CheckConclusion
+  /** ISO timestamp used to distinguish reruns with the same check name. */
+  startedAt: string
 }
 
 export interface PrStatus {
