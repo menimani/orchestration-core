@@ -98,11 +98,18 @@ describe('prepareLoopLog', () => {
 })
 
 describe('loopLogLines', () => {
-  it('prefixes every physical line, including child-error continuations and blanks', () => {
-    expect(loopLogLines('[loop] WARN: git failed\nraw stderr\n')).toEqual([
-      '[loop] WARN: git failed',
-      '[loop] raw stderr',
-      '[loop] ',
+  it('prefixes every physical line with a local date and time', () => {
+    const now = new Date(2026, 7, 10, 1, 2, 3)
+
+    expect(loopLogLines('[loop] WARN: git failed\nraw stderr\n', now)).toEqual([
+      '[loop] 2026-08-10 01:02:03 WARN: git failed',
+      '[loop] 2026-08-10 01:02:03 raw stderr',
+      '[loop] 2026-08-10 01:02:03 ',
     ])
+  })
+
+  it('uses the timestamp prefix shape required by loop.log consumers', () => {
+    expect(loopLogLines('CYCLE_COMPLETE: 1/2')[0])
+      .toMatch(/^\[loop\] \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} CYCLE_COMPLETE: 1\/2$/)
   })
 })

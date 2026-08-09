@@ -1313,12 +1313,11 @@ export function createLoop(deps: LoopDeps) {
       }
     }
 
-    const hhmmss = now().toTimeString().slice(0, 8)
     if (config.workerMode) {
-      log(`[loop] ${hhmmss} | Worker Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
+      log(`[loop] | Worker Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
     } else {
       const cycle = readCount(scanCountFile)
-      log(`[loop] ${hhmmss} | Cycle=${cycle}/${config.maxScanCycles} Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
+      log(`[loop] | Cycle=${cycle}/${config.maxScanCycles} Running=${running} Queue=${queueLength()} | Next poll: ${config.pollIntervalSeconds}s`)
     }
     return 'continue'
   }

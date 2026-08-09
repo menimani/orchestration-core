@@ -733,7 +733,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6 })
 
     expect(await loop.poll()).toBe('continue')
-    expect(logText()).toMatch(/\| Cycle=\d+\/\d+ Running=/)
+    expect(logText()).toMatch(/^\[loop\] \| Cycle=\d+\/\d+ Running=/m)
   })
 
   it('announces a failure once, records it for the cycle, and stops on a burst', async () => {
