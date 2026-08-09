@@ -304,7 +304,12 @@ export function createLoop(deps: LoopDeps) {
    */
   function actionableFindings(finalFile: string): string[] {
     if (!existsSync(finalFile)) return []
-    return readFileSync(finalFile, 'utf8').split(/\r?\n/)
+    const lines = readFileSync(finalFile, 'utf8').split(/\r?\n/)
+    if (lines.some((line) => line === 'NO_FINDINGS')
+      && lines.some((line) => line.startsWith('NEXT_TASK:'))) {
+      log('[loop] WARN: final message contains both NO_FINDINGS and NEXT_TASK lines; keeping the actionable findings')
+    }
+    return lines
       .filter((line) => line.startsWith('NEXT_TASK:'))
       .map((line) => line.replace(/^NEXT_TASK:\s*/, '').trim())
       .filter((desc) => {

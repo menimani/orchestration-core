@@ -140,6 +140,23 @@ describe('actionable findings', () => {
     ])
   })
 
+  it('treats NO_FINDINGS as an explicit empty result', () => {
+    const loop = makeLoop()
+    writeFinal('t-no-findings', 'NO_FINDINGS\n')
+
+    expect(loop.actionableFindings(finalMessageFile(paths, 't-no-findings'))).toEqual([])
+    expect(logged).toEqual([])
+  })
+
+  it('keeps a real finding and warns when NO_FINDINGS contradicts it', () => {
+    const loop = makeLoop()
+    const finding = '[BUG] `src/search.ts` drops valid results'
+    writeFinal('t-contradiction', `NO_FINDINGS\nNEXT_TASK: ${finding}\n`)
+
+    expect(loop.actionableFindings(finalMessageFile(paths, 't-contradiction'))).toEqual([finding])
+    expect(logText()).toContain('WARN: final message contains both NO_FINDINGS and NEXT_TASK lines')
+  })
+
   it('ignores descriptions that only report no findings', () => {
     const loop = makeLoop()
     writeFinal('t4', [
@@ -308,6 +325,16 @@ describe('scan yield', () => {
     expect(readFileSync(join(paths.queueDir, 'scan-yield-3'), 'utf8')).toContain('empty')
   })
 
+  it('records empty when the final message uses NO_FINDINGS', () => {
+    const loop = makeLoop()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '3\n')
+    writeFinal('20250101_000000_005_scan', 'NO_FINDINGS\n')
+
+    loop.recordScanYield('20250101_000000_005_scan')
+
+    expect(readFileSync(join(paths.queueDir, 'scan-yield-3'), 'utf8')).toContain('empty')
+  })
+
   it('folds: findings reset the counter, all-empty increments once, no record leaves it alone', () => {
     const loop = makeLoop({ maxEmptyScans: 2 })
     const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
@@ -373,6 +400,17 @@ describe('runAutoReview', () => {
     writeRawStatus(reviewId, 'completed')
     writeFinal(reviewId, '')
     expect(loop.runAutoReview(7, false)).toBe(true)
+  })
+
+  it('resumes after a review reports NO_FINDINGS', () => {
+    const loop = makeLoop()
+    expect(loop.runAutoReview(7, false)).toBe(false)
+    const reviewId = lastReviewId(7)
+    writeRawStatus(reviewId, 'completed')
+    writeFinal(reviewId, 'NO_FINDINGS\n')
+
+    expect(loop.runAutoReview(7, false)).toBe(true)
+    expect(logText()).toContain(`Review ${reviewId} found nothing`)
   })
 
   it('does not let a placeholder finding hold the gate open', () => {
