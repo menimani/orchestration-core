@@ -853,6 +853,7 @@ export function createLoop(deps: LoopDeps) {
   function runCycleSuite(cycle: number): boolean {
     if (config.taskGate !== 'light') return true
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
+    writeFileSync(suiteLog, '')
     log(`[loop] Cycle suite: full tests against the branch tip (task gates were light) — Log: ${suiteLog}`)
 
     const runStep = (cwd: string, command: string): boolean => {

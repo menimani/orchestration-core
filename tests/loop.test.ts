@@ -719,6 +719,25 @@ describe('runCycleSuite', () => {
     expect(existsSync(stopFile())).toBe(true)
   })
 
+  it('classifies only the current run when a reused log contains an earlier tool failure', () => {
+    const suiteLog = join(paths.logsDir, 'cycle-suite-6.log')
+    writeFileSync(suiteLog, 'vitest is not recognized as an internal or external command\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Failing test', cwd: '', command: 'echo "Tests run: 4, Failures: 1"; exit 1',
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+
+    expect(loop.runCycleSuite(6)).toBe(false)
+
+    expect(logText()).toContain('stopping rather than promoting a failing tip')
+    expect(logText()).not.toContain('the environment broke, not the branch')
+    expect(readFileSync(suiteLog, 'utf8')).toContain('Tests run: 4, Failures: 1')
+    expect(readFileSync(suiteLog, 'utf8')).not.toContain('vitest is not recognized')
+  })
+
   it('runs the repair when its marker path is missing and skips it when present', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
