@@ -189,6 +189,24 @@ function hasExactFingerprints(issue: ForgeIssue, fingerprints: string[]): boolea
     && actual.every((fingerprint, index) => fingerprint === expected[index])
 }
 
+function isAdvisoryFingerprint(fingerprint: string): boolean {
+  return fingerprint.startsWith('advisory:')
+}
+
+function issueHasMergedFix(paths: OrchPaths, issue: ForgeIssue): boolean {
+  return issuePromotionForIssue(paths, issue.number) !== undefined
+}
+
+/** Merged fixes are finished work; advisory identities alone remain durable across merges. */
+function issueSuppressesFingerprint(
+  paths: OrchPaths,
+  issue: ForgeIssue,
+  fingerprint: string,
+): boolean {
+  return isAdvisoryFingerprint(fingerprint)
+    || !issueHasMergedFix(paths, issue)
+}
+
 async function closeDuplicate(
   forge: Forge,
   issueNumber: number,
@@ -241,9 +259,8 @@ async function reconcileOpenFindings(
 ): Promise<number | undefined> {
   const issues = new Map((knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING))
     .filter((issue) => hasExactFingerprints(issue, fingerprints)
-      // A promoted issue's fix has already merged: it neither suppresses new findings
-      // nor gets closed as a duplicate — the promotion closes it.
-      && issuePromotionForIssue(paths, issue.number) === undefined)
+      && fingerprints.every((fingerprint) =>
+        issueSuppressesFingerprint(paths, issue, fingerprint)))
     .map((issue) => [issue.number, issue]))
   if (createdIssueNumber !== undefined && !issues.has(createdIssueNumber)) {
     try {
@@ -328,8 +345,12 @@ export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPath
   const owners = new Map<string, number>()
   for (const issue of ordered) {
     const fingerprints = [...new Set(issueFingerprints(issue))]
+      .filter((fingerprint) => issueSuppressesFingerprint(paths, issue, fingerprint))
+    if (fingerprints.length === 0) continue
     const coveredBy = fingerprints.map((fingerprint) => owners.get(fingerprint))
-    if (!isClaimed(issue) && coveredBy.every((owner) => owner !== undefined)) {
+    if (!issueHasMergedFix(paths, issue)
+      && !isClaimed(issue)
+      && coveredBy.every((owner) => owner !== undefined)) {
       await withIssueCoordination(forge, issue.number, async () => {
         let current: ForgeIssue
         try {
@@ -373,8 +394,9 @@ async function findExistingFinding(
       // An issue whose fix already merged must not suppress a new finding with the
       // same coarse fingerprint: the tag+first-path identity collapses distinct
       // defects in one file, and a review's fresh finding about new code was eaten
-      // by a merged-but-unpromoted issue exactly this way.
-      && issuePromotionForIssue(paths, recorded.issueNumber) === undefined) {
+      // by a merged-but-unpromoted issue exactly this way. Advisory identifiers are
+      // deliberately durable because the same advisory recurs with different prose.
+      && issueSuppressesFingerprint(paths, recordedIssue, fingerprint)) {
       const fingerprints = issueFingerprints(recordedIssue)
       const survivor = (await reconcileOpenFindings(
         forge, paths, fingerprints, recorded.issueNumber, undefined, onMutation,
@@ -386,7 +408,7 @@ async function findExistingFinding(
   }
   const matching = (await forge.listOpenIssues(LABEL_FINDING))
     .filter((issue) => hasIssueFingerprint(issue, fingerprint)
-      && issuePromotionForIssue(paths, issue.number) === undefined)
+      && issueSuppressesFingerprint(paths, issue, fingerprint))
     .sort((a, b) => Number(isClaimed(b)) - Number(isClaimed(a)) || a.number - b.number)
   const existing = matching[0]
   if (existing === undefined) return undefined

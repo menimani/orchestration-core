@@ -1027,7 +1027,7 @@ describe('scanForNextTasks', () => {
     expect(logText()).toContain('Growth depth limit reached')
   })
 
-  it('re-admits a review finding whose indexed task failed, and suppresses landed ones', async () => {
+  it('re-admits a review finding whose indexed task failed or already merged', async () => {
     const loop = makeLoop()
     const finding = '[BUG] a defect whose first fix crashed'
 
@@ -1046,13 +1046,15 @@ describe('scanForNextTasks', () => {
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(taskId)
     expect(logText()).not.toContain('Duplicate finding')
 
-    // Once the fix landed, the same finding is suppressed as a duplicate.
+    // Once the fix landed, a later review saw the post-fix tree and must create new work.
     writeRawStatus(taskId, 'merged')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     logged = []
     writeFinal('20250101_000000_022_review-c1', `NEXT_TASK: ${finding}\n`)
     await loop.scanForNextTasks('20250101_000000_022_review-c1', 0)
-    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe('')
-    expect(logText()).toContain(`Duplicate finding, existing task ${taskId}`)
+    const freshTaskId = readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim().split(':')[0]
+    expect(freshTaskId).not.toBe(taskId)
+    expect(readdirSync(paths.tasksDir)).toHaveLength(2)
+    expect(logText()).not.toContain('Duplicate finding')
   })
 })

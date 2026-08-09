@@ -186,7 +186,11 @@ from or equivalent to `orchestration/tests/*.sh`.
     identifier when one is named, else the finding's tag plus the first path it
     names, else the hashed text with whole-line semantics. Review findings are checked
     independently before unresolved findings are combined; a combined issue stores every
-    constituent fingerprint, so it also suppresses a later individual report.
+    constituent fingerprint, so it also suppresses a later individual report while
+    that work remains pending. Once a non-advisory issue's task merges into the run
+    branch, a later scan or review observed the post-fix tree and the same fingerprint
+    becomes fresh work; advisory identifiers remain durable deduplication keys across
+    merges because the same advisory recurs with different prose.
 33. Worker daemons claim a ready issue by self-assignment. The forge login is the worker
     identity, and every daemon that may claim concurrently must authenticate as a
     distinct forge account. Under that invariant, a simultaneous claim is settled

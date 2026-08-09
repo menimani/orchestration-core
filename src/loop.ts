@@ -8,7 +8,7 @@ import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import type { LoopConfig } from './config.ts'
 import {
-  existingTaskIdForDesc, taskIdForDesc, newTaskId, recordTaskIdForDesc,
+  descSlug, existingTaskIdForDesc, taskIdForDesc, newTaskId, recordTaskIdForDesc,
 } from './ids.ts'
 import { mergeRemoteTask, mergeTask, MergeError } from './merge.ts'
 import {
@@ -23,7 +23,7 @@ import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import {
   claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, heartbeatIssueForTask,
-  issueMergeComment,
+  fingerprintOf, issueMergeComment,
   issueNumberForTask, issuePromotionForIssue, publishFinding, reapStaleLeases,
   recordIssueForTask, recordIssuePromotion,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints, unresolvedFindings,
@@ -384,7 +384,9 @@ export function createLoop(deps: LoopDeps) {
           const queued = existsSync(queueFile)
             && readFileSync(queueFile, 'utf8').split(/\r?\n/)
               .some((line) => line.startsWith(`${existing}:`))
-          if (queued || status === 'running' || status === 'completed' || status === 'merged') {
+          const mergedAdvisory = status === 'merged'
+            && fingerprintOf(finding).startsWith('advisory:')
+          if (queued || status === 'running' || status === 'completed' || mergedAdvisory) {
             log(`[loop]   Duplicate finding, existing task ${existing}: ${finding}`)
             return false
           }
@@ -398,7 +400,14 @@ export function createLoop(deps: LoopDeps) {
       ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
       : pendingFindings
     for (const desc of descriptions) {
-      const newId = taskIdForDesc(paths, 'auto', desc)
+      const existing = existingTaskIdForDesc(paths, 'auto', desc)
+      const needsFreshTask = existing !== undefined
+        && readStatus(paths, existing)?.status === 'merged'
+        && !fingerprintOf(desc).startsWith('advisory:')
+      const newId = needsFreshTask
+        ? newTaskId(paths, `auto-${descSlug(desc)}`)
+        : taskIdForDesc(paths, 'auto', desc)
+      if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', desc, newId)
       log(`[loop] NEXT_TASK detection: ${desc}`)
       log(`[loop]   → New task: ${newId} (depth=${newDepth})`)
       if (!existsSync(specFile(paths, newId))) {

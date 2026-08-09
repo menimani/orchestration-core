@@ -286,9 +286,45 @@ describe('publishFinding', () => {
     recordIssuePromotion(paths, 'task-first-fix', 'a'.repeat(40), 'chore/run-branch')
 
     const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks differently', 'review-2')
+    await reconcileFindingFingerprints(forge, paths)
 
     expect(second.outcome).toBe('created')
     expect(second.issueNumber).not.toBe(first.issueNumber)
+    expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
+    expect((await forge.getIssue(second.issueNumber)).state).toBe('open')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`bug:src/a/b.ts ${second.issueNumber}\n`)
+  })
+
+  it('still suppresses a same-fingerprint finding while the first issue is in progress', async () => {
+    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-1')
+    await forge.assignIssue(first.issueNumber, 'worker-busy')
+    await forge.addLabel(first.issueNumber, LABEL_IN_PROGRESS)
+    await forge.removeLabel(first.issueNumber, LABEL_READY)
+
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks differently', 'review-2')
+
+    expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
+    expect(forge.issues.size).toBe(1)
+  })
+
+  it('keeps advisory identifier deduplication after its issue has merged', async () => {
+    const first = await publishFinding(
+      forge, paths, '[SECURITY] GHSA-qwww-vcr4-c8h2 affects a dependency', 'scan-1',
+    )
+    recordIssueForTask(paths, 'task-advisory-fix', first.issueNumber)
+    recordIssuePromotion(paths, 'task-advisory-fix', 'a'.repeat(40), 'chore/run-branch')
+
+    const second = await publishFinding(
+      forge, paths, '[SECURITY] Different wording for GHSA-QWWW-VCR4-C8H2', 'scan-2',
+    )
+    await reconcileFindingFingerprints(forge, paths)
+
+    expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
+    expect(forge.issues.size).toBe(1)
+    expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`advisory:GHSA-QWWW-VCR4-C8H2 ${first.issueNumber}\n`)
   })
 
   it('drops a ledger entry for a closed issue and files the finding again', async () => {
