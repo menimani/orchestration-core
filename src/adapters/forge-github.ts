@@ -255,6 +255,30 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
       }))
     },
 
+    async listClosedIssues(label: string): Promise<ForgeIssue[]> {
+      const stdout = await gh(repoRoot, ['issue', 'list', '--state', 'closed',
+        '--label', label, '--limit', '200',
+        '--json', 'number,state,title,body,labels,assignees,updatedAt'])
+      const data = JSON.parse(stdout) as Array<{
+        number: number
+        state: 'CLOSED'
+        title: string
+        body: string
+        labels: Array<{ name: string }>
+        assignees: Array<{ login: string }>
+        updatedAt: string
+      }>
+      return data.map((issue) => ({
+        number: issue.number,
+        state: issue.state.toLowerCase() as ForgeIssue['state'],
+        title: issue.title,
+        body: issue.body,
+        labels: issue.labels.map((label_) => label_.name),
+        assignees: issue.assignees.map((assignee) => assignee.login),
+        updatedAt: issue.updatedAt,
+      }))
+    },
+
     async assignIssue(issueNumber: number, user: string): Promise<void> {
       await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-assignee', user])
     },

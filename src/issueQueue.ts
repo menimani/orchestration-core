@@ -19,6 +19,9 @@ export const LABEL_READY = 'loop:ready'
 export const LABEL_IN_PROGRESS = 'loop:in-progress'
 export const LABEL_MERGE_READY = 'loop:merge-ready'
 export const LABEL_MERGE_FAILED = 'loop:merge-failed'
+export const LIFECYCLE_LABELS = [
+  LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
+] as const
 export const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
 
 const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
@@ -28,6 +31,29 @@ const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
 // the middle of the other. The final claim read below remains necessary because a
 // different orchestration process does not share this coordinator.
 const issueCoordination = new WeakMap<Forge, Map<number, Promise<void>>>()
+
+/** Remove queue-position labels after a direct close while preserving finding metadata. */
+export async function closeIssueAndRemoveLifecycleLabels(
+  forge: Forge,
+  issueNumber: number,
+  comment: string,
+): Promise<void> {
+  await forge.closeIssue(issueNumber, comment)
+  const issue = await forge.getIssue(issueNumber)
+  await Promise.all(LIFECYCLE_LABELS
+    .filter((label) => issue.labels.includes(label))
+    .map((label) => forge.removeLabel(issueNumber, label)))
+}
+
+/** Strip stale queue-position labels from issues closed by the forge. */
+export async function reconcileClosedIssueLifecycleLabels(forge: Forge): Promise<void> {
+  const issuesByLabel = await Promise.all(LIFECYCLE_LABELS.map(async (label) => ({
+    label,
+    issues: await forge.listClosedIssues(label),
+  })))
+  await Promise.all(issuesByLabel.flatMap(({ label, issues }) =>
+    issues.map((issue) => forge.removeLabel(issue.number, label))))
+}
 
 async function withIssueCoordination<T>(
   forge: Forge,
@@ -171,7 +197,7 @@ async function closeDuplicate(
 ): Promise<void> {
   try {
     onMutation?.(issueNumber)
-    await forge.closeIssue(issueNumber,
+    await closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
       `Duplicate of #${survivor}; both issues carry the same loop finding fingerprint.`)
   } catch (error) {
     // Concurrent reconcilers can both choose the same survivor. A close that lost

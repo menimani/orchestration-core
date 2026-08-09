@@ -469,8 +469,13 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
     const project = await loadProject(config.project)
     const log = (line: string): void => console.log(line)
     if (config.issueQueueEnabled) {
-      const { ensureQueueLabels } = await import('./issueQueue.ts')
+      const { ensureQueueLabels, reconcileClosedIssueLifecycleLabels } = await import('./issueQueue.ts')
       await ensureQueueLabels(forge)
+      try {
+        await reconcileClosedIssueLifecycleLabels(forge)
+      } catch (error) {
+        log(`[loop] WARN: could not reconcile closed issue lifecycle labels: ${(error as Error).message}`)
+      }
     }
     const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
 

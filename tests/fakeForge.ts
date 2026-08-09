@@ -80,6 +80,11 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
         .filter((issue) => issue.state === 'open' && issue.labels.includes(label))
         .map((issue) => ({ ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }))
     },
+    async listClosedIssues(label: string): Promise<ForgeIssue[]> {
+      return [...fake.issues.values()]
+        .filter((issue) => issue.state === 'closed' && issue.labels.includes(label))
+        .map((issue) => ({ ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }))
+    },
     async assignIssue(issueNumber: number, assignee: string): Promise<void> {
       const issue = fake.issues.get(issueNumber)
       if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)

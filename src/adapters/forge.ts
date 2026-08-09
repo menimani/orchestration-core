@@ -86,6 +86,8 @@ export interface Forge {
   listIssueComments(issueNumber: number): Promise<string[]>
   /** Open issues carrying the label, newest first. */
   listOpenIssues(label: string): Promise<ForgeIssue[]>
+  /** Closed issues carrying the label, newest first. */
+  listClosedIssues(label: string): Promise<ForgeIssue[]>
   assignIssue(issueNumber: number, user: string): Promise<void>
   unassignIssue(issueNumber: number, user: string): Promise<void>
   addLabel(issueNumber: number, label: string): Promise<void>

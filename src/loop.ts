@@ -22,11 +22,12 @@ import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import {
-  claimIssue, commentOnIssueMerge, heartbeatIssueForTask, issueMergeComment,
+  claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, heartbeatIssueForTask,
+  issueMergeComment,
   issueNumberForTask, issuePromotionForIssue, publishFinding, reapStaleLeases,
   recordIssueForTask, recordIssuePromotion,
-  reconcileFindingFingerprints, unresolvedFindings, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
-  LABEL_MERGE_READY, LABEL_READY,
+  reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints, unresolvedFindings,
+  LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
 } from './issueQueue.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
@@ -105,7 +106,7 @@ export function createLoop(deps: LoopDeps) {
       if (!isInspectionTaskId(paths, taskId)) {
         throw new Error(`${taskId} has no commits and is not an inspection task`)
       }
-      await forge.closeIssue(issueNumber,
+      await closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
         `Inspection task ${taskId} completed without commits.`)
       log(`[loop] Closed issue #${issueNumber} after inspection ${taskId}`)
       return
@@ -907,6 +908,11 @@ export function createLoop(deps: LoopDeps) {
     if (countRunning() > 0 || queueLength() > 0) return 'continue'
     if (isScanRunning()) return 'continue'
     if (config.issueQueueEnabled) {
+      try {
+        await reconcileClosedIssueLifecycleLabels(forge)
+      } catch (error) {
+        log(`[loop] WARN: could not reconcile closed issue lifecycle labels: ${(error as Error).message}`)
+      }
       try {
         const issues = await Promise.all([
           forge.listOpenIssues(LABEL_READY),

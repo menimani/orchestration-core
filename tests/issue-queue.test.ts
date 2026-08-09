@@ -4,10 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
-  buildIssueBody, claimIssue, commentOnIssueMerge, fingerprintOf, heartbeatIssueForTask,
-  issueNumberForTask, parseIssueBody, publishDelegatedTask, publishFinding,
-  reapStaleLeases, reconcileFindingFingerprints, recordIssueForTask, recordIssuePromotion,
-  LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
+  buildIssueBody, claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
+  fingerprintOf, heartbeatIssueForTask, issueNumberForTask, parseIssueBody,
+  publishDelegatedTask, publishFinding, reapStaleLeases,
+  reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints, recordIssueForTask,
+  recordIssuePromotion, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
+  LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
@@ -46,6 +48,53 @@ describe('fingerprintOf', () => {
     expect(a).toBe(b)
     expect(a).not.toBe(c)
     expect(a.startsWith('text:')).toBe(true)
+  })
+})
+
+describe('closed issue lifecycle labels', () => {
+  it('removes the matching lifecycle label from a closed issue and keeps loop:finding', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'closed work', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    const issue = forge.issues.get(issueNumber)
+    if (issue === undefined) throw new Error('expected issue')
+    issue.state = 'closed'
+    const removed: Array<[number, string]> = []
+    const removeLabel = forge.removeLabel.bind(forge)
+    forge.removeLabel = async (number, label) => {
+      removed.push([number, label])
+      await removeLabel(number, label)
+    }
+
+    await reconcileClosedIssueLifecycleLabels(forge)
+
+    expect(removed).toEqual([[issueNumber, LABEL_IN_PROGRESS]])
+    expect((await forge.getIssue(issueNumber)).labels).toEqual([LABEL_FINDING])
+  })
+
+  it('does not touch an open issue carrying lifecycle labels', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'open work', body: '',
+      labels: [LABEL_FINDING, LABEL_READY, LABEL_MERGE_READY, LABEL_MERGE_FAILED],
+    })
+
+    await reconcileClosedIssueLifecycleLabels(forge)
+
+    expect((await forge.getIssue(issueNumber)).labels)
+      .toEqual([LABEL_FINDING, LABEL_READY, LABEL_MERGE_READY, LABEL_MERGE_FAILED])
+  })
+
+  it('strips lifecycle labels when the orchestration closes an issue directly', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'inspection', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY],
+    })
+
+    await closeIssueAndRemoveLifecycleLabels(forge, issueNumber, 'Inspection completed.')
+
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.state).toBe('closed')
+    expect(issue.labels).toEqual([LABEL_FINDING])
   })
 })
 
