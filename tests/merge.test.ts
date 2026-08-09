@@ -20,7 +20,7 @@ const installProject: ProjectAdapter = {
   mergeChecks: () => [{
     label: 'Fixture check',
     cwd: '',
-    command: 'node -e "console.log(\'check ran\')"',
+    command: 'node -e "console.error(\'check warning\'); console.log(\'check ran\')"',
     installWhenMissing: {
       path: 'dependency-ready',
       command: 'node -e "console.log(\'install ran\')"',
@@ -225,6 +225,7 @@ describe('mergeTask', () => {
     const outputLines = output.split(/\r?\n/)
     expect(outputLines.filter((line) => line === 'install ran')).toHaveLength(1)
     expect(outputLines.indexOf('install ran')).toBeLessThan(outputLines.indexOf('check ran'))
+    expect(outputLines).toContain('check warning')
   })
 
   it('skips installation when the merge check dependency path is present', async () => {

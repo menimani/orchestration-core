@@ -25,7 +25,9 @@ export function createCodexRunner(): Runner {
     start(options: RunnerStartOptions): Promise<number> {
       const specContent = readFileSync(options.specFile, 'utf8')
       const args = buildArgs(options, specContent)
-      const logFd = openSync(options.logFile, 'w')
+      // startTask clears this file before setup; append so setup output remains ahead
+      // of the runner transcript instead of being silently truncated here.
+      const logFd = openSync(options.logFile, 'a')
 
       // On Windows the `codex` on PATH is an npm .cmd shim, which Node cannot spawn
       // without a shell — and shell quoting would mangle the multi-line spec argument.

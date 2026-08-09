@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { capturedSpawnOptions } from './childProcess.ts'
 import type { OrchPaths } from './paths.ts'
 
 export interface WorkerCommandDependencies {
@@ -16,13 +17,16 @@ interface ProcessResult {
 
 function gitResult(paths: OrchPaths, args: string[]): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd: paths.repoRoot, windowsHide: true })
+    const child = spawn('git', args, capturedSpawnOptions({
+      cwd: paths.repoRoot,
+      windowsHide: true,
+    }))
     let stdout = ''
     let stderr = ''
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
-    child.stderr.on('data', (chunk: string) => { stderr += chunk })
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => { stdout += chunk })
+    child.stderr?.on('data', (chunk: string) => { stderr += chunk })
     child.on('error', reject)
     child.on('close', (status) => resolve({ status, stdout, stderr }))
   })
@@ -49,7 +53,7 @@ export async function updateWorkerCheckout(
   paths: OrchPaths,
   baseRef: string,
 ): Promise<'current' | 'fast-forwarded'> {
-  await git(paths, ['fetch', 'origin'])
+  await git(paths, ['fetch', '--quiet', 'origin'])
   await git(paths, ['rev-parse', '--verify', `${baseRef}^{commit}`])
 
   const [headBehindBase, baseBehindHead] = await Promise.all([
@@ -62,7 +66,7 @@ export async function updateWorkerCheckout(
     )
   }
   if (headBehindBase && !baseBehindHead) {
-    await git(paths, ['merge', '--ff-only', baseRef])
+    await git(paths, ['merge', '--quiet', '--ff-only', baseRef])
     return 'fast-forwarded'
   }
   // A checkout AHEAD of the base carries commits the base never saw; every task

@@ -9,7 +9,7 @@ import { cleanupTask } from './cleanup.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig } from './config.ts'
 import { createLoop } from './loop.ts'
-import { prepareLoopLog } from './loopLog.ts'
+import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import {
   commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
 } from './issueQueue.ts'
@@ -170,6 +170,7 @@ const cmdStart: Command = async (paths, args) => {
     effort: effort === '' ? 'medium' : effort,
     model: model === '' ? undefined : model,
     setup: isScanTaskId(taskId) ? project.scanWorktreeSetup : undefined,
+    report: (line) => console.log(line),
   })
   if (result.outcome === 'already-running') {
     console.log(`[start] ${taskId} is already running (skipping)`)
@@ -419,7 +420,17 @@ const cmdLoop: Command = async (paths, args) => {
     console.log('Stop: npm run -C orchestration/ts stop')
     return 0
   }
-  return runLoopDaemon(paths)
+  const log = (message: string, error = false): void => {
+    const write = error ? console.error : console.log
+    for (const line of loopLogLines(message)) write(line)
+  }
+  try {
+    return await runLoopDaemon(paths, log)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log(`ERROR: ${(message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'}`, true)
+    return 1
+  }
 }
 
 const cmdWorker: Command = async (paths, args) => {
@@ -454,7 +465,7 @@ const cmdCiWait: Command = async (paths, args) => {
   return waitForCi(forge, Number(prNumber), { timeoutSeconds })
 }
 
-async function runLoopDaemon(paths: OrchPaths): Promise<number> {
+async function runLoopDaemon(paths: OrchPaths, log: (line: string) => void): Promise<number> {
   const config = loadConfig()
   const pidFile = join(paths.queueDir, 'loop.pid')
   const stopFile = join(paths.queueDir, 'stop')
@@ -464,10 +475,10 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
   if (existsSync(pidFile)) {
     const existing = readFileSync(pidFile, 'utf8').trim()
     if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
-      console.error(`[loop] ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
+      log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
       return 1
     }
-    console.log('[loop] WARN: Removing stale PID file')
+    log('WARN: Removing stale PID file')
     rmSync(pidFile, { force: true })
   }
   writeFileSync(pidFile, `${process.pid}\n`)
@@ -500,7 +511,6 @@ async function runLoopDaemon(paths: OrchPaths): Promise<number> {
     const forge = await loadForge(config.forge, paths.repoRoot)
     const runner = await loadRunner(config.runner)
     const project = await loadProject(config.project)
-    const log = (line: string): void => console.log(line)
     if (config.issueQueueEnabled) {
       const { ensureQueueLabels, reconcileClosedIssueLifecycleLabels } = await import('./issueQueue.ts')
       await ensureQueueLabels(forge)

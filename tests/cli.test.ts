@@ -127,6 +127,8 @@ describe('loop daemon ownership', () => {
 
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('[loop] End the loop.')
+    expect(result.stdout.split(/\r?\n/).filter((line) => line !== '')
+      .every((line) => line.startsWith('[loop] '))).toBe(true)
     expect(existsSync(daemonFile('loop.pid'))).toBe(false)
     expect(existsSync(daemonFile('issue-mode'))).toBe(false)
   })

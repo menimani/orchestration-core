@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Runner } from '../src/adapters/runner.ts'
 import { logFile, orchPaths, type OrchPaths } from '../src/paths.ts'
-import { startTask } from '../src/start.ts'
+import { startTask, worktreeAddArgs } from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 
@@ -32,6 +32,12 @@ afterEach(() => {
 })
 
 describe('startTask', () => {
+  it('uses quiet worktree creation so checkout progress stays out of daemon output', () => {
+    expect(worktreeAddArgs('task-worktree', 'task/task-id')).toEqual([
+      'worktree', 'add', '--quiet', 'task-worktree', '-b', 'task/task-id',
+    ])
+  })
+
   it('records and preserves a worktree setup failure before the runner starts', async () => {
     const taskId = '20260809_000000_001_scan'
     writeFileSync(specFile(paths, taskId), '# scan\n')
