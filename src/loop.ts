@@ -72,13 +72,14 @@ export function createLoop(deps: LoopDeps) {
     return /^\d+$/.test(raw) ? Number(raw) : 0
   }
 
-  function git(args: string[]): string {
+  function git(args: string[], quietSuccess = ''): string {
     try {
-      return execFileSync('git', args, {
+      const output = execFileSync('git', args, {
         cwd: paths.repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       })
+      return output === '' ? quietSuccess : output
     } catch {
       return ''
     }
@@ -918,13 +919,18 @@ export function createLoop(deps: LoopDeps) {
           forge.listOpenIssues(LABEL_READY),
           forge.listOpenIssues(LABEL_IN_PROGRESS),
           forge.listOpenIssues(LABEL_MERGE_READY),
+          forge.listOpenIssues(LABEL_MERGE_FAILED),
         ])
         const openIssues = new Map(issues.flat().map((issue) => [issue.number, issue]))
         const pendingIssues = await Promise.all([...openIssues.values()].map(async (issue) => {
           if (issuePromotionForIssue(paths, issue.number) !== undefined) return undefined
           try {
             const comments = await forge.listIssueComments(issue.number)
-            if (comments.some((comment) => /^MERGED: /.test(comment))) return undefined
+            const mergeSha = comments
+              .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment)?.[1])
+              .find((sha) => sha !== undefined
+                && git(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
+            if (mergeSha !== undefined) return undefined
           } catch (error) {
             log(`[loop] WARN: could not inspect issue #${issue.number} for merge metadata: ${(error as Error).message}`)
           }
@@ -932,11 +938,12 @@ export function createLoop(deps: LoopDeps) {
         }))
         const remoteCount = pendingIssues.filter((issueNumber) => issueNumber !== undefined).length
         if (remoteCount > 0) {
-          log(`[loop] Waiting for ${remoteCount} remote issue-queue task(s) before entering the cycle gate`)
+          log(`[loop] Waiting for ${remoteCount} remote issue-queue task(s) labeled ${LABEL_READY}, ${LABEL_IN_PROGRESS}, ${LABEL_MERGE_READY}, or ${LABEL_MERGE_FAILED} before entering the cycle gate`)
           return 'continue'
         }
       } catch (error) {
         log(`[loop] WARN: could not count remote issue-queue work: ${(error as Error).message}`)
+        return 'continue'
       }
     }
 

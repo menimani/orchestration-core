@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -71,6 +72,25 @@ function writeRawStatus(taskId: string, status: string, pid: number | null = nul
 
 function logText(): string {
   return logged.join('\n')
+}
+
+function git(args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  }).trim()
+}
+
+function initializeGitRepo(): string {
+  git(['init', '--initial-branch=main'])
+  git(['config', 'user.email', 'loop-test@example.test'])
+  git(['config', 'user.name', 'Loop Test'])
+  writeFileSync(join(repoRoot, 'tracked.txt'), 'initial\n')
+  git(['add', 'tracked.txt'])
+  git(['commit', '-m', 'initial'])
+  return git(['rev-parse', 'HEAD'])
 }
 
 beforeEach(() => {
@@ -449,6 +469,30 @@ describe('remote issue queue idle detection', () => {
     expect(logText()).toContain('Waiting for 1 remote issue-queue task')
   })
 
+  it('defers the cycle gate and review while a merge-failed issue is open', async () => {
+    const loop = makeReviewLoop(true)
+    await fakeForge.createIssue({ title: 'adoption needs repair', body: '', labels: ['loop:merge-failed'] })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(logText()).toContain('loop:merge-failed')
+  })
+
+  it('defers the cycle gate and review when remote issue listing fails', async () => {
+    const loop = makeReviewLoop(true)
+    fakeForge.listOpenIssues = async () => {
+      throw new Error('forge unavailable')
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(logText()).toContain('WARN: could not count remote issue-queue work: forge unavailable')
+  })
+
   it('enters the gate when an in-progress issue has a local promotion record', async () => {
     const loop = makeReviewLoop(true)
     const issueNumber = await fakeForge.createIssue({
@@ -463,17 +507,57 @@ describe('remote issue queue idle detection', () => {
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
   })
 
-  it('enters the gate when an in-progress issue has a forge-visible merge marker', async () => {
+  it('enters the gate when a forge-visible merge marker names an ancestor of HEAD', async () => {
+    const mergeSha = initializeGitRepo()
     const loop = makeReviewLoop(true)
     const issueNumber = await fakeForge.createIssue({
       title: 'remotely merged fix', body: '', labels: ['loop:in-progress'],
     })
-    await fakeForge.commentIssue(issueNumber, 'MERGED: remote-task\nMerged by another checkout.')
+    await fakeForge.commentIssue(
+      issueNumber,
+      `MERGED: remote-task\nMerged as ${mergeSha} into run branch feature/run-9. This issue closes on promotion.`,
+    )
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
+  })
+
+  it('does not exempt a merge marker whose SHA is not an ancestor of HEAD', async () => {
+    initializeGitRepo()
+    git(['switch', '-c', 'foreign'])
+    writeFileSync(join(repoRoot, 'foreign.txt'), 'foreign\n')
+    git(['add', 'foreign.txt'])
+    git(['commit', '-m', 'foreign'])
+    const foreignSha = git(['rev-parse', 'HEAD'])
+    git(['switch', 'main'])
+    const loop = makeReviewLoop(true)
+    const issueNumber = await fakeForge.createIssue({
+      title: 'foreign merged fix', body: '', labels: ['loop:in-progress'],
+    })
+    await fakeForge.commentIssue(
+      issueNumber,
+      `MERGED: remote-task\nMerged as ${foreignSha} into run branch feature/other-run. This issue closes on promotion.`,
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+  })
+
+  it('does not exempt a merge marker with no parseable SHA', async () => {
+    const loop = makeReviewLoop(true)
+    const issueNumber = await fakeForge.createIssue({
+      title: 'unverifiable merged fix', body: '', labels: ['loop:in-progress'],
+    })
+    await fakeForge.commentIssue(issueNumber, 'MERGED: remote-task\nMerged by another checkout.')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
   })
 
   it('enters the gate and dispatches the review when no remote issue is open', async () => {
