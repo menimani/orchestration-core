@@ -11,6 +11,7 @@ import {
   recordIssuePromotion, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
+import { existingTaskIdForDesc } from '../src/ids.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 
@@ -401,6 +402,30 @@ describe('claimIssue', () => {
     expect(readFileSync(join(paths.queueDir, 'effort', result.taskId), 'utf8').trim()).toBe('high')
     expect(issueNumberForTask(paths, result.taskId)).toBe(issueNumber)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(result.taskId)
+  })
+
+  it('mints and indexes a fresh task when an identical non-advisory finding returns after merge', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks on empty input'
+    const firstIssueNumber = await readyIssue(description)
+    const first = await claimIssue(
+      forge, paths, await forge.getIssue(firstIssueNumber), 'worker-a', appendRequirement,
+    )
+    if (first.outcome !== 'claimed') throw new Error(`expected a claim, got ${first.outcome}`)
+    writeFileSync(join(paths.statusDir, `${first.taskId}.json`),
+      JSON.stringify({ task_id: first.taskId, status: 'merged' }))
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    recordIssuePromotion(paths, first.taskId, 'a'.repeat(40), 'chore/run-branch')
+
+    const secondIssueNumber = await readyIssue(description)
+    const second = await claimIssue(
+      forge, paths, await forge.getIssue(secondIssueNumber), 'worker-a', appendRequirement,
+    )
+    if (second.outcome !== 'claimed') throw new Error(`expected a claim, got ${second.outcome}`)
+
+    expect(second.taskId).not.toBe(first.taskId)
+    expect(second.enqueue).toEqual({ outcome: 'enqueued', taskId: second.taskId, depth: 1 })
+    expect(existingTaskIdForDesc(paths, 'auto', description)).toBe(second.taskId)
+    expect(issueNumberForTask(paths, second.taskId)).toBe(secondIssueNumber)
   })
 
   it('settles a simultaneous claim deterministically — first login wins, loser backs off', async () => {

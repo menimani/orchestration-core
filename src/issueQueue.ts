@@ -2,8 +2,11 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
-import { taskIdForDesc } from './ids.ts'
+import {
+  descSlug, existingTaskIdForDesc, newTaskId, recordTaskIdForDesc, taskIdForDesc,
+} from './ids.ts'
 import type { OrchPaths } from './paths.ts'
+import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
 } from './tasks.ts'
@@ -719,7 +722,14 @@ export async function claimIssue(
       return { outcome: 'unparseable', issueNumber: issue.number }
     }
 
-    const taskId = taskIdForDesc(paths, 'auto', parsed.requirement)
+    const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)
+    const needsFreshTask = existing !== undefined
+      && readStatus(paths, existing)?.status === 'merged'
+      && !fingerprintOf(parsed.requirement).startsWith('advisory:')
+    const taskId = needsFreshTask
+      ? newTaskId(paths, `auto-${descSlug(parsed.requirement)}`)
+      : taskIdForDesc(paths, 'auto', parsed.requirement)
+    if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', parsed.requirement, taskId)
     if (!existsSync(specFile(paths, taskId))) {
       newTaskSpec(paths, taskId)
       appendRequirements(taskId, parsed.requirement)
