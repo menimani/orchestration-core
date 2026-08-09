@@ -756,8 +756,8 @@ describe('loop integration in issue mode', () => {
     expect(claimed?.assignees).toEqual(['worker-a'])
     expect(claimed?.labels).toContain(LABEL_IN_PROGRESS)
     expect(claimed?.labels).not.toContain(LABEL_READY)
-    expect(logged).toContain('Issue filed #1 (by 001_scan)')
-    expect(logged).toContain('Scan completed 001_scan (1 findings -> #1)')
+    expect(logged).toContain('Filed #1  by 001_scan')
+    expect(logged).toContain('Completed 001_scan  findings #1')
     expect(logged.some((line) => line.includes('NEXT_TASK detection'))).toBe(false)
 
     // A duplicate hidden beyond the creation retry window is still reconciled by

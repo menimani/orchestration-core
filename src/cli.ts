@@ -7,7 +7,7 @@ import { loadProject } from './adapters/project.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
 import { waitForCi } from './ciWait.ts'
-import { loadConfig } from './config.ts'
+import { loadConfig, type LoopConfig } from './config.ts'
 import { createLoop } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import {
@@ -28,9 +28,8 @@ import { observeNextPoll } from './wake.ts'
 import { runWorkerCommand } from './worker.ts'
 
 // The command surface: each package.json script dispatches here with the command name
-// as the first argument. CLI tokens such as `Enqueued:` and `Created:`, and loop event
-// names such as `CYCLE_COMPLETE`, `LOOP_DONE`, `FAILED`, and `DECISION_REQUIRED`, are
-// frozen contracts that skills and tests key on.
+// as the first argument. CLI tokens such as `Enqueued:`, `Created:`, and `LOOP_DONE:`
+// are frozen contracts that skills and tests key on.
 
 type Command = (paths: OrchPaths, args: string[]) => Promise<number>
 
@@ -420,12 +419,20 @@ const cmdLoop: Command = async (paths, args) => {
     console.log('Stop: npm run -C orchestration/ts stop')
     return 0
   }
+  const config = loadConfig()
+  const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const log = (message: string, error = false): void => {
     const write = error ? console.error : console.log
-    for (const line of loopLogLines(message)) write(line)
+    const currentCycle = existsSync(scanCountFile)
+      ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
+      : 0
+    for (const line of loopLogLines(message, {
+      currentCycle,
+      cycleCap: config.maxScanCycles,
+    })) write(line)
   }
   try {
-    return await runLoopDaemon(paths, log)
+    return await runLoopDaemon(paths, log, config)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log(`ERROR: ${(message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'}`, true)
@@ -465,8 +472,11 @@ const cmdCiWait: Command = async (paths, args) => {
   return waitForCi(forge, Number(prNumber), { timeoutSeconds })
 }
 
-async function runLoopDaemon(paths: OrchPaths, log: (line: string) => void): Promise<number> {
-  const config = loadConfig()
+async function runLoopDaemon(
+  paths: OrchPaths,
+  log: (line: string) => void,
+  config: LoopConfig,
+): Promise<number> {
   const pidFile = join(paths.queueDir, 'loop.pid')
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')

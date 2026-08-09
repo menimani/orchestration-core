@@ -3,24 +3,17 @@ import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
 
 const MAX_MESSAGE_LENGTH = 80
-export const LOOP_EVENT_NAME_WIDTH = 'DECISION_REQUIRED'.length
+export const LOOP_EVENT_NAME_WIDTH = 10
 
 const EVENT_NAMES = [
-  'DECISION_REQUIRED',
-  'CYCLE_COMPLETE',
-  'Merge completed',
-  'Review started',
-  'Scan completed',
-  'Merge started',
-  'Merge failed',
-  'Issue claimed',
-  'Issue filed',
-  'Task failed',
-  'Task completed',
-  'Task started',
-  'Scan started',
-  'LOOP_DONE',
-  'FAILED',
+  'Completed',
+  'Decision',
+  'Claimed',
+  'Started',
+  'Merging',
+  'Merged',
+  'Failed',
+  'Filed',
   'Status',
   'ERROR',
   'WARN',
@@ -47,19 +40,44 @@ export interface PrepareLoopLogOptions {
   runBranch?: string
 }
 
+export interface LoopLogContext {
+  currentCycle: number
+  cycleCap: number
+  now?: Date
+}
+
+function prDetail(content: string): string {
+  const number = /\/pull\/(\d+)(?:\D|$)/.exec(content)?.[1]
+  return number === undefined ? '' : `  PR #${number}`
+}
+
 function splitEvent(message: string): { event: string; subject: string } {
   const content = message.startsWith('[loop] ')
     ? message.slice('[loop] '.length)
     : message === '[loop]' ? '' : message
-  for (const event of EVENT_NAMES) {
-    // The lifecycle phrase is "Task failed", while FAILED remains a frozen log token.
-    const loggedEvent = event === 'Task failed' ? 'FAILED' : event
-    if (content === event) return { event: loggedEvent, subject: '' }
-    if (content.startsWith(`${event} `)) {
-      return { event: loggedEvent, subject: content.slice(event.length + 1) }
+  // LOOP_DONE is also a CLI stdout contract. It reaches this formatter unchanged,
+  // then becomes the human-facing loop.log milestone.
+  if (content.startsWith('LOOP_DONE:')) {
+    return { event: 'Completed', subject: `Loop${prDetail(content)}` }
+  }
+  if (content.startsWith('CYCLE_COMPLETE')) {
+    return { event: 'Completed', subject: `Cycle${prDetail(content)}` }
+  }
+  if (content.startsWith('DECISION_REQUIRED')) {
+    return {
+      event: 'Decision',
+      subject: content.slice('DECISION_REQUIRED'.length).replace(/^:\s*/, '').trimStart(),
     }
-    if (['WARN', 'ERROR', 'CYCLE_COMPLETE', 'LOOP_DONE', 'FAILED', 'DECISION_REQUIRED']
-      .includes(event) && content.startsWith(`${event}:`)) {
+  }
+  if (content.startsWith('FAILED:')) {
+    return { event: 'Failed', subject: content.slice('FAILED:'.length).trimStart() }
+  }
+  for (const event of EVENT_NAMES) {
+    if (content === event) return { event, subject: '' }
+    if (content.startsWith(`${event} `)) {
+      return { event, subject: content.slice(event.length + 1) }
+    }
+    if (['WARN', 'ERROR'].includes(event) && content.startsWith(`${event}:`)) {
       return { event, subject: content.slice(event.length + 1).trimStart() }
     }
   }
@@ -70,12 +88,16 @@ function splitEvent(message: string): { event: string; subject: string } {
 }
 
 /** Align every physical daemon-log line under the event that produced the message. */
-export function loopLogLines(message: string, now: Date = new Date()): string[] {
-  const prefix = `[loop] ${logTimestamp(now)} | `
+export function loopLogLines(message: string, context: LoopLogContext): string[] {
+  const cycle = String(context.currentCycle).padStart(2, '0')
+  const cap = String(context.cycleCap).padStart(2, '0')
+  const prefix = `${logTimestamp(context.now ?? new Date())} [loop ${cycle}/${cap}] `
   const physicalLines = message.split(/\r?\n/)
   const { event, subject } = splitEvent(physicalLines[0] ?? '')
   return [subject, ...physicalLines.slice(1)].map((line) => {
-    const content = `${event.padEnd(LOOP_EVENT_NAME_WIDTH)}${line === '' ? '' : ` ${line}`}`
+    const content = event === 'Status'
+      ? `${event}${line === '' ? '' : ` ${line}`}`
+      : `${event.padEnd(LOOP_EVENT_NAME_WIDTH)}${line === '' ? '' : ` ${line}`}`
     const capped = content.length > MAX_MESSAGE_LENGTH
       ? `${content.slice(0, MAX_MESSAGE_LENGTH - 1)}…`
       : content

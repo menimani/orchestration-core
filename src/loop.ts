@@ -196,7 +196,7 @@ export function createLoop(deps: LoopDeps) {
         }
         const taskId = report.branch.slice('task/'.length)
         adoptionTaskId = taskId
-        event('Merge started', shortTaskId(taskId))
+        event('Merging', shortTaskId(taskId))
         try {
           execFileSync('git', [
             'fetch', '--quiet', 'origin',
@@ -234,14 +234,14 @@ export function createLoop(deps: LoopDeps) {
         }
         const cycle = readCount(scanCountFile)
         if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
-        event('Merge completed', `${shortTaskId(taskId)} (${mergeCommit.slice(0, 8)})`)
+        event('Merged', `${shortTaskId(taskId)}  commit ${mergeCommit.slice(0, 8)}`)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         appendFileSync(mergeLog, `${message}\n`)
         if (adoptionTaskId === undefined) {
           event('WARN', `remote adoption failed for issue #${issue.number}`)
         } else {
-          event('Merge failed', shortTaskId(adoptionTaskId))
+          event('Failed', `${shortTaskId(adoptionTaskId)}  log ${shortTaskId(adoptionTaskId)}.merge.log`)
         }
         try {
           await forge.commentIssue(issue.number, `Remote task adoption failed: ${message}`)
@@ -405,7 +405,7 @@ export function createLoop(deps: LoopDeps) {
           )
           destinations.push(`#${result.issueNumber}`)
           if (result.outcome === 'created') {
-            event('Issue filed', `#${result.issueNumber} (by ${shortTaskId(taskId)})`)
+            event('Filed', `#${result.issueNumber}  by ${shortTaskId(taskId)}`)
           }
         } catch (error) {
           event('WARN', `could not file finding: ${errorSummary(error)}`)
@@ -524,7 +524,7 @@ export function createLoop(deps: LoopDeps) {
       }
       if (decisionAlreadyRecorded(text)) continue
       appendFileSync(decisionsFile, `${text}\n`)
-      event('DECISION_REQUIRED', `${shortTaskId(taskId)} ${text}`)
+      event('Decision', `${shortTaskId(taskId)}  ${text}`)
     }
   }
 
@@ -991,7 +991,8 @@ export function createLoop(deps: LoopDeps) {
 
           if (config.autoPr) await ensureDraftPr('cycle')
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
-          event('CYCLE_COMPLETE', `${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
+          const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
+          event('Completed', `Cycle${prNumber === undefined ? '' : `  PR #${prNumber}`}`)
           writeFileSync(completeFlag, '')
         }
 
@@ -1069,7 +1070,7 @@ export function createLoop(deps: LoopDeps) {
             model: config.scanModel === '' ? undefined : config.scanModel,
             setup: project.scanWorktreeSetup,
           })
-          event('Scan started', `${shortTaskId(scanId)} (cycle ${nextCycle}/${config.maxScanCycles}, ${i}/${nScans})`)
+          event('Started', `${shortTaskId(scanId)}  scan ${i}/${nScans}`)
         } catch (error) {
           event('WARN', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))})`)
         }
@@ -1120,7 +1121,7 @@ export function createLoop(deps: LoopDeps) {
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       if (status === 'failed' && !existsSync(failedFlag)) {
         const cycleNow = readCount(scanCountFile)
-        event('Task failed', `${shortTaskId(taskId)} (log: ${shortLogPath(logFile(paths, taskId))})`)
+        event('Failed', `${shortTaskId(taskId)}  log ${shortTaskId(taskId)}.log`)
         appendFileSync(join(paths.queueDir, `failed-${cycleNow}`), `${taskId}\n`)
         writeFileSync(failedFlag, '')
         burstFailures += 1
@@ -1132,7 +1133,7 @@ export function createLoop(deps: LoopDeps) {
         const depth = existsSync(depthFile) ? readCount(depthFile) : 0
 
         if (config.workerMode) {
-          event('Task completed', shortTaskId(taskId))
+          event('Completed', shortTaskId(taskId))
           const linkedIssue = issueNumberForTask(paths, taskId)
           if (linkedIssue === undefined) {
             event('WARN', `worker task ${shortTaskId(taskId)} has no linked issue`)
@@ -1149,21 +1150,19 @@ export function createLoop(deps: LoopDeps) {
 
         const dispatch = await scanForNextTasks(taskId, depth)
         if (isScanTaskId(taskId)) {
-          const detail = dispatch.findings.length === 0
-            ? 'NO_FINDINGS'
-            : `${dispatch.findings.length} findings${dispatch.destinations.length === 0
-                ? ''
-                : ` -> ${dispatch.destinations.join(' ')}`}`
-          event('Scan completed', `${shortTaskId(taskId)} (${detail})`)
+          const findings = dispatch.destinations.length > 0
+            ? dispatch.destinations.join(' ')
+            : dispatch.findings.length === 0 ? 'none' : String(dispatch.findings.length)
+          event('Completed', `${shortTaskId(taskId)}  findings ${findings}`)
         } else {
-          event('Task completed', shortTaskId(taskId))
+          event('Completed', shortTaskId(taskId))
         }
         collectDecisions(taskId)
 
         recordScanYield(taskId)
 
         if (config.autoMerge) {
-          event('Merge started', shortTaskId(taskId))
+          event('Merging', shortTaskId(taskId))
           const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
           const linkedIssue = issueNumberForTask(paths, taskId)
           try {
@@ -1175,7 +1174,7 @@ export function createLoop(deps: LoopDeps) {
               closesIssue: linkedIssue,
               outputFile: mergeLog,
             })
-            event('Merge completed', `${shortTaskId(taskId)} (${mergeCommit.slice(0, 8)})`)
+            event('Merged', `${shortTaskId(taskId)}  commit ${mergeCommit.slice(0, 8)}`)
             writeFileSync(mergeFailureFile, '0\n')
             if (linkedIssue !== undefined) {
               const runBranch = git(['branch', '--show-current']).trim()
@@ -1201,7 +1200,7 @@ export function createLoop(deps: LoopDeps) {
             }
           } catch (error) {
             if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
-            event('Merge failed', shortTaskId(taskId))
+            event('Failed', `${shortTaskId(taskId)}  log ${shortTaskId(taskId)}.merge.log`)
             noteMergeFailure(mergeLog)
           }
         }
@@ -1248,7 +1247,7 @@ export function createLoop(deps: LoopDeps) {
               const result = await claimIssue(forge, paths, issue, cachedUser,
                 (newTaskId_, requirement) => appendSharedRequirements(newTaskId_, `issue-${issue.number}`, requirement))
               if (result.outcome === 'claimed') {
-                event('Issue claimed', `#${issue.number} -> ${shortTaskId(result.taskId)}`)
+                event('Claimed', `${shortTaskId(result.taskId)} #${issue.number}`)
                 capacity -= 1
               } else {
                 if (result.outcome !== 'lost-race') {
@@ -1282,9 +1281,9 @@ export function createLoop(deps: LoopDeps) {
             const round = readCount(join(paths.queueDir, `review-round-${cycle}`))
             const final = cycleIsFinal(cycle)
             const maxRounds = final ? config.maxFinalReviewRounds : config.maxReviewRounds
-            event('Review started', `${shortTaskId(entry.taskId)} (round ${round}/${maxRounds}${final ? ', final' : ''})`)
+            event('Started', `${shortTaskId(entry.taskId)}  round ${round}/${maxRounds}${final ? '  phase final' : ''}`)
           } else {
-            event('Task started', `${shortTaskId(entry.taskId)} (${effort})`)
+            event('Started', `${shortTaskId(entry.taskId)}  effort ${effort}`)
           }
           running += 1
         } catch (error) {
@@ -1298,15 +1297,18 @@ export function createLoop(deps: LoopDeps) {
       }
     }
 
-    if (config.workerMode) {
-      event('Status', `worker  running ${running}  queue ${queueLength()}`)
-    } else {
-      const cycle = readCount(scanCountFile)
-      const scans = listTaskIds(paths)
-        .filter((taskId) => isScanTaskId(taskId) && readStatus(paths, taskId)?.status === 'running')
-        .length
-      event('Status', `cycle ${cycle}/${config.maxScanCycles}  running ${running}  scan ${scans}  queue ${queueLength()}`)
-    }
+    const scans = config.workerMode ? 0 : listTaskIds(paths)
+      .filter((taskId) => isScanTaskId(taskId) && readStatus(paths, taskId)?.status === 'running')
+      .length
+    const runningTasks = Math.max(0, running - scans)
+    const queue = queueLength()
+    const counters = [
+      ...(scans > 0 ? [`Scan=${scans}`] : []),
+      ...(scans === 0 || runningTasks > 0 || queue > 0
+        ? [`Running=${runningTasks}`, `Queue=${queue}`]
+        : []),
+    ]
+    event('Status', counters.join(', '))
     return 'continue'
   }
 

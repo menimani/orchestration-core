@@ -729,11 +729,28 @@ describe('collectDecisions', () => {
 })
 
 describe('failure announcement and burst stop (via poll)', () => {
-  it('includes the current scan cycle in the per-poll status line', async () => {
+  it('reports only execution counters when scans are not running', async () => {
     const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6 })
 
     expect(await loop.poll()).toBe('continue')
-    expect(logText()).toMatch(/^Status cycle \d+\/\d+  running \d+  scan \d+  queue \d+$/m)
+    expect(logText()).toMatch(/^Status Running=\d+, Queue=\d+$/m)
+  })
+
+  it('reports only scan counters while scans run', async () => {
+    const loop = makeLoop({ scanEnabled: false })
+    writeRawStatus('20260809_000000_001_scan', 'running', process.pid)
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logged).toContain('Status Scan=1')
+  })
+
+  it('reports both phase groups when scans and tasks run together', async () => {
+    const loop = makeLoop({ scanEnabled: false })
+    writeRawStatus('20260809_000000_001_scan', 'running', process.pid)
+    writeRawStatus('20260809_000001_002_auto-fix', 'running', process.pid)
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logged).toContain('Status Scan=1, Running=1, Queue=0')
   })
 
   it('announces a failure once, records it for the cycle, and stops on a burst', async () => {
@@ -745,7 +762,7 @@ describe('failure announcement and burst stop (via poll)', () => {
 
     expect(await loop.poll()).toBe('continue')
     for (const taskId of ['f1', 'f2', 'f3']) {
-      expect(logText()).toContain(`Task failed ${taskId} (log: logs/${taskId}.log)`)
+      expect(logText()).toContain(`Failed ${taskId}  log ${taskId}.log`)
     }
     const failedRecord = readFileSync(join(paths.queueDir, 'failed-4'), 'utf8')
     expect(failedRecord.trim().split('\n')).toHaveLength(3)
@@ -755,7 +772,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     // The next poll consumes the stop and exits; the failures are not announced again.
     logged = []
     expect(await loop.poll()).toBe('stopped')
-    expect(logText()).not.toContain('Task failed f1')
+    expect(logText()).not.toContain('Failed f1')
     expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n')).toHaveLength(3)
   })
 
@@ -772,8 +789,8 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe(`${taskId}\n`)
-    expect(logged.indexOf('Task failed 001_scan (log: logs/20260809_000000_001_scan.log)'))
-      .toBeLessThan(logged.findIndex((line) => line.includes('CYCLE_COMPLETE 1/')))
+    expect(logged.indexOf('Failed 001_scan  log 001_scan.log'))
+      .toBeLessThan(logged.findIndex((line) => line.includes('Completed Cycle')))
   })
 
   it('does not start queued work or scans while a stop is pending', async () => {
