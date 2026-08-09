@@ -40,9 +40,12 @@ export async function waitForCi(
   let previousNames: string[] | undefined
 
   for (;;) {
-    const checks = newestChecksByName((await forge.prStatus(String(prNumber))).checks)
+    const status = await forge.prStatus(String(prNumber))
+    const checks = newestChecksByName(status.checks)
     const names = checks.map((check) => check.name)
-    const ready = sameNames(previousNames, names)
+    const eligible = status.state === 'open' && checks.length > 0
+    const ready = eligible
+      && sameNames(previousNames, names)
       && checks.every((check) => check.conclusion !== 'pending')
 
     if (ready) {
@@ -50,7 +53,7 @@ export async function waitForCi(
       return checks.some((check) => check.conclusion === 'failure') ? 1 : 0
     }
 
-    previousNames = names
+    previousNames = eligible ? names : undefined
     const remaining = deadline - now()
     if (remaining <= 0) return 2
     if (remaining < POLL_INTERVAL_MS) {

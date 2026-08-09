@@ -89,6 +89,26 @@ describe('removeMergedWorktree', () => {
     expect(warn).not.toHaveBeenCalled()
   })
 
+  it('prunes after direct removal succeeds on non-Windows platforms', () => {
+    const worktree = worktreeDir(paths, '20260809_102500_100_auto-stale-registration')
+    const remove = vi.fn()
+    const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Removal failed')
+      return ''
+    })
+    const warn = vi.fn()
+
+    removeMergedWorktree(paths, worktree, warn, {
+      platform: 'linux', remove, git: gitRuntime,
+    })
+
+    expect(remove).toHaveBeenCalledWith(worktree, { recursive: true, force: true })
+    expect(gitRuntime).toHaveBeenNthCalledWith(
+      2, paths.repoRoot, ['worktree', 'prune'],
+    )
+    expect(warn).not.toHaveBeenCalled()
+  })
+
   it('keeps the existing warning when the Windows fallback also fails', () => {
     const worktree = worktreeDir(paths, '20260809_102500_100_auto-long-path')
     const gitRuntime = vi.fn((_cwd: string, args: string[]) => {

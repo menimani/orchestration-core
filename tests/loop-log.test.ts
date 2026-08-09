@@ -78,4 +78,21 @@ describe('prepareLoopLog', () => {
     expect(readFileSync(join(paths.logsDir, 'loop.log.branch'), 'utf8'))
       .toBe('feature/current-run\n')
   })
+
+  it('archives an unmarked daemon log under the previously recorded branch', () => {
+    writeFileSync(join(paths.logsDir, 'loop.log'), 'legacy output\n')
+    writeFileSync(join(paths.queueDir, 'run-branch.txt'), 'feature/previous-run\n')
+
+    prepareLoopLog(paths, {
+      now: new Date(2026, 7, 9, 18, 59, 36),
+      runBranch: 'feature/current-run',
+    })
+
+    expect(readFileSync(
+      join(paths.logsDir, 'loop-feature-previous-run-20260809_185936.log'),
+      'utf8',
+    )).toBe('legacy output\n')
+    expect(readFileSync(join(paths.logsDir, 'loop.log.branch'), 'utf8'))
+      .toBe('feature/current-run\n')
+  })
 })

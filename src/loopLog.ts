@@ -25,15 +25,16 @@ export function prepareLoopLog(
   const loopLog = join(paths.logsDir, 'loop.log')
   const branchMarker = join(paths.logsDir, 'loop.log.branch')
   const runBranchFile = join(paths.queueDir, 'run-branch.txt')
-  const runBranch = options.runBranch ?? (existsSync(runBranchFile)
+  const recordedRunBranch = existsSync(runBranchFile)
     ? readFileSync(runBranchFile, 'utf8').trim()
-    : '')
+    : ''
+  const markerBranch = options.runBranch ?? recordedRunBranch
   const loggedBranch = existsSync(branchMarker)
     ? readFileSync(branchMarker, 'utf8').trim()
     : undefined
 
-  if (existsSync(loopLog) && (loggedBranch === undefined || loggedBranch !== runBranch)) {
-    const oldBranch = loggedBranch ?? runBranch
+  if (existsSync(loopLog) && (loggedBranch === undefined || loggedBranch !== markerBranch)) {
+    const oldBranch = loggedBranch ?? (recordedRunBranch || markerBranch)
     renameSync(
       loopLog,
       join(paths.logsDir, `loop-${safeBranchName(oldBranch)}-${timestamp(options.now ?? new Date())}.log`),
@@ -41,5 +42,5 @@ export function prepareLoopLog(
   }
 
   if (!existsSync(loopLog)) writeFileSync(loopLog, '')
-  writeFileSync(branchMarker, `${runBranch}\n`)
+  writeFileSync(branchMarker, `${markerBranch}\n`)
 }

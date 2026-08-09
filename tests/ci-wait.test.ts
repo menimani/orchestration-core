@@ -79,6 +79,25 @@ describe('CI wait', () => {
     expect(wait.output).toEqual(['test: failure'])
   })
 
+  it('waits for a non-empty check rollup before returning a verdict', async () => {
+    const checks = status([['test', 'success', '2026-08-09T01:00:00Z']])
+    const wait = scriptedWait([status([]), status([]), checks, checks])
+
+    await expect(wait.run()).resolves.toBe(0)
+    expect(wait.forge.prStatusCalls).toBe(4)
+    expect(wait.sleeps).toEqual([30_000, 30_000, 30_000])
+  })
+
+  it('waits for an open PR before returning a verdict', async () => {
+    const checks = status([['test', 'success', '2026-08-09T01:00:00Z']])
+    const missing = { ...checks, state: 'none' as const }
+    const wait = scriptedWait([missing, missing, checks, checks])
+
+    await expect(wait.run()).resolves.toBe(0)
+    expect(wait.forge.prStatusCalls).toBe(4)
+    expect(wait.sleeps).toEqual([30_000, 30_000, 30_000])
+  })
+
   it('returns timeout when a verdict does not become ready', async () => {
     const forge = makeFakeForge()
     forge.prStatusValue = status([['test', 'pending', '2026-08-09T01:00:00Z']])

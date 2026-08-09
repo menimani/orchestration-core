@@ -68,7 +68,6 @@ export function removeMergedWorktree(
     // Fall through to a direct removal below.
   }
 
-  let removalFailed = false
   try {
     const removalPath = runtime.platform === 'win32' ? extendedLengthPath(worktree) : worktree
     const options = runtime.platform === 'win32'
@@ -76,16 +75,13 @@ export function removeMergedWorktree(
       : { recursive: true, force: true }
     runtime.remove(removalPath, options)
   } catch {
-    removalFailed = true
     warn(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`)
   }
 
-  if (runtime.platform === 'win32' || removalFailed) {
-    try {
-      runtime.git(paths.repoRoot, ['worktree', 'prune'])
-    } catch {
-      // cleanup is best effort; the merge verdict is already known
-    }
+  try {
+    runtime.git(paths.repoRoot, ['worktree', 'prune'])
+  } catch {
+    // cleanup is best effort; the merge verdict is already known
   }
 }
 
