@@ -152,6 +152,39 @@ describe('actionable findings', () => {
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
   })
 
+  it('ignores Japanese descriptions that only report no findings', () => {
+    const loop = makeLoop()
+    const phrases = [
+      '\u6307\u6458\u306a\u3057',
+      '\u554f\u984c\u306a\u3057',
+      '\u8a72\u5f53\u306a\u3057',
+      '\u7279\u306b\u306a\u3057',
+      '\u306a\u3057',
+    ]
+    const findings = phrases.flatMap((phrase) => [phrase, `${phrase}\u3002`])
+    writeFinal('t4-ja', findings.map((finding) => `NEXT_TASK: ${finding}`).join('\n'))
+
+    expect(loop.actionableFindings(finalMessageFile(paths, 't4-ja'))).toEqual([])
+    expect(logged).toEqual([])
+  })
+
+  it('warns and ignores a finding whose description cannot produce a task slug', () => {
+    const loop = makeLoop()
+    const finding = '\u8a2d\u5b9a\u753b\u9762\u304c\u958b\u3051\u306a\u3044'
+    writeFinal('t-empty-slug', `NEXT_TASK: ${finding}\n`)
+
+    expect(loop.actionableFindings(finalMessageFile(paths, 't-empty-slug'))).toEqual([])
+    expect(logText()).toContain(`[loop] WARN: ignored finding with an empty slug: ${finding}`)
+  })
+
+  it('keeps a normal English finding after applying the slug guard', () => {
+    const loop = makeLoop()
+    const finding = '[BUG] `src/search.ts` mishandles an empty response'
+    writeFinal('t-english-slug', `NEXT_TASK: ${finding}\n`)
+
+    expect(loop.actionableFindings(finalMessageFile(paths, 't-english-slug'))).toEqual([finding])
+  })
+
   it('filters a finding that opens with None even when the remainder sounds actionable', () => {
     const loop = makeLoop()
     writeFinal('t-none-prefix', 'NEXT_TASK: None of the export rows carry ids\n')

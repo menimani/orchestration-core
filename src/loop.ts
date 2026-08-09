@@ -280,9 +280,16 @@ export function createLoop(deps: LoopDeps) {
 
   function reportsNothing(text: string): boolean {
     const trimmed = text.trim()
-    const normalized = trimmed.replace(/[.!]+$/, '').toLowerCase()
+    const normalized = trimmed.replace(/[\u3002.!]+$/, '').toLowerCase()
     if (['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
       .includes(normalized)) return true
+    if ([
+      '\u6307\u6458\u306a\u3057',
+      '\u554f\u984c\u306a\u3057',
+      '\u8a72\u5f53\u306a\u3057',
+      '\u7279\u306b\u306a\u3057',
+      '\u306a\u3057',
+    ].includes(normalized)) return true
     const firstSentence = (trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? '')
       .replace(/[.!]+$/, '').toLowerCase()
     return /^none\b/.test(firstSentence)
@@ -300,7 +307,14 @@ export function createLoop(deps: LoopDeps) {
     return readFileSync(finalFile, 'utf8').split(/\r?\n/)
       .filter((line) => line.startsWith('NEXT_TASK:'))
       .map((line) => line.replace(/^NEXT_TASK:\s*/, '').trim())
-      .filter((desc) => desc !== '' && !hasFormatPlaceholder(desc) && !reportsNothing(desc))
+      .filter((desc) => {
+        if (desc === '' || hasFormatPlaceholder(desc) || reportsNothing(desc)) return false
+        if (!/[a-z0-9]/.test(descSlug(desc))) {
+          log(`[loop] WARN: ignored finding with an empty slug: ${desc}`)
+          return false
+        }
+        return true
+      })
   }
 
   function appendSharedRequirements(
