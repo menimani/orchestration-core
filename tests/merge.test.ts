@@ -2,10 +2,12 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { shioraProject } from '../src/adapters/project-shiora.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
-import { MergeError, mergeRemoteTask, mergeTask } from '../src/merge.ts'
+import {
+  MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
+} from '../src/merge.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
@@ -59,7 +61,55 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
+})
+
+describe('removeMergedWorktree', () => {
+  it('uses the Windows long-path fallback and prunes after git removal fails', () => {
+    const worktree = worktreeDir(paths, '20260809_102500_100_auto-long-path')
+    const remove = vi.fn()
+    const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Filename too long')
+      return ''
+    })
+    const warn = vi.fn()
+
+    removeMergedWorktree(paths, worktree, warn, {
+      platform: 'win32', remove, git: gitRuntime,
+    })
+
+    expect(remove).toHaveBeenCalledWith(
+      `\\\\?\\${worktree.replaceAll('/', '\\')}`,
+      { recursive: true, force: true, maxRetries: 3 },
+    )
+    expect(gitRuntime).toHaveBeenNthCalledWith(
+      2, paths.repoRoot, ['worktree', 'prune'],
+    )
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('keeps the existing warning when the Windows fallback also fails', () => {
+    const worktree = worktreeDir(paths, '20260809_102500_100_auto-long-path')
+    const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Filename too long')
+      return ''
+    })
+    const warn = vi.fn()
+
+    removeMergedWorktree(paths, worktree, warn, {
+      platform: 'win32',
+      remove: () => { throw new Error('Filename too long') },
+      git: gitRuntime,
+    })
+
+    expect(warn).toHaveBeenCalledWith(
+      `WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`,
+    )
+    expect(gitRuntime).toHaveBeenNthCalledWith(
+      2, paths.repoRoot, ['worktree', 'prune'],
+    )
+  })
 })
 
 describe('mergeTask', () => {

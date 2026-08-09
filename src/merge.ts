@@ -1,6 +1,6 @@
 import { execFileSync, execSync } from 'node:child_process'
 import { appendFileSync, existsSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { branchName, isInspectionTaskId, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus, writeStatus } from './status.ts'
@@ -36,6 +36,57 @@ interface MergeIo {
   out: (text: string) => void
   run: (cwd: string, command: string) => void
   tryRun: (cwd: string, command: string, label: string) => boolean
+}
+
+export interface WorktreeRemovalRuntime {
+  platform: NodeJS.Platform
+  remove: typeof rmSync
+  git: (cwd: string, args: string[]) => string
+}
+
+const worktreeRemovalRuntime: WorktreeRemovalRuntime = {
+  platform: process.platform,
+  remove: rmSync,
+  git,
+}
+
+function extendedLengthPath(path: string): string {
+  const absolutePath = resolve(path).replaceAll('/', '\\')
+  return absolutePath.startsWith('\\\\?\\') ? absolutePath : `\\\\?\\${absolutePath}`
+}
+
+export function removeMergedWorktree(
+  paths: OrchPaths,
+  worktree: string,
+  warn: (text: string) => void,
+  runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
+): void {
+  try {
+    runtime.git(paths.repoRoot, ['worktree', 'remove', worktree, '--force'])
+    return
+  } catch {
+    // Fall through to a direct removal below.
+  }
+
+  let removalFailed = false
+  try {
+    const removalPath = runtime.platform === 'win32' ? extendedLengthPath(worktree) : worktree
+    const options = runtime.platform === 'win32'
+      ? { recursive: true, force: true, maxRetries: 3 }
+      : { recursive: true, force: true }
+    runtime.remove(removalPath, options)
+  } catch {
+    removalFailed = true
+    warn(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`)
+  }
+
+  if (runtime.platform === 'win32' || removalFailed) {
+    try {
+      runtime.git(paths.repoRoot, ['worktree', 'prune'])
+    } catch {
+      // cleanup is best effort; the merge verdict is already known
+    }
+  }
 }
 
 function git(cwd: string, args: string[]): string {
@@ -185,20 +236,7 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
   // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
   // once left the merge in place while the task was recorded as failed.
-  try {
-    git(paths.repoRoot, ['worktree', 'remove', worktree, '--force'])
-  } catch {
-    try {
-      rmSync(worktree, { recursive: true, force: true })
-    } catch {
-      io.out(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`)
-      try {
-        git(paths.repoRoot, ['worktree', 'prune'])
-      } catch {
-        // best effort
-      }
-    }
-  }
+  removeMergedWorktree(paths, worktree, io.out)
   try {
     git(paths.repoRoot, ['branch', '-d', branch])
   } catch {
