@@ -8,6 +8,7 @@ import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
 import { loadConfig } from './config.ts'
 import { createLoop } from './loop.ts'
+import { prepareLoopLog } from './loopLog.ts'
 import {
   commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
 } from './issueQueue.ts'
@@ -395,6 +396,14 @@ const cmdStop: Command = async (paths) => {
 const cmdLoop: Command = async (paths, args) => {
   const loopLog = join(paths.logsDir, 'loop.log')
   if (args[0] === '--daemon' || args[0] === '-d') {
+    // run-branch.txt is updated by the child after this descriptor is opened. Use the
+    // branch it is about to record so a new run rotates immediately, not on its restart.
+    const runBranch = execFileSync('git', ['branch', '--show-current'], {
+      cwd: paths.repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim()
+    prepareLoopLog(paths, { runBranch })
     const fd = openSync(loopLog, 'a')
     const child = spawn(process.execPath, [join(paths.root, 'ts', 'src', 'cli.ts'), 'loop'], {
       cwd: paths.repoRoot,
