@@ -6,6 +6,7 @@ import { loadForge } from './adapters/forge.ts'
 import { loadProject } from './adapters/project.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
+import { waitForCi } from './ciWait.ts'
 import { loadConfig } from './config.ts'
 import { createLoop } from './loop.ts'
 import {
@@ -421,6 +422,29 @@ const cmdWorker: Command = async (paths, args) => {
   return await runWorkerCommand(paths, baseRef)
 }
 
+const cmdCiWait: Command = async (paths, args) => {
+  const prNumber = args[0]
+  let timeoutSeconds = 900
+  if (prNumber === undefined || !/^\d+$/.test(prNumber)
+    || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) {
+    console.error('Usage: ci-wait <pr-number> [--timeout <seconds>]')
+    return 1
+  }
+  if (args.length > 1) {
+    const timeout = args[2]
+    if (args.length !== 3 || args[1] !== '--timeout' || timeout === undefined
+      || !/^\d+$/.test(timeout) || !Number.isSafeInteger(Number(timeout))) {
+      console.error('ERROR: --timeout must be a non-negative number of seconds')
+      return 1
+    }
+    timeoutSeconds = Number(timeout)
+  }
+
+  const config = loadConfig()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  return waitForCi(forge, Number(prNumber), { timeoutSeconds })
+}
+
 async function runLoopDaemon(paths: OrchPaths): Promise<number> {
   const config = loadConfig()
   const pidFile = join(paths.queueDir, 'loop.pid')
@@ -530,6 +554,7 @@ const commands: Record<string, Command> = {
   'queue': cmdQueue,
   'loop': cmdLoop,
   'worker': cmdWorker,
+  'ci-wait': cmdCiWait,
   'loop-status': cmdLoopStatus,
   'stop': cmdStop,
 }

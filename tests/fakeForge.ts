@@ -8,6 +8,8 @@ import type {
 
 export interface FakeForge extends Forge {
   prStatusValue: PrStatus
+  prStatusScript: PrStatus[]
+  prStatusCalls: number
   issues: Map<number, ForgeIssue>
   issueComments: Map<number, string[]>
   user: string
@@ -18,13 +20,17 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
   let nextIssueNumber = 1
   const fake: FakeForge = {
     prStatusValue: { state: 'open', isDraft: true, url: 'https://example.test/pull/1', headSha: '', checks: [] },
+    prStatusScript: [],
+    prStatusCalls: 0,
     issues: new Map(),
     issueComments: new Map(),
     user,
     clock: () => new Date(),
 
     async prStatus(): Promise<PrStatus> {
-      return fake.prStatusValue
+      const scripted = fake.prStatusScript[Math.min(fake.prStatusCalls, fake.prStatusScript.length - 1)]
+      fake.prStatusCalls++
+      return scripted ?? fake.prStatusValue
     },
     async prBody(): Promise<string> {
       return ''

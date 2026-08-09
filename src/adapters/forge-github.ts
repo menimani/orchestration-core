@@ -18,6 +18,7 @@ export interface RollupEntry {
   status?: string
   conclusion?: string
   state?: string
+  startedAt?: string
 }
 
 export interface GithubWorkflowRun {
@@ -53,7 +54,8 @@ export function normalizeEntry(entry: RollupEntry): CheckConclusion {
         ? (entry.conclusion ?? '') === '' ? 'UNKNOWN' : (entry.conclusion as string)
         : 'PENDING'
       : (entry.state ?? '') === '' ? 'UNKNOWN' : (entry.state as string)
-  if (raw === 'SUCCESS' || raw === 'NEUTRAL' || raw === 'SKIPPED') return 'success'
+  if (raw === 'SUCCESS' || raw === 'NEUTRAL') return 'success'
+  if (raw === 'SKIPPED') return 'skipped'
   if (raw === 'FAILURE' || raw === 'ERROR' || raw === 'CANCELLED' || raw === 'TIMED_OUT') {
     return 'failure'
   }
@@ -108,6 +110,7 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
         checks: (data.statusCheckRollup ?? []).map((entry) => ({
           name: entry.name ?? entry.context ?? '(unnamed)',
           conclusion: normalizeEntry(entry),
+          startedAt: entry.startedAt ?? '',
         })),
       }
     },

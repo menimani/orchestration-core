@@ -229,6 +229,7 @@ describe('actionable findings', () => {
 describe('CI check normalization (forge adapter)', () => {
   it('reads completed successes as success', () => {
     expect(normalizeEntry({ status: 'COMPLETED', conclusion: 'SUCCESS' })).toBe('success')
+    expect(normalizeEntry({ status: 'COMPLETED', conclusion: 'SKIPPED' })).toBe('skipped')
   })
   it('reads an in-progress check with an empty conclusion as pending, never success', () => {
     expect(normalizeEntry({ status: 'IN_PROGRESS', conclusion: '' })).toBe('pending')
@@ -255,17 +256,19 @@ describe('checkPrCiStatus', () => {
   it('passes on all-success and fails on any failure', async () => {
     const loop = makeLoop()
     forgeStatus.checks = [
-      { name: 'a', conclusion: 'success' }, { name: 'b', conclusion: 'success' },
+      { name: 'a', conclusion: 'success', startedAt: '' },
+      { name: 'b', conclusion: 'success', startedAt: '' },
     ]
     expect(await loop.checkPrCiStatus()).toBe('success')
-    forgeStatus.checks = [{ name: 'a', conclusion: 'failure' }]
+    forgeStatus.checks = [{ name: 'a', conclusion: 'failure', startedAt: '' }]
     expect(await loop.checkPrCiStatus()).toBe('failure')
   })
 
   it('keeps waiting on mixed pending and failed checks', async () => {
     const loop = makeLoop()
     forgeStatus.checks = [
-      { name: 'a', conclusion: 'pending' }, { name: 'b', conclusion: 'failure' },
+      { name: 'a', conclusion: 'pending', startedAt: '' },
+      { name: 'b', conclusion: 'failure', startedAt: '' },
     ]
     expect(await loop.checkPrCiStatus()).not.toBe('success')
   })
