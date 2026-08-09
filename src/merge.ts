@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process'
-import { appendFileSync, existsSync, rmSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, openSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { branchName, isInspectionTaskId, logFile, worktreeDir, type OrchPaths } from './paths.ts'
@@ -88,6 +88,7 @@ export function removeMergedWorktree(
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
 }
 
@@ -101,12 +102,20 @@ function mergeIo(outputFile?: string): MergeIo {
   }
   const run = (cwd: string, command: string): void => {
     if (outputFile !== undefined) {
-      const result = execSync(command, {
-        cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
-      })
-      appendFileSync(outputFile, result)
+      const outputFd = openSync(outputFile, 'a')
+      try {
+        execSync(command, {
+          cwd, stdio: ['ignore', outputFd, outputFd], windowsHide: true,
+        })
+      } finally {
+        closeSync(outputFd)
+      }
     } else {
-      execSync(command, { cwd, stdio: 'inherit', windowsHide: true })
+      const result = execSync(command, {
+        cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+      })
+      if (result !== '') process.stdout.write(result)
     }
   }
   const tryRun = (cwd: string, command: string, label: string): boolean => {
@@ -219,7 +228,7 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     ? `Merge ${taskId} via Codex`
     : `Merge ${taskId} via Codex (closes #${options.closesIssue})`
   try {
-    git(paths.repoRoot, ['merge', '--no-ff', branch, '-m', mergeMessage])
+    git(paths.repoRoot, ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage])
   } catch {
     try {
       git(paths.repoRoot, ['merge', '--abort'])
@@ -288,9 +297,9 @@ export async function mergeRemoteTask(
   const io = mergeIo(options.outputFile)
   const mergeMessage = `Merge ${taskId} via Codex (closes #${issueNumber})`
   try {
-    git(paths.repoRoot, ['worktree', 'add', '--detach', worktree, currentBranch])
+    git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     try {
-      git(worktree, ['merge', '--no-ff', remoteRef, '-m', mergeMessage])
+      git(worktree, ['merge', '--quiet', '--no-ff', remoteRef, '-m', mergeMessage])
     } catch {
       try {
         git(worktree, ['merge', '--abort'])
@@ -304,7 +313,7 @@ export async function mergeRemoteTask(
     runMergeChecks(worktree, currentBranch, options, io)
 
     try {
-      git(paths.repoRoot, ['merge', '--no-ff', remoteRef, '-m', mergeMessage])
+      git(paths.repoRoot, ['merge', '--quiet', '--no-ff', remoteRef, '-m', mergeMessage])
     } catch {
       try {
         git(paths.repoRoot, ['merge', '--abort'])

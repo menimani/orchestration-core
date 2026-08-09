@@ -15,6 +15,11 @@ export interface StartOptions {
   effort: RunnerStartOptions['effort']
   model?: string | undefined
   setup?: WorktreeSetupStep[] | undefined
+  report?: ((line: string) => void) | undefined
+}
+
+export function worktreeAddArgs(worktree: string, branch: string): string[] {
+  return ['worktree', 'add', '--quiet', worktree, '-b', branch]
 }
 
 /**
@@ -58,16 +63,16 @@ export async function startTask(
   rmSync(finalMessage, { force: true })
 
   try {
-    console.log(`Creating worktree: ${worktree} (branch: ${branch})`)
-    execFileSync('git', ['worktree', 'add', worktree, '-b', branch], {
+    options.report?.(`Creating worktree: ${worktree} (branch: ${branch})`)
+    execFileSync('git', worktreeAddArgs(worktree, branch), {
       cwd: paths.repoRoot,
-      stdio: 'inherit',
+      stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     })
 
     for (const step of options.setup ?? []) {
       if (step.requires !== undefined && !existsSync(join(worktree, step.requires))) continue
-      console.log(`Preparing worktree: ${step.label}`)
+      options.report?.(`Preparing worktree: ${step.label}`)
       const setupLogFd = openSync(log, 'a')
       try {
         execSync(step.command, {
@@ -80,7 +85,7 @@ export async function startTask(
       }
     }
 
-    console.log(`Starting task execution: ${taskId}`
+    options.report?.(`Starting task execution: ${taskId}`
       + (options.model !== undefined && options.model !== '' ? ` model=${options.model}` : '')
       + ` effort=${options.effort}`)
     const pid = await runner.start({
@@ -92,7 +97,7 @@ export async function startTask(
       model: options.model,
     })
     await writeStatus(paths, taskId, 'running', pid)
-    console.log(`Started. task_id=${taskId} pid=${pid} log=${log}`)
+    options.report?.(`Started. task_id=${taskId} pid=${pid} log=${log}`)
     return { outcome: 'started', pid }
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error)

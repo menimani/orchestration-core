@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFil
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { prepareLoopLog } from '../src/loopLog.ts'
+import { loopLogLines, prepareLoopLog } from '../src/loopLog.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 
 let repoRoot: string
@@ -94,5 +94,15 @@ describe('prepareLoopLog', () => {
     )).toBe('legacy output\n')
     expect(readFileSync(join(paths.logsDir, 'loop.log.branch'), 'utf8'))
       .toBe('feature/current-run\n')
+  })
+})
+
+describe('loopLogLines', () => {
+  it('prefixes every physical line, including child-error continuations and blanks', () => {
+    expect(loopLogLines('[loop] WARN: git failed\nraw stderr\n')).toEqual([
+      '[loop] WARN: git failed',
+      '[loop] raw stderr',
+      '[loop] ',
+    ])
   })
 })

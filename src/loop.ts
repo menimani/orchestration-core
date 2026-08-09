@@ -66,6 +66,11 @@ export function createLoop(deps: LoopDeps) {
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
 
+  function errorSummary(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error)
+    return (message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'
+  }
+
   function readCount(file: string): number {
     if (!existsSync(file)) return 0
     const raw = readFileSync(file, 'utf8').replace(/[\s\r\n]/g, '')
@@ -114,7 +119,7 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const branch = branchName(taskId)
-    gitIn(worktree, ['push', 'origin', branch])
+    gitIn(worktree, ['push', '--quiet', 'origin', branch])
     const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
     await forge.commentIssue(issueNumber,
       `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}`)
@@ -150,7 +155,7 @@ export function createLoop(deps: LoopDeps) {
     try {
       issues = await forge.listOpenIssues(LABEL_MERGE_READY)
     } catch (error) {
-      log(`[loop] WARN: could not list merge-ready issues: ${(error as Error).message}`)
+      log(`[loop] WARN: could not list merge-ready issues: ${errorSummary(error)}`)
       return
     }
 
@@ -168,7 +173,7 @@ export function createLoop(deps: LoopDeps) {
           )
           log(`[loop] Updated issue metadata for adopted remote task #${issue.number}`)
         } catch (error) {
-          log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${(error as Error).message}`)
+          log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${errorSummary(error)}`)
         }
         continue
       }
@@ -179,7 +184,7 @@ export function createLoop(deps: LoopDeps) {
         }
         try {
           execFileSync('git', [
-            'fetch', 'origin',
+            'fetch', '--quiet', 'origin',
             `+refs/heads/${report.branch}:refs/remotes/origin/${report.branch}`,
           ], {
             cwd: paths.repoRoot,
@@ -211,7 +216,7 @@ export function createLoop(deps: LoopDeps) {
         try {
           await updateAdoptedIssue(issue.number, taskId, mergeCommit, runBranch)
         } catch (error) {
-          log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${(error as Error).message}`)
+          log(`[loop] WARN: adopted issue #${issue.number}, but could not update it: ${errorSummary(error)}`)
         }
         const cycle = readCount(scanCountFile)
         if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
@@ -223,13 +228,13 @@ export function createLoop(deps: LoopDeps) {
         try {
           await forge.commentIssue(issue.number, `Remote task adoption failed: ${message}`)
         } catch (commentError) {
-          log(`[loop] WARN: could not comment on issue #${issue.number}: ${(commentError as Error).message}`)
+          log(`[loop] WARN: could not comment on issue #${issue.number}: ${errorSummary(commentError)}`)
         }
         try {
           await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
           await forge.removeLabel(issue.number, LABEL_MERGE_READY)
         } catch (labelError) {
-          log(`[loop] WARN: could not relabel issue #${issue.number}: ${(labelError as Error).message}`)
+          log(`[loop] WARN: could not relabel issue #${issue.number}: ${errorSummary(labelError)}`)
         }
         noteMergeFailure(mergeLog)
       }
@@ -386,7 +391,7 @@ export function createLoop(deps: LoopDeps) {
             log(`[loop]   Duplicate finding, existing issue #${result.issueNumber}: ${desc}`)
           }
         } catch (error) {
-          log(`[loop] WARN: could not file the finding as an issue: ${(error as Error).message}`)
+          log(`[loop] WARN: could not file the finding as an issue: ${errorSummary(error)}`)
         }
       }
       return
@@ -462,7 +467,7 @@ export function createLoop(deps: LoopDeps) {
       }
       try {
         const result = enqueueTask(paths, newId, newDepth)
-        if (result.outcome === 'enqueued') log(`Enqueued: ${newId} (depth=${newDepth})`)
+        if (result.outcome === 'enqueued') log(`[loop] Enqueued: ${newId} (depth=${newDepth})`)
       } catch {
         // an unenqueueable finding is not worth stopping the poll for
       }
@@ -693,7 +698,7 @@ export function createLoop(deps: LoopDeps) {
     writeFileSync(idFile, `${reviewId}\n`)
     try {
       enqueueTask(paths, reviewId, 0)
-      log(`Enqueued: ${reviewId} (depth=0)`)
+      log(`[loop] Enqueued: ${reviewId} (depth=0)`)
     } catch {
       // enqueue of a just-written spec cannot fail for a missing spec
     }
@@ -751,7 +756,7 @@ export function createLoop(deps: LoopDeps) {
     }
     log(`[loop] Pushing branch: ${branch}`)
     try {
-      execFileSync('git', ['push', 'origin', branch], {
+      execFileSync('git', ['push', '--quiet', 'origin', branch], {
         cwd: paths.repoRoot,
         stdio: 'ignore',
         windowsHide: true,
@@ -803,7 +808,7 @@ export function createLoop(deps: LoopDeps) {
       writeFileSync(prUrlFile, `${url}\n`)
       return true
     } catch (error) {
-      log(`[loop]   WARN: could not create the PR: ${(error as Error).message}`)
+      log(`[loop]   WARN: could not create the PR: ${errorSummary(error)}`)
       return false
     }
   }
@@ -940,7 +945,7 @@ export function createLoop(deps: LoopDeps) {
       try {
         await reconcileClosedIssueLifecycleLabels(forge)
       } catch (error) {
-        log(`[loop] WARN: could not reconcile closed issue lifecycle labels: ${(error as Error).message}`)
+        log(`[loop] WARN: could not reconcile closed issue lifecycle labels: ${errorSummary(error)}`)
       }
       try {
         const issues = await Promise.all([
@@ -960,7 +965,7 @@ export function createLoop(deps: LoopDeps) {
                 && git(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
             if (mergeSha !== undefined) return undefined
           } catch (error) {
-            log(`[loop] WARN: could not inspect issue #${issue.number} for merge metadata: ${(error as Error).message}`)
+            log(`[loop] WARN: could not inspect issue #${issue.number} for merge metadata: ${errorSummary(error)}`)
           }
           return issue.number
         }))
@@ -970,7 +975,7 @@ export function createLoop(deps: LoopDeps) {
           return 'continue'
         }
       } catch (error) {
-        log(`[loop] WARN: could not count remote issue-queue work: ${(error as Error).message}`)
+        log(`[loop] WARN: could not count remote issue-queue work: ${errorSummary(error)}`)
         return 'continue'
       }
     }
@@ -1093,8 +1098,7 @@ export function createLoop(deps: LoopDeps) {
             setup: project.scanWorktreeSetup,
           })
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          log(`[loop] WARN: Scan startup failure: ${message} — Log: ${logFile(paths, scanId)}`)
+          log(`[loop] WARN: Scan startup failure: ${errorSummary(error)} — Log: ${logFile(paths, scanId)}`)
         }
       }
     }
@@ -1135,7 +1139,7 @@ export function createLoop(deps: LoopDeps) {
         try {
           await heartbeatIssueForTask(forge, paths, taskId, now())
         } catch (error) {
-          log(`[loop] WARN: heartbeat failed for ${taskId}: ${(error as Error).message}`)
+          log(`[loop] WARN: heartbeat failed for ${taskId}: ${errorSummary(error)}`)
         }
       }
 
@@ -1166,7 +1170,7 @@ export function createLoop(deps: LoopDeps) {
             await publishWorkerCompletion(taskId, linkedIssue)
             writeFileSync(scannedFlag, '')
           } catch (error) {
-            log(`[loop] WARN: could not publish ${taskId}: ${(error as Error).message}`)
+            log(`[loop] WARN: could not publish ${taskId}: ${errorSummary(error)}`)
           }
           continue
         }
@@ -1203,7 +1207,7 @@ export function createLoop(deps: LoopDeps) {
                   runBranch,
                 )
               } catch (error) {
-                log(`[loop] WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`)
+                log(`[loop] WARN: could not link issue #${linkedIssue} to its merge: ${errorSummary(error)}`)
               }
             }
             // A task delegated while the gate was waiting merges commits the gate has
@@ -1277,7 +1281,7 @@ export function createLoop(deps: LoopDeps) {
             }
           }
         } catch (error) {
-          log(`[loop] WARN: the issue queue is unreachable this poll: ${(error as Error).message}`)
+          log(`[loop] WARN: the issue queue is unreachable this poll: ${errorSummary(error)}`)
         }
       }
 
@@ -1299,8 +1303,7 @@ export function createLoop(deps: LoopDeps) {
           })
           running += 1
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          log(`[loop] WARN: ${entry.taskId} startup failure: ${message} — Log: ${logFile(paths, entry.taskId)}`)
+          log(`[loop] WARN: ${entry.taskId} startup failure: ${errorSummary(error)} — Log: ${logFile(paths, entry.taskId)}`)
         }
       }
 

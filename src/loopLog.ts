@@ -17,6 +17,15 @@ export interface PrepareLoopLogOptions {
   runBranch?: string
 }
 
+/** Normalize even multiline failures so every physical daemon-log line is identifiable. */
+export function loopLogLines(message: string): string[] {
+  return message.split(/\r?\n/).map((line) => {
+    if (line.startsWith('[loop] ')) return line
+    if (line === '[loop]') return '[loop] '
+    return `[loop] ${line}`
+  })
+}
+
 /** Prepare the process-wide loop log before the daemon opens it for append. */
 export function prepareLoopLog(
   paths: OrchPaths,
