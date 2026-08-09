@@ -18,8 +18,8 @@ export interface StartOptions {
 }
 
 /**
- * Create the task's worktree and hand it to the runner. Ported from task-start.sh:
- * a worktree whose task is already running is a skip, not an error, so the loop
+ * Create the task's worktree and hand it to the runner.
+ * A worktree whose task is already running is a skip, not an error, so the loop
  * does not retry endlessly; any other leftover worktree needs cleanup first.
  */
 export async function startTask(

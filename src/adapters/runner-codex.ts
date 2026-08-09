@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { openSync, readFileSync } from 'node:fs'
 import type { Runner, RunnerStartOptions } from './runner.ts'
 
-// Ported from bin/task-start.sh: the spec content is the prompt, passed as one
+// The spec content is the prompt, passed as one
 // argument; the final message lands in --output-last-message, which is the only
 // place the core reads completion markers from. Effort maps to the codex-specific
 // `model_reasoning_effort` config key here, not in the core.

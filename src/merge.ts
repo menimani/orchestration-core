@@ -176,8 +176,8 @@ function removeTemporaryWorktree(paths: OrchPaths, worktree: string): void {
 }
 
 /**
- * Merge a completed task into the current branch. Ported from task-merge.sh:
- * uncommitted changes or a missing deliverable stop the merge and keep the worktree,
+ * Merge a completed task into the current branch.
+ * Uncommitted changes or a missing deliverable stop the merge and keep the worktree,
  * because removing it would lose work an agent forgot to commit.
  */
 export async function mergeTask(paths: OrchPaths, taskId: string, options: MergeOptions): Promise<string> {

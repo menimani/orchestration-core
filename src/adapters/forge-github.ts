@@ -41,7 +41,7 @@ export function workflowRunForDispatch(
   )
 }
 
-// Normalization ported 1:1 from check_pr_ci_status in bin/loop.sh:
+// Normalization constraints:
 // - A running CheckRun has an empty-string conclusion; an empty string must read as
 //   pending, never as success.
 // - The rollup may contain StatusContext entries, which carry `state` instead of the
