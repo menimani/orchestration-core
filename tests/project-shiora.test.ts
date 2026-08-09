@@ -11,8 +11,14 @@ function check(label: string, taskGate: 'full' | 'light' = 'full') {
 }
 
 describe('gate commands', () => {
-  it('installs frontend dependencies before a scan starts', () => {
+  it('prepares runtime dependencies before a scan starts', () => {
     expect(shioraProject.scanWorktreeSetup).toEqual([
+      {
+        label: 'Docker for backend tests',
+        cwd: '',
+        command: 'node orchestration/ts/scripts/ensure-docker.ts',
+        requires: 'src/backend/pom.xml',
+      },
       {
         label: 'Frontend dependencies',
         cwd: 'src/frontend',

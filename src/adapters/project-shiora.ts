@@ -13,6 +13,12 @@ export const shioraProject: ProjectAdapter = {
   name: 'shiora',
   scanWorktreeSetup: [
     {
+      label: 'Docker for backend tests',
+      cwd: '',
+      command: 'node orchestration/ts/scripts/ensure-docker.ts',
+      requires: 'src/backend/pom.xml',
+    },
+    {
       label: 'Frontend dependencies',
       cwd: 'src/frontend',
       command: 'npm ci --no-audit --no-fund',
