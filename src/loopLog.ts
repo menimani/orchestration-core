@@ -2,6 +2,8 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
 
+const MAX_MESSAGE_LENGTH = 80
+
 function timestamp(now: Date): string {
   const pad = (value: number): string => String(value).padStart(2, '0')
   return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
@@ -27,9 +29,13 @@ export interface PrepareLoopLogOptions {
 export function loopLogLines(message: string, now: Date = new Date()): string[] {
   const prefix = `[loop] ${logTimestamp(now)} `
   return message.split(/\r?\n/).map((line) => {
-    if (line.startsWith('[loop] ')) return `${prefix}${line.slice('[loop] '.length)}`
-    if (line === '[loop]') return prefix
-    return `${prefix}${line}`
+    const content = line.startsWith('[loop] ')
+      ? line.slice('[loop] '.length)
+      : line === '[loop]' ? '' : line
+    const capped = content.length > MAX_MESSAGE_LENGTH
+      ? `${content.slice(0, MAX_MESSAGE_LENGTH - 1)}…`
+      : content
+    return `${prefix}${capped}`
   })
 }
 

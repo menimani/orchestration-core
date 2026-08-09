@@ -112,4 +112,31 @@ describe('loopLogLines', () => {
     expect(loopLogLines('CYCLE_COMPLETE: 1/2')[0])
       .toMatch(/^\[loop\] \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} CYCLE_COMPLETE: 1\/2$/)
   })
+
+  it('caps an over-length message at 79 characters plus an ellipsis', () => {
+    const content = 'a'.repeat(81)
+
+    const line = loopLogLines(content, new Date(2026, 7, 10, 1, 2, 3))[0]!
+
+    expect(line).toBe(`[loop] 2026-08-10 01:02:03 ${'a'.repeat(79)}…`)
+    expect(line.slice('[loop] 2026-08-10 01:02:03 '.length)).toHaveLength(80)
+  })
+
+  it.each([79, 80])('leaves a %i-character message unchanged', (length) => {
+    const content = 'a'.repeat(length)
+
+    expect(loopLogLines(content, new Date(2026, 7, 10, 1, 2, 3)))
+      .toEqual([`[loop] 2026-08-10 01:02:03 ${content}`])
+  })
+
+  it('caps each line of a multiline message independently', () => {
+    expect(loopLogLines(
+      `${'a'.repeat(81)}\n${'b'.repeat(80)}\n${'c'.repeat(100)}`,
+      new Date(2026, 7, 10, 1, 2, 3),
+    )).toEqual([
+      `[loop] 2026-08-10 01:02:03 ${'a'.repeat(79)}…`,
+      `[loop] 2026-08-10 01:02:03 ${'b'.repeat(80)}`,
+      `[loop] 2026-08-10 01:02:03 ${'c'.repeat(79)}…`,
+    ])
+  })
 })
