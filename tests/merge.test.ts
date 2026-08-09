@@ -70,12 +70,16 @@ describe('removeMergedWorktree', () => {
     const worktree = worktreeDir(paths, '20260809_102500_100_auto-long-path')
     const remove = vi.fn()
     const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
-      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Filename too long')
+      if (args[0] === 'worktree' && args[1] === 'remove') {
+        throw Object.assign(new Error('git command failed'), {
+          stderr: 'error: failed to delete: Filename too long\n',
+        })
+      }
       return ''
     })
-    const warn = vi.fn()
+    const log = vi.fn()
 
-    removeMergedWorktree(paths, worktree, warn, {
+    removeMergedWorktree(paths, worktree, log, {
       platform: 'win32', remove, git: gitRuntime,
     })
 
@@ -86,7 +90,11 @@ describe('removeMergedWorktree', () => {
     expect(gitRuntime).toHaveBeenNthCalledWith(
       2, paths.repoRoot, ['worktree', 'prune'],
     )
-    expect(warn).not.toHaveBeenCalled()
+    expect(log).toHaveBeenCalledOnce()
+    expect(log).toHaveBeenCalledWith(
+      `Worktree removal needed the Windows long-path fallback: ${worktree} (error: failed to delete: Filename too long)`,
+    )
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('WARN:'))
   })
 
   it('prunes after direct removal succeeds on non-Windows platforms', () => {
@@ -96,9 +104,9 @@ describe('removeMergedWorktree', () => {
       if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Removal failed')
       return ''
     })
-    const warn = vi.fn()
+    const log = vi.fn()
 
-    removeMergedWorktree(paths, worktree, warn, {
+    removeMergedWorktree(paths, worktree, log, {
       platform: 'linux', remove, git: gitRuntime,
     })
 
@@ -106,25 +114,33 @@ describe('removeMergedWorktree', () => {
     expect(gitRuntime).toHaveBeenNthCalledWith(
       2, paths.repoRoot, ['worktree', 'prune'],
     )
-    expect(warn).not.toHaveBeenCalled()
+    expect(log).toHaveBeenCalledWith(
+      `Worktree removal needed the direct-removal fallback: ${worktree} (Removal failed)`,
+    )
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('WARN:'))
   })
 
   it('keeps the existing warning when the Windows fallback also fails', () => {
     const worktree = worktreeDir(paths, '20260809_102500_100_auto-long-path')
     const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
-      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Filename too long')
+      if (args[0] === 'worktree' && args[1] === 'remove') {
+        throw Object.assign(new Error('git command failed'), {
+          stderr: 'error: failed to delete: Filename too long\n',
+        })
+      }
       return ''
     })
-    const warn = vi.fn()
+    const log = vi.fn()
 
-    removeMergedWorktree(paths, worktree, warn, {
+    removeMergedWorktree(paths, worktree, log, {
       platform: 'win32',
       remove: () => { throw new Error('Filename too long') },
       git: gitRuntime,
     })
 
-    expect(warn).toHaveBeenCalledWith(
-      `WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`,
+    expect(log).toHaveBeenCalledOnce()
+    expect(log).toHaveBeenCalledWith(
+      `WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (error: failed to delete: Filename too long)`,
     )
     expect(gitRuntime).toHaveBeenNthCalledWith(
       2, paths.repoRoot, ['worktree', 'prune'],

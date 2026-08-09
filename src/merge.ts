@@ -55,17 +55,25 @@ function extendedLengthPath(path: string): string {
   return absolutePath.startsWith('\\\\?\\') ? absolutePath : `\\\\?\\${absolutePath}`
 }
 
+function removalFailureDetail(error: unknown): string {
+  const stderr = (error as { stderr?: string | Buffer }).stderr
+  const detail = Buffer.isBuffer(stderr) ? stderr.toString('utf8') : stderr
+  const message = detail?.trim() || (error instanceof Error ? error.message : String(error))
+  return message.replaceAll(/\s+/g, ' ')
+}
+
 export function removeMergedWorktree(
   paths: OrchPaths,
   worktree: string,
-  warn: (text: string) => void,
+  log: (text: string) => void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
+  let gitFailure = ''
   try {
     runtime.git(paths.repoRoot, ['worktree', 'remove', worktree, '--force'])
     return
-  } catch {
-    // Fall through to a direct removal below.
+  } catch (error) {
+    gitFailure = removalFailureDetail(error)
   }
 
   try {
@@ -74,8 +82,12 @@ export function removeMergedWorktree(
       ? { recursive: true, force: true, maxRetries: 3 }
       : { recursive: true, force: true }
     runtime.remove(removalPath, options)
+    const fallback = runtime.platform === 'win32'
+      ? 'Windows long-path fallback'
+      : 'direct-removal fallback'
+    log(`Worktree removal needed the ${fallback}: ${worktree} (${gitFailure})`)
   } catch {
-    warn(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`)
+    log(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (${gitFailure})`)
   }
 
   try {
@@ -88,6 +100,7 @@ export function removeMergedWorktree(
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
 }
 
