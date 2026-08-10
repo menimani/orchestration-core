@@ -66,15 +66,15 @@ export const shioraProject: ProjectAdapter = {
       {
         label: 'Translation completeness',
         cwd: '',
-        command: 'node checks/i18n-keys.js',
+        command: 'node checks/i18n-keys.ts',
         appliesTo: (changed) => changed.some((file) => I18N_PATHS.test(file)),
-        requires: 'checks/i18n-keys.js',
+        requires: 'checks/i18n-keys.ts',
       },
       {
         label: 'English only',
         cwd: '',
-        command: 'node checks/english-only.mjs',
-        requires: 'checks/english-only.mjs',
+        command: 'node checks/english-only.ts',
+        requires: 'checks/english-only.ts',
       },
     ]
   },
@@ -105,14 +105,14 @@ export const shioraProject: ProjectAdapter = {
       {
         label: 'Translation completeness',
         cwd: '',
-        command: 'node checks/i18n-keys.js',
-        requires: 'checks/i18n-keys.js',
+        command: 'node checks/i18n-keys.ts',
+        requires: 'checks/i18n-keys.ts',
       },
       {
         label: 'English only',
         cwd: '',
-        command: 'node checks/english-only.mjs',
-        requires: 'checks/english-only.mjs',
+        command: 'node checks/english-only.ts',
+        requires: 'checks/english-only.ts',
       },
     ]
   },
