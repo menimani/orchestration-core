@@ -75,6 +75,15 @@ describe('GitHub workflow dispatch correlation', () => {
       run({ displayTitle: 'other-token' }),
     ], 'main', 'wanted-token')).toBeUndefined()
   })
+
+  it('matches the token inside the readable run-name wrapper', () => {
+    const wanted = run({ displayTitle: 'Production deploy [wanted-token]' })
+
+    expect(workflowRunForDispatch([
+      run({ displayTitle: 'Production deploy (manual)' }),
+      wanted,
+    ], 'main', 'wanted-token')).toBe(wanted)
+  })
 })
 
 describe('GitHub forge JSON schemas', () => {

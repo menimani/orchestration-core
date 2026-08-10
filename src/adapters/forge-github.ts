@@ -98,8 +98,10 @@ export function workflowRunForDispatch(
   ref: string,
   dispatchToken: string,
 ): GithubWorkflowRun | undefined {
+  // The workflow embeds the token in a readable run-name ('Production deploy [<token>]'),
+  // so containment is the contract; exact equality also matches older runs' bare titles.
   return runs.find(
-    (candidate) => candidate.displayTitle === dispatchToken && candidate.headBranch === ref,
+    (candidate) => candidate.displayTitle.includes(dispatchToken) && candidate.headBranch === ref,
   )
 }
 
