@@ -168,6 +168,9 @@ describe('loop daemon ownership', () => {
           AUTO_PR: 'false',
           ISSUE_QUEUE_ENABLED: 'false',
           MAX_BURST_FAILURES: '1',
+          // The [loop 00/12] assertions below depend on the cycle cap; pin it so the
+          // test does not inherit whatever MAX_SCAN_CYCLES a surrounding daemon exports.
+          MAX_SCAN_CYCLES: '12',
           POLL_INTERVAL: '0',
           SCAN_ENABLED: 'false',
         },
