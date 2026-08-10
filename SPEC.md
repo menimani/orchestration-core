@@ -70,8 +70,10 @@ from or equivalent to `orchestration/tests/*.sh`.
    at the gate names no task) is accepted and documented; the gate stops the loop rather
    than promote a failing tip.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
-    any successful merge resets the count. When the merge log names Docker or an
-    unreachable registry, say which — "tests failed" misattributes an environment
+    a completed task remains eligible for merge on later polls, and any successful merge
+    resets the count. Re-claiming completed-but-unmerged work requests that merge instead
+    of silently treating the task as already processed. When the merge log names Docker
+    or an unreachable registry, say which — "tests failed" misattributes an environment
     failure to the task's diff.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
@@ -97,7 +99,9 @@ from or equivalent to `orchestration/tests/*.sh`.
 15. The gate runs only when nothing is queued or running. Sequence: report lost tasks
     (loss note into `queue/decisions.txt`, deduped), run the cycle suite, ensure/update
     the draft PR, print `CYCLE_COMPLETE: <n>/<max>` with the PR URL, then the CI gate,
-    then review.
+    then review. Remote work defers the gate with a `Waiting remote` event when its
+    pending issue set changes and every ten minutes while unchanged. A light-gate cycle
+    suite logs its `Started Suite` event before invoking the blocking commands.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
