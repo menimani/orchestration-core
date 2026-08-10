@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { z } from 'zod'
 import type {
   CheckConclusion, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus, WorkflowRun,
 } from './forge.ts'
@@ -11,24 +12,85 @@ const execFileAsync = promisify(execFile)
 // asked gh about a pull request called "check your internet connection".
 const PR_URL_PATTERN = /^https:\/\/\S+\/pull\/\d+$/
 
-export interface RollupEntry {
-  __typename?: string
-  name?: string
-  context?: string
-  status?: string
-  conclusion?: string
-  state?: string
-  startedAt?: string
+const rollupEntrySchema = z.object({
+  __typename: z.string().optional(),
+  name: z.string().optional(),
+  context: z.string().optional(),
+  status: z.string().optional(),
+  conclusion: z.string().optional(),
+  state: z.string().optional(),
+  startedAt: z.string().optional(),
+})
+
+const prStatusSchema = z.object({
+  url: z.string(),
+  state: z.string(),
+  isDraft: z.boolean(),
+  headRefOid: z.string(),
+  statusCheckRollup: z.array(rollupEntrySchema).nullable(),
+})
+
+const prBodySchema = z.object({ body: z.string() })
+const currentUserSchema = z.object({ login: z.string() })
+
+const workflowRunSchema = z.object({
+  databaseId: z.number(),
+  createdAt: z.string(),
+  displayTitle: z.string(),
+  headBranch: z.string(),
+  headSha: z.string(),
+  status: z.string(),
+  conclusion: z.string().nullable(),
+})
+
+const workflowRunListSchema = z.array(workflowRunSchema)
+
+const githubIssueSchema = z.object({
+  number: z.number(),
+  state: z.enum(['OPEN', 'CLOSED']),
+  title: z.string(),
+  body: z.string(),
+  labels: z.array(z.object({ name: z.string() })),
+  assignees: z.array(z.object({ login: z.string() })),
+  updatedAt: z.string(),
+})
+
+const openGithubIssueListSchema = z.array(githubIssueSchema.extend({ state: z.literal('OPEN') }))
+const closedGithubIssueListSchema = z.array(githubIssueSchema.extend({ state: z.literal('CLOSED') }))
+const issueCommentsSchema = z.object({
+  comments: z.array(z.object({ body: z.string() })),
+})
+
+export type RollupEntry = z.infer<typeof rollupEntrySchema>
+export type GithubWorkflowRun = z.infer<typeof workflowRunSchema>
+type GithubIssue = z.infer<typeof githubIssueSchema>
+
+function schemaPath(path: PropertyKey[]): string {
+  if (path.length === 0) return '(root)'
+  return path.map((segment, index) => {
+    if (typeof segment === 'number') return `[${segment}]`
+    return `${index === 0 ? '' : '.'}${String(segment)}`
+  }).join('')
 }
 
-export interface GithubWorkflowRun {
-  databaseId: number
-  createdAt: string
-  displayTitle: string
-  headBranch: string
-  headSha: string
-  status: string
-  conclusion: string | null
+function parseGhJson<T>(args: readonly string[], stdout: string, schema: z.ZodType<T>): T {
+  const command = `gh ${args.join(' ')}`
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stdout)
+  } catch (error) {
+    throw new Error(`${command} returned invalid JSON at (root)`, { cause: error })
+  }
+  const result = schema.safeParse(parsed)
+  if (!result.success) {
+    const mismatches = result.error.issues
+      .map((issue) => `${schemaPath(issue.path)}: ${issue.message}`)
+      .join('; ')
+    throw new Error(`${command} returned JSON that failed schema validation at ${mismatches}`, {
+      cause: result.error,
+    })
+  }
+  return result.data
 }
 
 export function workflowRunForDispatch(
@@ -51,9 +113,9 @@ export function normalizeEntry(entry: RollupEntry): CheckConclusion {
   const raw
     = entry.status !== undefined && entry.status !== ''
       ? entry.status === 'COMPLETED'
-        ? (entry.conclusion ?? '') === '' ? 'UNKNOWN' : (entry.conclusion as string)
+        ? (entry.conclusion ?? '') === '' ? 'UNKNOWN' : entry.conclusion
         : 'PENDING'
-      : (entry.state ?? '') === '' ? 'UNKNOWN' : (entry.state as string)
+      : (entry.state ?? '') === '' ? 'UNKNOWN' : entry.state
   if (raw === 'SUCCESS' || raw === 'NEUTRAL') return 'success'
   if (raw === 'SKIPPED') return 'skipped'
   if (raw === 'FAILURE' || raw === 'ERROR' || raw === 'CANCELLED' || raw === 'TIMED_OUT'
@@ -72,7 +134,12 @@ async function gh(repoRoot: string, args: string[]): Promise<string> {
   return stdout
 }
 
-export function createGithubForge(repoRoot: string = process.cwd()): Forge {
+export type GithubCommand = (repoRoot: string, args: string[]) => Promise<string>
+
+export function createGithubForge(
+  repoRoot: string = process.cwd(),
+  runGh: GithubCommand = gh,
+): Forge {
   const parseWorkflowRun = (data: GithubWorkflowRun): WorkflowRun => ({
     id: data.databaseId,
     createdAt: data.createdAt,
@@ -84,21 +151,16 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
   return {
     async prStatus(ref: string): Promise<PrStatus> {
       let stdout: string
+      const args = [
+        'pr', 'view', ref,
+        '--json', 'url,state,isDraft,headRefOid,statusCheckRollup',
+      ]
       try {
-        stdout = await gh(repoRoot, [
-          'pr', 'view', ref,
-          '--json', 'url,state,isDraft,headRefOid,statusCheckRollup',
-        ])
+        stdout = await runGh(repoRoot, args)
       } catch {
         return { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
       }
-      const data = JSON.parse(stdout) as {
-        url: string
-        state: string
-        isDraft: boolean
-        headRefOid: string
-        statusCheckRollup: RollupEntry[] | null
-      }
+      const data = parseGhJson(args, stdout, prStatusSchema)
       const state
         = data.state === 'OPEN' ? 'open'
           : data.state === 'MERGED' ? 'merged'
@@ -117,8 +179,9 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
     },
 
     async prBody(ref: string): Promise<string> {
-      const stdout = await gh(repoRoot, ['pr', 'view', ref, '--json', 'body', '--jq', '.body'])
-      return stdout
+      const args = ['pr', 'view', ref, '--json', 'body']
+      const stdout = await runGh(repoRoot, args)
+      return `${parseGhJson(args, stdout, prBodySchema).body}\n`
     },
 
     async createPr(options: CreatePrOptions): Promise<string> {
@@ -130,7 +193,7 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
         '--body', options.body,
       ]
       if (options.draft) args.push('--draft')
-      const stdout = await gh(repoRoot, args)
+      const stdout = await runGh(repoRoot, args)
       const url = stdout.split(/\r?\n/).map((line) => line.trim())
         .find((line) => PR_URL_PATTERN.test(line))
       if (url === undefined) {
@@ -144,15 +207,15 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
       if (fields.title !== undefined) args.push('--title', fields.title)
       if (fields.body !== undefined) args.push('--body', fields.body)
       if (args.length === 3) return
-      await gh(repoRoot, args)
+      await runGh(repoRoot, args)
     },
 
     async markPrReady(ref: string): Promise<void> {
-      await gh(repoRoot, ['pr', 'ready', ref])
+      await runGh(repoRoot, ['pr', 'ready', ref])
     },
 
     async dispatchWorkflow(workflow: string, ref: string, dispatchToken: string): Promise<void> {
-      await gh(repoRoot, [
+      await runGh(repoRoot, [
         'workflow', 'run', workflow, '--ref', ref,
         '--field', `dispatch_token=${dispatchToken}`,
       ])
@@ -163,36 +226,42 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
       ref: string,
       dispatchToken: string,
     ): Promise<WorkflowRun | undefined> {
-      const stdout = await gh(repoRoot, [
+      const args = [
         'run', 'list', '--workflow', workflow, '--event', 'workflow_dispatch', '--limit', '100',
         '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
-      ])
-      const run = workflowRunForDispatch(JSON.parse(stdout) as GithubWorkflowRun[], ref, dispatchToken)
+      ]
+      const stdout = await runGh(repoRoot, args)
+      const run = workflowRunForDispatch(
+        parseGhJson(args, stdout, workflowRunListSchema), ref, dispatchToken,
+      )
       return run === undefined ? undefined : parseWorkflowRun(run)
     },
 
     async getWorkflowRun(runId: number): Promise<WorkflowRun> {
-      const stdout = await gh(repoRoot, [
+      const args = [
         'run', 'view', String(runId),
         '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
-      ])
-      return parseWorkflowRun(JSON.parse(stdout) as GithubWorkflowRun)
+      ]
+      const stdout = await runGh(repoRoot, args)
+      return parseWorkflowRun(parseGhJson(args, stdout, workflowRunSchema))
     },
 
     async currentUser(): Promise<string> {
-      return (await gh(repoRoot, ['api', 'user', '--jq', '.login'])).trim()
+      const args = ['api', 'user']
+      const stdout = await runGh(repoRoot, args)
+      return parseGhJson(args, stdout, currentUserSchema).login
     },
 
     async ensureLabel(name: string, description: string): Promise<void> {
       // --force updates an existing label instead of failing on it.
-      await gh(repoRoot, ['label', 'create', name, '--description', description, '--force'])
+      await runGh(repoRoot, ['label', 'create', name, '--description', description, '--force'])
     },
 
     async createIssue(options: CreateIssueOptions): Promise<number> {
       const args = ['issue', 'create', '--title', options.title, '--body', options.body]
       for (const label of options.labels) args.push('--label', label)
       for (const assignee of options.assignees ?? []) args.push('--assignee', assignee)
-      const stdout = await gh(repoRoot, args)
+      const stdout = await runGh(repoRoot, args)
       const match = /\/issues\/(\d+)\s*$/.exec(stdout.trim())
       if (match === null) {
         throw new Error(`gh issue create returned no issue URL: ${stdout.trim()}`)
@@ -201,106 +270,71 @@ export function createGithubForge(repoRoot: string = process.cwd()): Forge {
     },
 
     async getIssue(issueNumber: number): Promise<ForgeIssue> {
-      const stdout = await gh(repoRoot, ['issue', 'view', String(issueNumber),
-        '--json', 'number,state,title,body,labels,assignees,updatedAt'])
-      const data = JSON.parse(stdout) as {
-        number: number
-        state: 'OPEN' | 'CLOSED'
-        title: string
-        body: string
-        labels: Array<{ name: string }>
-        assignees: Array<{ login: string }>
-        updatedAt: string
-      }
-      return {
-        number: data.number,
-        state: data.state.toLowerCase() as ForgeIssue['state'],
-        title: data.title,
-        body: data.body,
-        labels: data.labels.map((label) => label.name),
-        assignees: data.assignees.map((assignee) => assignee.login),
-        updatedAt: data.updatedAt,
-      }
+      const args = ['issue', 'view', String(issueNumber),
+        '--json', 'number,state,title,body,labels,assignees,updatedAt']
+      const stdout = await runGh(repoRoot, args)
+      return normalizeIssue(parseGhJson(args, stdout, githubIssueSchema))
     },
 
     async commentIssue(issueNumber: number, comment: string): Promise<void> {
-      await gh(repoRoot, ['issue', 'comment', String(issueNumber), '--body', comment])
+      await runGh(repoRoot, ['issue', 'comment', String(issueNumber), '--body', comment])
     },
 
     async listIssueComments(issueNumber: number): Promise<string[]> {
-      const stdout = await gh(repoRoot, [
+      const args = [
         'issue', 'view', String(issueNumber), '--json', 'comments',
-      ])
-      const data = JSON.parse(stdout) as { comments: Array<{ body: string }> }
+      ]
+      const stdout = await runGh(repoRoot, args)
+      const data = parseGhJson(args, stdout, issueCommentsSchema)
       return data.comments.map((comment) => comment.body)
     },
 
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
-      const stdout = await gh(repoRoot, ['issue', 'list', '--state', 'open',
+      const args = ['issue', 'list', '--state', 'open',
         '--label', label, '--limit', '200',
-        '--json', 'number,state,title,body,labels,assignees,updatedAt'])
-      const data = JSON.parse(stdout) as Array<{
-        number: number
-        state: 'OPEN'
-        title: string
-        body: string
-        labels: Array<{ name: string }>
-        assignees: Array<{ login: string }>
-        updatedAt: string
-      }>
-      return data.map((issue) => ({
-        number: issue.number,
-        state: issue.state.toLowerCase() as ForgeIssue['state'],
-        title: issue.title,
-        body: issue.body,
-        labels: issue.labels.map((label_) => label_.name),
-        assignees: issue.assignees.map((assignee) => assignee.login),
-        updatedAt: issue.updatedAt,
-      }))
+        '--json', 'number,state,title,body,labels,assignees,updatedAt']
+      const stdout = await runGh(repoRoot, args)
+      return parseGhJson(args, stdout, openGithubIssueListSchema).map(normalizeIssue)
     },
 
     async listClosedIssues(label: string): Promise<ForgeIssue[]> {
-      const stdout = await gh(repoRoot, ['issue', 'list', '--state', 'closed',
+      const args = ['issue', 'list', '--state', 'closed',
         '--label', label, '--limit', '200',
-        '--json', 'number,state,title,body,labels,assignees,updatedAt'])
-      const data = JSON.parse(stdout) as Array<{
-        number: number
-        state: 'CLOSED'
-        title: string
-        body: string
-        labels: Array<{ name: string }>
-        assignees: Array<{ login: string }>
-        updatedAt: string
-      }>
-      return data.map((issue) => ({
-        number: issue.number,
-        state: issue.state.toLowerCase() as ForgeIssue['state'],
-        title: issue.title,
-        body: issue.body,
-        labels: issue.labels.map((label_) => label_.name),
-        assignees: issue.assignees.map((assignee) => assignee.login),
-        updatedAt: issue.updatedAt,
-      }))
+        '--json', 'number,state,title,body,labels,assignees,updatedAt']
+      const stdout = await runGh(repoRoot, args)
+      return parseGhJson(args, stdout, closedGithubIssueListSchema).map(normalizeIssue)
     },
 
     async assignIssue(issueNumber: number, user: string): Promise<void> {
-      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-assignee', user])
+      await runGh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-assignee', user])
     },
 
     async unassignIssue(issueNumber: number, user: string): Promise<void> {
-      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-assignee', user])
+      await runGh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-assignee', user])
     },
 
     async addLabel(issueNumber: number, label: string): Promise<void> {
-      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-label', label])
+      await runGh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-label', label])
     },
 
     async removeLabel(issueNumber: number, label: string): Promise<void> {
-      await gh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-label', label])
+      await runGh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-label', label])
     },
 
     async closeIssue(issueNumber: number, comment: string): Promise<void> {
-      await gh(repoRoot, ['issue', 'close', String(issueNumber), '--comment', comment])
+      await runGh(repoRoot, ['issue', 'close', String(issueNumber), '--comment', comment])
     },
+  }
+}
+
+function normalizeIssue(issue: GithubIssue): ForgeIssue {
+  return {
+    number: issue.number,
+    state: issue.state === 'OPEN' ? 'open' : 'closed',
+    title: issue.title,
+    body: issue.body,
+    labels: issue.labels.map((label) => label.name),
+    assignees: issue.assignees.map((assignee) => assignee.login),
+    updatedAt: issue.updatedAt,
   }
 }
