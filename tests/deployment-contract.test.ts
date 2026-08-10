@@ -12,7 +12,9 @@ describe('production deployment identity contract', () => {
   it('carries the dispatch token into the workflow run title', () => {
     const workflow = source('.github/workflows/deploy.yml')
 
-    expect(workflow).toContain('run-name: ${{ inputs.dispatch_token }}')
+    // The token must appear in the run title for the deploy command's containment
+    // matcher to find the exact run; the readable wrapper around it is free to change.
+    expect(workflow).toMatch(/run-name: .*inputs\.dispatch_token/)
     expect(workflow).toContain('dispatch_token:')
   })
 
