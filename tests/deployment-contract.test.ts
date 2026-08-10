@@ -33,9 +33,13 @@ describe('production deployment identity contract', () => {
   it('notifies after both image building and deployment have finished', () => {
     const workflow = source('.github/workflows/deploy.yml')
 
-    expect(workflow).toContain('notify:\n    name: Send the deployment notification\n    if: always()')
+    // The durable contract: a notification job that always runs after both jobs,
+    // reports which outcome occurred, and sends from the server (the runner's foreign
+    // IP is dropped by the mail provider's country filter before authentication).
+    expect(workflow).toMatch(/notify:\n\s+name: Send the deployment notification\n(?:.*\n)*?\s+if: always\(\)/)
     expect(workflow).toContain('needs: [build-and-push, deploy]')
-    expect(workflow).toContain("if: needs.build-and-push.result == 'success' && needs.deploy.result == 'success'")
-    expect(workflow).toContain("if: needs.build-and-push.result != 'success' || needs.deploy.result != 'success'")
+    expect(workflow).toMatch(/needs\.build-and-push\.result == 'success' && needs\.deploy\.result == 'success'/)
+    expect(workflow).toContain('deploy/send-deploy-mail.sh')
+    expect(source('deploy/send-deploy-mail.sh')).toContain('--mail-rcpt support@shiora.jp')
   })
 })
