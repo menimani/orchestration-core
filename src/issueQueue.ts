@@ -665,7 +665,13 @@ export function issueMergeComment(taskId: string, mergeCommit: string, runBranch
 }
 
 export type ClaimResult
-  = { outcome: 'claimed'; taskId: string; issueNumber: number; enqueue: EnqueueResult }
+  = {
+    outcome: 'claimed'
+    taskId: string
+    issueNumber: number
+    enqueue: EnqueueResult
+    pendingMerge: boolean
+  }
     | { outcome: 'lost-race'; issueNumber: number }
     | { outcome: 'unparseable'; issueNumber: number }
 
@@ -743,7 +749,14 @@ export async function claimIssue(
       writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
     }
     recordIssueForTask(paths, taskId, issue.number)
-    return { outcome: 'claimed', taskId, issueNumber: issue.number, enqueue: enqueueTask(paths, taskId, 1) }
+    const enqueue = enqueueTask(paths, taskId, 1)
+    return {
+      outcome: 'claimed',
+      taskId,
+      issueNumber: issue.number,
+      enqueue,
+      pendingMerge: enqueue.outcome === 'already-processed' && enqueue.status === 'completed',
+    }
   })
 }
 

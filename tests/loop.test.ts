@@ -9,12 +9,18 @@ import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
-import { recordIssueForTask, recordIssuePromotion } from '../src/issueQueue.ts'
+import {
+  buildIssueBody, recordIssueForTask, recordIssuePromotion, LABEL_FINDING, LABEL_READY,
+} from '../src/issueQueue.ts'
+import { recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop, formatEventLine, type Loop } from '../src/loop.ts'
 import {
   syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
-import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import {
+  branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
+} from '../src/paths.ts'
+import { readStatus } from '../src/status.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -70,6 +76,7 @@ function makeLoop(
   overrides: Partial<LoopConfig> = {},
   project: ProjectAdapter = stubProject,
   orchestrationDepsRuntime?: OrchestrationDepsRuntime,
+  clock: () => Date = () => new Date(2026, 7, 8, 12, 0, 0),
 ): Loop {
   const config = { ...loadConfig({}), ...overrides }
   return createLoop({
@@ -79,7 +86,7 @@ function makeLoop(
     runner: makeRunner(),
     project,
     log: (line) => logged.push(line),
-    now: () => new Date(2026, 7, 8, 12, 0, 0),
+    now: clock,
     orchestrationDepsRuntime,
   })
 }
@@ -114,6 +121,17 @@ function initializeGitRepo(): string {
   git(['add', 'tracked.txt'])
   git(['commit', '-m', 'initial'])
   return git(['rev-parse', 'HEAD'])
+}
+
+function makeCompletedTask(taskId: string, writeCompletedStatus = true): void {
+  writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+  const worktree = worktreeDir(paths, taskId)
+  git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+  writeFileSync(join(worktree, `${taskId}.txt`), 'completed work\n')
+  execFileSync('git', ['add', '-A'], { cwd: worktree })
+  execFileSync('git', ['commit', '-qm', 'fix: complete fixture task'], { cwd: worktree })
+  writeFinal(taskId, 'TASK_COMPLETE\n')
+  if (writeCompletedStatus) writeRawStatus(taskId, 'completed')
 }
 
 beforeEach(() => {
@@ -562,8 +580,14 @@ describe('remote issue queue idle detection', () => {
     })
   }
 
-  it('defers the cycle gate and review while a ready issue is open', async () => {
-    const loop = makeReviewLoop(true)
+  it('logs changed remote work immediately and unchanged work at most every ten minutes', async () => {
+    let current = new Date(2026, 7, 8, 12, 0, 0)
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: true,
+    }, stubProject, undefined, () => current)
     await fakeForge.createIssue({
       title: 'pending fix',
       body: '',
@@ -571,10 +595,26 @@ describe('remote issue queue idle detection', () => {
     })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
-
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toBe('')
+    expect(logged).toEqual(['Waiting remote  issues #1'])
+
+    await loop.triggerScanIfIdle()
+    expect(logged).toHaveLength(1)
+
+    await fakeForge.createIssue({
+      title: 'another pending fix', body: '', labels: ['loop:in-progress'],
+    })
+    await loop.triggerScanIfIdle()
+    expect(logged.at(-1)).toBe('Waiting remote  issues #1 #2')
+
+    current = new Date(2026, 7, 8, 12, 9, 59)
+    await loop.triggerScanIfIdle()
+    expect(logged).toHaveLength(2)
+    current = new Date(2026, 7, 8, 12, 10, 0)
+    await loop.triggerScanIfIdle()
+    expect(logged.at(-1)).toBe('Waiting remote  issues #1 #2')
+    expect(logged).toHaveLength(3)
   })
 
   it('defers the cycle gate and review while an in-progress issue is open', async () => {
@@ -585,7 +625,7 @@ describe('remote issue queue idle detection', () => {
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toBe('')
+    expect(logText()).toBe('Waiting remote  issues #1')
   })
 
   it('defers the cycle gate and review while a merge-failed issue is open', async () => {
@@ -596,7 +636,7 @@ describe('remote issue queue idle detection', () => {
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toBe('')
+    expect(logText()).toBe('Waiting remote  issues #1')
   })
 
   it('defers the cycle gate and review when remote issue listing fails', async () => {
@@ -847,6 +887,82 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 })
 
+describe('completed task merge recovery', () => {
+  it('retries a failed automerge on the next poll and lets the cycle gate proceed', async () => {
+    const taskId = '20260810_040800_064_auto-retry-merge'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    let mergeChecks = 0
+    const transientProject: ProjectAdapter = {
+      ...stubProject,
+      mergeChecks: () => ++mergeChecks === 1
+        ? [{ label: 'Transient outage', cwd: '', command: 'node -e "process.exit(1)"' }]
+        : [],
+    }
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: true,
+      reviewEnabled: true,
+      autoReview: false,
+      autoPr: false,
+      taskGate: 'full',
+    }, transientProject)
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'pending fix', body: '', labels: ['loop:in-progress'],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+
+    expect(await loop.poll()).toBe('continue')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(logged).toContain('Waiting remote  issues #1')
+
+    expect(await loop.poll()).toBe('continue')
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(logged.filter((line) => line.startsWith('Merging 064_auto'))).toHaveLength(2)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('merges when a claim finds its existing local task completed but unmerged', async () => {
+    const taskId = '20260810_040800_064_auto-claimed-again'
+    const description = '[BUG] retry the completed local task'
+    initializeGitRepo()
+    makeCompletedTask(taskId, false)
+    recordTaskIdForDesc(paths, 'auto', description, taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    await fakeForge.createIssue({
+      title: 'retry completed work',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const listOpenIssues = fakeForge.listOpenIssues.bind(fakeForge)
+    let exposedCompletion = false
+    fakeForge.listOpenIssues = async (label) => {
+      if (label === LABEL_READY && !exposedCompletion) {
+        exposedCompletion = true
+        writeRawStatus(taskId, 'completed')
+      }
+      return listOpenIssues(label)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(runnerStarts).toHaveLength(0)
+    expect(logged).toContain('Claimed 064_auto    #1')
+    expect(logged).toContain('Merging 064_auto')
+    expect(logged.some((line) => line.startsWith('Merged 064_auto'))).toBe(true)
+    expect(logged.indexOf('Claimed 064_auto    #1'))
+      .toBeLessThan(logged.indexOf('Merging 064_auto'))
+  })
+})
+
 describe('noteMergeFailure', () => {
   const mergeLog = (): string => join(paths.logsDir, 'sample.merge.log')
   const stopFile = (): string => join(paths.queueDir, 'stop')
@@ -912,6 +1028,7 @@ describe('runCycleSuite', () => {
     expect(loop.runCycleSuite(1)).toBe(true)
     expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(true)
     expect(existsSync(stopFile())).toBe(false)
+    expect(logged).toContain('Started Suite  cycle 1')
   })
 
   it('stops the loop rather than promote a failing tip', () => {

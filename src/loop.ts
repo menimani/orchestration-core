@@ -83,6 +83,7 @@ export function createLoop(deps: LoopDeps) {
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
   const warningLog = new LoopWarningLog(paths, log, now)
+  let remoteWaitState: { pending: string; loggedAt: number } | undefined
 
   function event(name: string, subject = '', detail = ''): void {
     if (name === 'WARN') {
@@ -91,6 +92,10 @@ export function createLoop(deps: LoopDeps) {
       return
     }
     log(formatEventLine(name, subject, detail))
+  }
+
+  function compactEvent(name: string, subject: string, detail: string): void {
+    log(`${formatEventLine(name, subject)}  ${detail}`)
   }
 
   function orchestrationDepsEvent(name: 'Installed' | 'WARN', subject: string): void {
@@ -905,6 +910,7 @@ export function createLoop(deps: LoopDeps) {
    */
   function runCycleSuite(cycle: number): boolean {
     if (config.taskGate !== 'light') return true
+    compactEvent('Started', 'Suite', `cycle ${cycle}`)
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
     writeFileSync(suiteLog, '')
 
@@ -986,11 +992,26 @@ export function createLoop(deps: LoopDeps) {
           }
           return issue.number
         }))
-        const remoteCount = pendingIssues.filter((issueNumber) => issueNumber !== undefined).length
+        const pendingIssueNumbers = pendingIssues
+          .filter((issueNumber): issueNumber is number => issueNumber !== undefined)
+          .sort((a, b) => a - b)
+        const remoteCount = pendingIssueNumbers.length
         warningLog.recovered('count-remote-issue-work')
         if (remoteCount > 0) {
+          const pending = pendingIssueNumbers.join(' ')
+          const currentTime = now().getTime()
+          if (remoteWaitState?.pending !== pending
+            || currentTime - remoteWaitState.loggedAt >= 10 * 60 * 1000) {
+            compactEvent(
+              'Waiting',
+              'remote',
+              `issues ${pendingIssueNumbers.slice(0, 5).map((issueNumber) => `#${issueNumber}`).join(' ')}`,
+            )
+            remoteWaitState = { pending, loggedAt: currentTime }
+          }
           return 'continue'
         }
+        remoteWaitState = undefined
       } catch (error) {
         warning('count-remote-issue-work', 'counting remote issue work',
           `could not count remote issue work: ${errorSummary(error)}`)
@@ -1130,7 +1151,57 @@ export function createLoop(deps: LoopDeps) {
     }
 
     let burstFailures = 0
+    const mergeAttempts = new Set<string>()
     const locallyRunningIssues = new Set<number>()
+
+    const mergeCompletedTask = async (taskId: string): Promise<void> => {
+      if (!config.autoMerge || mergeAttempts.has(taskId)) return
+      mergeAttempts.add(taskId)
+      event('Merging', shortTaskId(taskId))
+      const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
+      const linkedIssue = issueNumberForTask(paths, taskId)
+      try {
+        const mergeCommit = await mergeTask(paths, taskId, {
+          taskGate: config.taskGate,
+          testCmd: config.testCmd === '' ? undefined : config.testCmd,
+          skipAutoTest: config.skipAutoTest,
+          project,
+          closesIssue: linkedIssue,
+          outputFile: mergeLog,
+          orchestrationDepsRuntime,
+          onOrchestrationDepsEvent: orchestrationDepsEvent,
+        })
+        event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
+        writeFileSync(mergeFailureFile, '0\n')
+        if (linkedIssue !== undefined) {
+          const runBranch = git(['branch', '--show-current']).trim()
+          try {
+            recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
+            await commentOnIssueMerge(
+              forge,
+              linkedIssue,
+              taskId,
+              mergeCommit,
+              runBranch,
+            )
+          } catch (error) {
+            event('WARN', `could not link issue #${linkedIssue} to merge: ${errorSummary(error)}`)
+          }
+        }
+        // A task delegated while the gate was waiting merges commits the gate has
+        // already pushed past; clearing the flag makes the gate push and verify
+        // again with the new commits included.
+        if (!isInspectionTaskId(paths, taskId)) {
+          const cycle = readCount(scanCountFile)
+          if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+        }
+      } catch (error) {
+        if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
+        event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.merge.log`)
+        noteMergeFailure(mergeLog)
+      }
+    }
+
     for (const taskId of listTaskIds(paths)) {
       const before = readStatus(paths, taskId)
       if (before === undefined) continue
@@ -1196,52 +1267,14 @@ export function createLoop(deps: LoopDeps) {
 
         recordScanYield(taskId)
 
-        if (config.autoMerge) {
-          event('Merging', shortTaskId(taskId))
-          const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
-          const linkedIssue = issueNumberForTask(paths, taskId)
-          try {
-            const mergeCommit = await mergeTask(paths, taskId, {
-              taskGate: config.taskGate,
-              testCmd: config.testCmd === '' ? undefined : config.testCmd,
-              skipAutoTest: config.skipAutoTest,
-              project,
-              closesIssue: linkedIssue,
-              outputFile: mergeLog,
-              orchestrationDepsRuntime,
-              onOrchestrationDepsEvent: orchestrationDepsEvent,
-            })
-            event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
-            writeFileSync(mergeFailureFile, '0\n')
-            if (linkedIssue !== undefined) {
-              const runBranch = git(['branch', '--show-current']).trim()
-              try {
-                recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
-                await commentOnIssueMerge(
-                  forge,
-                  linkedIssue,
-                  taskId,
-                  mergeCommit,
-                  runBranch,
-                )
-              } catch (error) {
-                event('WARN', `could not link issue #${linkedIssue} to merge: ${errorSummary(error)}`)
-              }
-            }
-            // A task delegated while the gate was waiting merges commits the gate has
-            // already pushed past; clearing the flag makes the gate push and verify
-            // again with the new commits included.
-            if (!isInspectionTaskId(paths, taskId)) {
-              const cycle = readCount(scanCountFile)
-              if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
-            }
-          } catch (error) {
-            if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
-            event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.merge.log`)
-            noteMergeFailure(mergeLog)
-          }
-        }
         writeFileSync(scannedFlag, '')
+      }
+
+      // Completion processing above is one-shot, but a merge is not: transient test,
+      // Docker, registry, or network failures leave the status completed so the next
+      // poll retries instead of wedging the cycle gate forever.
+      if (status === 'completed' && !config.workerMode) {
+        await mergeCompletedTask(taskId)
       }
     }
 
@@ -1281,10 +1314,12 @@ export function createLoop(deps: LoopDeps) {
             for (const issue of await forge.listOpenIssues(LABEL_READY)) {
               if (capacity <= 0) break
               if (issue.assignees.length > 0) continue
+              if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
               const result = await claimIssue(forge, paths, issue, cachedUser,
                 (newTaskId_, requirement) => appendSharedRequirements(newTaskId_, `issue-${issue.number}`, requirement))
               if (result.outcome === 'claimed') {
                 event('Claimed', shortTaskId(result.taskId), `#${issue.number}`)
+                if (result.pendingMerge) await mergeCompletedTask(result.taskId)
                 capacity -= 1
               } else {
                 if (result.outcome !== 'lost-race') {

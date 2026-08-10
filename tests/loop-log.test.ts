@@ -122,6 +122,13 @@ describe('loopLogLines', () => {
       .toBe('2026-08-10 01:02:03 [loop 04/12] Failed     031_auto    log 031_auto.log')
   })
 
+  it('keeps the frozen remote-wait and cycle-suite start lines', () => {
+    expect(loopLogLines('Waiting remote  issues #349 #351', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Waiting    remote  issues #349 #351')
+    expect(loopLogLines('Started Suite  cycle 6', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Started    Suite  cycle 6')
+  })
+
   it('aligns subjects for verbs of different lengths', () => {
     const scan = loopLogLines('Started 030_scan', context)[0]!
     const decision = loopLogLines('Decision choose a database', context)[0]!
