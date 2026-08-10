@@ -26,7 +26,15 @@ from or equivalent to `orchestration/tests/*.sh`.
   the npm form as part of the cutover. What stays frozen: the environment variable
   names (they pass through npm unchanged, so launch commands keep their shape) and the
   output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
-  `LOOP_DONE:`, `FAILED:`, `[loop]` prefixes).
+  `LOOP_DONE:`, and `FAILED:`). Loop daemon events in `loop.log` use
+  `YYYY-MM-DD HH:mm:ss [loop <cycle>/<cap>] <event> <subject> <detail>`: cycle and cap
+  are zero-padded, event names occupy a ten-character column, and subjects shorter than
+  twelve characters are padded so details align. Every physical line receives the full
+  prefix and messages are capped at 80 characters after it. The three machine markers
+  are the exception to presentation-only output: a foreground loop also prints each
+  marker as an exact standalone line, while a background loop writes that exact line to
+  `logs/loop-markers.log`. Their copies in `loop.log` still receive the timestamp and
+  cycle prefix, and retain the marker name rather than being rewritten as display events.
 
 ## Task lifecycle
 
@@ -42,7 +50,8 @@ from or equivalent to `orchestration/tests/*.sh`.
    or the same decision delegated twice resolves to the one existing task.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
    `task/<id>`.
-5. Failure handling: print `FAILED: <id>` with the log path, record the loss against the
+5. Failure handling: emit `FAILED: <id>` with the log path to the machine-marker sink,
+   with a separately formatted copy in `loop.log`; record the loss against the
    current cycle (`queue/failed-<cycle>`, once per task), never retry automatically.
    `cleanup` clears the announce markers so a manual retry is watched, not silent, but
    only after verifying that the task process stopped, the worktree directory and Git
@@ -98,7 +107,8 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 15. The gate runs only when nothing is queued or running. Sequence: report lost tasks
     (loss note into `queue/decisions.txt`, deduped), run the cycle suite, ensure/update
-    the draft PR, print `CYCLE_COMPLETE: <n>/<max>` with the PR URL, then the CI gate,
+    the draft PR, emit `CYCLE_COMPLETE: <n>/<max>` with the PR URL to the machine-marker
+    sink and a formatted copy to `loop.log`, then the CI gate,
     then review. Remote work defers the gate with a `Waiting remote` event when its
     pending issue set changes and every ten minutes while unchanged. A light-gate cycle
     suite logs its `Started Suite` event before invoking the blocking commands.
@@ -116,7 +126,8 @@ from or equivalent to `orchestration/tests/*.sh`.
     for a person instead of promoting a branch its own review keeps rejecting.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
-    `LOOP_DONE: <PR URL>` is printed, session state is cleaned up, and the loop exits.
+    `LOOP_DONE: <PR URL>` is emitted to the machine-marker sink and as a formatted
+    `loop.log` copy, session state is cleaned up, and the loop exits.
 
 ## Failure containment
 
@@ -235,8 +246,9 @@ from or equivalent to `orchestration/tests/*.sh`.
     the standard path and starts their local tasks. A completed task with commits pushes
     `task/<id>` to `origin`, comments the branch and exact head commit on its issue, and
     swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection with no
-    commits comments and closes its issue instead. Its poll status uses `Worker` in place
-    of the cycle counter.
+    commits comments and closes its issue instead. Its poll status uses the shared
+    `Status     Running=<n>  Queue=<n>` event; because workers never scan, their loop-log
+    prefix carries cycle zero rather than a worker-specific replacement for the cycle.
 36. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts open
     `loop:merge-ready` issues: it reads the reported branch and head, fetches that branch
@@ -244,8 +256,10 @@ from or equivalent to `orchestration/tests/*.sh`.
     the project adapter's path-selected checks in a detached worktree, and merges with
     `--no-ff` and `closes #N`. It persists a successful adoption before updating the
     issue, so a later poll retries failed metadata updates without merging again. A
-    successful adoption logs `[loop] Adopted remote task from issue #N`; promotion closes
-    the issue. A failure is
+    successful adoption logs aligned `Merging` and `Merged` events keyed by the short
+    task id, with the latter naming the first eight characters of the merge commit;
+    promotion closes the issue. A failure logs the aligned `Failed` event with the short
+    task id and merge-log name. It is
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
     through the consecutive-merge-failure limit instead of returning work to ready.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →

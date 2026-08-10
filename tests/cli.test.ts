@@ -152,6 +152,42 @@ describe('loop daemon ownership', () => {
     )
   })
 
+  it('separates daemon markers while formatting their loop-log copies', async () => {
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260810_010203_032_auto-failed-task'
+    const markerLog = join(paths.logsDir, 'loop-markers.log')
+    await writeStatus(paths, taskId, 'failed')
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop', '--marker-output', markerLog],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          AUTO_PR: 'false',
+          ISSUE_QUEUE_ENABLED: 'false',
+          MAX_BURST_FAILURES: '1',
+          POLL_INTERVAL: '0',
+          SCAN_ENABLED: 'false',
+        },
+        encoding: 'utf8',
+        windowsHide: true,
+      },
+    )
+
+    const marker = `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`
+    const loopLogLines = result.stdout.split(/\r?\n/).filter((line) => line !== '')
+    expect(result.status).toBe(0)
+    expect(readFileSync(markerLog, 'utf8')).toBe(`${marker}\n`)
+    expect(loopLogLines).not.toContain(marker)
+    expect(loopLogLines.every((line) =>
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 00\/12\] /.test(line))).toBe(true)
+    expect(loopLogLines).toContainEqual(
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 00\/12\] FAILED:/),
+    )
+  })
+
   it('removes the PID and issue marker after a startup failure', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,

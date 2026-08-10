@@ -1,5 +1,7 @@
 import { spawn, execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
@@ -406,7 +408,10 @@ const cmdLoop: Command = async (paths, args) => {
     }).trim()
     prepareLoopLog(paths, { runBranch })
     const fd = openSync(loopLog, 'a')
-    const child = spawn(process.execPath, [join(paths.root, 'ts', 'src', 'cli.ts'), 'loop'], {
+    const markerLog = join(paths.logsDir, 'loop-markers.log')
+    const child = spawn(process.execPath, [
+      join(paths.root, 'ts', 'src', 'cli.ts'), 'loop', '--marker-output', markerLog,
+    ], {
       cwd: paths.repoRoot,
       detached: true,
       stdio: ['ignore', fd, fd],
@@ -419,13 +424,14 @@ const cmdLoop: Command = async (paths, args) => {
     console.log('Stop: npm run -C orchestration/ts stop')
     return 0
   }
+  const markerOutput = args[0] === '--marker-output' ? args[1] : undefined
   const config = loadConfig()
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const log = (message: string, error = false): void => {
     const write = error ? console.error : console.log
     if (/^(?:CYCLE_COMPLETE|FAILED|LOOP_DONE):/.test(message)) {
-      write(message)
-      return
+      if (markerOutput === undefined) write(message)
+      else appendFileSync(markerOutput, `${message}\n`)
     }
     const currentCycle = existsSync(scanCountFile)
       ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
