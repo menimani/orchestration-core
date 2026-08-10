@@ -97,7 +97,7 @@ function installOrchestrationDeps(
   }
 }
 
-export function syncOrchestrationDepsAfterMerge(
+function syncOrchestrationDepsAfterMerge(
   paths: OrchPaths,
   mergeCommit: string,
   taskId: string,

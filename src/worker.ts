@@ -49,7 +49,7 @@ async function isAncestor(paths: OrchPaths, ancestor: string, descendant: string
   throw new Error(`Could not compare HEAD with '${descendant}'${detail === '' ? '' : `: ${detail}`}`)
 }
 
-export async function updateWorkerCheckout(
+async function updateWorkerCheckout(
   paths: OrchPaths,
   baseRef: string,
 ): Promise<'current' | 'fast-forwarded'> {

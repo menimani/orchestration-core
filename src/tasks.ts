@@ -121,7 +121,7 @@ export type DelegateResult
       issue: DelegatedIssueResult & { materialize: false }
     }
 
-export function issueModeMarkerFile(paths: OrchPaths): string {
+function issueModeMarkerFile(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-mode')
 }
 
