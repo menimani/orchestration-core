@@ -10,7 +10,7 @@ import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
-import { createLoop } from './loop.ts'
+import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import {
   commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
@@ -571,6 +571,35 @@ async function runLoopDaemon(
   }
 }
 
+// Every recent run has ended at the final-review cap, been promoted by hand, and left
+// loop.log without its true ending. This records that ending after the fact.
+const cmdShipped: Command = async (paths, args) => {
+  const pr = args[0]
+  if (pr === undefined || args.length !== 1) {
+    console.error('Usage: shipped <pr-number-or-url>')
+    return 1
+  }
+  if (isLoopRunning(paths)) {
+    console.error('The loop is running and records its own ending; shipped is for runs promoted by hand.')
+    return 1
+  }
+  const reference = /^#?\d+$/.test(pr) ? `#${pr.replace(/^#/, '')}` : pr
+  const config = loadConfig()
+  const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+  const currentCycle = existsSync(scanCountFile)
+    ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
+    : 0
+  mkdirSync(paths.logsDir, { recursive: true })
+  const lines = loopLogLines(formatEventLine('Completed', 'Loop', `PR ${reference}`), {
+    currentCycle,
+    cycleCap: config.maxScanCycles,
+  })
+  appendFileSync(join(paths.logsDir, 'loop.log'), `${lines.join('\n')}\n`)
+  appendFileSync(join(paths.logsDir, 'loop-markers.log'), `LOOP_DONE: ${pr}\n`)
+  console.log(`Recorded: Completed Loop PR ${reference}`)
+  return 0
+}
+
 const commands: Record<string, Command> = {
   'new': cmdNew,
   'enqueue': cmdEnqueue,
@@ -587,6 +616,7 @@ const commands: Record<string, Command> = {
   'worker': cmdWorker,
   'ci-wait': cmdCiWait,
   'loop-status': cmdLoopStatus,
+  'shipped': cmdShipped,
   'stop': cmdStop,
 }
 

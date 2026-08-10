@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -123,6 +123,40 @@ describe('manual merge', () => {
     expect(result.stdout).toContain('check stdout')
     expect(result.stderr).toContain('check stderr')
     expect(result.stderr).toContain('Tests failed. Aborting merge.')
+  })
+})
+
+describe('manually promoted run ending', () => {
+  it('records a Completed Loop event and the LOOP_DONE marker', () => {
+    const paths = orchPaths(repoRoot)
+    mkdirSync(paths.queueDir, { recursive: true })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '12\n')
+
+    const result = spawnSync(process.execPath, [CLI, 'shipped', '322'], {
+      cwd: repoRoot,
+      env: { ...process.env, MAX_SCAN_CYCLES: '12' },
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(0)
+    const logged = readFileSync(join(paths.logsDir, 'loop.log'), 'utf8')
+    expect(logged).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 12\/12\] Completed {2}Loop {8}PR #322\r?\n$/,
+    )
+    expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
+      .toBe('LOOP_DONE: 322\n')
+  })
+
+  it('rejects a call without a pull request reference', () => {
+    const result = spawnSync(process.execPath, [CLI, 'shipped'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Usage: shipped')
   })
 })
 

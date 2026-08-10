@@ -714,7 +714,9 @@ export function createLoop(deps: LoopDeps) {
         // Promoting here would ship findings nobody resolved — the failure the round
         // cap used to allow. Rounds this persistent signal something structural, which
         // is a person's call, so the loop stops instead of promoting.
-        event('ERROR', `final review still has findings after ${rounds} rounds; stopping`)
+        // Ending at the cap is the run's normal handoff to a person, not a malfunction,
+        // so it closes the log as a first-class event rather than a bare ERROR.
+        event('Stopped', 'Loop', `review-cap rounds ${rounds}/${maxRounds}`)
         writeFileSync(stopFile, '')
         return false
       }
