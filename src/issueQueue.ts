@@ -22,10 +22,10 @@ export const LABEL_READY = 'loop:ready'
 export const LABEL_IN_PROGRESS = 'loop:in-progress'
 export const LABEL_MERGE_READY = 'loop:merge-ready'
 export const LABEL_MERGE_FAILED = 'loop:merge-failed'
-export const LIFECYCLE_LABELS = [
+const LIFECYCLE_LABELS = [
   LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
 ] as const
-export const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
+const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
 
 const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
 

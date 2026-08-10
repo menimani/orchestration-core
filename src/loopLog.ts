@@ -4,7 +4,7 @@ import type { OrchPaths } from './paths.ts'
 
 const MAX_MESSAGE_LENGTH = 80
 const WARN_SUMMARY_INTERVAL_MS = 10 * 60 * 1000
-export const LOOP_EVENT_NAME_WIDTH = 10
+const LOOP_EVENT_NAME_WIDTH = 10
 
 const EVENT_NAMES = [
   'Completed',
