@@ -29,7 +29,7 @@ function filesOfCommit(repoRoot: string, sha: string): string[] {
  * Estimate which screen or domain a commit changed from the files it touched. With
  * many screens the reader cannot grasp the overall picture from type alone.
  */
-export function areaOfCommit(repoRoot: string, sha: string): string {
+function areaOfCommit(repoRoot: string, sha: string): string {
   const files = filesOfCommit(repoRoot, sha)
 
   for (const file of files) {
@@ -65,7 +65,7 @@ export function areaOfCommit(repoRoot: string, sha: string): string {
  * the touched files and the subject, because with type prefixes alone a change that
  * affects authentication is buried in bug fixes.
  */
-export function categoryOfCommit(repoRoot: string, sha: string, subject: string): Category {
+function categoryOfCommit(repoRoot: string, sha: string, subject: string): Category {
   const files = filesOfCommit(repoRoot, sha)
 
   if (files.some((file) => /\/(auth|twofactor)\/|SecurityConfig\.java|\/value\/Url\.java/.test(file))
@@ -150,7 +150,7 @@ function branchCommits(repoRoot: string): Array<{ sha: string; subject: string }
     })
 }
 
-export interface TitleContext {
+interface TitleContext {
   cycle: number
   maxCycles: number
 }
