@@ -148,12 +148,23 @@ afterEach(() => {
 })
 
 describe('daemon startup', () => {
-  it('installs orchestration dependencies when package.json names a missing package', () => {
+  function writeOrchestrationManifests(lockVersion: string): void {
     mkdirSync(join(repoRoot, 'orchestration', 'ts'), { recursive: true })
     writeFileSync(join(repoRoot, 'orchestration', 'ts', 'package.json'), JSON.stringify({
       dependencies: { zod: '^4.4.3' },
     }))
-    const install = vi.fn()
+    writeFileSync(join(repoRoot, 'orchestration', 'ts', 'package-lock.json'), lockVersion)
+  }
+
+  function successfulInstall(): void {
+    const packageDir = join(repoRoot, 'orchestration', 'ts', 'node_modules', 'zod')
+    mkdirSync(packageDir, { recursive: true })
+    writeFileSync(join(packageDir, 'package.json'), '{}\n')
+  }
+
+  it('records the installed lockfile and skips a synchronized restart', () => {
+    writeOrchestrationManifests('{"lockfileVersion":3}\n')
+    const install = vi.fn(successfulInstall)
     syncOrchestrationDepsAtStartup(
       paths,
       (name, subject) => logged.push(`${name} ${subject}`),
@@ -163,6 +174,25 @@ describe('daemon startup', () => {
     expect(install).toHaveBeenCalledOnce()
     expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
     expect(logged).toContain('Installed  orchestration deps  at startup')
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install })
+
+    expect(install).toHaveBeenCalledOnce()
+  })
+
+  it('reinstalls after a lockfile change and retries a failed upgrade on restart', () => {
+    writeOrchestrationManifests('{"lockfileVersion":3}\n')
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: successfulInstall })
+    writeFileSync(
+      join(repoRoot, 'orchestration', 'ts', 'package-lock.json'),
+      '{"lockfileVersion":3,"packages":{"node_modules/zod":{"version":"4.5.0"}}}\n',
+    )
+    const failedInstall = vi.fn(() => { throw new Error('registry unavailable') })
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall })
+
+    expect(failedInstall).toHaveBeenCalledTimes(2)
   })
 })
 

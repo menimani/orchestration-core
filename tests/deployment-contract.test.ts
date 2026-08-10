@@ -27,4 +27,13 @@ describe('production deployment identity contract', () => {
     expect(frontendDockerfile).toContain('org.opencontainers.image.revision=$DEPLOY_COMMIT_SHA')
     expect(backendDockerfile).toContain('org.opencontainers.image.revision=$DEPLOY_COMMIT_SHA')
   })
+
+  it('notifies after both image building and deployment have finished', () => {
+    const workflow = source('.github/workflows/deploy.yml')
+
+    expect(workflow).toContain('notify:\n    name: Send the deployment notification\n    if: always()')
+    expect(workflow).toContain('needs: [build-and-push, deploy]')
+    expect(workflow).toContain("if: needs.build-and-push.result == 'success' && needs.deploy.result == 'success'")
+    expect(workflow).toContain("if: needs.build-and-push.result != 'success' || needs.deploy.result != 'success'")
+  })
 })

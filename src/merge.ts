@@ -1,5 +1,8 @@
 import { execFileSync, execSync } from 'node:child_process'
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
@@ -43,7 +46,7 @@ export type OrchestrationDepsEvent = (name: 'Installed' | 'WARN', subject: strin
 
 const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
   install: (cwd) => {
-    execSync('npm install --no-audit --no-fund', {
+    execSync('npm ci --no-audit --no-fund', {
       cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     })
@@ -54,6 +57,16 @@ const ORCHESTRATION_MANIFESTS = new Set([
   'orchestration/ts/package.json',
   'orchestration/ts/package-lock.json',
 ])
+
+function orchestrationLockHash(paths: OrchPaths): string | undefined {
+  const lockFile = join(paths.repoRoot, 'orchestration', 'ts', 'package-lock.json')
+  if (!existsSync(lockFile)) return undefined
+  return createHash('sha256').update(readFileSync(lockFile)).digest('hex')
+}
+
+function orchestrationLockHashFile(paths: OrchPaths): string {
+  return join(paths.repoRoot, 'orchestration', 'ts', 'node_modules', '.shiora-lock.sha256')
+}
 
 function installFailureSummary(error: unknown): string {
   const failure = error as { stderr?: string | Buffer }
@@ -72,6 +85,12 @@ function installOrchestrationDeps(
 ): void {
   try {
     runtime.install(join(paths.repoRoot, 'orchestration', 'ts'))
+    const lockHash = orchestrationLockHash(paths)
+    if (lockHash !== undefined) {
+      const hashFile = orchestrationLockHashFile(paths)
+      mkdirSync(join(paths.repoRoot, 'orchestration', 'ts', 'node_modules'), { recursive: true })
+      writeFileSync(hashFile, `${lockHash}\n`)
+    }
     event('Installed', ` orchestration deps  ${subject}`)
   } catch (error) {
     event('WARN', `orchestration deps install ${subject} failed: ${installFailureSummary(error)}`)
@@ -99,6 +118,13 @@ export function syncOrchestrationDepsAfterMerge(
 function orchestrationDepsMissing(paths: OrchPaths): boolean {
   const packageFile = join(paths.repoRoot, 'orchestration', 'ts', 'package.json')
   if (!existsSync(packageFile)) return false
+  const lockHash = orchestrationLockHash(paths)
+  if (lockHash === undefined) return true
+  try {
+    if (readFileSync(orchestrationLockHashFile(paths), 'utf8').trim() !== lockHash) return true
+  } catch {
+    return true
+  }
   const manifest = JSON.parse(readFileSync(packageFile, 'utf8')) as {
     dependencies?: Record<string, string>
     devDependencies?: Record<string, string>
