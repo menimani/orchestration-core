@@ -11,7 +11,9 @@ import {
   descSlug, existingTaskIdForDesc, taskIdForDesc, newTaskId, recordTaskIdForDesc,
   shortTaskId,
 } from './ids.ts'
-import { mergeRemoteTask, mergeTask, MergeError } from './merge.ts'
+import {
+  mergeRemoteTask, mergeTask, MergeError, type OrchestrationDepsRuntime,
+} from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
   branchName, worktreeDir, type OrchPaths,
@@ -43,6 +45,7 @@ export interface LoopDeps {
   project: ProjectAdapter
   log: (line: string) => void
   now: () => Date
+  orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
 }
 
 interface QueueEntry {
@@ -56,7 +59,7 @@ interface FindingDispatch {
 }
 
 export function createLoop(deps: LoopDeps) {
-  const { paths, config, forge, runner, project, log, now } = deps
+  const { paths, config, forge, runner, project, log, now, orchestrationDepsRuntime } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
   const scannedDir = join(paths.queueDir, 'scanned')
@@ -81,6 +84,10 @@ export function createLoop(deps: LoopDeps) {
       return
     }
     log(subject === '' ? name : `${name} ${subject}`)
+  }
+
+  function orchestrationDepsEvent(name: 'Installed' | 'WARN', subject: string): void {
+    event(name, subject)
   }
 
   function warning(callSite: string, operation: string, subject: string): void {
@@ -234,6 +241,8 @@ export function createLoop(deps: LoopDeps) {
             skipAutoTest: config.skipAutoTest,
             project,
             outputFile: mergeLog,
+            orchestrationDepsRuntime,
+            onOrchestrationDepsEvent: orchestrationDepsEvent,
           },
         )
         writeFileSync(mergeFailureFile, '0\n')
@@ -1192,6 +1201,8 @@ export function createLoop(deps: LoopDeps) {
               project,
               closesIssue: linkedIssue,
               outputFile: mergeLog,
+              orchestrationDepsRuntime,
+              onOrchestrationDepsEvent: orchestrationDepsEvent,
             })
             event('Merged', `${shortTaskId(taskId)}  commit ${mergeCommit.slice(0, 8)}`)
             writeFileSync(mergeFailureFile, '0\n')

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -26,6 +26,12 @@ const installProject: ProjectAdapter = {
       command: 'node -e "console.log(\'install ran\')"',
     },
   }],
+  cycleSuite: () => [],
+}
+
+const noCheckProject: ProjectAdapter = {
+  name: 'no-check',
+  mergeChecks: () => [],
   cycleSuite: () => [],
 }
 
@@ -243,6 +249,66 @@ describe('mergeTask', () => {
     const output = readFileSync(outputFile, 'utf8')
     expect(output).not.toContain('install ran')
     expect(output.split(/\r?\n/).filter((line) => line === 'check ran')).toHaveLength(1)
+  })
+
+  it('installs orchestration dependencies once when the merge changes package.json', async () => {
+    const taskId = '20260808_000000_010_user-adds-orchestration-dependency'
+    const worktree = await makeCompletedTask(taskId)
+    mkdirSync(join(worktree, 'orchestration', 'ts'), { recursive: true })
+    writeFileSync(join(worktree, 'orchestration', 'ts', 'package.json'), '{"dependencies":{}}\n')
+    git(worktree, ['add', 'orchestration/ts/package.json'])
+    git(worktree, ['commit', '-qm', 'feat: add orchestration dependency'])
+    const install = vi.fn()
+    const event = vi.fn()
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light',
+      project: noCheckProject,
+      orchestrationDepsRuntime: { install },
+      onOrchestrationDepsEvent: event,
+    })
+
+    expect(install).toHaveBeenCalledOnce()
+    expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
+    expect(event).toHaveBeenCalledWith(
+      'Installed', ' orchestration deps  after 010_user',
+    )
+  })
+
+  it('does not install orchestration dependencies when the merge leaves manifests unchanged', async () => {
+    const taskId = '20260808_000000_011_user-changes-source'
+    await makeCompletedTask(taskId, { commit: true })
+    const install = vi.fn()
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light',
+      project: noCheckProject,
+      orchestrationDepsRuntime: { install },
+    })
+
+    expect(install).not.toHaveBeenCalled()
+  })
+
+  it('warns without failing the merge when orchestration dependency installation fails', async () => {
+    const taskId = '20260808_000000_012_user-adds-broken-dependency'
+    const worktree = await makeCompletedTask(taskId)
+    mkdirSync(join(worktree, 'orchestration', 'ts'), { recursive: true })
+    writeFileSync(join(worktree, 'orchestration', 'ts', 'package-lock.json'), '{}\n')
+    git(worktree, ['add', 'orchestration/ts/package-lock.json'])
+    git(worktree, ['commit', '-qm', 'feat: update orchestration lockfile'])
+    const event = vi.fn()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light',
+      project: noCheckProject,
+      orchestrationDepsRuntime: { install: () => { throw new Error('registry unavailable') } },
+      onOrchestrationDepsEvent: event,
+    })).resolves.toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
+
+    expect(event).toHaveBeenCalledWith(
+      'WARN', expect.stringContaining('registry unavailable'),
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 })
 

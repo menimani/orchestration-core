@@ -13,7 +13,7 @@ import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import {
   commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
 } from './issueQueue.ts'
-import { mergeTask, MergeError } from './merge.ts'
+import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
 import { deploy } from './deploy.ts'
 import { isScanTaskId, logFile, orchPaths, type OrchPaths } from './paths.ts'
 import { pruneTasks } from './prune.ts'
@@ -518,6 +518,10 @@ async function runLoopDaemon(
     rmSync(stopFile, { force: true })
     if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
 
+    syncOrchestrationDepsAtStartup(
+      paths,
+      (name, subject) => log(`${name} ${subject}`),
+    )
     const forge = await loadForge(config.forge, paths.repoRoot)
     const runner = await loadRunner(config.runner)
     const project = await loadProject(config.project)

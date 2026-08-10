@@ -1,7 +1,8 @@
 import { execFileSync, execSync } from 'node:child_process'
-import { appendFileSync, closeSync, existsSync, openSync, rmSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
+import { shortTaskId } from './ids.ts'
 import { branchName, isInspectionTaskId, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus, writeStatus } from './status.ts'
 
@@ -30,6 +31,94 @@ export interface MergeOptions {
    * instead of stdout, so a loop's log stays readable and the details stay findable.
    */
   outputFile?: string | undefined
+  orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
+  onOrchestrationDepsEvent?: OrchestrationDepsEvent | undefined
+}
+
+export interface OrchestrationDepsRuntime {
+  install: (cwd: string) => void
+}
+
+export type OrchestrationDepsEvent = (name: 'Installed' | 'WARN', subject: string) => void
+
+const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
+  install: (cwd) => {
+    execSync('npm install --no-audit --no-fund', {
+      cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    })
+  },
+}
+
+const ORCHESTRATION_MANIFESTS = new Set([
+  'orchestration/ts/package.json',
+  'orchestration/ts/package-lock.json',
+])
+
+function installFailureSummary(error: unknown): string {
+  const failure = error as { stderr?: string | Buffer }
+  const stderr = Buffer.isBuffer(failure.stderr)
+    ? failure.stderr.toString('utf8')
+    : failure.stderr
+  return (stderr?.trim() || (error instanceof Error ? error.message : String(error)))
+    .replaceAll(/\s+/g, ' ')
+}
+
+function installOrchestrationDeps(
+  paths: OrchPaths,
+  subject: string,
+  event: OrchestrationDepsEvent,
+  runtime: OrchestrationDepsRuntime,
+): void {
+  try {
+    runtime.install(join(paths.repoRoot, 'orchestration', 'ts'))
+    event('Installed', ` orchestration deps  ${subject}`)
+  } catch (error) {
+    event('WARN', `orchestration deps install ${subject} failed: ${installFailureSummary(error)}`)
+  }
+}
+
+export function syncOrchestrationDepsAfterMerge(
+  paths: OrchPaths,
+  mergeCommit: string,
+  taskId: string,
+  event: OrchestrationDepsEvent,
+  runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
+): void {
+  const [, firstParent, secondParent] = git(paths.repoRoot, [
+    'rev-list', '--parents', '-n', '1', mergeCommit,
+  ]).trim().split(/\s+/)
+  if (firstParent === undefined || secondParent === undefined) return
+  const changed = git(paths.repoRoot, [
+    'diff', '--name-only', firstParent, mergeCommit,
+  ]).split(/\r?\n/).filter((path) => path !== '')
+  if (!changed.some((path) => ORCHESTRATION_MANIFESTS.has(path))) return
+  installOrchestrationDeps(paths, `after ${shortTaskId(taskId)}`, event, runtime)
+}
+
+function orchestrationDepsMissing(paths: OrchPaths): boolean {
+  const packageFile = join(paths.repoRoot, 'orchestration', 'ts', 'package.json')
+  if (!existsSync(packageFile)) return false
+  const manifest = JSON.parse(readFileSync(packageFile, 'utf8')) as {
+    dependencies?: Record<string, string>
+    devDependencies?: Record<string, string>
+  }
+  const dependencies = [
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...Object.keys(manifest.devDependencies ?? {}),
+  ]
+  return dependencies.some((name) => !existsSync(join(
+    paths.repoRoot, 'orchestration', 'ts', 'node_modules', ...name.split('/'), 'package.json',
+  )))
+}
+
+export function syncOrchestrationDepsAtStartup(
+  paths: OrchPaths,
+  event: OrchestrationDepsEvent,
+  runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
+): void {
+  if (!orchestrationDepsMissing(paths)) return
+  installOrchestrationDeps(paths, 'at startup', event, runtime)
 }
 
 interface MergeIo {
@@ -199,6 +288,8 @@ function removeTemporaryWorktree(paths: OrchPaths, worktree: string): void {
  */
 export async function mergeTask(paths: OrchPaths, taskId: string, options: MergeOptions): Promise<string> {
   const io = mergeIo(options.outputFile)
+  const depsEvent = options.onOrchestrationDepsEvent
+    ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
 
   const status = readStatus(paths, taskId)
   if (status === undefined) {
@@ -250,6 +341,11 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     throw new MergeError('A merge conflict occurred. Rebase the worktree, then retry the merge.')
   }
 
+  const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  syncOrchestrationDepsAfterMerge(
+    paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+  )
+
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
   // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
   // once left the merge in place while the task was recorded as failed.
@@ -265,7 +361,7 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   }
   await writeStatus(paths, taskId, 'merged')
   io.out(`Merged ${taskId} and removed the worktree.`)
-  return git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  return mergeCommit
 }
 
 /** Merge an already-fetched worker branch through the same selected checks as a local task. */
@@ -307,6 +403,8 @@ export async function mergeRemoteTask(
   const taskId = branch.slice('task/'.length)
   const worktree = join(paths.worktreesDir, `.adopt-${issueNumber}-${process.pid}-${Date.now()}`)
   const io = mergeIo(options.outputFile)
+  const depsEvent = options.onOrchestrationDepsEvent
+    ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
   const mergeMessage = `Merge ${taskId} via Codex (closes #${issueNumber})`
   try {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
@@ -334,7 +432,11 @@ export async function mergeRemoteTask(
       }
       throw new MergeError(`A merge conflict occurred while adopting ${branch}.`)
     }
-    return git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+    const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+    syncOrchestrationDepsAfterMerge(
+      paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+    )
+    return mergeCommit
   } finally {
     removeTemporaryWorktree(paths, worktree)
   }

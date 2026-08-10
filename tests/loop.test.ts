@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Forge, PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
@@ -11,6 +11,9 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import { recordIssueForTask, recordIssuePromotion } from '../src/issueQueue.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
+import {
+  syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
+} from '../src/merge.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 
@@ -48,7 +51,11 @@ const stubProject: ProjectAdapter = {
   cycleSuite: () => [],
 }
 
-function makeLoop(overrides: Partial<LoopConfig> = {}, project: ProjectAdapter = stubProject): Loop {
+function makeLoop(
+  overrides: Partial<LoopConfig> = {},
+  project: ProjectAdapter = stubProject,
+  orchestrationDepsRuntime?: OrchestrationDepsRuntime,
+): Loop {
   const config = { ...loadConfig({}), ...overrides }
   return createLoop({
     paths,
@@ -58,6 +65,7 @@ function makeLoop(overrides: Partial<LoopConfig> = {}, project: ProjectAdapter =
     project,
     log: (line) => logged.push(line),
     now: () => new Date(2026, 7, 8, 12, 0, 0),
+    orchestrationDepsRuntime,
   })
 }
 
@@ -104,6 +112,25 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(repoRoot, { recursive: true, force: true })
+})
+
+describe('daemon startup', () => {
+  it('installs orchestration dependencies when package.json names a missing package', () => {
+    mkdirSync(join(repoRoot, 'orchestration', 'ts'), { recursive: true })
+    writeFileSync(join(repoRoot, 'orchestration', 'ts', 'package.json'), JSON.stringify({
+      dependencies: { zod: '^4.4.3' },
+    }))
+    const install = vi.fn()
+    syncOrchestrationDepsAtStartup(
+      paths,
+      (name, subject) => logged.push(`${name} ${subject}`),
+      { install },
+    )
+
+    expect(install).toHaveBeenCalledOnce()
+    expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
+    expect(logged).toContain('Installed  orchestration deps  at startup')
+  })
 })
 
 describe('actionable findings', () => {
