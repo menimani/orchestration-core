@@ -127,6 +127,31 @@ describe('manual merge', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('prints a failed-task contract marker as an exact standalone line', async () => {
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260810_010203_031_auto-failed-task'
+    await writeStatus(paths, taskId, 'failed')
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_BURST_FAILURES: '1',
+        POLL_INTERVAL: '0',
+        SCAN_ENABLED: 'false',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout.split(/\r?\n/)).toContain(
+      `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`,
+    )
+  })
+
   it('removes the PID and issue marker after a startup failure', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,

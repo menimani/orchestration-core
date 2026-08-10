@@ -28,8 +28,8 @@ import { observeNextPoll } from './wake.ts'
 import { runWorkerCommand } from './worker.ts'
 
 // The command surface: each package.json script dispatches here with the command name
-// as the first argument. CLI tokens such as `Enqueued:`, `Created:`, and `LOOP_DONE:`
-// are frozen contracts that skills and tests key on.
+// as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
+// `FAILED:`, and `LOOP_DONE:` are frozen contracts that skills and tests key on.
 
 type Command = (paths: OrchPaths, args: string[]) => Promise<number>
 
@@ -423,6 +423,10 @@ const cmdLoop: Command = async (paths, args) => {
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const log = (message: string, error = false): void => {
     const write = error ? console.error : console.log
+    if (/^(?:CYCLE_COMPLETE|FAILED|LOOP_DONE):/.test(message)) {
+      write(message)
+      return
+    }
     const currentCycle = existsSync(scanCountFile)
       ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
       : 0

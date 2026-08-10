@@ -122,31 +122,20 @@ export interface LoopLogContext {
   now?: Date
 }
 
-function milestoneSubject(subject: string, content: string): string {
-  const number = /\/pull\/(\d+)(?:\D|$)/.exec(content)?.[1]
-  return number === undefined ? subject : `${subject.padEnd(12)}PR #${number}`
-}
-
 function splitEvent(message: string): { event: string; subject: string } {
   const content = message.startsWith('[loop] ')
     ? message.slice('[loop] '.length)
     : message === '[loop]' ? '' : message
-  // LOOP_DONE is also a CLI stdout contract. It reaches this formatter unchanged,
-  // then becomes the human-facing loop.log milestone.
-  if (content.startsWith('LOOP_DONE:')) {
-    return { event: 'Completed', subject: milestoneSubject('Loop', content) }
-  }
-  if (content.startsWith('CYCLE_COMPLETE')) {
-    return { event: 'Completed', subject: milestoneSubject('Cycle', content) }
+  for (const marker of ['CYCLE_COMPLETE', 'FAILED', 'LOOP_DONE']) {
+    if (content.startsWith(`${marker}:`)) {
+      return { event: `${marker}:`, subject: content.slice(marker.length + 1).trimStart() }
+    }
   }
   if (content.startsWith('DECISION_REQUIRED')) {
     return {
       event: 'Decision',
       subject: content.slice('DECISION_REQUIRED'.length).replace(/^:\s*/, '').trimStart(),
     }
-  }
-  if (content.startsWith('FAILED:')) {
-    return { event: 'Failed', subject: content.slice('FAILED:'.length).trimStart() }
   }
   for (const event of EVENT_NAMES) {
     if (content === event) return { event, subject: '' }

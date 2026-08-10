@@ -152,13 +152,13 @@ describe('loopLogLines', () => {
       .toBe('2026-08-10 01:02:03 [loop 04/12] Status     Scan=2  Running=3  Queue=1')
   })
 
-  it('formats cycle and loop completion milestones', () => {
-    expect(loopLogLines('Completed Cycle       PR #322', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Completed  Cycle       PR #322')
-    expect(loopLogLines(
-      'LOOP_DONE: https://example.test/pull/322 — rewrite the final summary.',
-      context,
-    )[0]).toBe('2026-08-10 01:02:03 [loop 04/12] Completed  Loop        PR #322')
+  it('does not rewrite frozen automation markers as presentation events', () => {
+    expect(loopLogLines('CYCLE_COMPLETE: 4/12 PR:https://example.test/pull/322', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] CYCLE_COMPLETE: 4/12 PR:https://example.test/pull/322')
+    expect(loopLogLines('FAILED: 20260810_010203_031_auto — log: logs/task.log', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] FAILED:    20260810_010203_031_auto — log: logs/task.log')
+    expect(loopLogLines('LOOP_DONE: https://example.test/pull/322', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] LOOP_DONE: https://example.test/pull/322')
   })
 
   it('caps an over-length message at 79 characters plus an ellipsis', () => {

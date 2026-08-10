@@ -901,6 +901,8 @@ export function createLoop(deps: LoopDeps) {
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
     log(`LOOP_DONE: ${prUrl} — The body still reflects history and must be rewritten as a final summary.`)
+    const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
+    event('Completed', 'Loop', prNumber === undefined ? '' : `PR #${prNumber}`)
   }
 
   /**
@@ -1045,6 +1047,7 @@ export function createLoop(deps: LoopDeps) {
 
           if (config.autoPr) await ensureDraftPr('cycle')
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
+          log(`CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
           const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
           event('Completed', 'Cycle', prNumber === undefined ? '' : `PR #${prNumber}`)
           writeFileSync(completeFlag, '')
@@ -1227,6 +1230,7 @@ export function createLoop(deps: LoopDeps) {
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       if (status === 'failed' && !existsSync(failedFlag)) {
         const cycleNow = readCount(scanCountFile)
+        log(`FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.log`)
         appendFileSync(join(paths.queueDir, `failed-${cycleNow}`), `${taskId}\n`)
         writeFileSync(failedFlag, '')

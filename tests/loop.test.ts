@@ -874,6 +874,7 @@ describe('failure announcement and burst stop (via poll)', () => {
 
     expect(await loop.poll()).toBe('continue')
     for (const taskId of ['f1', 'f2', 'f3']) {
+      expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`)
       expect(logText()).toContain(`Failed ${taskId.padEnd(12)}log ${taskId}.log`)
     }
     const failedRecord = readFileSync(join(paths.queueDir, 'failed-4'), 'utf8')
@@ -901,8 +902,10 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe(`${taskId}\n`)
-    expect(logged.indexOf('Failed 001_scan    log 001_scan.log'))
-      .toBeLessThan(logged.findIndex((line) => line.includes('Completed Cycle')))
+    expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`)
+    expect(logged).toContain('CYCLE_COMPLETE: 1/3')
+    expect(logged.indexOf(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`))
+      .toBeLessThan(logged.indexOf('CYCLE_COMPLETE: 1/3'))
   })
 
   it('does not start queued work or scans while a stop is pending', async () => {
@@ -914,6 +917,26 @@ describe('failure announcement and burst stop (via poll)', () => {
     await loop.poll()
     expect(runnerStarts).toHaveLength(0)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain('queued-task')
+  })
+})
+
+describe('completion marker output', () => {
+  it('emits LOOP_DONE verbatim before the formatted completion row', async () => {
+    initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    const loop = makeLoop()
+
+    await loop.postLoopPr()
+
+    expect(logged).toContain(
+      'LOOP_DONE: https://example.test/pull/1 — The body still reflects history and must be rewritten as a final summary.',
+    )
+    expect(logged).toContain('Completed Loop        PR #1')
+    expect(logged.indexOf('LOOP_DONE: https://example.test/pull/1 — The body still reflects history and must be rewritten as a final summary.'))
+      .toBeLessThan(logged.indexOf('Completed Loop        PR #1'))
   })
 })
 
