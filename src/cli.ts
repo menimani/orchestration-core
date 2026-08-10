@@ -573,8 +573,6 @@ async function runLoopDaemon(
   }
 }
 
-// Every recent run has ended at the final-review cap, been promoted by hand, and left
-// loop.log without its true ending. This records that ending after the fact.
 const cmdShipped: Command = async (paths, args) => {
   const pr = args[0]
   if (pr === undefined || args.length !== 1) {
