@@ -733,7 +733,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6 })
 
     expect(await loop.poll()).toBe('continue')
-    expect(logText()).toMatch(/^Status Running=\d+, Queue=\d+$/m)
+    expect(logText()).toMatch(/^Status Running=\d+  Queue=\d+$/m)
   })
 
   it('reports only scan counters while scans run', async () => {
@@ -750,7 +750,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     writeRawStatus('20260809_000001_002_auto-fix', 'running', process.pid)
 
     expect(await loop.poll()).toBe('continue')
-    expect(logged).toContain('Status Scan=1, Running=1, Queue=0')
+    expect(logged).toContain('Status Scan=1  Running=1  Queue=0')
   })
 
   it('announces a failure once, records it for the cycle, and stops on a burst', async () => {

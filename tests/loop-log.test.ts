@@ -129,13 +129,13 @@ describe('loopLogLines', () => {
     expect(scan.indexOf('030_scan')).toBe(decision.indexOf('choose a database'))
   })
 
-  it('keeps the Status counter exception compact', () => {
+  it('aligns the Status counter groups with the shared event column', () => {
     expect(loopLogLines('Status Scan=4', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Status Scan=4')
-    expect(loopLogLines('Status Running=8, Queue=0', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Status Running=8, Queue=0')
-    expect(loopLogLines('Status Scan=2, Running=3, Queue=1', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Status Scan=2, Running=3, Queue=1')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Status     Scan=4')
+    expect(loopLogLines('Status Running=8  Queue=0', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Status     Running=8  Queue=0')
+    expect(loopLogLines('Status Scan=2  Running=3  Queue=1', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Status     Scan=2  Running=3  Queue=1')
   })
 
   it('formats cycle and loop completion milestones', () => {

@@ -170,9 +170,7 @@ export function loopLogLines(message: string, context: LoopLogContext): string[]
   const physicalLines = message.split(/\r?\n/)
   const { event, subject } = splitEvent(physicalLines[0] ?? '')
   return [subject, ...physicalLines.slice(1)].map((line) => {
-    const content = event === 'Status'
-      ? `${event}${line === '' ? '' : ` ${line}`}`
-      : `${event.padEnd(LOOP_EVENT_NAME_WIDTH)}${line === '' ? '' : ` ${line}`}`
+    const content = `${event.padEnd(LOOP_EVENT_NAME_WIDTH)}${line === '' ? '' : ` ${line}`}`
     const capped = content.length > MAX_MESSAGE_LENGTH
       ? `${content.slice(0, MAX_MESSAGE_LENGTH - 1)}…`
       : content

@@ -1329,7 +1329,7 @@ export function createLoop(deps: LoopDeps) {
         ? [`Running=${runningTasks}`, `Queue=${queue}`]
         : []),
     ]
-    event('Status', counters.join(', '))
+    event('Status', counters.join('  '))
     return 'continue'
   }
 
