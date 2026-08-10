@@ -131,10 +131,11 @@ describe('manually promoted run ending', () => {
     const paths = orchPaths(repoRoot)
     mkdirSync(paths.queueDir, { recursive: true })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '12\n')
+    writeFileSync(join(paths.queueDir, 'cycle-cap.txt'), '12\n')
 
     const result = spawnSync(process.execPath, [CLI, 'shipped', '322'], {
       cwd: repoRoot,
-      env: { ...process.env, MAX_SCAN_CYCLES: '12' },
+      env: { ...process.env, MAX_SCAN_CYCLES: '3' },
       encoding: 'utf8',
       windowsHide: true,
     })
@@ -146,6 +147,23 @@ describe('manually promoted run ending', () => {
     )
     expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
       .toBe('LOOP_DONE: 322\n')
+  })
+
+  it('falls back to its configured cycle cap when no daemon cap was recorded', () => {
+    const paths = orchPaths(repoRoot)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '5\n')
+
+    const result = spawnSync(process.execPath, [CLI, 'shipped', '323'], {
+      cwd: repoRoot,
+      env: { ...process.env, MAX_SCAN_CYCLES: '8' },
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(0)
+    expect(readFileSync(join(paths.logsDir, 'loop.log'), 'utf8')).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 05\/08\] Completed {2}Loop {8}PR #323\r?\n$/,
+    )
   })
 
   it('rejects a call without a pull request reference', () => {
@@ -239,7 +257,10 @@ describe('loop daemon ownership', () => {
     expect(existsSync(daemonFile('issue-mode'))).toBe(false)
   })
 
-  it('removes the PID and issue marker after a normal shutdown', () => {
+  it('refreshes the cycle cap and removes daemon markers after a normal shutdown', () => {
+    mkdirSync(dirname(daemonFile('cycle-cap.txt')), { recursive: true })
+    writeFileSync(daemonFile('cycle-cap.txt'), '99\n')
+
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,
       env: {
@@ -256,5 +277,6 @@ describe('loop daemon ownership', () => {
     expect(result.stdout).toBe('')
     expect(existsSync(daemonFile('loop.pid'))).toBe(false)
     expect(existsSync(daemonFile('issue-mode'))).toBe(false)
+    expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('0\n')
   })
 })

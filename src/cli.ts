@@ -490,6 +490,7 @@ async function runLoopDaemon(
   const pidFile = join(paths.queueDir, 'loop.pid')
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+  const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
 
   // PID lock: one loop per repository.
   if (existsSync(pidFile)) {
@@ -527,6 +528,7 @@ async function runLoopDaemon(
     // instance's signal is never removed.
     rmSync(stopFile, { force: true })
     if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
+    writeFileSync(cycleCapFile, `${config.maxScanCycles}\n`)
 
     syncOrchestrationDepsAtStartup(
       paths,
@@ -586,13 +588,17 @@ const cmdShipped: Command = async (paths, args) => {
   const reference = /^#?\d+$/.test(pr) ? `#${pr.replace(/^#/, '')}` : pr
   const config = loadConfig()
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+  const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
   const currentCycle = existsSync(scanCountFile)
     ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
     : 0
+  const cycleCap = existsSync(cycleCapFile)
+    ? Number(readFileSync(cycleCapFile, 'utf8').trim())
+    : config.maxScanCycles
   mkdirSync(paths.logsDir, { recursive: true })
   const lines = loopLogLines(formatEventLine('Completed', 'Loop', `PR ${reference}`), {
     currentCycle,
-    cycleCap: config.maxScanCycles,
+    cycleCap,
   })
   appendFileSync(join(paths.logsDir, 'loop.log'), `${lines.join('\n')}\n`)
   appendFileSync(join(paths.logsDir, 'loop-markers.log'), `LOOP_DONE: ${pr}\n`)
