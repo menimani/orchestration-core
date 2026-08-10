@@ -121,9 +121,9 @@ export interface LoopLogContext {
   now?: Date
 }
 
-function prDetail(content: string): string {
+function milestoneSubject(subject: string, content: string): string {
   const number = /\/pull\/(\d+)(?:\D|$)/.exec(content)?.[1]
-  return number === undefined ? '' : `  PR #${number}`
+  return number === undefined ? subject : `${subject.padEnd(12)}PR #${number}`
 }
 
 function splitEvent(message: string): { event: string; subject: string } {
@@ -133,10 +133,10 @@ function splitEvent(message: string): { event: string; subject: string } {
   // LOOP_DONE is also a CLI stdout contract. It reaches this formatter unchanged,
   // then becomes the human-facing loop.log milestone.
   if (content.startsWith('LOOP_DONE:')) {
-    return { event: 'Completed', subject: `Loop${prDetail(content)}` }
+    return { event: 'Completed', subject: milestoneSubject('Loop', content) }
   }
   if (content.startsWith('CYCLE_COMPLETE')) {
-    return { event: 'Completed', subject: `Cycle${prDetail(content)}` }
+    return { event: 'Completed', subject: milestoneSubject('Cycle', content) }
   }
   if (content.startsWith('DECISION_REQUIRED')) {
     return {

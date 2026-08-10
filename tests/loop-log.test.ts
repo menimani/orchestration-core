@@ -110,16 +110,16 @@ describe('loopLogLines', () => {
   })
 
   it('puts the timestamp first and zero-pads the cycle tag', () => {
-    expect(loopLogLines('Started 030_scan  scan 1/4', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Started    030_scan  scan 1/4')
+    expect(loopLogLines('Started 030_scan    scan 1/4', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Started    030_scan    scan 1/4')
 
     expect(loopLogLines('WARN waiting', { ...context, currentCycle: 0 })[0])
       .toContain('[loop 00/12]')
   })
 
   it('uses the frozen single-word verb column', () => {
-    expect(loopLogLines('Failed 031_auto  log 031_auto.log', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Failed     031_auto  log 031_auto.log')
+    expect(loopLogLines('Failed 031_auto    log 031_auto.log', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Failed     031_auto    log 031_auto.log')
   })
 
   it('aligns subjects for verbs of different lengths', () => {
@@ -127,6 +127,13 @@ describe('loopLogLines', () => {
     const decision = loopLogLines('Decision choose a database', context)[0]!
 
     expect(scan.indexOf('030_scan')).toBe(decision.indexOf('choose a database'))
+  })
+
+  it('starts details at the same column for different subjects', () => {
+    const scan = loopLogLines('Started 030_scan    scan 1/4', context)[0]!
+    const review = loopLogLines('Started 227_review  effort medium', context)[0]!
+
+    expect(scan.indexOf('scan 1/4')).toBe(review.indexOf('effort medium'))
   })
 
   it('aligns the Status counter groups with the shared event column', () => {
@@ -139,12 +146,12 @@ describe('loopLogLines', () => {
   })
 
   it('formats cycle and loop completion milestones', () => {
-    expect(loopLogLines('Completed Cycle  PR #322', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Completed  Cycle  PR #322')
+    expect(loopLogLines('Completed Cycle       PR #322', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Completed  Cycle       PR #322')
     expect(loopLogLines(
       'LOOP_DONE: https://example.test/pull/322 — rewrite the final summary.',
       context,
-    )[0]).toBe('2026-08-10 01:02:03 [loop 04/12] Completed  Loop  PR #322')
+    )[0]).toBe('2026-08-10 01:02:03 [loop 04/12] Completed  Loop        PR #322')
   })
 
   it('caps an over-length message at 79 characters plus an ellipsis', () => {

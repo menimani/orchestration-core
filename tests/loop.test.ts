@@ -10,7 +10,7 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import { recordIssueForTask, recordIssuePromotion } from '../src/issueQueue.ts'
-import { createLoop, type Loop } from '../src/loop.ts'
+import { createLoop, formatEventLine, type Loop } from '../src/loop.ts'
 import {
   syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
@@ -26,6 +26,21 @@ let forgeStatus: PrStatus
 let prStatusCalls: number
 let runnerStarts: string[]
 let fakeForge: FakeForge
+
+describe('formatEventLine', () => {
+  it('pads subjects to a fixed column and separates longer subjects', () => {
+    expect(formatEventLine('Claimed', '064_auto', '#349')).toBe('Claimed 064_auto    #349')
+    expect(formatEventLine('Started', '227_review', 'effort medium'))
+      .toBe('Started 227_review  effort medium')
+    expect(formatEventLine('Failed', 'subject-over-12', 'log task.log'))
+      .toBe('Failed subject-over-12  log task.log')
+  })
+
+  it('does not add trailing padding without a detail', () => {
+    expect(formatEventLine('Completed')).toBe('Completed')
+    expect(formatEventLine('Completed', '064_auto')).toBe('Completed 064_auto')
+  })
+})
 
 function makeForge(): Forge {
   fakeForge = makeFakeForge()
@@ -789,7 +804,7 @@ describe('failure announcement and burst stop (via poll)', () => {
 
     expect(await loop.poll()).toBe('continue')
     for (const taskId of ['f1', 'f2', 'f3']) {
-      expect(logText()).toContain(`Failed ${taskId}  log ${taskId}.log`)
+      expect(logText()).toContain(`Failed ${taskId.padEnd(12)}log ${taskId}.log`)
     }
     const failedRecord = readFileSync(join(paths.queueDir, 'failed-4'), 'utf8')
     expect(failedRecord.trim().split('\n')).toHaveLength(3)
@@ -816,7 +831,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe(`${taskId}\n`)
-    expect(logged.indexOf('Failed 001_scan  log 001_scan.log'))
+    expect(logged.indexOf('Failed 001_scan    log 001_scan.log'))
       .toBeLessThan(logged.findIndex((line) => line.includes('Completed Cycle')))
   })
 
