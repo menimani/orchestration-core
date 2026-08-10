@@ -238,11 +238,18 @@ function mergeIo(outputFile?: string): MergeIo {
         closeSync(outputFd)
       }
     } else {
-      const result = execSync(command, {
-        cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
-        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-      })
-      if (result !== '') process.stdout.write(result)
+      try {
+        const result = execSync(command, {
+          cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+          stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+        })
+        if (result !== '') process.stdout.write(result)
+      } catch (error) {
+        const failed = error as { stdout?: string; stderr?: string }
+        if (failed.stdout !== undefined && failed.stdout !== '') process.stdout.write(failed.stdout)
+        if (failed.stderr !== undefined && failed.stderr !== '') process.stderr.write(failed.stderr)
+        throw error
+      }
     }
   }
   const tryRun = (cwd: string, command: string, label: string): boolean => {

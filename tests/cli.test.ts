@@ -95,6 +95,35 @@ describe('manual merge', () => {
       runBranch,
     })
   })
+
+  it('forwards failed check output before reporting the merge failure', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260808_000000_002_user-failed-check'
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(join(worktree, 'work.txt'), 'done\n')
+    git(['add', '-A'], worktree)
+    git(['commit', '-qm', 'fix: complete task with failed check'], worktree)
+    await writeStatus(paths, taskId, 'completed')
+
+    const command = 'node -e "console.log(\'check stdout\'); console.error(\'check stderr\'); process.exit(1)"'
+    const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes', '--test-cmd', command], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('check stdout')
+    expect(result.stderr).toContain('check stderr')
+    expect(result.stderr).toContain('Tests failed. Aborting merge.')
+  })
 })
 
 describe('loop daemon ownership', () => {
