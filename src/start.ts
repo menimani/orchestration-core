@@ -3,6 +3,7 @@ import { appendFileSync, closeSync, existsSync, openSync, rmSync, writeFileSync 
 import { join } from 'node:path'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
+import { cleanupTask } from './cleanup.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus, writeStatus } from './status.ts'
 import { specFile } from './tasks.ts'
@@ -22,10 +23,20 @@ export function worktreeAddArgs(worktree: string, branch: string): string[] {
   return ['worktree', 'add', '--quiet', worktree, '-b', branch]
 }
 
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
 /**
  * Create the task's worktree and hand it to the runner.
  * A worktree whose task is already running is a skip, not an error, so the loop
- * does not retry endlessly; any other leftover worktree needs cleanup first.
+ * does not retry endlessly. A leftover worktree with no live owner is stale and is
+ * reclaimed before creation so an abandoned directory cannot block the queue.
  */
 export async function startTask(
   paths: OrchPaths,
@@ -49,12 +60,11 @@ export async function startTask(
   const worktree = worktreeDir(paths, taskId)
   const branch = branchName(taskId)
   if (existsSync(worktree)) {
-    if (readStatus(paths, taskId)?.status === 'running') {
+    const status = readStatus(paths, taskId)
+    if (status?.pid !== null && status?.pid !== undefined && processIsAlive(status.pid)) {
       return { outcome: 'already-running' }
     }
-    throw new Error(
-      `Worktree already exists: ${worktree}\nIf this task was abandoned, run cleanup first.`,
-    )
+    cleanupTask(paths, taskId, undefined, false)
   }
 
   const log = logFile(paths, taskId)

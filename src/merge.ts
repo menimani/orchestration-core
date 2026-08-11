@@ -3,11 +3,14 @@ import { createHash } from 'node:crypto'
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
 import { branchName, isInspectionTaskId, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus, writeStatus } from './status.ts'
+import {
+  removeWorktreeWithFallback, type WorktreeRemovalRuntime,
+} from './worktree.ts'
 
 export class MergeError extends Error {
   keepWorktree: boolean
@@ -153,28 +156,10 @@ interface MergeIo {
   tryRun: (cwd: string, command: string, label: string) => boolean
 }
 
-export interface WorktreeRemovalRuntime {
-  platform: NodeJS.Platform
-  remove: typeof rmSync
-  git: (cwd: string, args: string[]) => string
-}
-
 const worktreeRemovalRuntime: WorktreeRemovalRuntime = {
   platform: process.platform,
   remove: rmSync,
   git,
-}
-
-function extendedLengthPath(path: string): string {
-  const absolutePath = resolve(path).replaceAll('/', '\\')
-  return absolutePath.startsWith('\\\\?\\') ? absolutePath : `\\\\?\\${absolutePath}`
-}
-
-function removalFailureDetail(error: unknown): string {
-  const stderr = (error as { stderr?: string | Buffer }).stderr
-  const detail = Buffer.isBuffer(stderr) ? stderr.toString('utf8') : stderr
-  const message = detail?.trim() || (error instanceof Error ? error.message : String(error))
-  return message.replaceAll(/\s+/g, ' ')
 }
 
 export function removeMergedWorktree(
@@ -183,33 +168,16 @@ export function removeMergedWorktree(
   log: (text: string) => void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
-  let gitFailure = ''
-  try {
-    runtime.git(paths.repoRoot, ['worktree', 'remove', worktree, '--force'])
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+  if (result.fallback === undefined) return
+  if (result.fallbackFailure !== undefined) {
+    log(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
     return
-  } catch (error) {
-    gitFailure = removalFailureDetail(error)
   }
-
-  try {
-    const removalPath = runtime.platform === 'win32' ? extendedLengthPath(worktree) : worktree
-    const options = runtime.platform === 'win32'
-      ? { recursive: true, force: true, maxRetries: 3 }
-      : { recursive: true, force: true }
-    runtime.remove(removalPath, options)
-    const fallback = runtime.platform === 'win32'
-      ? 'Windows long-path fallback'
-      : 'direct-removal fallback'
-    log(`Worktree removal needed the ${fallback}: ${worktree} (${gitFailure})`)
-  } catch {
-    log(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (${gitFailure})`)
-  }
-
-  try {
-    runtime.git(paths.repoRoot, ['worktree', 'prune'])
-  } catch {
-    // cleanup is best effort; the merge verdict is already known
-  }
+  const fallback = result.fallback === 'windows-long-path'
+    ? 'Windows long-path fallback'
+    : 'direct-removal fallback'
+  log(`Worktree removal needed the ${fallback}: ${worktree} (${result.gitFailure})`)
 }
 
 function git(cwd: string, args: string[]): string {

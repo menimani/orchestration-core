@@ -3,6 +3,7 @@ import { existsSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { branchName, finalMessageFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
+import { removeWorktreeWithFallback } from './worktree.ts'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
@@ -14,6 +15,7 @@ interface CommandOptions {
 
 interface RemoveOptions {
   force?: boolean
+  maxRetries?: number
   recursive?: boolean
 }
 
@@ -113,7 +115,12 @@ function stopProcess(runtime: CleanupRuntime, pid: number): void {
  * leaving them would let the loop watch the retry in silence, completed and failed
  * alike.
  */
-export function cleanupTask(paths: OrchPaths, taskId: string, runtime: CleanupRuntime = systemRuntime): void {
+export function cleanupTask(
+  paths: OrchPaths,
+  taskId: string,
+  runtime: CleanupRuntime = systemRuntime,
+  announce = true,
+): void {
   const status = readStatus(paths, taskId)
   if (status !== undefined && status.pid !== null) {
     stopProcess(runtime, status.pid)
@@ -121,18 +128,11 @@ export function cleanupTask(paths: OrchPaths, taskId: string, runtime: CleanupRu
 
   const worktree = worktreeDir(paths, taskId)
   if (runtime.exists(worktree)) {
-    try {
-      git(runtime, paths, ['worktree', 'remove', worktree, '--force'])
-    } catch {
-      // Fall back to removing the directory directly below.
-    }
-    if (runtime.exists(worktree)) {
-      try {
-        runtime.remove(worktree, { recursive: true, force: true })
-      } catch {
-        // The existence check below is authoritative.
-      }
-    }
+    removeWorktreeWithFallback(paths.repoRoot, worktree, {
+      platform: runtime.platform,
+      remove: runtime.remove,
+      git: (_cwd, args) => git(runtime, paths, args),
+    })
   }
   if (runtime.exists(worktree)) {
     throw new Error(`Could not remove worktree ${worktree}; task state was retained.`)
@@ -173,6 +173,7 @@ export function cleanupTask(paths: OrchPaths, taskId: string, runtime: CleanupRu
   runtime.remove(finalMessageFile(paths, taskId), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', taskId), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
+  runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.depth`), { force: true })
   runtime.remove(join(paths.queueDir, 'heartbeat', taskId), { force: true })
-  console.log(`Cleaned up ${taskId}.`)
+  if (announce) console.log(`Cleaned up ${taskId}.`)
 }

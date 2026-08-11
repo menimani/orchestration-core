@@ -102,10 +102,7 @@ describe('cleanupTask', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     const runtime = makeRuntime({
       execFile: () => { throw new Error('git failed') },
-      remove: (path, options) => {
-        if (path === worktree) throw new Error('directory is locked')
-        rmSync(path, options)
-      },
+      remove: () => { throw new Error('directory is locked') },
     })
 
     expect(() => cleanupTask(paths, taskId, runtime))
@@ -114,6 +111,37 @@ describe('cleanupTask', () => {
     expectTaskStateToExist()
     expect(existsSync(worktree)).toBe(true)
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
+  })
+
+  it('uses the Windows long-path fallback when git cannot remove the worktree', () => {
+    seedTask(null)
+    const runtime = makeRuntime()
+    const execFile = runtime.execFile
+    runtime.execFile = vi.fn((command, args, options) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') {
+        throw new Error('Filename too long')
+      }
+      return execFile(command, args, options)
+    })
+    runtime.remove = vi.fn((path, options) => {
+      if (path.startsWith('\\\\?\\')) {
+        rmSync(worktree, { recursive: true, force: true })
+        return
+      }
+      rmSync(path, options)
+    })
+
+    cleanupTask(paths, taskId, runtime)
+
+    expect(runtime.remove).toHaveBeenCalledWith(
+      `\\\\?\\${worktree.replaceAll('/', '\\')}`,
+      { recursive: true, force: true, maxRetries: 3 },
+    )
+    expect(runtime.execFile).toHaveBeenCalledWith(
+      'git', ['worktree', 'prune'], expect.anything(),
+    )
+    expect(existsSync(worktree)).toBe(false)
+    expect(existsSync(statusFile(paths, taskId))).toBe(false)
   })
 
   it('retains task state when direct removal leaves the worktree registered', () => {

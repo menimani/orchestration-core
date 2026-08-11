@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Runner } from '../src/adapters/runner.ts'
-import { logFile, orchPaths, type OrchPaths } from '../src/paths.ts'
+import { logFile, orchPaths, statusFile, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { startTask, worktreeAddArgs } from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
@@ -36,6 +36,43 @@ describe('startTask', () => {
     expect(worktreeAddArgs('task-worktree', 'task/task-id')).toEqual([
       'worktree', 'add', '--quiet', 'task-worktree', '-b', 'task/task-id',
     ])
+  })
+
+  it('reclaims a stale worktree directory before starting the task', async () => {
+    const taskId = '20260809_000000_001_auto-stale-worktree'
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(specFile(paths, taskId), '# stale worktree task\n')
+    mkdirSync(worktree, { recursive: true })
+    writeFileSync(join(worktree, 'stale.txt'), 'left behind\n')
+    writeFileSync(statusFile(paths, taskId), JSON.stringify({
+      task_id: taskId, status: 'running', pid: null,
+    }))
+    const start = vi.fn(async () => process.pid)
+
+    await expect(startTask(paths, { start }, taskId, { effort: 'medium' }))
+      .resolves.toEqual({ outcome: 'started', pid: process.pid })
+
+    expect(start).toHaveBeenCalledOnce()
+    expect(existsSync(join(worktree, 'stale.txt'))).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('running')
+  })
+
+  it('does not reclaim a worktree owned by a live process', async () => {
+    const taskId = '20260809_000000_002_auto-live-worktree'
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(specFile(paths, taskId), '# live worktree task\n')
+    mkdirSync(worktree, { recursive: true })
+    writeFileSync(join(worktree, 'owned.txt'), 'still running\n')
+    writeFileSync(statusFile(paths, taskId), JSON.stringify({
+      task_id: taskId, status: 'running', pid: process.pid,
+    }))
+    const start = vi.fn(async () => process.pid)
+
+    await expect(startTask(paths, { start }, taskId, { effort: 'medium' }))
+      .resolves.toEqual({ outcome: 'already-running' })
+
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(join(worktree, 'owned.txt'))).toBe(true)
   })
 
   it('records and preserves a worktree setup failure before the runner starts', async () => {

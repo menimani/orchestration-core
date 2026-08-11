@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import {
-  descSlug, existingTaskIdForDesc, newTaskId, recordTaskIdForDesc, taskIdForDesc,
+  descSlug, existingTaskIdForDesc, forgetTaskId, newTaskId, recordTaskIdForDesc, taskIdForDesc,
 } from './ids.ts'
 import type { OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
@@ -548,6 +548,29 @@ export function issueNumberForTask(paths: OrchPaths, taskId: string): number | u
   if (!existsSync(file)) return undefined
   const raw = readFileSync(file, 'utf8').trim()
   return /^\d+$/.test(raw) ? Number(raw) : undefined
+}
+
+/** Remove the local files that make a released issue resolve to the failed task id. */
+export function dropClaimedTaskMaterialization(paths: OrchPaths, taskId: string): void {
+  rmSync(specFile(paths, taskId), { force: true })
+  rmSync(issueMapFile(paths, taskId), { force: true })
+  rmSync(join(paths.queueDir, 'effort', taskId), { force: true })
+  rmSync(join(paths.queueDir, 'inspect', taskId), { force: true })
+  rmSync(join(paths.queueDir, 'heartbeat', taskId), { force: true })
+  forgetTaskId(paths, taskId)
+}
+
+/** Return a startup claim to the shared queue before another worker can be blocked by it. */
+export async function releaseIssueClaim(
+  forge: Forge,
+  issueNumber: number,
+  assignee: string,
+): Promise<void> {
+  await withIssueCoordination(forge, issueNumber, async () => {
+    await forge.addLabel(issueNumber, LABEL_READY)
+    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+    await forge.unassignIssue(issueNumber, assignee)
+  })
 }
 
 export interface IssuePromotion {

@@ -10,9 +10,10 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
-  buildIssueBody, recordIssueForTask, recordIssuePromotion, LABEL_FINDING, LABEL_READY,
+  buildIssueBody, recordIssueForTask, recordIssuePromotion, LABEL_FINDING, LABEL_IN_PROGRESS,
+  LABEL_READY,
 } from '../src/issueQueue.ts'
-import { recordTaskIdForDesc } from '../src/ids.ts'
+import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop, formatEventLine, type Loop } from '../src/loop.ts'
 import {
   syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
@@ -77,13 +78,14 @@ function makeLoop(
   project: ProjectAdapter = stubProject,
   orchestrationDepsRuntime?: OrchestrationDepsRuntime,
   clock: () => Date = () => new Date(2026, 7, 8, 12, 0, 0),
+  runner: Runner = makeRunner(),
 ): Loop {
   const config = { ...loadConfig({}), ...overrides }
   return createLoop({
     paths,
     config,
     forge: makeForge(),
-    runner: makeRunner(),
+    runner,
     project,
     log: (line) => logged.push(line),
     now: clock,
@@ -917,6 +919,55 @@ describe('failure announcement and burst stop (via poll)', () => {
     await loop.poll()
     expect(runnerStarts).toHaveLength(0)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain('queued-task')
+  })
+
+  it('releases a claimed issue immediately when task startup fails', async () => {
+    initializeGitRepo()
+    const description = '[BUG] recover a claimed task after startup fails'
+    const attemptedTaskIds: string[] = []
+    let attempt = 0
+    const runner: Runner = {
+      start: async (options) => {
+        attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
+        if (attempt++ === 0) throw new Error('runner spawn failed')
+        return process.pid
+      },
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, maxParallel: 1 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'startup recovery',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    const firstTaskId = attemptedTaskIds[0]!
+    const released = await fakeForge.getIssue(issueNumber)
+    expect(released.labels).toContain(LABEL_READY)
+    expect(released.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(released.assignees).toEqual([])
+    expect(logged).toContain('Released 001_auto    startup failed')
+    expect(existsSync(join(paths.tasksDir, `${firstTaskId}.md`))).toBe(false)
+    expect(existsSync(statusFile(paths, firstTaskId))).toBe(false)
+    expect(existsSync(worktreeDir(paths, firstTaskId))).toBe(false)
+    expect(existingTaskIdForDesc(paths, 'auto', description)).toBeUndefined()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(attemptedTaskIds).toHaveLength(2)
+    expect(attemptedTaskIds[1]).not.toBe(firstTaskId)
+    const reclaimed = await fakeForge.getIssue(issueNumber)
+    expect(reclaimed.labels).toContain(LABEL_IN_PROGRESS)
+    expect(reclaimed.labels).not.toContain(LABEL_READY)
+    expect(reclaimed.assignees).toEqual(['worker-a'])
   })
 })
 

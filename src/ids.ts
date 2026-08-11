@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
 
@@ -82,6 +82,16 @@ export function recordTaskIdForDesc(
   taskId: string,
 ): void {
   writeFileSync(descIndexFile(paths, origin, description), `${taskId}\n`)
+}
+
+/** Remove every description index that points at a discarded task materialization. */
+export function forgetTaskId(paths: OrchPaths, taskId: string): void {
+  const indexDir = join(paths.queueDir, 'desc-index')
+  if (!existsSync(indexDir)) return
+  for (const name of readdirSync(indexDir)) {
+    const file = join(indexDir, name)
+    if (readFileSync(file, 'utf8').trim() === taskId) rmSync(file, { force: true })
+  }
 }
 
 export function taskIdForDesc(paths: OrchPaths, origin: string, description: string): string {

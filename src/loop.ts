@@ -6,6 +6,7 @@ import { join, relative } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
+import { cleanupTask } from './cleanup.ts'
 import type { LoopConfig } from './config.ts'
 import {
   descSlug, existingTaskIdForDesc, taskIdForDesc, newTaskId, recordTaskIdForDesc,
@@ -26,10 +27,11 @@ import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import {
-  claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, heartbeatIssueForTask,
+  claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, dropClaimedTaskMaterialization,
+  heartbeatIssueForTask,
   fingerprintOf, issueMergeComment,
   issueNumberForTask, issuePromotionForIssue, publishFinding, reapStaleLeases,
-  recordIssueForTask, recordIssuePromotion,
+  recordIssueForTask, recordIssuePromotion, releaseIssueClaim,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints, unresolvedFindings,
   LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
 } from './issueQueue.ts'
@@ -1367,7 +1369,24 @@ export function createLoop(deps: LoopDeps) {
           }
           running += 1
         } catch (error) {
-          event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)
+          const issueNumber = issueNumberForTask(paths, entry.taskId)
+          if (config.issueQueueEnabled && issueNumber !== undefined) {
+            try {
+              if (cachedUser === undefined) cachedUser = await forge.currentUser()
+              await releaseIssueClaim(forge, issueNumber, cachedUser)
+              event('Released', shortTaskId(entry.taskId), 'startup failed')
+            } catch (releaseError) {
+              event('WARN', `${shortTaskId(entry.taskId)} startup failed and issue #${issueNumber} could not be released: ${errorSummary(releaseError)}`)
+            }
+            try {
+              cleanupTask(paths, entry.taskId, undefined, false)
+              dropClaimedTaskMaterialization(paths, entry.taskId)
+            } catch (cleanupError) {
+              event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)
+            }
+          } else {
+            event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)
+          }
         }
       }
 
