@@ -90,5 +90,10 @@ describe('cycle suite', () => {
     const frontend = steps[0]
     expect(frontend?.repairWhenMissing?.path).toBe('src/frontend/node_modules/.bin/vitest')
     expect(frontend?.repairWhenMissing?.command).toBe('npm install --no-audit --no-fund')
+    expect(steps.find((step) => step.label === 'Backend suite')?.needsDocker).toBe(true)
+    expect(shioraProject.cycleSuiteDockerProbe).toEqual({
+      command: 'docker info',
+      timeoutMs: 5_000,
+    })
   })
 })

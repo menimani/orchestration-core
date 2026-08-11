@@ -30,6 +30,15 @@ export interface SuiteStep {
   /** Run a repair command first when a repo-relative path is missing — for a toolchain
    * that breaks in a way reinstalling fixes, which is not the branch's fault. */
   repairWhenMissing?: { path: string; command: string; message: string }
+  /** Whether this step needs a running Docker daemon. */
+  needsDocker?: boolean
+}
+
+export interface DockerProbe {
+  /** Command used to verify that the Docker daemon is reachable. */
+  command: string
+  /** Maximum time to wait for the probe before treating Docker as unavailable. */
+  timeoutMs: number
 }
 
 export interface WorktreeSetupStep {
@@ -49,6 +58,8 @@ export interface ProjectAdapter {
   mergeChecks(taskGate: 'full' | 'light'): MergeCheck[]
   /** The full suites the cycle gate runs against the branch tip under light task gates. */
   cycleSuite(): SuiteStep[]
+  /** Repository-specific probe used when a cycle suite step needs Docker. */
+  cycleSuiteDockerProbe?: DockerProbe
   /** Repository-specific preparation required before a scan can inspect a fresh worktree. */
   scanWorktreeSetup?: WorktreeSetupStep[]
 }

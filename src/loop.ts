@@ -67,6 +67,10 @@ export function formatEventLine(name: string, subject = '', detail = ''): string
   return `${name} ${subjectColumn}${detail}`
 }
 
+function isDockerEnvironmentFailure(text: string): boolean {
+  return text.includes('Could not find a valid Docker environment')
+}
+
 export function createLoop(deps: LoopDeps) {
   const { paths, config, forge, runner, project, log, now, orchestrationDepsRuntime } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
@@ -576,7 +580,7 @@ export function createLoop(deps: LoopDeps) {
     let diagnosis = ''
     if (existsSync(mergeLog)) {
       const text = readFileSync(mergeLog, 'utf8')
-      if (text.includes('Could not find a valid Docker environment')) {
+      if (isDockerEnvironmentFailure(text)) {
         diagnosis = 'Docker is not running, and the integration tests need it'
       } else if (/Could not resolve host|Connection refused|Could not transfer artifact/.test(text)) {
         diagnosis = 'the network or a package registry is unreachable'
@@ -920,11 +924,11 @@ export function createLoop(deps: LoopDeps) {
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
     writeFileSync(suiteLog, '')
 
-    const runStep = (cwd: string, command: string): boolean => {
+    const runStep = (cwd: string, command: string, timeout?: number): boolean => {
       try {
         const out = execFileSync('bash', ['-c', command], {
           cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true,
+          windowsHide: true, timeout,
         })
         appendFileSync(suiteLog, out)
         return true
@@ -935,9 +939,19 @@ export function createLoop(deps: LoopDeps) {
       }
     }
 
+    const steps = project.cycleSuite().filter((step) =>
+      step.requires === undefined || existsSync(join(paths.repoRoot, step.requires)))
+    if (steps.some((step) => step.needsDocker)) {
+      const probe = project.cycleSuiteDockerProbe
+      if (probe === undefined || !runStep(paths.repoRoot, probe.command, probe.timeoutMs)) {
+        event('ERROR', 'Docker is not running; the cycle suite needs it (start Docker Desktop and restart the loop)')
+        writeFileSync(stopFile, '')
+        return false
+      }
+    }
+
     let ok = true
-    for (const step of project.cycleSuite()) {
-      if (step.requires !== undefined && !existsSync(join(paths.repoRoot, step.requires))) continue
+    for (const step of steps) {
       // A toolchain that broke in a way reinstalling fixes is the environment, not the
       // branch; the repair keeps the suite's verdict about the code.
       const repair = step.repairWhenMissing
@@ -952,7 +966,9 @@ export function createLoop(deps: LoopDeps) {
 
     if (!ok) {
       const logText = existsSync(suiteLog) ? readFileSync(suiteLog, 'utf8') : ''
-      if (/is not recognized|command not found|ENOENT/i.test(logText)) {
+      if (isDockerEnvironmentFailure(logText)) {
+        event('ERROR', `Docker is not running; the cycle suite needs it (start Docker Desktop and restart the loop; log: ${shortLogPath(suiteLog)})`)
+      } else if (/is not recognized|command not found|ENOENT/i.test(logText)) {
         event('ERROR', `cycle suite tool missing (log: ${shortLogPath(suiteLog)})`)
       } else {
         event('ERROR', `cycle suite failed (log: ${shortLogPath(suiteLog)})`)

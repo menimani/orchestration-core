@@ -11,6 +11,10 @@ const I18N_PATHS = /^src\/frontend\/src\/i18n\/|^src\/backend\/src\/main\/resour
 
 export const shioraProject: ProjectAdapter = {
   name: 'shiora',
+  cycleSuiteDockerProbe: {
+    command: 'docker info',
+    timeoutMs: 5_000,
+  },
   scanWorktreeSetup: [
     {
       label: 'Docker for backend tests',
@@ -101,6 +105,7 @@ export const shioraProject: ProjectAdapter = {
         cwd: 'src/backend',
         command: 'mvn clean test -q',
         requires: 'src/backend',
+        needsDocker: true,
       },
       {
         label: 'Translation completeness',

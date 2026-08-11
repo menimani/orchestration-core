@@ -1135,6 +1135,44 @@ describe('runCycleSuite', () => {
     expect(logged).toContain('Started Suite  cycle 1')
   })
 
+  it('stops before running suite steps when the Docker probe fails', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuiteDockerProbe: { command: 'exit 1', timeoutMs: 1_000 },
+      cycleSuite: () => [{
+        label: 'Docker suite', cwd: '', command: 'touch suite-ran', needsDocker: true,
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+
+    expect(loop.runCycleSuite(1)).toBe(false)
+
+    expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(false)
+    expect(existsSync(stopFile())).toBe(true)
+    expect(logText()).toContain(
+      'ERROR Docker is not running; the cycle suite needs it (start Docker Desktop and restart the loop)',
+    )
+  })
+
+  it('probes once and runs Docker-dependent suite steps when the probe passes', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuiteDockerProbe: { command: 'echo probe >> docker-probes', timeoutMs: 1_000 },
+      cycleSuite: () => [
+        { label: 'First Docker suite', cwd: '', command: 'touch suite-ran', needsDocker: true },
+        { label: 'Second Docker suite', cwd: '', command: 'touch suite-ran-again', needsDocker: true },
+      ],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+
+    expect(loop.runCycleSuite(1)).toBe(true)
+
+    expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'suite-ran-again'))).toBe(true)
+    expect(readFileSync(join(repoRoot, 'docker-probes'), 'utf8').trim()).toBe('probe')
+    expect(existsSync(stopFile())).toBe(false)
+  })
+
   it('stops the loop rather than promote a failing tip', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
@@ -1157,6 +1195,24 @@ describe('runCycleSuite', () => {
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
     expect(loop.runCycleSuite(5)).toBe(false)
     expect(logText()).toContain('ERROR cycle suite tool missing')
+    expect(existsSync(stopFile())).toBe(true)
+  })
+
+  it('attributes a Docker failure after a passing probe to the environment', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuiteDockerProbe: { command: 'true', timeoutMs: 1_000 },
+      cycleSuite: () => [{
+        label: 'Docker suite', cwd: '', needsDocker: true,
+        command: 'echo "Could not find a valid Docker environment"; exit 1',
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+
+    expect(loop.runCycleSuite(5)).toBe(false)
+
+    expect(logText()).toContain('ERROR Docker is not running; the cycle suite needs it')
+    expect(logText()).not.toContain('ERROR cycle suite failed')
     expect(existsSync(stopFile())).toBe(true)
   })
 
