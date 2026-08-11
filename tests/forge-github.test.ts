@@ -107,8 +107,10 @@ describe('GitHub upstream issue creation', () => {
       optionalLabels: ['upstream:report'],
     })).resolves.toBe('https://github.com/menimani/orchestration-core/issues/42')
 
+    // No --search: gh reads that as search syntax, and a label name carrying a colon
+    // fails there instead of matching. The list is fetched once and filtered locally.
     expect(calls[0]).toEqual([
-      'label', 'list', '--repo', 'menimani/orchestration-core', '--search', 'upstream:report',
+      'label', 'list', '--repo', 'menimani/orchestration-core',
       '--limit', '100', '--json', 'name',
     ])
     expect(calls[1]).toEqual([

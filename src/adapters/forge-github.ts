@@ -323,16 +323,16 @@ export function createGithubForge(
     },
 
     async createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string> {
-      const labels: string[] = []
-      for (const label of options.optionalLabels) {
-        const labelArgs = [
-          'label', 'list', '--repo', options.repository, '--search', label,
-          '--limit', '100', '--json', 'name',
-        ]
-        const stdout = await checkedGh(repoRoot, labelArgs)
-        const available = parseGhJson(labelArgs, stdout, labelListSchema)
-        if (available.some((candidate) => candidate.name === label)) labels.push(label)
-      }
+      // One listing, filtered here: gh's --search takes search syntax, and a label whose
+      // name carries a colon — which every label this loop uses does — makes it fail
+      // rather than match. It also costs one call instead of one per label.
+      const labelArgs = [
+        'label', 'list', '--repo', options.repository, '--limit', '100', '--json', 'name',
+      ]
+      const available = parseGhJson(
+        labelArgs, await checkedGh(repoRoot, labelArgs), labelListSchema,
+      ).map((candidate) => candidate.name)
+      const labels = options.optionalLabels.filter((label) => available.includes(label))
 
       const args = [
         'issue', 'create', '--repo', options.repository,
