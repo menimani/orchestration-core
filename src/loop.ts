@@ -4,6 +4,7 @@ import {
 } from 'node:fs'
 import { join, relative } from 'node:path'
 import { ForgeRateLimitError, type Forge, type ForgeIssue } from './adapters/forge.ts'
+import { dequeueBacklog, ensureBacklog } from './backlog.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
@@ -91,7 +92,7 @@ export function createLoop(deps: LoopDeps) {
   const prUrlFile = join(paths.queueDir, 'pr-url.txt')
 
   mkdirSync(scannedDir, { recursive: true })
-  if (!existsSync(queueFile)) writeFileSync(queueFile, '')
+  ensureBacklog(queueFile)
 
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
@@ -436,10 +437,8 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function dequeueNext(): QueueEntry | undefined {
-    const lines = readFileSync(queueFile, 'utf8').split(/\r?\n/).filter((line) => line !== '')
-    const first = lines.shift()
+    const first = dequeueBacklog(queueFile)
     if (first === undefined) return undefined
-    writeFileSync(queueFile, lines.map((line) => `${line}\n`).join(''))
     const sep = first.indexOf(':')
     const depthRaw = sep === -1 ? '' : first.slice(sep + 1)
     return {
