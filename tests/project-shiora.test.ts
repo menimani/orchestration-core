@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { shioraProject } from '../src/adapters/project-shiora.ts'
+import { shioraProject } from '../../project/project-shiora.ts'
 
 // The project adapter carries the repository's own knowledge: gate commands per
 // TASK_GATE, and which touched paths make each check relevant.

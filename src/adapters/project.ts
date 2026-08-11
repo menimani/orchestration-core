@@ -1,3 +1,7 @@
+import { existsSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
 // The project adapter carries everything the orchestration knows about the repository
 // it runs in: which checks verify a merge, which suites prove a cycle's tip, and which
 // paths make each of them relevant. The core executes these declarations and owns the
@@ -64,13 +68,32 @@ export interface ProjectAdapter {
   scanWorktreeSetup?: WorktreeSetupStep[]
 }
 
-export async function loadProject(name: string): Promise<ProjectAdapter> {
-  switch (name) {
-    case 'shiora': {
-      const mod = await import('./project-shiora.ts')
-      return mod.shioraProject
-    }
-    default:
-      throw new Error(`Unknown PROJECT '${name}' (supported: shiora)`)
+const ORCHESTRATION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+
+function isProjectAdapter(value: unknown, name: string): value is ProjectAdapter {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Partial<ProjectAdapter>
+  return candidate.name === name
+    && typeof candidate.mergeChecks === 'function'
+    && typeof candidate.cycleSuite === 'function'
+}
+
+export async function loadProject(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ProjectAdapter> {
+  const name = env['PROJECT'] === undefined || env['PROJECT'] === '' ? 'shiora' : env['PROJECT']
+  const configuredPath = env['PROJECT_ADAPTER']
+  const adapterPath = configuredPath === undefined || configuredPath === ''
+    ? resolve(ORCHESTRATION_ROOT, 'project', `project-${name}.ts`)
+    : resolve(ORCHESTRATION_ROOT, configuredPath)
+
+  if (!existsSync(adapterPath)) {
+    throw new Error(`Project adapter not found: ${adapterPath}`)
   }
+
+  const mod = await import(pathToFileURL(adapterPath).href) as Record<string, unknown>
+  for (const value of Object.values(mod)) {
+    if (isProjectAdapter(value, name)) return value
+  }
+  throw new Error(`Project adapter '${adapterPath}' does not export project '${name}'`)
 }

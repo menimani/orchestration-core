@@ -166,7 +166,7 @@ const cmdStart: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const runner = await loadRunner(config.runner)
-  const project = await loadProject(config.project)
+  const project = await loadProject()
   const result = await startTask(paths, runner, taskId, {
     effort: effort === '' ? 'medium' : effort,
     model: model === '' ? undefined : model,
@@ -224,7 +224,7 @@ const cmdDeploy: Command = async (paths, args) => {
     return 1
   }
   const config = loadConfig()
-  const project = await loadProject(config.project)
+  const project = await loadProject()
   if (project.deployment === undefined) {
     console.error(`Project '${project.name}' does not define a deployment.`)
     return 1
@@ -273,7 +273,7 @@ const cmdMerge: Command = async (paths, args) => {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
-      project: await loadProject(config.project),
+      project: await loadProject(),
       closesIssue: linkedIssue,
     })
     if (linkedIssue !== undefined) {
@@ -536,7 +536,7 @@ async function runLoopDaemon(
     )
     const forge = await loadForge(config.forge, paths.repoRoot)
     const runner = await loadRunner(config.runner)
-    const project = await loadProject(config.project)
+    const project = await loadProject()
     const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
 
     await loop.initializeIssueQueue()

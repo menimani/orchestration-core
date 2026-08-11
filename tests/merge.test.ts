@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { shioraProject } from '../src/adapters/project-shiora.ts'
+import { shioraProject } from '../../project/project-shiora.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import {
   MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
