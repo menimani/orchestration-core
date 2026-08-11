@@ -147,6 +147,10 @@ afterEach(() => {
 })
 
 describe('daemon startup', () => {
+  function fixturePackageRoot(): string {
+    return join(repoRoot, 'orchestration', 'ts')
+  }
+
   function writeOrchestrationManifests(lockVersion: string): void {
     mkdirSync(join(repoRoot, 'orchestration', 'ts'), { recursive: true })
     writeFileSync(join(repoRoot, 'orchestration', 'ts', 'package.json'), JSON.stringify({
@@ -167,31 +171,49 @@ describe('daemon startup', () => {
     syncOrchestrationDepsAtStartup(
       paths,
       (name, subject) => logged.push(`${name} ${subject}`),
-      { install },
+      { install, packageRoot: fixturePackageRoot() },
     )
 
     expect(install).toHaveBeenCalledOnce()
     expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
     expect(logged).toContain('Installed  orchestration deps  at startup')
 
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install,
+      packageRoot: fixturePackageRoot(),
+    })
 
     expect(install).toHaveBeenCalledOnce()
   })
 
   it('reinstalls after a lockfile change and retries a failed upgrade on restart', () => {
     writeOrchestrationManifests('{"lockfileVersion":3}\n')
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: successfulInstall })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: successfulInstall, packageRoot: fixturePackageRoot() })
     writeFileSync(
       join(repoRoot, 'orchestration', 'ts', 'package-lock.json'),
       '{"lockfileVersion":3,"packages":{"node_modules/zod":{"version":"4.5.0"}}}\n',
     )
     const failedInstall = vi.fn(() => { throw new Error('registry unavailable') })
 
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall })
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
 
     expect(failedInstall).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves a package outside the repository alone', () => {
+    // A CLI pointed at another checkout — a fixture, another clone — must never
+    // reinstall the package it is itself running from. The suite learned this the hard
+    // way: the real package's node_modules was reinstalled mid-test-run.
+    writeOrchestrationManifests('{"lockfileVersion":3}\n')
+    const install = vi.fn(successfulInstall)
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install,
+      packageRoot: mkdtempSync(join(tmpdir(), 'orch-elsewhere-')),
+    })
+
+    expect(install).not.toHaveBeenCalled()
   })
 })
 

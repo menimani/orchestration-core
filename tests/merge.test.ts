@@ -264,7 +264,7 @@ describe('mergeTask', () => {
     await mergeTask(paths, taskId, {
       taskGate: 'light',
       project: noCheckProject,
-      orchestrationDepsRuntime: { install },
+      orchestrationDepsRuntime: { install, packageRoot: join(repoRoot, 'orchestration', 'ts') },
       onOrchestrationDepsEvent: event,
     })
 
@@ -283,7 +283,7 @@ describe('mergeTask', () => {
     await mergeTask(paths, taskId, {
       taskGate: 'light',
       project: noCheckProject,
-      orchestrationDepsRuntime: { install },
+      orchestrationDepsRuntime: { install, packageRoot: join(repoRoot, 'orchestration', 'ts') },
     })
 
     expect(install).not.toHaveBeenCalled()
@@ -301,7 +301,10 @@ describe('mergeTask', () => {
     await expect(mergeTask(paths, taskId, {
       taskGate: 'light',
       project: noCheckProject,
-      orchestrationDepsRuntime: { install: () => { throw new Error('registry unavailable') } },
+      orchestrationDepsRuntime: {
+        install: () => { throw new Error('registry unavailable') },
+        packageRoot: join(repoRoot, 'orchestration', 'ts'),
+      },
       onOrchestrationDepsEvent: event,
     })).resolves.toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
 

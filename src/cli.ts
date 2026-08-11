@@ -17,7 +17,7 @@ import {
 } from './issueQueue.ts'
 import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
 import { deploy } from './deploy.ts'
-import { isScanTaskId, logFile, orchPaths, type OrchPaths } from './paths.ts'
+import { isScanTaskId, logFile, orchPaths, packageFile, type OrchPaths } from './paths.ts'
 import { pruneTasks } from './prune.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
@@ -410,7 +410,7 @@ const cmdLoop: Command = async (paths, args) => {
     const fd = openSync(loopLog, 'a')
     const markerLog = join(paths.logsDir, 'loop-markers.log')
     const child = spawn(process.execPath, [
-      join(paths.root, 'ts', 'src', 'cli.ts'), 'loop', '--marker-output', markerLog,
+      packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
     ], {
       cwd: paths.repoRoot,
       detached: true,

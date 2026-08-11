@@ -3,10 +3,13 @@ import { createHash } from 'node:crypto'
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
-import { branchName, isInspectionTaskId, logFile, worktreeDir, type OrchPaths } from './paths.ts'
+import {
+  branchName, isInspectionTaskId, logFile, packageFile, worktreeDir, PACKAGE_ROOT,
+  type OrchPaths,
+} from './paths.ts'
 import { readStatus, writeStatus } from './status.ts'
 import {
   removeWorktreeWithFallback, type WorktreeRemovalRuntime,
@@ -43,6 +46,11 @@ export interface MergeOptions {
 
 export interface OrchestrationDepsRuntime {
   install: (cwd: string) => void
+  /**
+   * The package whose dependencies are synchronized. Defaults to this package's own
+   * directory, which is what a running loop means; tests point it at a fixture.
+   */
+  packageRoot?: string
 }
 
 export type OrchestrationDepsEvent = (name: 'Installed' | 'WARN', subject: string) => void
@@ -61,14 +69,14 @@ const ORCHESTRATION_MANIFESTS = new Set([
   'orchestration/ts/package-lock.json',
 ])
 
-function orchestrationLockHash(paths: OrchPaths): string | undefined {
-  const lockFile = join(paths.repoRoot, 'orchestration', 'ts', 'package-lock.json')
+function orchestrationLockHash(root: string): string | undefined {
+  const lockFile = join(root, 'package-lock.json')
   if (!existsSync(lockFile)) return undefined
   return createHash('sha256').update(readFileSync(lockFile)).digest('hex')
 }
 
-function orchestrationLockHashFile(paths: OrchPaths): string {
-  return join(paths.repoRoot, 'orchestration', 'ts', 'node_modules', '.shiora-lock.sha256')
+function orchestrationLockHashFile(root: string): string {
+  return join(root, 'node_modules', '.orchestration-lock.sha256')
 }
 
 function installFailureSummary(error: unknown): string {
@@ -81,17 +89,17 @@ function installFailureSummary(error: unknown): string {
 }
 
 function installOrchestrationDeps(
-  paths: OrchPaths,
   subject: string,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime,
 ): void {
+  const root = runtime.packageRoot ?? PACKAGE_ROOT
   try {
-    runtime.install(join(paths.repoRoot, 'orchestration', 'ts'))
-    const lockHash = orchestrationLockHash(paths)
+    runtime.install(root)
+    const lockHash = orchestrationLockHash(root)
     if (lockHash !== undefined) {
-      const hashFile = orchestrationLockHashFile(paths)
-      mkdirSync(join(paths.repoRoot, 'orchestration', 'ts', 'node_modules'), { recursive: true })
+      const hashFile = orchestrationLockHashFile(root)
+      mkdirSync(join(root, 'node_modules'), { recursive: true })
       writeFileSync(hashFile, `${lockHash}\n`)
     }
     event('Installed', ` orchestration deps  ${subject}`)
@@ -115,20 +123,20 @@ function syncOrchestrationDepsAfterMerge(
     'diff', '--name-only', firstParent, mergeCommit,
   ]).split(/\r?\n/).filter((path) => path !== '')
   if (!changed.some((path) => ORCHESTRATION_MANIFESTS.has(path))) return
-  installOrchestrationDeps(paths, `after ${shortTaskId(taskId)}`, event, runtime)
+  installOrchestrationDeps(`after ${shortTaskId(taskId)}`, event, runtime)
 }
 
-function orchestrationDepsMissing(paths: OrchPaths): boolean {
-  const packageFile = join(paths.repoRoot, 'orchestration', 'ts', 'package.json')
-  if (!existsSync(packageFile)) return false
-  const lockHash = orchestrationLockHash(paths)
+function orchestrationDepsMissing(root: string): boolean {
+  const manifestFile = join(root, 'package.json')
+  if (!existsSync(manifestFile)) return false
+  const lockHash = orchestrationLockHash(root)
   if (lockHash === undefined) return true
   try {
-    if (readFileSync(orchestrationLockHashFile(paths), 'utf8').trim() !== lockHash) return true
+    if (readFileSync(orchestrationLockHashFile(root), 'utf8').trim() !== lockHash) return true
   } catch {
     return true
   }
-  const manifest = JSON.parse(readFileSync(packageFile, 'utf8')) as {
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8')) as {
     dependencies?: Record<string, string>
     devDependencies?: Record<string, string>
   }
@@ -136,9 +144,15 @@ function orchestrationDepsMissing(paths: OrchPaths): boolean {
     ...Object.keys(manifest.dependencies ?? {}),
     ...Object.keys(manifest.devDependencies ?? {}),
   ]
-  return dependencies.some((name) => !existsSync(join(
-    paths.repoRoot, 'orchestration', 'ts', 'node_modules', ...name.split('/'), 'package.json',
-  )))
+  return dependencies.some(
+    (name) => !existsSync(join(root, 'node_modules', ...name.split('/'), 'package.json')),
+  )
+}
+
+/** Whether `directory` lies inside `root`, so a repository only ever syncs its own copy. */
+function isInside(root: string, directory: string): boolean {
+  const offset = relative(root, directory)
+  return offset !== '' && !offset.startsWith('..') && !isAbsolute(offset)
 }
 
 export function syncOrchestrationDepsAtStartup(
@@ -146,8 +160,13 @@ export function syncOrchestrationDepsAtStartup(
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
 ): void {
-  if (!orchestrationDepsMissing(paths)) return
-  installOrchestrationDeps(paths, 'at startup', event, runtime)
+  const root = runtime.packageRoot ?? PACKAGE_ROOT
+  // Installing is for the copy this repository carries. A CLI pointed at some other
+  // checkout — a test fixture, another clone — must not reinstall the package it is
+  // itself running from.
+  if (!isInside(paths.repoRoot, root)) return
+  if (!orchestrationDepsMissing(root)) return
+  installOrchestrationDeps('at startup', event, runtime)
 }
 
 interface MergeIo {

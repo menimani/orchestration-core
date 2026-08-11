@@ -1,9 +1,23 @@
 import { existsSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // The on-disk layout is shared state with everything the loop leaves behind between
 // runs, so the names here are contract, not implementation: queue markers, status
 // files, logs and worktrees must land exactly where the bash implementation put them.
+
+/**
+ * This package's own directory, derived from where it executes rather than from an
+ * assumed position inside the repository. A consumer keeps the package at
+ * <repo>/orchestration/ts; the repository that owns it keeps it at the root. Anything
+ * that re-invokes the CLI, or reaches for the package's lockfile or node_modules,
+ * resolves from here — hardcoding 'orchestration/ts' broke the owning repository.
+ */
+export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
+export function packageFile(...segments: string[]): string {
+  return join(PACKAGE_ROOT, ...segments)
+}
 
 export interface OrchPaths {
   root: string
