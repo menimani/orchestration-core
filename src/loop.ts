@@ -791,14 +791,38 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
-    let baseBranch = 'main'
+    let remote: string
     try {
-      const remote = currentBranchRemote(paths.repoRoot)
-      baseBranch = git([
-        'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
-      ]).trim() || `${remote}/main`
-    } catch {
-      // A review can still run against a local main branch before a remote is configured.
+      remote = currentBranchRemote(paths.repoRoot)
+    } catch (error) {
+      event('WARN', `could not resolve review base: ${errorSummary(error)}`)
+      return false
+    }
+
+    const remotePrefix = `${remote}/`
+    let baseBranch = git([
+      'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
+    ]).trim()
+    if (baseBranch.startsWith(remotePrefix)
+      && git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
+      const branch = baseBranch.slice(remotePrefix.length)
+      git(['fetch', '--quiet', remote,
+        `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
+    }
+    if (!baseBranch.startsWith(remotePrefix)
+      || git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
+      const advertised = git(['ls-remote', '--symref', remote, 'HEAD'])
+      const branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(advertised)?.[1] ?? ''
+      baseBranch = branch === '' ? '' : `${remote}/${branch}`
+      if (branch !== '') {
+        git(['fetch', '--quiet', remote,
+          `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
+      }
+    }
+    if (!baseBranch.startsWith(remotePrefix)
+      || git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
+      event('WARN', `could not resolve a valid default branch for ${remote}`)
+      return false
     }
     const acceptedLimitsFile = join(paths.root, 'accepted-limits.md')
     const acceptedLimits = existsSync(acceptedLimitsFile)
@@ -878,8 +902,9 @@ export function createLoop(deps: LoopDeps) {
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     const reviewId = newTaskId(paths, `review-c${cycle}`, now())
     if (!generateReviewTask(reviewId, cycle, prUrl)) {
-      event('WARN', 'could not write review specification; resuming without review')
-      return true
+      event('Stopped', 'Loop', 'review base unavailable')
+      writeFileSync(stopFile, '')
+      return false
     }
     const effortDir = join(paths.queueDir, 'effort')
     mkdirSync(effortDir, { recursive: true })

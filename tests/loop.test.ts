@@ -124,6 +124,18 @@ function initializeGitRepo(): string {
   return git(['rev-parse', 'HEAD'])
 }
 
+function configureRemoteDefaultBranch(branch = 'main', remoteName = 'origin'): void {
+  const remote = join(repoRoot, `${remoteName}.git`)
+  execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+  git(['remote', 'add', remoteName, remote])
+  git(['push', '-u', remoteName, branch])
+  execFileSync('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], {
+    cwd: remote, windowsHide: true,
+  })
+  git(['symbolic-ref', `refs/remotes/${remoteName}/HEAD`,
+    `refs/remotes/${remoteName}/${branch}`])
+}
+
 function makeCompletedTask(taskId: string, writeCompletedStatus = true): void {
   writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
   const worktree = worktreeDir(paths, taskId)
@@ -625,6 +637,8 @@ describe('scan yield', () => {
 
 describe('runAutoReview', () => {
   beforeEach(() => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
       '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
@@ -666,6 +680,35 @@ describe('runAutoReview', () => {
     writeRawStatus(reviewId, 'completed')
     writeFinal(reviewId, '')
     expect(loop.runAutoReview(7, false)).toBe(true)
+  })
+
+  it('resolves the advertised remote default branch when the local HEAD ref is missing', () => {
+    git(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
+    git(['branch', '-m', 'main', 'trunk'])
+    git(['push', 'origin', 'trunk'])
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/trunk'], {
+      cwd: join(repoRoot, 'origin.git'), windowsHide: true,
+    })
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+    expect(spec).toContain('against origin/trunk')
+  })
+
+  it('stops without dispatching a review when no valid default branch exists', () => {
+    git(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/missing'], {
+      cwd: join(repoRoot, 'origin.git'), windowsHide: true,
+    })
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-7'))).toBe(false)
+    expect(readdirSync(paths.tasksDir).filter((name) => name.includes('_review-c7'))).toEqual([])
+    expect(logText()).toContain('WARN could not resolve a valid default branch for origin')
+    expect(logged).toContain('Stopped Loop        review base unavailable')
   })
 
   it('resumes after a review reports NO_FINDINGS', () => {
@@ -833,6 +876,8 @@ describe('cycle gate', () => {
 
 describe('remote issue queue idle detection', () => {
   beforeEach(() => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
       '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
@@ -939,7 +984,7 @@ describe('remote issue queue idle detection', () => {
   })
 
   it('enters the gate when a forge-visible merge marker names an ancestor of HEAD', async () => {
-    const mergeSha = initializeGitRepo()
+    const mergeSha = git(['rev-parse', 'HEAD'])
     const loop = makeReviewLoop(true)
     const issueNumber = await fakeForge.createIssue({
       title: 'remotely merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
@@ -956,7 +1001,6 @@ describe('remote issue queue idle detection', () => {
   })
 
   it('does not exempt a merge marker whose SHA is not an ancestor of HEAD', async () => {
-    initializeGitRepo()
     git(['switch', '-c', 'foreign'])
     writeFileSync(join(repoRoot, 'foreign.txt'), 'foreign\n')
     git(['add', 'foreign.txt'])
@@ -1463,6 +1507,7 @@ describe('completed task merge recovery', () => {
   it('retries post-merge reconciliation on a later poll without stopping or advancing the gate', async () => {
     const taskId = '20260811_120000_066_auto-unconfirmed-merge'
     initializeGitRepo()
+    configureRemoteDefaultBranch()
     makeCompletedTask(taskId)
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
