@@ -1,4 +1,6 @@
-import { mkdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 
@@ -24,8 +26,9 @@ export interface TaskStatus {
 export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undefined {
   try {
     return JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as TaskStatus
-  } catch {
-    return undefined
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
   }
 }
 
@@ -114,6 +117,7 @@ function releaseStatusLock(paths: OrchPaths, taskId: string): void {
 
 function writeStatusUnlocked(paths: OrchPaths, taskId: string, status: TaskState, pid?: number): void {
   const file = statusFile(paths, taskId)
+  const temporaryFile = join(paths.statusDir, `.${taskId}.${process.pid}.tmp`)
   const existing = readStatus(paths, taskId)
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   const record: TaskStatus = {
@@ -125,7 +129,14 @@ function writeStatusUnlocked(paths: OrchPaths, taskId: string, status: TaskState
     worktree: worktreeDir(paths, taskId),
     branch: branchName(taskId),
   }
-  writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`)
+  try {
+    // Publishing with a same-directory rename prevents readers from observing a
+    // truncated JSON document if this process exits while writing the new record.
+    writeFileSync(temporaryFile, `${JSON.stringify(record, null, 2)}\n`)
+    renameSync(temporaryFile, file)
+  } finally {
+    rmSync(temporaryFile, { force: true })
+  }
 }
 
 export async function writeStatus(paths: OrchPaths, taskId: string, status: TaskState, pid?: number): Promise<void> {

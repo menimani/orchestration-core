@@ -232,6 +232,17 @@ describe('daemon startup', () => {
   })
 })
 
+describe('status file safety', () => {
+  it('stops the poll when an existing task status is malformed', async () => {
+    const taskId = '20260811_000000_001_user-existing'
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# Existing task\n')
+    writeFileSync(statusFile(paths, taskId), '{"status":"running"')
+
+    const loop = makeLoop({ scanEnabled: false, autoMerge: false })
+    await expect(loop.poll()).rejects.toThrow(SyntaxError)
+  })
+})
+
 describe('forge poll budget', () => {
   it('records an unparseable issue failure and stops with the issue quarantined', async () => {
     initializeGitRepo()

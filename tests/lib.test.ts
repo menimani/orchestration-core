@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -90,6 +90,17 @@ describe('status files', () => {
 
   it('reads an absent status file as undefined', () => {
     expect(readStatus(paths, 'task-absent')).toBeUndefined()
+  })
+
+  it('does not treat a malformed existing status file as absent', () => {
+    writeFileSync(statusFile(paths, 'task-malformed'), '{"status":"running"')
+    expect(() => readStatus(paths, 'task-malformed')).toThrow(SyntaxError)
+  })
+
+  it('publishes status through a temporary file without leaving it behind', async () => {
+    await writeStatus(paths, 'task-atomic', 'running', 12345)
+    expect(existsSync(join(paths.statusDir, `.task-atomic.${process.pid}.tmp`))).toBe(false)
+    expect(readStatus(paths, 'task-atomic')?.status).toBe('running')
   })
 
   it('derives the final message path from the log path', () => {
