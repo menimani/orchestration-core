@@ -1,8 +1,8 @@
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { recordIssueForTask } from '../src/issueQueue.ts'
 import { branchName, orchPaths, worktreeDir } from '../src/paths.ts'
@@ -34,6 +34,24 @@ function daemonFile(name: string): string {
 
 function git(args: string[], cwd = repoRoot): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })
+}
+
+function childCompletion(child: ChildProcess): Promise<{ code: number | null; output: string }> {
+  return new Promise((resolve, reject) => {
+    let output = ''
+    child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString() })
+    child.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString() })
+    child.on('error', reject)
+    child.on('exit', (code) => resolve({ code, output }))
+  })
+}
+
+async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
 }
 
 describe('command registry', () => {
@@ -204,6 +222,57 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('allows only one of concurrent starts to acquire the PID lock', async () => {
+    const wrapper = join(repoRoot, 'start-loop.mjs')
+    const cliUrl = pathToFileURL(CLI).href
+    writeFileSync(wrapper, [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalWriteFileSync = fs.writeFileSync',
+      'fs.writeFileSync = function (file, ...args) {',
+      "  if (typeof file === 'string' && /[\\\\/]loop\\.pid$/.test(file)) {",
+      '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250)',
+      '  }',
+      '  return originalWriteFileSync.call(this, file, ...args)',
+      '}',
+      'syncBuiltinESMExports()',
+      `await import(${JSON.stringify(cliUrl)})`,
+      '',
+    ].join('\n'))
+
+    const children = Array.from({ length: 6 }, () => spawn(process.execPath, [wrapper, 'loop'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        POLL_INTERVAL: '60',
+        SCAN_ENABLED: 'false',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    }))
+    const completions = children.map(childCompletion)
+
+    try {
+      await waitUntil(
+        () => children.filter((child) => child.exitCode !== null).length >= children.length - 1,
+        'competing loop starts did not reject the PID lock',
+      )
+      writeFileSync(daemonFile('stop'), '')
+      const results = await Promise.all(completions)
+
+      expect(results.filter((result) => result.code === 0)).toHaveLength(1)
+      const rejected = results.filter((result) => result.code === 1)
+      expect(rejected).toHaveLength(children.length - 1)
+      expect(rejected.every((result) => result.output.includes('Loop is already running'))).toBe(true)
+    } finally {
+      for (const child of children) {
+        if (child.exitCode === null) child.kill()
+      }
+    }
+  })
+
   it('prints a failed-task contract marker as an exact standalone line', async () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260810_010203_031_auto-failed-task'

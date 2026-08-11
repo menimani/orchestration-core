@@ -509,8 +509,21 @@ async function runLoopDaemon(
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
 
   // PID lock: one loop per repository.
-  if (existsSync(pidFile)) {
-    const existing = readFileSync(pidFile, 'utf8').trim()
+  for (;;) {
+    try {
+      writeFileSync(pidFile, `${process.pid}\n`, { flag: 'wx' })
+      break
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+
+    let existing: string
+    try {
+      existing = readFileSync(pidFile, 'utf8').trim()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
     if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
       log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
       return 1
@@ -518,7 +531,6 @@ async function runLoopDaemon(
     log('WARN: Removing stale PID file')
     rmSync(pidFile, { force: true })
   }
-  writeFileSync(pidFile, `${process.pid}\n`)
   const releaseDaemonState = (): void => {
     try {
       removeIssueModeMarker(paths, process.pid)
