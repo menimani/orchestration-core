@@ -174,9 +174,10 @@ describe('prRisks', () => {
     expect(prRisks(project, repoRoot, baseRef, [])).toBe('- None identified\n')
   })
 
-  it('fences issue-number-like references in decisions', () => {
+  it('preserves issue-number-like references in decisions', () => {
     const risks = prRisks(project, repoRoot, baseRef, ['Dependabot alert #1 stays open pending a major bump'])
-    expect(risks).toContain('`#1`')
+    expect(risks).toContain('Dependabot alert #1 stays open pending a major bump')
+    expect(risks).not.toContain('`#1`')
     expect(risks).toContain('- Awaiting a decision before this branch is relied on:')
   })
 

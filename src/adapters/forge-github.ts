@@ -165,6 +165,13 @@ function isRateLimitFailure(error: unknown): boolean {
   return /rate.?limit|HTTP 429/i.test(commandErrorText(error))
 }
 
+function githubPrBody(body: string): string {
+  // GitHub reads a bare #N in a PR body as an issue reference and links it to some
+  // unrelated pull request from the repository's first week. This presentation rule
+  // belongs at the forge boundary so the core and other adapters retain the source text.
+  return body.replace(/#(\d+)/g, '`#$1`')
+}
+
 export type GithubCommand = (repoRoot: string, args: string[]) => Promise<string>
 
 export function createGithubForge(
@@ -247,7 +254,7 @@ export function createGithubForge(
         '--base', options.base,
         '--head', options.branch,
         '--title', options.title,
-        '--body', options.body,
+        '--body', githubPrBody(options.body),
       ]
       if (options.draft) args.push('--draft')
       const stdout = await checkedGh(repoRoot, args)
@@ -262,7 +269,7 @@ export function createGithubForge(
     async updatePr(ref: string, fields: { title?: string; body?: string }): Promise<void> {
       const args = ['pr', 'edit', ref]
       if (fields.title !== undefined) args.push('--title', fields.title)
-      if (fields.body !== undefined) args.push('--body', fields.body)
+      if (fields.body !== undefined) args.push('--body', githubPrBody(fields.body))
       if (args.length === 3) return
       await checkedGh(repoRoot, args)
     },

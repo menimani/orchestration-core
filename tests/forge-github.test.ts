@@ -67,6 +67,42 @@ describe('GitHub issue promotion', () => {
   })
 })
 
+describe('GitHub pull request bodies', () => {
+  it('fences issue-number-like references when creating a pull request', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return 'https://github.com/example/repo/pull/12\n'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.createPr({
+      branch: 'task/branch',
+      base: 'main',
+      title: 'Generated PR',
+      body: 'Decision #12 remains open',
+      draft: false,
+    })
+
+    expect(calls[0]).toContain('Decision `#12` remains open')
+  })
+
+  it('fences issue-number-like references when updating a pull request', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.updatePr('task/branch', { body: 'Decision #12 remains open' })
+
+    expect(calls[0]).toEqual([
+      'pr', 'edit', 'task/branch', '--body', 'Decision `#12` remains open',
+    ])
+  })
+})
+
 describe('GitHub workflow dispatch correlation', () => {
   it('ignores newer concurrent and same-second runs with another token or ref', () => {
     const wanted = run({ databaseId: 71 })
