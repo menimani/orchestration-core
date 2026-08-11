@@ -42,12 +42,16 @@ describe('loadConfig', () => {
       TASK_GATE: 'light',
       AUTO_REVIEW: 'true',
       REVIEW_EFFORT: 'low',
+      TASK_EFFORT: 'high',
+      TASK_MODEL: 'task-model',
     })
     expect(config.maxParallel).toBe(12)
     expect(config.reviewEveryNCycles).toBe(3)
     expect(config.taskGate).toBe('light')
     expect(config.autoReview).toBe(true)
     expect(config.reviewEffort).toBe('low')
+    expect(config.taskEffort).toBe('high')
+    expect(config.taskModel).toBe('task-model')
   })
 
   it('clamps SCAN_PARALLEL to the four defined checklist groups', () => {
