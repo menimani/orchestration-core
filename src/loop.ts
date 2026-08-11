@@ -981,16 +981,9 @@ export function createLoop(deps: LoopDeps) {
     if (status.state === 'none') return 'unknown'
     if (status.state === 'merged') return 'success'
     if (status.checks.length === 0) {
-      // No checks at all: either they have not registered yet, or the push touched only
-      // paths no workflow watches. Waiting forever on the second would stall the loop,
-      // so silence past the grace window means nothing to verify.
-      const pushedAt = git(['log', '-1', '--format=%ct', status.headSha]).trim()
-      if (/^\d+$/.test(pushedAt)) {
-        const age = Math.floor(now().getTime() / 1000) - Number(pushedAt)
-        const grace = Number(process.env['NO_CHECK_GRACE_SECONDS'] ?? '180')
-        if (age > grace) return 'success'
-      }
-      return 'unknown'
+      // Silence cannot prove success: workflows may be delayed or misconfigured. Only a
+      // project that explicitly declares it expects no CI checks may clear this gate.
+      return project.ciChecksExpected === false ? 'success' : 'unknown'
     }
     if (status.checks.some((check) => check.conclusion === 'pending')) return 'pending'
     if (status.checks.some((check) => check.conclusion === 'failure')) return 'failure'

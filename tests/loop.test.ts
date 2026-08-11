@@ -491,10 +491,17 @@ describe('checkPrCiStatus', () => {
     expect(await loop.checkPrCiStatus()).not.toBe('success')
   })
 
-  it('does not clear the gate for a PR with no checks and no age evidence', async () => {
-    const loop = makeLoop()
+  it('does not clear the gate for an old PR head with no checks', async () => {
+    const headSha = initializeGitRepo()
+    forgeStatus = { ...forgeStatus, headSha, checks: [] }
+    const loop = makeLoop({}, stubProject, undefined, () => new Date('2030-01-01T00:00:00Z'))
+    expect(await loop.checkPrCiStatus()).toBe('unknown')
+  })
+
+  it('passes with no checks only when the project explicitly expects none', async () => {
+    const loop = makeLoop({}, { ...stubProject, ciChecksExpected: false })
     forgeStatus.checks = []
-    expect(['unknown', 'pending']).toContain(await loop.checkPrCiStatus())
+    expect(await loop.checkPrCiStatus()).toBe('success')
   })
 
   it('treats a merged PR as passed', async () => {
