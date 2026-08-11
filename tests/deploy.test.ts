@@ -119,4 +119,77 @@ describe('deploy', () => {
       },
     )).rejects.toThrow('Deployment verification request failed with HTTP 404.')
   })
+
+  it('times out when the dispatched workflow never appears', async () => {
+    const forge = makeFakeForge()
+    forge.findWorkflowRun = vi.fn(async () => undefined)
+    let time = 0
+    const deploymentClock: DeploymentClock = {
+      sleep: vi.fn(async (milliseconds) => { time += milliseconds }),
+    }
+
+    await expect(deploy(
+      {
+        workflow: 'deploy.yml',
+        revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
+      },
+      'main',
+      forge,
+      {
+        clock: deploymentClock,
+        now: () => time,
+        pollMilliseconds: 4_000,
+        discoveryTimeoutMilliseconds: 10_000,
+        createDispatchToken: () => 'missing-dispatch',
+      },
+    )).rejects.toThrow(
+      "Timed out after 10000ms waiting for dispatched deployment workflow 'deploy.yml' (token 'missing-dispatch') to appear.",
+    )
+    expect(deploymentClock.sleep).toHaveBeenCalledTimes(3)
+    expect(deploymentClock.sleep).toHaveBeenLastCalledWith(2_000)
+    expect(forge.findWorkflowRun).toHaveBeenCalledTimes(4)
+  })
+
+  it('times out when the discovered workflow never completes', async () => {
+    const forge = makeFakeForge()
+    forge.findWorkflowRun = async () => ({
+      id: 76,
+      createdAt: '2026-08-08T15:00:00Z',
+      headSha: 'expected-sha',
+      status: 'in_progress',
+      conclusion: null,
+    })
+    forge.getWorkflowRun = vi.fn(async () => ({
+      id: 76,
+      createdAt: '2026-08-08T15:00:00Z',
+      headSha: 'expected-sha',
+      status: 'in_progress',
+      conclusion: null,
+    }))
+    let time = 0
+    const deploymentClock: DeploymentClock = {
+      sleep: vi.fn(async (milliseconds) => { time += milliseconds }),
+    }
+
+    await expect(deploy(
+      {
+        workflow: 'deploy.yml',
+        revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
+      },
+      'main',
+      forge,
+      {
+        clock: deploymentClock,
+        now: () => time,
+        pollMilliseconds: 4_000,
+        completionTimeoutMilliseconds: 9_000,
+        createDispatchToken: () => 'unfinished-dispatch',
+      },
+    )).rejects.toThrow(
+      'Timed out after 9000ms waiting for deployment workflow run 76 to complete.',
+    )
+    expect(deploymentClock.sleep).toHaveBeenCalledTimes(3)
+    expect(deploymentClock.sleep).toHaveBeenLastCalledWith(1_000)
+    expect(forge.getWorkflowRun).toHaveBeenCalledTimes(3)
+  })
 })
