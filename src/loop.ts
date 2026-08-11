@@ -24,6 +24,7 @@ import { refreshTask, listTaskIds } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
+import { readTemplate } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import {
@@ -501,8 +502,7 @@ export function createLoop(deps: LoopDeps) {
   ): void {
     const parts = [`\n## Auto-generated task (parent: ${parentId})\n`]
     if (includeDescription) parts.push(`\n${desc}\n`)
-    const requirements = join(paths.root, 'templates', 'task-requirements.md')
-    if (existsSync(requirements)) parts.push(`\n${readFileSync(requirements, 'utf8')}`)
+    parts.push(`\n${readTemplate(paths, 'task-requirements.md')}`)
     const pitfalls = pitfallsFileForDesc(paths, desc)
     if (existsSync(pitfalls)) parts.push(`\n${readFileSync(pitfalls, 'utf8')}`)
     appendFileSync(specFile(paths, newId), parts.join(''))
@@ -742,13 +742,8 @@ export function createLoop(deps: LoopDeps) {
     rmSync(yieldFile, { force: true })
   }
 
-  function renderTemplate(templateName: string, replacements: Record<string, string>): string | undefined {
-    const template = join(paths.root, 'templates', templateName)
-    if (!existsSync(template)) {
-      event('WARN', `template not found: ${shortLogPath(template)}`)
-      return undefined
-    }
-    let text = readFileSync(template, 'utf8')
+  function renderTemplate(templateName: string, replacements: Record<string, string>): string {
+    let text = readTemplate(paths, templateName)
     for (const [key, value] of Object.entries(replacements)) {
       text = text.replaceAll(`{{${key}}}`, value)
     }
@@ -757,7 +752,6 @@ export function createLoop(deps: LoopDeps) {
 
   function generateScanTask(scanId: string, scope: string): boolean {
     const text = renderTemplate('scan-template.md', { SCAN_ID: scanId, SCAN_SCOPE: scope })
-    if (text === undefined) return false
     writeFileSync(specFile(paths, scanId), text)
     return true
   }
@@ -776,7 +770,6 @@ export function createLoop(deps: LoopDeps) {
       BASE_BRANCH: baseBranch,
       ACCEPTED_LIMITS: acceptedLimits,
     })
-    if (text === undefined) return false
     writeFileSync(specFile(paths, reviewId), text)
     return true
   }
@@ -995,7 +988,6 @@ export function createLoop(deps: LoopDeps) {
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       FAIL_SUMMARY: failSummary === '' ? '(check the PR checks for details)' : failSummary,
     })
-    if (text === undefined) return
     writeFileSync(specFile(paths, fixId), text)
     try {
       enqueueTask(paths, fixId, 0)

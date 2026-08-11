@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { shioraProject } from '../../project/project-shiora.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import {
   MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
@@ -11,6 +10,7 @@ import {
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
+import { stubProject } from './stubProject.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -160,7 +160,7 @@ describe('mergeTask', () => {
     const worktree = await makeCompletedTask(taskId, { commit: true })
 
     const mergeCommit = await mergeTask(
-      paths, taskId, { taskGate: 'light', project: shioraProject },
+      paths, taskId, { taskGate: 'light', project: stubProject },
     )
 
     expect(mergeCommit).toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
@@ -174,7 +174,7 @@ describe('mergeTask', () => {
   it('stops on uncommitted changes and keeps the worktree', async () => {
     const taskId = '20260808_000000_002_user-forgot-commit'
     const worktree = await makeCompletedTask(taskId, { commit: true, dirty: true })
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
       .rejects.toThrow(/uncommitted changes/)
     expect(existsSync(worktree)).toBe(true)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
@@ -183,7 +183,7 @@ describe('mergeTask', () => {
   it('stops a non-inspection task that produced no commits', async () => {
     const taskId = '20260808_000000_003_user-empty-handed'
     const worktree = await makeCompletedTask(taskId)
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
       .rejects.toThrow(/no new commits/)
     expect(existsSync(worktree)).toBe(true)
   })
@@ -191,7 +191,7 @@ describe('mergeTask', () => {
   it('lets a scan through without commits', async () => {
     const taskId = '20260808_000000_004_scan'
     await makeCompletedTask(taskId)
-    await mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject })
+    await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
@@ -199,14 +199,14 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_005_user-still-going'
     await makeCompletedTask(taskId, { commit: true })
     await writeStatus(paths, taskId, 'running', process.pid)
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
       .rejects.toThrow(/not 'completed'/)
   })
 
   it('aborts the merge when the explicit test command fails', async () => {
     const taskId = '20260808_000000_006_user-tests-fail'
     await makeCompletedTask(taskId, { commit: true })
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject, testCmd: 'node -e "process.exit(1)"' }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject, testCmd: 'node -e "process.exit(1)"' }))
       .rejects.toThrow(/Tests failed/)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
@@ -214,7 +214,7 @@ describe('mergeTask', () => {
   it('throws MergeError instances so callers can count merge failures', async () => {
     const taskId = '20260808_000000_007_user-error-type'
     await makeCompletedTask(taskId)
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: shioraProject }))
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
       .rejects.toBeInstanceOf(MergeError)
   })
 
@@ -329,7 +329,7 @@ describe('mergeRemoteTask', () => {
 
     await expect(mergeRemoteTask(paths, 220, branch, expectedHead, {
       taskGate: 'light',
-      project: shioraProject,
+      project: stubProject,
       testCmd: 'node -e "const fs=require(\'node:fs\'); process.exit(fs.existsSync(\'run.txt\') && fs.existsSync(\'task.txt\') ? 1 : 0)"',
     })).rejects.toThrow(/Tests failed/)
 

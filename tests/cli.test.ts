@@ -10,6 +10,11 @@ import { writeStatus } from '../src/status.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'src', 'cli.ts')
+const CORE_ENV = {
+  ...process.env,
+  PROJECT: 'shiora',
+  PROJECT_ADAPTER: join(HERE, 'fixtures', 'project-loader-fixture.ts'),
+}
 
 let repoRoot: string
 
@@ -77,6 +82,7 @@ describe('manual merge', () => {
 
     const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
       cwd: repoRoot,
+      env: CORE_ENV,
       encoding: 'utf8',
       windowsHide: true,
     })
@@ -115,6 +121,7 @@ describe('manual merge', () => {
     const command = 'node -e "console.log(\'check stdout\'); console.error(\'check stderr\'); process.exit(1)"'
     const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes', '--test-cmd', command], {
       cwd: repoRoot,
+      env: CORE_ENV,
       encoding: 'utf8',
       windowsHide: true,
     })
@@ -187,7 +194,7 @@ describe('loop daemon ownership', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,
       env: {
-        ...process.env,
+        ...CORE_ENV,
         AUTO_PR: 'false',
         ISSUE_QUEUE_ENABLED: 'false',
         MAX_BURST_FAILURES: '1',
@@ -216,7 +223,7 @@ describe('loop daemon ownership', () => {
       {
         cwd: repoRoot,
         env: {
-          ...process.env,
+          ...CORE_ENV,
           AUTO_PR: 'false',
           ISSUE_QUEUE_ENABLED: 'false',
           MAX_BURST_FAILURES: '1',
@@ -246,7 +253,7 @@ describe('loop daemon ownership', () => {
   it('removes the PID and issue marker after a startup failure', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,
-      env: { ...process.env, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
+      env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
       encoding: 'utf8',
       windowsHide: true,
     })
@@ -264,7 +271,7 @@ describe('loop daemon ownership', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,
       env: {
-        ...process.env,
+        ...CORE_ENV,
         AUTO_PR: 'false',
         ISSUE_QUEUE_ENABLED: 'false',
         MAX_SCAN_CYCLES: '0',

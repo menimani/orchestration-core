@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
@@ -23,8 +22,6 @@ import {
 } from '../src/paths.ts'
 import { readStatus } from '../src/status.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
-
-const HERE = dirname(fileURLToPath(import.meta.url))
 
 let repoRoot: string
 let paths: OrchPaths
@@ -528,10 +525,9 @@ describe('runAutoReview', () => {
   }
 
   it('includes the curated accepted limits in a generated review spec', () => {
-    const acceptedLimitsFile = join(HERE, '..', '..', 'accepted-limits.md')
-    copyFileSync(join(HERE, '..', '..', 'templates', 'review-template.md'),
-      join(paths.root, 'templates', 'review-template.md'))
-    copyFileSync(acceptedLimitsFile, join(paths.root, 'accepted-limits.md'))
+    rmSync(join(paths.root, 'templates', 'review-template.md'))
+    const acceptedLimitsFile = join(paths.root, 'accepted-limits.md')
+    writeFileSync(acceptedLimitsFile, '- Keep the accepted fixture limit.\n')
 
     expect(makeLoop().runAutoReview(7, false)).toBe(false)
     const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
@@ -540,8 +536,7 @@ describe('runAutoReview', () => {
   })
 
   it('marks accepted limits as none when the file is missing', () => {
-    copyFileSync(join(HERE, '..', '..', 'templates', 'review-template.md'),
-      join(paths.root, 'templates', 'review-template.md'))
+    rmSync(join(paths.root, 'templates', 'review-template.md'))
 
     expect(makeLoop().runAutoReview(7, false)).toBe(false)
     const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
@@ -1333,9 +1328,13 @@ describe('runCycleSuite', () => {
 describe('scanForNextTasks', () => {
   beforeEach(() => {
     mkdirSync(join(paths.root, 'templates', 'pitfalls'), { recursive: true })
-    const realPitfalls = join(HERE, '..', '..', 'templates', 'pitfalls')
-    for (const name of readdirSync(realPitfalls)) {
-      copyFileSync(join(realPitfalls, name), join(paths.root, 'templates', 'pitfalls', name))
+    const pitfalls = {
+      'code.md': 'Stale async responses.\n',
+      'docs.md': 'Project documentation pitfalls.\n',
+      'tests.md': 'clearAllMocks keeps implementations.\n',
+    }
+    for (const [name, content] of Object.entries(pitfalls)) {
+      writeFileSync(join(paths.root, 'templates', 'pitfalls', name), content)
     }
     writeFileSync(join(paths.root, 'templates', 'task-requirements.md'), 'Shared requirements.\n')
   })
