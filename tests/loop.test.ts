@@ -1104,6 +1104,9 @@ describe('completion marker output', () => {
     git(['push', '-u', 'origin', 'main'])
     git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
     const loop = makeLoop()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
 
     await loop.postLoopPr()
 
@@ -1113,6 +1116,40 @@ describe('completion marker output', () => {
     expect(logged).toContain('Completed Loop        PR #1')
     expect(logged.indexOf('LOOP_DONE: https://example.test/pull/1 — The body still reflects history and must be rewritten as a final summary.'))
       .toBeLessThan(logged.indexOf('Completed Loop        PR #1'))
+  })
+
+  it('does not emit LOOP_DONE when draft promotion fails', async () => {
+    initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    const loop = makeLoop()
+    fakeForge.markPrReady = async () => {
+      throw new Error('promotion failed')
+    }
+
+    await loop.postLoopPr()
+
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+    expect(logged).not.toContain('Completed Loop        PR #1')
+  })
+
+  it('does not emit LOOP_DONE until the forge confirms the PR is ready', async () => {
+    initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    const loop = makeLoop()
+
+    await loop.postLoopPr()
+
+    expect(prStatusCalls).toBe(3)
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+    expect(logged).not.toContain('Completed Loop        PR #1')
   })
 })
 
