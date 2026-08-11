@@ -78,6 +78,24 @@ describe('command registry', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('Usage: worker <base-ref>')
   })
+
+  it('reads runner-neutral task settings when manually starting a task', () => {
+    const result = spawnSync(process.execPath, [CLI, 'start', 'manual-task'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        TASK_EFFORT: 'maximum',
+        CODEX_EFFORT: 'low',
+        CODEX_MODEL: 'codex-specific-model',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("TASK_EFFORT must be minimal, low, medium or high, got 'maximum'")
+    expect(readFileSync(CLI, 'utf8')).not.toMatch(/CODEX_(?:EFFORT|MODEL)/)
+  })
 })
 
 describe('logs', () => {

@@ -163,8 +163,9 @@ const cmdStart: Command = async (paths, args) => {
     console.error('Usage: start <task-id> [--effort minimal|low|medium|high] [--model <model>]')
     return 1
   }
-  let effort = (process.env['CODEX_EFFORT'] ?? '') as ReasoningEffort | ''
-  let model = process.env['CODEX_MODEL'] ?? ''
+  const config = loadConfig()
+  let effort = config.taskEffort
+  let model = config.taskModel
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--effort') {
       const value = args[++i]
@@ -180,11 +181,10 @@ const cmdStart: Command = async (paths, args) => {
       return 1
     }
   }
-  const config = loadConfig()
   const runner = await loadRunner(config.runner)
   const project = await loadProject(paths.root)
   const result = await startTask(paths, runner, taskId, {
-    effort: effort === '' ? 'medium' : effort,
+    effort,
     model: model === '' ? undefined : model,
     setup: isScanTaskId(taskId) ? project.scanWorktreeSetup : undefined,
     report: (line) => console.log(line),
