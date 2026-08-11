@@ -793,6 +793,24 @@ describe('cycleIsFinal', () => {
 })
 
 describe('cycle gate', () => {
+  it.each([2, 3, 4])('partitions the eight scan sections across %i scans', async (scanParallel) => {
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const loop = makeLoop({ scanParallel, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    const scopes = readdirSync(paths.tasksDir)
+      .filter((name) => name.endsWith('_scan.md'))
+      .map((name) => readFileSync(join(paths.tasksDir, name), 'utf8'))
+    expect(scopes).toHaveLength(scanParallel)
+    const assignedSections = scopes.flatMap((scope) => {
+      const assignment = /Perform only sections ([^;]+);/.exec(scope)?.[1] ?? ''
+      return [...assignment.matchAll(/\d+/g)].map((match) => Number(match[0]))
+    })
+    expect(assignedSections.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+  })
+
   it('resumes when review is enabled but automatic review is disabled', async () => {
     const loop = makeLoop({
       autoPr: false,
