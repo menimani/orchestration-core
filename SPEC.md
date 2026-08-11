@@ -17,6 +17,10 @@ from or equivalent to `orchestration/tests/*.sh`.
 - `tsc --noEmit` joins the repository checks; vitest runs the test suite.
 - No `jq` dependency anywhere (this deletes the Windows-jq-CRLF bug class; the invariant
   it protected — values read from status files compare clean — still holds and is tested).
+- Core subtree updates default on. The daemon logs whether `CORE_AUTO_UPDATE` is on or
+  off at startup; `false` skips the pre-cycle check entirely. `UPSTREAM_REMOTE` defaults
+  to the package's `upstreamRepo` value used by `report-upstream`, and
+  `UPSTREAM_BRANCH` defaults to `main`.
 - The command surface is the `scripts` block of the package's `package.json` (the
   repository-root manifest here, or `orchestration/ts/package.json` when installed as a
   subtree) — `orchestrate.sh` is not kept (decided 2026-08-08; supersedes the
@@ -105,6 +109,16 @@ from or equivalent to `orchestration/tests/*.sh`.
 14. Effort defaults: scans run the runner at high reasoning effort, queued tasks at
     medium; `SCAN_EFFORT`, `TASK_EFFORT`, `SCAN_MODEL`, `TASK_MODEL` override, and
     `delegate --effort` overrides per task.
+14a. Immediately before a new cycle consumes its number or starts a scan, after the
+    previous cycle gate has closed and while no task is running, the daemon fetches the
+    configured core upstream and compares its tip with the last `git-subtree-split` for
+    this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
+    A package-file change logs aligned `Updated    core        <old8>..<new8>` and
+    `Restarting core        for cycle <n>` events, releases daemon ownership, and starts
+    the same command with the same environment, working tree, and run branch. A daemon
+    otherwise runs the code it started with. The check never runs mid-cycle. A dirty
+    working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
+    the cycle proceed unchanged so local divergence is resolved by the consumer.
 
 ## The cycle gate
 

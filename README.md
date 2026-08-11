@@ -33,6 +33,15 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
+Immediately before each cycle starts, the daemon fetches the configured shared-core
+upstream and compares it with the last import of this package's subtree. If the subtree
+is behind, it runs `git subtree pull --squash`; when package files change, it replaces
+itself so the new cycle uses the pulled code while retaining the environment and run
+branch. This happens only after the prior gate has closed and while no task is running.
+A daemon otherwise runs the code it started with. A dirty working tree or conflicting
+pull is left for the consumer to resolve: the daemon warns and starts the cycle on the
+old code instead of merging local divergence.
+
 Nothing here decides that shipping is safe. Deployment stays a human action.
 
 ## The three adapters
@@ -100,7 +109,8 @@ a decision from your own head to the loop, `loop-status` says what is in flight,
 waits on a pull request's checks without believing a partial rollup, `deploy` dispatches a
 deployment workflow and verifies the revision that actually came up.
 
-Pull later improvements with:
+Automatic pulls are enabled by default. To pull later improvements manually, or when
+`CORE_AUTO_UPDATE=false` pins the consumed version, use:
 
 ```bash
 git subtree pull --prefix=orchestration/ts \
@@ -118,6 +128,9 @@ git subtree pull --prefix=orchestration/ts \
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work |
+| `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
+| `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |
+| `UPSTREAM_BRANCH` | main | Shared-core branch to compare and pull |
 
 ## Shared backlog and workers
 

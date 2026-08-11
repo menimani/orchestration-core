@@ -448,9 +448,27 @@ describe('loop daemon ownership', () => {
     })
 
     expect(result.status).toBe(0)
-    expect(result.stdout).toBe('')
+    expect(result.stdout).toContain('Mode       core        auto-update on')
     expect(existsSync(daemonFile('loop.pid'))).toBe(false)
     expect(existsSync(daemonFile('issue-mode'))).toBe(false)
     expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('states when automatic core updates are disabled', () => {
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        CORE_AUTO_UPDATE: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_SCAN_CYCLES: '0',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('Mode       core        auto-update off')
   })
 })
