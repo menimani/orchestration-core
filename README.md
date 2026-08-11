@@ -71,7 +71,7 @@ Then start a run on a topic branch — never on your default branch, because the
 commits and merges on its own:
 
 ```bash
-MAX_SCAN_CYCLES=12 MAX_PARALLEL=8 \
+MAX_SCAN_CYCLES=12 MAX_PARALLEL=8 AUTO_REVIEW=true \
   node orchestration/ts/src/cli.ts loop --daemon
 ```
 
