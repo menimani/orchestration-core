@@ -180,6 +180,7 @@ export function createLoop(deps: LoopDeps) {
   }
 
   async function initializeIssueQueue(): Promise<boolean> {
+    if (!config.issueQueueEnabled) return true
     if (issueQueueInitialized) return true
     try {
       await ensureQueueLabels(forge)
@@ -1303,7 +1304,10 @@ export function createLoop(deps: LoopDeps) {
       return 'stopped'
     }
 
-    if (!(await initializeIssueQueue())) return 'continue'
+    // Label setup is a remote prerequisite, not a prerequisite for observing and
+    // advancing local work. If it is unavailable, keep this poll local-only and
+    // retry initialization on the next poll.
+    const remoteOperationsAvailable = await initializeIssueQueue()
 
     let burstFailures = 0
     const mergeAttempts = new Set<string>()
@@ -1332,13 +1336,15 @@ export function createLoop(deps: LoopDeps) {
           const runBranch = git(['branch', '--show-current']).trim()
           try {
             recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
-            await commentOnIssueMerge(
-              forge,
-              linkedIssue,
-              taskId,
-              mergeCommit,
-              runBranch,
-            )
+            if (remoteOperationsAvailable) {
+              await commentOnIssueMerge(
+                forge,
+                linkedIssue,
+                taskId,
+                mergeCommit,
+                runBranch,
+              )
+            }
           } catch (error) {
             if (!(error instanceof ForgeRateLimitError)) {
               event('WARN', `could not link issue #${linkedIssue} to merge: ${errorSummary(error)}`)
@@ -1368,7 +1374,7 @@ export function createLoop(deps: LoopDeps) {
       if (status === undefined) continue
 
       const linkedIssue = status === 'running' ? issueNumberForTask(paths, taskId) : undefined
-      if (linkedIssue !== undefined) {
+      if (linkedIssue !== undefined && remoteOperationsAvailable) {
         locallyRunningIssues.add(linkedIssue)
         try {
           await heartbeatIssueForTask(forge, paths, taskId, now())
@@ -1394,7 +1400,8 @@ export function createLoop(deps: LoopDeps) {
       }
 
       const scannedFlag = join(scannedDir, taskId)
-      if (status === 'completed' && !existsSync(scannedFlag)) {
+      if (status === 'completed' && !existsSync(scannedFlag)
+        && (!config.issueQueueEnabled || remoteOperationsAvailable)) {
         const depthFile = join(scannedDir, `${taskId}.depth`)
         const depth = existsSync(depthFile) ? readCount(depthFile) : 0
 
@@ -1449,7 +1456,7 @@ export function createLoop(deps: LoopDeps) {
     }
 
     let openFindings: ForgeIssue[] | null = null
-    if (config.issueQueueEnabled && !existsSync(stopFile)) {
+    if (config.issueQueueEnabled && remoteOperationsAvailable && !existsSync(stopFile)) {
       try {
         openFindings = await forge.listOpenIssues(LABEL_FINDING)
         warningLog.recovered('list-loop-issues')
@@ -1543,13 +1550,15 @@ export function createLoop(deps: LoopDeps) {
         } catch (error) {
           const issueNumber = issueNumberForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumber !== undefined) {
-            try {
-              if (cachedUser === undefined) cachedUser = await forge.currentUser()
-              await releaseIssueClaim(forge, issueNumber, cachedUser)
-              event('Released', shortTaskId(entry.taskId), 'startup failed')
-            } catch (releaseError) {
-              if (!(releaseError instanceof ForgeRateLimitError)) {
-                event('WARN', `${shortTaskId(entry.taskId)} startup failed and issue #${issueNumber} could not be released: ${errorSummary(releaseError)}`)
+            if (remoteOperationsAvailable) {
+              try {
+                if (cachedUser === undefined) cachedUser = await forge.currentUser()
+                await releaseIssueClaim(forge, issueNumber, cachedUser)
+                event('Released', shortTaskId(entry.taskId), 'startup failed')
+              } catch (releaseError) {
+                if (!(releaseError instanceof ForgeRateLimitError)) {
+                  event('WARN', `${shortTaskId(entry.taskId)} startup failed and issue #${issueNumber} could not be released: ${errorSummary(releaseError)}`)
+                }
               }
             }
             try {
