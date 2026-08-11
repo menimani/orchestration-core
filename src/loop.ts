@@ -1069,7 +1069,11 @@ export function createLoop(deps: LoopDeps) {
     if (status.state !== 'open' || status.isDraft) return false
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
-    log(`LOOP_DONE: ${prUrl} — The body still reflects history and must be rewritten as a final summary.`)
+    log(`LOOP_DONE: ${prUrl}`)
+    event(
+      'Status', 'PR body',
+      'still reflects history and must be rewritten as a final summary.',
+    )
     const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
     event('Completed', 'Loop', prNumber === undefined ? '' : `PR #${prNumber}`)
     return true
