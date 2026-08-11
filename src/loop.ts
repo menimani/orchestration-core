@@ -1015,14 +1015,16 @@ export function createLoop(deps: LoopDeps) {
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     if (prUrl === '') return
     const branch = git(['branch', '--show-current']).trim()
-    const status = await forge.prStatus(branch)
+    let status = await forge.prStatus(branch)
     if (status.isDraft) {
       try {
         await forge.markPrReady(branch)
+        status = await forge.prStatus(branch)
       } catch {
-        // promotion failing is reported by the missing ready state, not a crash
+        return
       }
     }
+    if (status.state !== 'open' || status.isDraft) return
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
     log(`LOOP_DONE: ${prUrl} — The body still reflects history and must be rewritten as a final summary.`)
