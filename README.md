@@ -43,7 +43,7 @@ carry all of that:
 |---------|-------------|------------------------|----------------|
 | forge   | `FORGE`     | `forge-github` (`gh`)  | move to Gitea, GitLab, … |
 | runner  | `RUNNER`    | `runner-codex`         | drive a different agent CLI |
-| project | `PROJECT`   | none — you write it    | describe *your* repository |
+| project | discovery or `PROJECT` | none — you write it | describe *your* repository |
 
 The project adapter is the one you must supply. It lives **outside** this package so a
 `git subtree pull` never touches it:
@@ -56,7 +56,10 @@ your-repo/
     ts/                         ← this package, pulled as a subtree
 ```
 
-Point `PROJECT=<name>` at it, or give `PROJECT_ADAPTER` an explicit path.
+With neither variable set, the core uses the single `project-*.ts` file in
+`orchestration/project/`. If that directory has multiple adapters, set `PROJECT=<name>`
+to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explicit path;
+it overrides the conventional path selected by `PROJECT`.
 
 A project adapter answers a few questions: which commands gate a merge, which tests a
 changed path implies, which suites run once per cycle, and how a deployment is verified.

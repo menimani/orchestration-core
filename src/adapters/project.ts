@@ -1,5 +1,5 @@
-import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, readdirSync } from 'node:fs'
+import { basename, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // The project adapter carries everything the orchestration knows about the repository
@@ -70,23 +70,57 @@ export interface ProjectAdapter {
   scanWorktreeSetup?: WorktreeSetupStep[]
 }
 
-function isProjectAdapter(value: unknown, name: string): value is ProjectAdapter {
+function isProjectAdapter(value: unknown, name?: string): value is ProjectAdapter {
   if (typeof value !== 'object' || value === null) return false
   const candidate = value as Partial<ProjectAdapter>
-  return candidate.name === name
+  return typeof candidate.name === 'string'
+    && candidate.name !== ''
+    && (name === undefined || candidate.name === name)
     && typeof candidate.mergeChecks === 'function'
     && typeof candidate.cycleSuite === 'function'
+}
+
+function discoverProjectAdapter(orchestrationRoot: string): { path: string; name: string } {
+  const projectDirectory = resolve(orchestrationRoot, 'project')
+  const adapters = existsSync(projectDirectory)
+    ? readdirSync(projectDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^project-.+\.ts$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+    : []
+
+  if (adapters.length !== 1) {
+    const found = adapters.length === 0 ? '(none)' : adapters.join(', ')
+    throw new Error(
+      `Could not discover project adapter in ${projectDirectory}: found ${found}. `
+      + 'Expected exactly one project-*.ts file; PROJECT selects between them.',
+    )
+  }
+
+  const filename = adapters[0]!
+  return {
+    path: resolve(projectDirectory, filename),
+    name: basename(filename, '.ts').slice('project-'.length),
+  }
 }
 
 export async function loadProject(
   orchestrationRoot: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ProjectAdapter> {
-  const name = env['PROJECT'] === undefined || env['PROJECT'] === '' ? 'shiora' : env['PROJECT']
-  const configuredPath = env['PROJECT_ADAPTER']
-  const adapterPath = configuredPath === undefined || configuredPath === ''
-    ? resolve(orchestrationRoot, 'project', `project-${name}.ts`)
-    : resolve(orchestrationRoot, configuredPath)
+  const configuredName = env['PROJECT'] === undefined || env['PROJECT'] === ''
+    ? undefined
+    : env['PROJECT']
+  const configuredPath = env['PROJECT_ADAPTER'] === undefined || env['PROJECT_ADAPTER'] === ''
+    ? undefined
+    : env['PROJECT_ADAPTER']
+  const discovered = configuredName === undefined && configuredPath === undefined
+    ? discoverProjectAdapter(orchestrationRoot)
+    : undefined
+  const name = configuredName ?? discovered?.name
+  const adapterPath = configuredPath !== undefined
+    ? resolve(orchestrationRoot, configuredPath)
+    : discovered?.path ?? resolve(orchestrationRoot, 'project', `project-${name}.ts`)
 
   if (!existsSync(adapterPath)) {
     throw new Error(`Project adapter not found: ${adapterPath}`)
@@ -96,5 +130,6 @@ export async function loadProject(
   for (const value of Object.values(mod)) {
     if (isProjectAdapter(value, name)) return value
   }
-  throw new Error(`Project adapter '${adapterPath}' does not export project '${name}'`)
+  const expected = name === undefined ? 'a project adapter' : `project '${name}'`
+  throw new Error(`Project adapter '${adapterPath}' does not export ${expected}`)
 }
