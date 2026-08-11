@@ -30,6 +30,9 @@ const systemClock: DeploymentClock = {
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 }
 
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 5 * 60_000
+const DEFAULT_COMPLETION_TIMEOUT_MS = 30 * 60_000
+
 /** Dispatch, identify, and verify one deployment by identities unique to this request. */
 export async function deploy(
   deployment: Deployment,
@@ -39,23 +42,48 @@ export async function deploy(
     fetcher?: DeploymentFetcher
     clock?: DeploymentClock
     pollMilliseconds?: number
+    discoveryTimeoutMilliseconds?: number
+    completionTimeoutMilliseconds?: number
+    now?: () => number
     createDispatchToken?: () => string
   } = {},
 ): Promise<DeploymentResult> {
   const clock = options.clock ?? systemClock
   const fetcher = options.fetcher ?? fetch
   const pollMilliseconds = options.pollMilliseconds ?? 5_000
+  const discoveryTimeoutMilliseconds = options.discoveryTimeoutMilliseconds
+    ?? DEFAULT_DISCOVERY_TIMEOUT_MS
+  const completionTimeoutMilliseconds = options.completionTimeoutMilliseconds
+    ?? DEFAULT_COMPLETION_TIMEOUT_MS
+  const now = options.now ?? Date.now
   const dispatchToken = (options.createDispatchToken ?? randomUUID)()
 
   await forge.dispatchWorkflow(deployment.workflow, ref, dispatchToken)
 
+  const discoveryDeadline = now() + discoveryTimeoutMilliseconds
   let run: WorkflowRun | undefined
   while (run === undefined) {
     run = await forge.findWorkflowRun(deployment.workflow, ref, dispatchToken)
-    if (run === undefined) await clock.sleep(pollMilliseconds)
+    if (run === undefined) {
+      const remaining = discoveryDeadline - now()
+      if (remaining <= 0) {
+        throw new Error(
+          `Timed out after ${discoveryTimeoutMilliseconds}ms waiting for dispatched deployment workflow '${deployment.workflow}' (token '${dispatchToken}') to appear.`,
+        )
+      }
+      await clock.sleep(Math.min(pollMilliseconds, remaining))
+    }
   }
+
+  const completionDeadline = now() + completionTimeoutMilliseconds
   while (run.status !== 'completed') {
-    await clock.sleep(pollMilliseconds)
+    const remaining = completionDeadline - now()
+    if (remaining <= 0) {
+      throw new Error(
+        `Timed out after ${completionTimeoutMilliseconds}ms waiting for deployment workflow run ${run.id} to complete.`,
+      )
+    }
+    await clock.sleep(Math.min(pollMilliseconds, remaining))
     run = await forge.getWorkflowRun(run.id)
   }
   if (run.conclusion !== 'success') {
