@@ -1536,20 +1536,29 @@ export function createLoop(deps: LoopDeps) {
         } catch (error) {
           const issueNumber = issueNumberForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumber !== undefined) {
+            let released = false
             try {
               if (cachedUser === undefined) cachedUser = await forge.currentUser()
               await releaseIssueClaim(forge, issueNumber, cachedUser)
+              released = true
               event('Released', shortTaskId(entry.taskId), 'startup failed')
             } catch (releaseError) {
               if (!(releaseError instanceof ForgeRateLimitError)) {
                 event('WARN', `${shortTaskId(entry.taskId)} startup failed and issue #${issueNumber} could not be released: ${errorSummary(releaseError)}`)
               }
             }
-            try {
-              cleanupTask(paths, entry.taskId, undefined, false)
-              dropClaimedTaskMaterialization(paths, entry.taskId)
-            } catch (cleanupError) {
-              event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)
+            if (released) {
+              try {
+                cleanupTask(paths, entry.taskId, undefined, false)
+                dropClaimedTaskMaterialization(paths, entry.taskId)
+              } catch (cleanupError) {
+                event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)
+              }
+            } else {
+              enqueueTask(paths, entry.taskId, entry.depth)
+              // Do not dequeue the same retained materialization again in this poll.
+              // The next poll retries the release while keeping the forge claim linked.
+              break
             }
           } else {
             event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)
