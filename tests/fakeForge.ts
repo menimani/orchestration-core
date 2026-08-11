@@ -1,5 +1,6 @@
 import type {
-  CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus,
+  CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue,
+  PrReference, PrStatus,
 } from '../src/adapters/forge.ts'
 
 // An in-memory forge for tests: PR calls answer from a settable status, and the issue
@@ -10,6 +11,7 @@ export interface FakeForge extends Forge {
   prStatusValue: PrStatus
   prStatusScript: PrStatus[]
   prStatusCalls: number
+  prStatusRefs: PrReference[]
   issues: Map<number, ForgeIssue>
   issueComments: Map<number, string[]>
   repositoryIssues: Array<CreateIssueInRepositoryOptions & { labels: string[]; url: string }>
@@ -26,6 +28,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     prStatusValue: { state: 'open', isDraft: true, url: 'https://example.test/pull/1', headSha: '', checks: [] },
     prStatusScript: [],
     prStatusCalls: 0,
+    prStatusRefs: [],
     issues: new Map(),
     issueComments: new Map(),
     repositoryIssues: [],
@@ -35,7 +38,8 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     user,
     clock: () => new Date(),
 
-    async prStatus(): Promise<PrStatus> {
+    async prStatus(ref: PrReference): Promise<PrStatus> {
+      fake.prStatusRefs.push(ref)
       const scripted = fake.prStatusScript[Math.min(fake.prStatusCalls, fake.prStatusScript.length - 1)]
       fake.prStatusCalls++
       return scripted ?? fake.prStatusValue

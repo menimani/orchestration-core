@@ -3,7 +3,7 @@ import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
   CheckConclusion, CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge,
-  ForgeIssue, PrStatus, WorkflowRun,
+  ForgeIssue, PrReference, PrStatus, WorkflowRun,
 } from './forge.ts'
 import { ForgeRateLimitError } from './forge.ts'
 
@@ -201,10 +201,10 @@ export function createGithubForge(
   })
 
   return {
-    async prStatus(ref: string): Promise<PrStatus> {
+    async prStatus(ref: PrReference): Promise<PrStatus> {
       let stdout: string
       const args = [
-        'pr', 'view', ref,
+        'pr', 'view', String(ref.value),
         '--json', 'url,state,isDraft,headRefOid,statusCheckRollup',
       ]
       try {

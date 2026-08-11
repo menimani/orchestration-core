@@ -965,7 +965,7 @@ export function createLoop(deps: LoopDeps) {
     const title = prTitle(project, paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
       { cycle, maxCycles: config.maxScanCycles })
 
-    const status = await forge.prStatus(branch)
+    const status = await forge.prStatus({ kind: 'branch', value: branch })
     if (status.state === 'open') {
       // A body left as created stops at the first cycle's content, so it is rebuilt
       // every cycle — unless a person edited it, which removes the generated marker.
@@ -1019,7 +1019,7 @@ export function createLoop(deps: LoopDeps) {
     if (prUrl === '') return 'unknown'
     let status
     try {
-      status = await forge.prStatus(prUrl)
+      status = await forge.prStatus({ kind: 'url', value: prUrl })
     } catch {
       return 'unknown'
     }
@@ -1057,11 +1057,11 @@ export function createLoop(deps: LoopDeps) {
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     if (prUrl === '') return false
     const branch = git(['branch', '--show-current']).trim()
-    let status = await forge.prStatus(branch)
+    let status = await forge.prStatus({ kind: 'branch', value: branch })
     if (status.isDraft) {
       try {
         await forge.markPrReady(branch)
-        status = await forge.prStatus(branch)
+        status = await forge.prStatus({ kind: 'branch', value: branch })
       } catch {
         return false
       }
@@ -1257,7 +1257,7 @@ export function createLoop(deps: LoopDeps) {
             const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
             let failSummary = ''
             try {
-              const status = await forge.prStatus(prUrl)
+              const status = await forge.prStatus({ kind: 'url', value: prUrl })
               failSummary = status.checks.map((check) => `${check.name}: ${check.conclusion}`).join('\n')
             } catch {
               failSummary = ''
