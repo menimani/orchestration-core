@@ -4,6 +4,7 @@ import { pitfallsFileForDesc } from './gates.ts'
 import { taskIdForDesc } from './ids.ts'
 import { statusFile, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
+import { readTemplate } from './templates.ts'
 import { signalWake } from './wake.ts'
 import type { Forge } from './adapters/forge.ts'
 
@@ -185,10 +186,7 @@ function materializeDelegatedTask(
   const specReused = existsSync(spec)
   if (!specReused) {
     const parts = [`# ${taskId}: delegated task\n\n## Requirement\n\n${description}\n`]
-    const requirements = join(paths.root, 'templates', 'task-requirements.md')
-    if (existsSync(requirements)) {
-      parts.push(`\n${readFileSync(requirements, 'utf8')}`)
-    }
+    parts.push(`\n${readTemplate(paths, 'task-requirements.md')}`)
     // Delegated work is nearly always code; the pitfall list carries the defect classes
     // reviews kept re-flagging, so the implementer checks them up front.
     const pitfalls = pitfallsFileForDesc(paths, description)
