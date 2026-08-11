@@ -23,8 +23,11 @@ from or equivalent to `orchestration/tests/*.sh`.
   loop`, `... delegate -- "<description>"`, `... loop-status`, `queue`, `stop`, `start`,
   `status`, `logs`, `merge`, `cleanup`, `prune`, `new`, `enqueue`), all dispatching into
   `src/cli.ts`. The skills (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
-  the npm form as part of the cutover. What stays frozen: the environment variable
-  names (they pass through npm unchanged, so launch commands keep their shape) and the
+  the npm form as part of the cutover. A background launch prints status and stop
+  commands for the package's actual location: direct `npm run` commands at the repository
+  root, or `npm run -C <package-path>` when installed as a subtree. What stays frozen:
+  the environment variable names (they pass through npm unchanged, so launch commands
+  keep their shape) and the
   output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
   `LOOP_DONE:`, and `FAILED:`). Loop daemon events in `loop.log` use
   `YYYY-MM-DD HH:mm:ss [loop <cycle>/<cap>] <event> <subject> <detail>`: cycle and cap

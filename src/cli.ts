@@ -17,7 +17,9 @@ import {
 } from './issueQueue.ts'
 import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
 import { deploy } from './deploy.ts'
-import { isScanTaskId, logFile, orchPaths, packageFile, type OrchPaths } from './paths.ts'
+import {
+  isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
+} from './paths.ts'
 import { pruneTasks } from './prune.ts'
 import { reportUpstream } from './reportUpstream.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
@@ -433,8 +435,8 @@ const cmdLoop: Command = async (paths, args) => {
     child.unref()
     console.log(`Started the loop in the background (PID=${child.pid})`)
     console.log(`Log: ${loopLog}`)
-    console.log('Check: npm run -C orchestration/ts loop-status')
-    console.log('Stop: npm run -C orchestration/ts stop')
+    console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
+    console.log(`Stop: ${packageScriptCommand(paths.repoRoot, 'stop')}`)
     return 0
   }
   const markerOutput = args[0] === '--marker-output' ? args[1] : undefined
