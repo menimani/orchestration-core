@@ -1023,7 +1023,21 @@ export async function reapStaleLeases(
     if (await hasMergeMarker(issue)) {
       continue
     }
-    for (const assignee of issue.assignees) {
+
+    // The listing is only a candidate snapshot. A heartbeat, quarantine, or new
+    // assignment may land while promotion metadata and comments are checked, so
+    // re-read every part of the lease immediately before changing it.
+    const current = await forge.getIssue(issue.number)
+    const currentAgeMs = now.getTime() - new Date(current.updatedAt).getTime()
+    if (current.state !== 'open'
+      || !current.labels.includes(LABEL_IN_PROGRESS)
+      || current.labels.includes(LABEL_MERGE_FAILED)
+      || currentAgeMs < leaseHours * 3600 * 1000
+      || current.assignees.length !== issue.assignees.length
+      || current.assignees.some((assignee) => !issue.assignees.includes(assignee))) {
+      continue
+    }
+    for (const assignee of current.assignees) {
       await forge.unassignIssue(issue.number, assignee)
     }
     await forge.addLabel(issue.number, LABEL_READY)
