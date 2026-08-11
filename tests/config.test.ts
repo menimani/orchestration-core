@@ -30,7 +30,11 @@ describe('loadConfig', () => {
       taskGate: 'full',
       forge: 'github',
       runner: 'codex',
+      project: '',
       workerMode: false,
+      coreAutoUpdate: true,
+      upstreamRemote: 'menimani/orchestration-core',
+      upstreamBranch: 'main',
     })
   })
 
@@ -41,12 +45,22 @@ describe('loadConfig', () => {
       TASK_GATE: 'light',
       AUTO_REVIEW: 'true',
       REVIEW_EFFORT: 'low',
+      TASK_EFFORT: 'high',
+      TASK_MODEL: 'task-model',
+      CORE_AUTO_UPDATE: 'false',
+      UPSTREAM_REMOTE: 'shared-core',
+      UPSTREAM_BRANCH: 'stable',
     })
     expect(config.maxParallel).toBe(12)
     expect(config.reviewEveryNCycles).toBe(3)
     expect(config.taskGate).toBe('light')
     expect(config.autoReview).toBe(true)
     expect(config.reviewEffort).toBe('low')
+    expect(config.taskEffort).toBe('high')
+    expect(config.taskModel).toBe('task-model')
+    expect(config.coreAutoUpdate).toBe(false)
+    expect(config.upstreamRemote).toBe('shared-core')
+    expect(config.upstreamBranch).toBe('stable')
   })
 
   it('clamps SCAN_PARALLEL to the four defined checklist groups', () => {
@@ -63,6 +77,17 @@ describe('loadConfig', () => {
 
   it('rejects a non-integer numeric setting', () => {
     expect(() => loadConfig({ MAX_PARALLEL: 'many' })).toThrow(/MAX_PARALLEL/)
+  })
+
+  it('rejects MAX_PARALLEL below one', () => {
+    expect(() => loadConfig({ MAX_PARALLEL: '0' })).toThrow(/MAX_PARALLEL must be at least 1/)
+  })
+
+  it('rejects a poll interval longer than the issue heartbeat interval', () => {
+    expect(loadConfig({ POLL_INTERVAL: '1800' }).pollIntervalSeconds).toBe(1800)
+    expect(() => loadConfig({ POLL_INTERVAL: '1801' })).toThrow(
+      /POLL_INTERVAL must not exceed 1800 seconds/,
+    )
   })
 
   it('enables worker mode only with the issue queue', () => {

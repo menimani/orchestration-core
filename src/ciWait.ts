@@ -40,7 +40,7 @@ export async function waitForCi(
   let previousNames: string[] | undefined
 
   for (;;) {
-    const status = await forge.prStatus(String(prNumber))
+    const status = await forge.prStatus({ kind: 'number', value: prNumber })
     const checks = newestChecksByName(status.checks)
     const names = checks.map((check) => check.name)
     const eligible = status.state === 'open' && checks.length > 0

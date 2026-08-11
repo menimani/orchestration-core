@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
 
 // Which commands verify a merge, and when, is project knowledge — it lives in the
-// project adapter (orchestration/project/project-shiora.ts), not here. The rest of this
+// project adapter (orchestration/project/project-<name>.ts), not here. The rest of this
 // file is orchestration-generic.
 
 // Maps a finding's tag to the pitfall list its implementer checks a diff against.

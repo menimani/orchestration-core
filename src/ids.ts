@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
+import { withBacklogLock } from './backlog.ts'
 import type { OrchPaths } from './paths.ts'
 
 // Task ids are `YYYYMMDD_HHMMSS_nnn_<name>`: a directory listing sorts
@@ -14,9 +17,13 @@ function timestamp(now: Date): { full: string; day: string } {
   return { full: `${day}_${time}`, day }
 }
 
-export function newTaskId(paths: OrchPaths, taskName: string, now: Date = new Date()): string {
+function sequenceFile(paths: OrchPaths): string {
+  return join(paths.queueDir, 'task-seq.txt')
+}
+
+function newTaskIdUnlocked(paths: OrchPaths, taskName: string, now: Date): string {
   const { full, day } = timestamp(now)
-  const seqFile = join(paths.queueDir, 'task-seq.txt')
+  const seqFile = sequenceFile(paths)
   let seq = 0
   if (existsSync(seqFile)) {
     // A carriage return read into the sequence once made it compare equal to nothing;
@@ -29,6 +36,10 @@ export function newTaskId(paths: OrchPaths, taskName: string, now: Date = new Da
   seq += 1
   writeFileSync(seqFile, `${day} ${seq}\n`)
   return `${full}_${String(seq).padStart(3, '0')}_${taskName}`
+}
+
+export function newTaskId(paths: OrchPaths, taskName: string, now: Date = new Date()): string {
+  return withBacklogLock(sequenceFile(paths), () => newTaskIdUnlocked(paths, taskName, now))
 }
 
 /** The run-local id used in loop.log; the full id remains the on-disk identity. */
@@ -81,7 +92,25 @@ export function recordTaskIdForDesc(
   description: string,
   taskId: string,
 ): void {
-  writeFileSync(descIndexFile(paths, origin, description), `${taskId}\n`)
+  withBacklogLock(sequenceFile(paths), () => {
+    recordTaskIdForDescUnlocked(paths, origin, description, taskId)
+  })
+}
+
+function recordTaskIdForDescUnlocked(
+  paths: OrchPaths,
+  origin: string,
+  description: string,
+  taskId: string,
+): void {
+  const indexFile = descIndexFile(paths, origin, description)
+  const replacement = `${indexFile}.${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`
+  try {
+    writeFileSync(replacement, `${taskId}\n`)
+    renameSync(replacement, indexFile)
+  } finally {
+    rmSync(replacement, { force: true })
+  }
 }
 
 /** Remove every description index that points at a discarded task materialization. */
@@ -95,9 +124,11 @@ export function forgetTaskId(paths: OrchPaths, taskId: string): void {
 }
 
 export function taskIdForDesc(paths: OrchPaths, origin: string, description: string): string {
-  const existing = existingTaskIdForDesc(paths, origin, description)
-  if (existing !== undefined) return existing
-  const id = newTaskId(paths, `${origin}-${descSlug(description)}`)
-  recordTaskIdForDesc(paths, origin, description, id)
-  return id
+  return withBacklogLock(sequenceFile(paths), () => {
+    const existing = existingTaskIdForDesc(paths, origin, description)
+    if (existing !== undefined) return existing
+    const id = newTaskIdUnlocked(paths, `${origin}-${descSlug(description)}`, new Date())
+    recordTaskIdForDescUnlocked(paths, origin, description, id)
+    return id
+  })
 }

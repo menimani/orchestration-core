@@ -17,14 +17,21 @@ from or equivalent to `orchestration/tests/*.sh`.
 - `tsc --noEmit` joins the repository checks; vitest runs the test suite.
 - No `jq` dependency anywhere (this deletes the Windows-jq-CRLF bug class; the invariant
   it protected — values read from status files compare clean — still holds and is tested).
-- The command surface is the `scripts` block of `orchestration/ts/package.json` —
-  `orchestrate.sh` is not kept (decided 2026-08-08; supersedes the frozen-wrapper plan).
-  Each current command maps to a script of the same name (`npm run -C orchestration/ts
-  loop`, `... delegate -- "<description>"`, `... loop-status`, `queue`, `stop`, `start`,
-  `status`, `logs`, `merge`, `cleanup`, `prune`, `new`, `enqueue`), all dispatching into
-  `src/cli.ts`. The skills (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
-  the npm form as part of the cutover. What stays frozen: the environment variable
-  names (they pass through npm unchanged, so launch commands keep their shape) and the
+- Core subtree updates default on. The daemon logs whether `CORE_AUTO_UPDATE` is on or
+  off at startup; `false` skips the pre-cycle check entirely. `UPSTREAM_REMOTE` defaults
+  to the package's `upstreamRepo` value used by `report-upstream`, and
+  `UPSTREAM_BRANCH` defaults to `main`.
+- The command surface is the `scripts` block of the package's `package.json` (the
+  repository-root manifest here, or `orchestration/ts/package.json` when installed as a
+  subtree) — `orchestrate.sh` is not kept (decided 2026-08-08; supersedes the
+  frozen-wrapper plan). Runtime commands map to same-name entries in the command registry
+  in `src/cli.ts`; those two files are the authoritative command list. The skills
+  (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
+  the npm form as part of the cutover. A background launch prints status and stop
+  commands for the package's actual location: direct `npm run` commands at the repository
+  root, or `npm run -C <package-path>` when installed as a subtree. What stays frozen:
+  the environment variable names (they pass through npm unchanged, so launch commands
+  keep their shape) and the
   output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
   `LOOP_DONE:`, and `FAILED:`). Loop daemon events in `loop.log` use
   `YYYY-MM-DD HH:mm:ss [loop <cycle>/<cap>] <event> <subject> <detail>`: cycle and cap
@@ -74,16 +81,16 @@ from or equivalent to `orchestration/tests/*.sh`.
    no new commits — an agent that forgot to commit must not silently lose its work.
    Scan tasks and `--inspect` tasks are exempt (investigation produces no commits).
 9. Pre-merge tests are chosen from the paths the worktree touched. `TASK_GATE=full`
-   runs the full suites per merge; `TASK_GATE=light` runs compile/lint per merge and the
-   full suites once at each cycle-gate entry. Light-gate attribution cost (a suite break
-   at the gate names no task) is accepted and documented; the gate stops the loop rather
-   than promote a failing tip.
+   asks the project adapter for its full merge checks; `TASK_GATE=light` asks it for
+   reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
+   entry. Light-gate attribution cost (a suite break at the gate names no task) is
+   accepted and documented; the gate stops the loop rather than promote a failing tip.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. Re-claiming completed-but-unmerged work requests that merge instead
-    of silently treating the task as already processed. When the merge log names Docker
-    or an unreachable registry, say which — "tests failed" misattributes an environment
-    failure to the task's diff.
+    of silently treating the task as already processed. When the project adapter classifies
+    an infrastructure failure, or the merge log names an unreachable registry, say which —
+    "tests failed" misattributes an environment failure to the task's diff.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
 
@@ -102,6 +109,16 @@ from or equivalent to `orchestration/tests/*.sh`.
 14. Effort defaults: scans run the runner at high reasoning effort, queued tasks at
     medium; `SCAN_EFFORT`, `TASK_EFFORT`, `SCAN_MODEL`, `TASK_MODEL` override, and
     `delegate --effort` overrides per task.
+14a. Immediately before a new cycle consumes its number or starts a scan, after the
+    previous cycle gate has closed and while no task is running, the daemon fetches the
+    configured core upstream and compares its tip with the last `git-subtree-split` for
+    this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
+    A package-file change logs aligned `Updated    core        <old8>..<new8>` and
+    `Restarting core        for cycle <n>` events, releases daemon ownership, and starts
+    the same command with the same environment, working tree, and run branch. A daemon
+    otherwise runs the code it started with. The check never runs mid-cycle. A dirty
+    working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
+    the cycle proceed unchanged so local divergence is resolved by the consumer.
 
 ## The cycle gate
 
@@ -115,14 +132,17 @@ from or equivalent to `orchestration/tests/*.sh`.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
-    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass.
+    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. A PR with
+    zero checks remains unknown regardless of its age unless the project adapter
+    explicitly sets `ciChecksExpected: false`.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
     findings come back as `NEXT_TASK` lines that become fix tasks and clear the cycle
     flag (the gate re-verifies before the next round reads the corrected diff). A clean
     round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle.
     `REVIEW_EVERY_N_CYCLES` skips review on off-cycles (the next reviewed cycle still
-    reads their work). The final cycle is always reviewed, and its rounds continue until
-    one is clean, bounded by `MAX_FINAL_REVIEW_ROUNDS`; exceeding that stops the loop
+    reads their work). When automatic review is enabled, the final cycle is always
+    reviewed, and its rounds continue until one is clean, bounded by
+    `MAX_FINAL_REVIEW_ROUNDS`; exceeding that stops the loop
     for a person instead of promoting a branch its own review keeps rejecting.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
@@ -187,18 +207,44 @@ from or equivalent to `orchestration/tests/*.sh`.
     is substitutable.
 31. Everything the orchestration knows about the repository it runs in — which commands
     verify a merge, which paths make each check relevant, which suites prove a cycle's
-    tip, and which toolchain breakage a reinstall repairs — lives in the project
-    adapter (`adapters/project.ts`, `PROJECT=shiora` selects
-    `../project/project-shiora.ts`; `PROJECT_ADAPTER` overrides the path). The
-    core executes the declarations and owns the generic behavior: output capture,
-    failure attribution, and stop decisions. Porting the orchestration to another
-    repository means writing a project adapter and nothing else.
+    tip, which toolchain breakage a reinstall repairs, and how commits and changed paths
+    become pull-request sections, area labels, and risk bullets — lives in the project
+    adapter (`adapters/project.ts`; with neither selection variable set, the single
+    `../project/project-*.ts` file is discovered; `PROJECT=<name>` selects
+    `../project/project-<name>.ts`; `PROJECT_ADAPTER` overrides the path). The
+    core executes the declarations and owns the generic behavior: Git history and diff
+    collection, pull-request formatting, output capture, failure attribution, and stop
+    decisions. Porting the orchestration to another repository means writing a project
+    adapter and nothing else.
 
 ## The issue queue (new in the rewrite, opt-in)
 
+### Trust model
+
+The loop trusts its installed orchestration code, its operator-supplied configuration and
+templates, and forge actors whom the adapter identifies as having repository write access.
+Write access is the authorship boundary because repository administrators have already
+authorized those accounts to change the code the loop will eventually merge. Public issue
+bodies, comments, repository files, diffs, and commit messages are otherwise untrusted;
+being visible in the repository or carrying a loop-shaped marker does not grant authority.
+For GitHub, the adapter maps `OWNER`, `MEMBER`, and `COLLABORATOR` author associations to
+that forge-neutral write-access verdict and treats every other or unknown association as
+untrusted.
+
+Authorship is checked when a ready issue is claimed, not while findings are listed. An
+untrusted issue remains unassigned and ready, receives `loop:untrusted-author`, and emits
+a warning naming its author so a maintainer can inspect it and re-file genuine work. A
+task materialized from a trusted issue still frames the body as delimited untrusted data:
+prompt-like instructions in the requested change are reported and refused, not executed.
+Scan and review prompts apply the same rule to repository-controlled text they inspect or
+quote. A `MERGED:` comment affects stale-lease reaping or idle detection only when its
+author has write access; idle detection additionally retains the merge-SHA ancestry check,
+so authorship and verified ancestry must both hold.
+
 32. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
-    same growth bounds. An issue is filed once per fingerprint: the advisory
+    same growth bounds. A finding is filed in the repository the loop is running
+    against, never anywhere else. An issue is filed once per fingerprint: the advisory
     identifier when one is named, else the finding's tag plus the first path it
     names and a digest of normalized finding terms, else that normalized digest alone.
     Normalization ignores case, punctuation, whitespace, word order, grammatical filler,

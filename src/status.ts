@@ -1,4 +1,6 @@
-import { mkdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 
@@ -19,13 +21,22 @@ export interface TaskStatus {
   updated_at: string
   worktree: string
   branch: string
+  /** Durable merge identity used to finish issue reconciliation after a restart. */
+  merge_commit?: string
+  run_branch?: string
+}
+
+interface StatusMetadata {
+  mergeCommit: string
+  runBranch: string
 }
 
 export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undefined {
   try {
     return JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as TaskStatus
-  } catch {
-    return undefined
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
   }
 }
 
@@ -112,8 +123,15 @@ function releaseStatusLock(paths: OrchPaths, taskId: string): void {
   rmdirSync(dir)
 }
 
-function writeStatusUnlocked(paths: OrchPaths, taskId: string, status: TaskState, pid?: number): void {
+function writeStatusUnlocked(
+  paths: OrchPaths,
+  taskId: string,
+  status: TaskState,
+  pid?: number,
+  metadata?: StatusMetadata,
+): void {
   const file = statusFile(paths, taskId)
+  const temporaryFile = join(paths.statusDir, `.${taskId}.${process.pid}.tmp`)
   const existing = readStatus(paths, taskId)
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   const record: TaskStatus = {
@@ -124,14 +142,40 @@ function writeStatusUnlocked(paths: OrchPaths, taskId: string, status: TaskState
     updated_at: now,
     worktree: worktreeDir(paths, taskId),
     branch: branchName(taskId),
+    ...(metadata === undefined ? {} : {
+      merge_commit: metadata.mergeCommit,
+      run_branch: metadata.runBranch,
+    }),
   }
-  writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`)
+  try {
+    // Publishing with a same-directory rename prevents readers from observing a
+    // truncated JSON document if this process exits while writing the new record.
+    writeFileSync(temporaryFile, `${JSON.stringify(record, null, 2)}\n`)
+    renameSync(temporaryFile, file)
+  } finally {
+    rmSync(temporaryFile, { force: true })
+  }
 }
 
 export async function writeStatus(paths: OrchPaths, taskId: string, status: TaskState, pid?: number): Promise<void> {
   await acquireStatusLock(paths, taskId)
   try {
     writeStatusUnlocked(paths, taskId, status, pid)
+  } finally {
+    releaseStatusLock(paths, taskId)
+  }
+}
+
+/** Record the merge verdict and the identity needed for durable issue reconciliation. */
+export async function writeMergedStatus(
+  paths: OrchPaths,
+  taskId: string,
+  mergeCommit: string,
+  runBranch: string,
+): Promise<void> {
+  await acquireStatusLock(paths, taskId)
+  try {
+    writeStatusUnlocked(paths, taskId, 'merged', undefined, { mergeCommit, runBranch })
   } finally {
     releaseStatusLock(paths, taskId)
   }

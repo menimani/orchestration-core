@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // The on-disk layout is shared state with everything the loop leaves behind between
@@ -17,6 +17,16 @@ export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..
 
 export function packageFile(...segments: string[]): string {
   return join(PACKAGE_ROOT, ...segments)
+}
+
+export function packageScriptCommand(
+  repoRoot: string,
+  script: string,
+  packageRoot = PACKAGE_ROOT,
+): string {
+  const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
+  const prefix = packageDirectory === '' ? 'npm run' : `npm run -C ${packageDirectory}`
+  return `${prefix} ${script}`
 }
 
 export interface OrchPaths {

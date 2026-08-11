@@ -19,9 +19,26 @@ afterEach(() => {
 
 describe('template resolution', () => {
   it('uses the core default when the project has no override', () => {
-    expect(readTemplate(paths, 'task-requirements.md')).toContain('Before reporting this done')
+    const template = readTemplate(paths, 'task-requirements.md')
+
+    expect(template).toContain('Before reporting this done')
+    expect(template).toContain("repository's contributor guidance")
+    expect(template).not.toContain('src/frontend')
+    expect(template).not.toContain('mvn test')
     expect(templateFile(paths, 'task-requirements.md')).not.toBe(
       join(paths.root, 'templates', 'task-requirements.md'),
+    )
+  })
+
+  it('keeps repository-specific guidance out of the core defaults', () => {
+    const defaults = [
+      readTemplate(paths, 'task-requirements.md'),
+      readTemplate(paths, 'review-template.md'),
+      readTemplate(paths, 'ci-fix-template.md'),
+    ].join('\n')
+
+    expect(defaults).not.toMatch(
+      /frontend|backend|messageId|i18n|mvn|JST|TZ=|user\.timezone|CLAUDE\.md/i,
     )
   })
 

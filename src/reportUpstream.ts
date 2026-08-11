@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { platform } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join, relative, sep } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
-import type { OrchPaths } from './paths.ts'
+import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 
 interface PackageMetadata {
   version?: unknown
@@ -14,6 +14,7 @@ export interface ReportUpstreamRuntime {
   env: NodeJS.ProcessEnv
   nodeVersion: string
   platform: string
+  packageRoot?: string
   git(repoRoot: string, args: string[]): string
 }
 
@@ -46,20 +47,54 @@ function repositoryFromRemote(remote: string): string | undefined {
   }
 }
 
-function reportingRepository(paths: OrchPaths, runtime: ReportUpstreamRuntime): string {
+function currentBranchRemote(paths: OrchPaths, runtime: ReportUpstreamRuntime): string | undefined {
   try {
-    const remote = runtime.git(paths.repoRoot, ['remote', 'get-url', 'origin'])
-    return repositoryFromRemote(remote) ?? basename(paths.repoRoot)
+    const branch = runtime.git(paths.repoRoot, ['branch', '--show-current']).trim()
+    if (branch === '') return undefined
+    return configuredString(runtime.git(paths.repoRoot, [
+      'config', '--get', `branch.${branch}.remote`,
+    ]))
   } catch {
-    return basename(paths.repoRoot)
+    return undefined
   }
 }
 
-function subtreeCommit(paths: OrchPaths, runtime: ReportUpstreamRuntime): string | undefined {
+function reportingRepository(paths: OrchPaths, runtime: ReportUpstreamRuntime): string {
+  const configuredRemote = currentBranchRemote(paths, runtime)
+  const remotes = configuredRemote === undefined || configuredRemote === 'origin'
+    ? ['origin']
+    : [configuredRemote, 'origin']
+  for (const remote of remotes) {
+    try {
+      const repository = repositoryFromRemote(
+        runtime.git(paths.repoRoot, ['remote', 'get-url', remote]),
+      )
+      if (repository !== undefined) return repository
+    } catch {
+      // Try the conventional remote before falling back to the local directory name.
+    }
+  }
+  return basename(paths.repoRoot)
+}
+
+function packageSubtreePath(paths: OrchPaths, packageRoot: string): string | undefined {
+  const subtreePath = relative(paths.repoRoot, packageRoot)
+  if (subtreePath === '' || subtreePath === '..' || subtreePath.startsWith(`..${sep}`)
+    || isAbsolute(subtreePath)) return undefined
+  return subtreePath.replaceAll('\\', '/')
+}
+
+function subtreeCommit(
+  paths: OrchPaths,
+  packageRoot: string,
+  runtime: ReportUpstreamRuntime,
+): string | undefined {
+  const subtreePath = packageSubtreePath(paths, packageRoot)
+  if (subtreePath === undefined) return undefined
   try {
     const message = runtime.git(paths.repoRoot, [
       'log', '-1', '--format=%B', '--grep=git-subtree-split', '--fixed-strings',
-      '--', 'orchestration/ts',
+      '--', subtreePath,
     ])
     return /^git-subtree-split:\s*([0-9a-f]{7,40})\s*$/im.exec(message)?.[1]
   } catch {
@@ -73,20 +108,21 @@ export async function reportUpstream(
   forge: Forge,
   runtime: ReportUpstreamRuntime = defaultRuntime,
 ): Promise<string> {
-  const packageFile = join(paths.repoRoot, 'orchestration', 'ts', 'package.json')
+  const packageRoot = runtime.packageRoot ?? PACKAGE_ROOT
+  const packageFile = join(packageRoot, 'package.json')
   const metadata = JSON.parse(readFileSync(packageFile, 'utf8')) as PackageMetadata
   const upstreamRepository = configuredString(runtime.env.UPSTREAM_REPO)
     ?? configuredString(metadata.upstreamRepo)
   if (upstreamRepository === undefined) {
     throw new Error(
-      'No upstream repository is configured. Set UPSTREAM_REPO or upstreamRepo in orchestration/ts/package.json.',
+      'No upstream repository is configured. Set UPSTREAM_REPO or upstreamRepo in package.json.',
     )
   }
 
-  const coreVersion = subtreeCommit(paths, runtime) ?? configuredString(metadata.version)
+  const coreVersion = subtreeCommit(paths, packageRoot, runtime) ?? configuredString(metadata.version)
   if (coreVersion === undefined) {
     throw new Error(
-      'No core version is available. Record a git subtree commit or set version in orchestration/ts/package.json.',
+      'No core version is available. Record a git subtree commit or set version in package.json.',
     )
   }
   const repository = reportingRepository(paths, runtime)

@@ -129,6 +129,13 @@ describe('loopLogLines', () => {
       .toBe('2026-08-10 01:02:03 [loop 04/12] Started    Suite  cycle 6')
   })
 
+  it('aligns the core update and restart transition', () => {
+    expect(loopLogLines('Updated core        12345678..abcdef01', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Updated    core        12345678..abcdef01')
+    expect(loopLogLines('Restarting core        for cycle 5', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Restarting core        for cycle 5')
+  })
+
   it('aligns subjects for verbs of different lengths', () => {
     const scan = loopLogLines('Started 030_scan', context)[0]!
     const decision = loopLogLines('Decision choose a database', context)[0]!

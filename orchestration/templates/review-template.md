@@ -52,10 +52,10 @@ here for. Look for what a green suite cannot see:
   scoped differently, a null guard added around a check rather than inside it. Say which
   rows the new query can reach that the old one could not.
 - **A behaviour the repository decided on deliberately, changed as though it were a bug.**
-  Read the repository's contributor guidance and design documentation before treating an
-  established behaviour as accidental.
-- **A documentation claim that the diff made untrue**, and a claim the diff added that
-  its own source contradicts.
+  `CLAUDE.md` names several and `docs/` explains them — the 404 for unauthenticated
+  access to a protected endpoint is the one that gets "fixed" most often.
+- **A claim in `docs/` that the diff made untrue**, and a claim the diff added that its
+  own source contradicts.
 - **A change that does more than one thing**: a layout move, a restyle and a behaviour
   change in one commit, or an unrelated cleanup bundled into a fix.
 - **Anything left unfinished** — a placeholder body, an unresolved TODO, a file that
