@@ -285,12 +285,16 @@ const cmdMerge: Command = async (paths, args) => {
   }
   try {
     const linkedIssue = issueNumberForTask(paths, taskId)
+    const forge = linkedIssue === undefined
+      ? undefined
+      : await loadForge(config.forge, paths.repoRoot)
     const mergeCommit = await mergeTask(paths, taskId, {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(paths.root),
       closesIssue: linkedIssue,
+      forge,
     })
     if (linkedIssue !== undefined) {
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
@@ -300,8 +304,7 @@ const cmdMerge: Command = async (paths, args) => {
       }).trim()
       recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
       try {
-        const forge = await loadForge(config.forge, paths.repoRoot)
-        await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
+        await commentOnIssueMerge(forge!, linkedIssue, taskId, mergeCommit, runBranch)
       } catch (error) {
         console.error(
           `WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`,

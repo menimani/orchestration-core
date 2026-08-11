@@ -193,6 +193,25 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
+  it('leaves linked-issue closing syntax to the forge adapter', async () => {
+    const taskId = '20260808_000000_015_user-linked-issue'
+    await makeCompletedTask(taskId, { commit: true })
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light',
+      project: stubProject,
+      closesIssue: 317,
+      forge: {
+        issueClosingCommitMessage: (message, issueNumber) =>
+          `${message} (resolves ticket ${issueNumber})`,
+      },
+    })
+
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
+      `Merge ${taskId} via orchestration (resolves ticket 317)`,
+    )
+  })
+
   it('stops on uncommitted changes and keeps the worktree', async () => {
     const taskId = '20260808_000000_002_user-forgot-commit'
     const worktree = await makeCompletedTask(taskId, { commit: true, dirty: true })
@@ -376,7 +395,7 @@ describe('mergeTask', () => {
 })
 
 describe('mergeRemoteTask', () => {
-  it('uses a runner-neutral merge commit message', async () => {
+  it('leaves issue-closing syntax to the forge adapter', async () => {
     const branch = 'task/remote-runner-neutral-message'
     git(repoRoot, ['switch', '-qc', branch])
     writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
@@ -388,10 +407,14 @@ describe('mergeRemoteTask', () => {
 
     await mergeRemoteTask(paths, 219, 'shared', branch, expectedHead, {
       taskGate: 'light', project: noCheckProject,
+      forge: {
+        issueClosingCommitMessage: (message, issueNumber) =>
+          `${message} (resolves ticket ${issueNumber})`,
+      },
     })
 
     expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
-      'Merge remote-runner-neutral-message via orchestration (closes #219)',
+      'Merge remote-runner-neutral-message via orchestration (resolves ticket 219)',
     )
   })
 
@@ -412,6 +435,7 @@ describe('mergeRemoteTask', () => {
     await expect(mergeRemoteTask(paths, 220, 'origin', branch, expectedHead, {
       taskGate: 'light',
       project: stubProject,
+      forge: { issueClosingCommitMessage: (message) => message },
       testCmd: 'node -e "const fs=require(\'node:fs\'); process.exit(fs.existsSync(\'run.txt\') && fs.existsSync(\'task.txt\') ? 1 : 0)"',
     })).rejects.toThrow(/Tests failed/)
 

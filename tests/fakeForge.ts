@@ -38,6 +38,10 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     user,
     clock: () => new Date(),
 
+    issueClosingCommitMessage(message: string): string {
+      return message
+    },
+
     async prStatus(ref: PrReference): Promise<PrStatus> {
       fake.prStatusRefs.push(ref)
       const scripted = fake.prStatusScript[Math.min(fake.prStatusCalls, fake.prStatusScript.length - 1)]
