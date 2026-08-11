@@ -207,7 +207,8 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 32. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
-    same growth bounds. An issue is filed once per fingerprint: the advisory
+    same growth bounds. A finding is filed in the repository the loop is running
+    against, never anywhere else. An issue is filed once per fingerprint: the advisory
     identifier when one is named, else the finding's tag plus the first path it
     names and a digest of normalized finding terms, else that normalized digest alone.
     Normalization ignores case, punctuation, whitespace, word order, grammatical filler,
