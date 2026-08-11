@@ -2,10 +2,16 @@ name: CI
 
 # The core is executed as TypeScript without a build step, so the gate is the type
 # checker plus the suite that pins SPEC.md. Node 24 is the floor the sources assume.
+#
+# Draft pull requests are filtered by the job guard rather than by the types below,
+# because `ready_for_review` must reach the workflow to start the run that promotion
+# deserves. The default set omits it, so a loop that opens its pull request as a draft
+# and later promotes it produced a required check that never started.
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -15,6 +21,9 @@ jobs:
   check:
     name: Typecheck and tests
     runs-on: ubuntu-latest
+    # A draft pull request is not headed for merge yet, so it is not what CI is for.
+    # Absent on a push, the expression is null and the job runs.
+    if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v5
 
