@@ -6,6 +6,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { ForgeIssue } from '../src/adapters/forge.ts'
 import {
   buildIssueBody, claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
   fingerprintOf, heartbeatIssueForTask, issueNumberForTask, parseIssueBody,
@@ -703,6 +704,60 @@ describe('reapStaleLeases', () => {
     const liveAfter = await forge.getIssue(live)
     expect(liveAfter.assignees).toEqual(['worker-busy'])
     expect(liveAfter.labels).toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('revalidates a stale listing after a concurrent heartbeat before reaping', async () => {
+    const now = new Date('2026-08-08T12:00:00Z')
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'stale snapshot', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-busy'],
+    })
+    const staleListing = await forge.listOpenIssues(LABEL_IN_PROGRESS)
+    forge.clock = () => new Date('2026-08-08T11:30:00Z')
+
+    const reaped = await reapStaleLeases(
+      forge, paths, 3, now, new Set(), staleListing,
+      async (issue) => {
+        await forge.commentIssue(issue.number, 'Heartbeat: 2026-08-08T11:30:00.000Z')
+        return false
+      },
+    )
+
+    expect(reaped).toEqual([])
+    const after = await forge.getIssue(issueNumber)
+    expect(after.assignees).toEqual(['worker-busy'])
+    expect(after.labels).toContain(LABEL_IN_PROGRESS)
+    expect(after.labels).not.toContain(LABEL_READY)
+  })
+
+  it('does not mutate lease labels or assignees changed after listing', async () => {
+    const now = new Date('2026-08-08T12:00:00Z')
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const relabeled = await forge.createIssue({
+      title: 'relabeled', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    const reassigned = await forge.createIssue({
+      title: 'reassigned', body: buildIssueBody('[BUG] `c/d.ts` y', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    const staleListing = await forge.listOpenIssues(LABEL_IN_PROGRESS)
+    const hasMergeMarker = async (issue: ForgeIssue): Promise<boolean> => {
+      const current = forge.issues.get(issue.number)
+      if (current === undefined) throw new Error(`expected issue #${issue.number}`)
+      if (issue.number === relabeled) current.labels.push(LABEL_MERGE_FAILED)
+      if (issue.number === reassigned) current.assignees = ['worker-b']
+      return false
+    }
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, now, new Set(), staleListing, hasMergeMarker,
+    )).toEqual([])
+    expect((await forge.getIssue(relabeled)).labels).toContain(LABEL_MERGE_FAILED)
+    expect((await forge.getIssue(relabeled)).assignees).toEqual(['worker-a'])
+    expect((await forge.getIssue(reassigned)).assignees).toEqual(['worker-b'])
+    expect((await forge.getIssue(reassigned)).labels).toContain(LABEL_IN_PROGRESS)
   })
 
   it('uses persisted merge metadata after task status cleanup instead of reaping it', async () => {
