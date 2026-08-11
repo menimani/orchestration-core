@@ -1,10 +1,11 @@
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const LOCK_RETRY_MS = 10
 const OWNER_GRACE_MS = 30_000
+const MAX_LOCK_RETRIES = Math.ceil(OWNER_GRACE_MS / LOCK_RETRY_MS)
 const sleepBuffer = new SharedArrayBuffer(4)
 
 function processIsAlive(pid: number): boolean {
@@ -17,19 +18,40 @@ function processIsAlive(pid: number): boolean {
 }
 
 function lockOwnerIsStale(lockDir: string): boolean {
+  const lockIsAged = (): boolean => {
+    try {
+      return Date.now() - statSync(lockDir).mtimeMs >= OWNER_GRACE_MS
+    } catch {
+      return false
+    }
+  }
   const ownerFile = join(lockDir, 'owner')
-  if (!existsSync(ownerFile)) return false
-  const [pidRaw, createdRaw] = readFileSync(ownerFile, 'utf8').trim().split(/\s+/)
-  if (pidRaw === undefined || !/^\d+$/.test(pidRaw)) return false
-  if (processIsAlive(Number(pidRaw))) return false
+  let owner = ''
+  try {
+    owner = readFileSync(ownerFile, 'utf8').trim()
+  } catch {
+    // The creator may still be between mkdir and publishing its owner metadata.
+  }
+  const [pidRaw, createdRaw, ...extra] = owner.split(/\s+/)
+  const pid = Number(pidRaw)
   const created = Number(createdRaw)
-  return !Number.isFinite(created) || Date.now() - created >= OWNER_GRACE_MS
+  if (
+    !/^[1-9]\d*$/.test(pidRaw ?? '')
+    || !/^\d+$/.test(createdRaw ?? '')
+    || !Number.isSafeInteger(pid)
+    || !Number.isSafeInteger(created)
+    || extra.length > 0
+  ) {
+    return lockIsAged()
+  }
+  if (processIsAlive(pid)) return false
+  return Date.now() - created >= OWNER_GRACE_MS
 }
 
 /** Serialize backlog read-modify-write operations across loop and CLI processes. */
 export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
   const lockDir = `${backlog}.lock`
-  while (true) {
+  for (let attempts = 0; ; attempts++) {
     try {
       mkdirSync(lockDir)
       try {
@@ -49,6 +71,9 @@ export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
           // Another waiter may have recovered it first.
         }
         continue
+      }
+      if (attempts >= MAX_LOCK_RETRIES) {
+        throw new Error(`Timed out waiting for the backlog lock: ${backlog}`)
       }
       Atomics.wait(new Int32Array(sleepBuffer), 0, 0, LOCK_RETRY_MS)
     }
