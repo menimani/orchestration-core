@@ -930,11 +930,14 @@ export function createLoop(deps: LoopDeps) {
     if (status.state === 'open') {
       // A body left as created stops at the first cycle's content, so it is rebuilt
       // every cycle — unless a person edited it, which removes the generated marker.
-      let body = ''
+      let body: string
       try {
         body = await forge.prBody(branch)
-      } catch {
-        body = ''
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          event('WARN', `could not read PR body: ${errorSummary(error)}`)
+        }
+        return false
       }
       if (body.includes(GENERATED_BODY_MARKER)) {
         try {
@@ -943,7 +946,10 @@ export function createLoop(deps: LoopDeps) {
             body: buildPrBody(paths.repoRoot, baseRef, readDecisions()),
           })
         } catch (error) {
-          if (!(error instanceof ForgeRateLimitError)) event('WARN', 'could not update PR body')
+          if (!(error instanceof ForgeRateLimitError)) {
+            event('WARN', `could not update PR body: ${errorSummary(error)}`)
+          }
+          return false
         }
       }
       writeFileSync(prUrlFile, `${status.url}\n`)

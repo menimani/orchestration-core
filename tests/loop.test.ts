@@ -20,6 +20,7 @@ import {
 import {
   branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
+import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 
@@ -1144,6 +1145,15 @@ describe('failure announcement and burst stop (via poll)', () => {
 })
 
 describe('completion marker output', () => {
+  function configureLocalRemote(): void {
+    initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+  }
+
   it('returns failure and leaves the cycle gate incomplete when the branch cannot be pushed', async () => {
     initializeGitRepo()
     git(['remote', 'add', 'origin', join(repoRoot, 'missing-remote.git')])
@@ -1157,6 +1167,54 @@ describe('completion marker output', () => {
     expect(logText()).not.toContain('CYCLE_COMPLETE:')
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(prStatusCalls).toBe(0)
+  })
+
+  it('retries the cycle gate when the existing PR body cannot be read', async () => {
+    configureLocalRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ autoPr: true, reviewEnabled: true, autoReview: false })
+    let reads = 0
+    fakeForge.prBody = async () => {
+      if (reads++ === 0) throw new Error('body read failed')
+      return GENERATED_BODY_MARKER
+    }
+    const updatePr = vi.fn(async () => {})
+    fakeForge.updatePr = updatePr
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(logText()).toContain('WARN could not read PR body: body read failed')
+    expect(updatePr).not.toHaveBeenCalled()
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(updatePr).toHaveBeenCalledOnce()
+  })
+
+  it('returns failure when the generated PR body cannot be updated', async () => {
+    configureLocalRemote()
+    const loop = makeLoop()
+    fakeForge.prBody = async () => GENERATED_BODY_MARKER
+    fakeForge.updatePr = async () => {
+      throw new Error('body update failed')
+    }
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(logText()).toContain('WARN could not update PR body: body update failed')
+    expect(existsSync(join(paths.queueDir, 'pr-url.txt'))).toBe(false)
+  })
+
+  it('accepts a confirmed hand-edited PR body without overwriting it', async () => {
+    configureLocalRemote()
+    const loop = makeLoop()
+    fakeForge.prBody = async () => 'A person rewrote this summary.'
+    const updatePr = vi.fn(async () => {})
+    fakeForge.updatePr = updatePr
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(true)
+    expect(updatePr).not.toHaveBeenCalled()
+    expect(readFileSync(join(paths.queueDir, 'pr-url.txt'), 'utf8'))
+      .toBe('https://example.test/pull/1\n')
   })
 
   it('creates and summarizes a PR against the remote default branch', async () => {
