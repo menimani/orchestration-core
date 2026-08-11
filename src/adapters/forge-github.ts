@@ -3,7 +3,7 @@ import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
   CheckConclusion, CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge,
-  ForgeIssue, PrReference, PrStatus, WorkflowRun,
+  ForgeAuthor, ForgeIssue, ForgeIssueComment, PrReference, PrStatus, WorkflowRun,
 } from './forge.ts'
 import { ForgeRateLimitError } from './forge.ts'
 
@@ -50,11 +50,15 @@ const workflowRunSchema = z.object({
 
 const workflowRunListSchema = z.array(workflowRunSchema)
 
+const githubAuthorSchema = z.object({ login: z.string() }).nullable()
+
 const githubIssueSchema = z.object({
   number: z.number(),
   state: z.enum(['OPEN', 'CLOSED']),
   title: z.string(),
   body: z.string(),
+  author: githubAuthorSchema,
+  authorAssociation: z.string(),
   labels: z.array(z.object({ name: z.string() })),
   assignees: z.array(z.object({ login: z.string() })),
   updatedAt: z.string(),
@@ -63,7 +67,11 @@ const githubIssueSchema = z.object({
 const openGithubIssueListSchema = z.array(githubIssueSchema.extend({ state: z.literal('OPEN') }))
 const closedGithubIssueListSchema = z.array(githubIssueSchema.extend({ state: z.literal('CLOSED') }))
 const issueCommentsSchema = z.object({
-  comments: z.array(z.object({ body: z.string() })),
+  comments: z.array(z.object({
+    body: z.string(),
+    author: githubAuthorSchema,
+    authorAssociation: z.string(),
+  })),
 })
 const rateLimitSchema = z.object({
   resources: z.object({
@@ -74,6 +82,18 @@ const rateLimitSchema = z.object({
 export type RollupEntry = z.infer<typeof rollupEntrySchema>
 export type GithubWorkflowRun = z.infer<typeof workflowRunSchema>
 type GithubIssue = z.infer<typeof githubIssueSchema>
+
+const WRITE_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
+
+function normalizeAuthor(
+  author: { login: string } | null,
+  association: string,
+): ForgeAuthor {
+  return {
+    login: author?.login ?? '(unknown)',
+    hasWriteAccess: author !== null && WRITE_ASSOCIATIONS.has(association),
+  }
+}
 
 function schemaPath(path: PropertyKey[]): string {
   if (path.length === 0) return '(root)'
@@ -396,7 +416,7 @@ export function createGithubForge(
       const repository = await issueQueueRepository()
       const args = ['issue', 'view', String(issueNumber),
         '--repo', repository,
-        '--json', 'number,state,title,body,labels,assignees,updatedAt']
+        '--json', 'number,state,title,body,author,authorAssociation,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
       return normalizeIssue(parseGhJson(args, stdout, githubIssueSchema))
     },
@@ -408,14 +428,17 @@ export function createGithubForge(
       ])
     },
 
-    async listIssueComments(issueNumber: number): Promise<string[]> {
+    async listIssueComments(issueNumber: number): Promise<ForgeIssueComment[]> {
       const repository = await issueQueueRepository()
       const args = [
         'issue', 'view', String(issueNumber), '--repo', repository, '--json', 'comments',
       ]
       const stdout = await checkedGh(repoRoot, args)
       const data = parseGhJson(args, stdout, issueCommentsSchema)
-      return data.comments.map((comment) => comment.body)
+      return data.comments.map((comment) => ({
+        body: comment.body,
+        author: normalizeAuthor(comment.author, comment.authorAssociation),
+      }))
     },
 
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
@@ -423,7 +446,7 @@ export function createGithubForge(
       const args = ['issue', 'list', '--state', 'open',
         '--repo', repository,
         '--label', label, '--limit', '200',
-        '--json', 'number,state,title,body,labels,assignees,updatedAt']
+        '--json', 'number,state,title,body,author,authorAssociation,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
       return parseGhJson(args, stdout, openGithubIssueListSchema).map(normalizeIssue)
     },
@@ -433,7 +456,7 @@ export function createGithubForge(
       const args = ['issue', 'list', '--state', 'closed',
         '--repo', repository,
         '--label', label, '--limit', '200',
-        '--json', 'number,state,title,body,labels,assignees,updatedAt']
+        '--json', 'number,state,title,body,author,authorAssociation,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
       return parseGhJson(args, stdout, closedGithubIssueListSchema).map(normalizeIssue)
     },
@@ -481,6 +504,7 @@ function normalizeIssue(issue: GithubIssue): ForgeIssue {
     state: issue.state === 'OPEN' ? 'open' : 'closed',
     title: issue.title,
     body: issue.body,
+    author: normalizeAuthor(issue.author, issue.authorAssociation),
     labels: issue.labels.map((label) => label.name),
     assignees: issue.assignees.map((assignee) => assignee.login),
     updatedAt: issue.updatedAt,

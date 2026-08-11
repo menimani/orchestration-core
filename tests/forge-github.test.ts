@@ -20,6 +20,8 @@ const openIssueFixture = {
   state: 'OPEN',
   title: 'Validate forge JSON',
   body: 'Task body',
+  author: { login: 'maintainer-one' },
+  authorAssociation: 'MEMBER',
   labels: [{ name: 'loop:ready', color: 'ffffff' }],
   assignees: [{ login: 'worker-one', databaseId: 10 }],
   updatedAt: '2026-08-10T01:00:00Z',
@@ -185,7 +187,10 @@ describe('GitHub issue queue repository targeting', () => {
       }
       if (args[0] === 'issue' && args[1] === 'view') {
         return JSON.stringify(args.includes('comments')
-          ? { comments: [{ body: 'Queue comment' }] }
+          ? { comments: [{
+            body: 'Queue comment', author: { login: 'maintainer-one' },
+            authorAssociation: 'MEMBER',
+          }] }
           : openIssueFixture)
       }
       return ''
@@ -283,7 +288,7 @@ describe('GitHub forge JSON schemas', () => {
     expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
     expect(calls.map((args) => args.join(' '))).toEqual([
       'repo view --json nameWithOwner',
-      'issue list --state open --repo example/repo --label loop:finding --limit 200 --json number,state,title,body,labels,assignees,updatedAt',
+      'issue list --state open --repo example/repo --label loop:finding --limit 200 --json number,state,title,body,author,authorAssociation,labels,assignees,updatedAt',
       'api rate_limit',
     ])
   })
@@ -355,6 +360,7 @@ describe('GitHub forge JSON schemas', () => {
       state: 'open',
       title: 'Validate forge JSON',
       body: 'Task body',
+      author: { login: 'maintainer-one', hasWriteAccess: true },
       labels: ['loop:ready'],
       assignees: ['worker-one'],
       updatedAt: '2026-08-10T01:00:00Z',
@@ -366,9 +372,19 @@ describe('GitHub forge JSON schemas', () => {
     await expect(forgeReturning([{ ...openIssueFixture, state: 'CLOSED' }])
       .listClosedIssues('loop:done')).resolves.toEqual([{ ...normalizedOpenIssue, state: 'closed' }])
     await expect(forgeReturning({
-      comments: [{ body: 'claimed', futureCommentField: 1 }],
+      comments: [{
+        body: 'claimed', author: { login: 'outside-user' },
+        authorAssociation: 'NONE', futureCommentField: 1,
+      }],
       futureCommentsField: true,
-    }).listIssueComments(357)).resolves.toEqual(['claimed'])
+    }).listIssueComments(357)).resolves.toEqual([{
+      body: 'claimed', author: { login: 'outside-user', hasWriteAccess: false },
+    }])
+    await expect(forgeReturning({
+      ...openIssueFixture, author: null, authorAssociation: 'NONE',
+    }).getIssue(357)).resolves.toMatchObject({
+      author: { login: '(unknown)', hasWriteAccess: false },
+    })
   })
 
   it('validates and normalizes the current user response', async () => {
@@ -413,7 +429,7 @@ describe('GitHub forge JSON schemas', () => {
         path: 'labels[0].name',
       },
       {
-        output: { comments: [{}] },
+        output: { comments: [{ author: { login: 'worker' }, authorAssociation: 'MEMBER' }] },
         invoke: (forge) => forge.listIssueComments(357),
         command: 'gh issue view',
         path: 'comments[0].body',
@@ -471,7 +487,9 @@ describe('GitHub forge JSON schemas', () => {
         path: '[0].updatedAt',
       },
       {
-        output: { comments: [{ body: 42 }] },
+        output: { comments: [{
+          body: 42, author: { login: 'worker' }, authorAssociation: 'MEMBER',
+        }] },
         invoke: (forge) => forge.listIssueComments(357),
         command: 'gh issue view',
         path: 'comments[0].body',

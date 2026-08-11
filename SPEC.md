@@ -205,6 +205,28 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 ## The issue queue (new in the rewrite, opt-in)
 
+### Trust model
+
+The loop trusts its installed orchestration code, its operator-supplied configuration and
+templates, and forge actors whom the adapter identifies as having repository write access.
+Write access is the authorship boundary because repository administrators have already
+authorized those accounts to change the code the loop will eventually merge. Public issue
+bodies, comments, repository files, diffs, and commit messages are otherwise untrusted;
+being visible in the repository or carrying a loop-shaped marker does not grant authority.
+For GitHub, the adapter maps `OWNER`, `MEMBER`, and `COLLABORATOR` author associations to
+that forge-neutral write-access verdict and treats every other or unknown association as
+untrusted.
+
+Authorship is checked when a ready issue is claimed, not while findings are listed. An
+untrusted issue remains unassigned and ready, receives `loop:untrusted-author`, and emits
+a warning naming its author so a maintainer can inspect it and re-file genuine work. A
+task materialized from a trusted issue still frames the body as delimited untrusted data:
+prompt-like instructions in the requested change are reported and refused, not executed.
+Scan and review prompts apply the same rule to repository-controlled text they inspect or
+quote. A `MERGED:` comment affects stale-lease reaping or idle detection only when its
+author has write access; idle detection additionally retains the merge-SHA ancestry check,
+so authorship and verified ancestry must both hold.
+
 32. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
     same growth bounds. A finding is filed in the repository the loop is running

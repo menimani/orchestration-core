@@ -3,7 +3,9 @@ import {
   appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { join, relative } from 'node:path'
-import { ForgeRateLimitError, type Forge, type ForgeIssue } from './adapters/forge.ts'
+import {
+  ForgeRateLimitError, type Forge, type ForgeIssue, type ForgeIssueComment,
+} from './adapters/forge.ts'
 import { dequeueBacklog, ensureBacklog } from './backlog.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
@@ -25,7 +27,9 @@ import { refreshTask, listTaskIds } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
-import { readTemplate } from './templates.ts'
+import {
+  frameUntrustedText, readTemplate, repositoryInspectionPreamble,
+} from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { currentBranchRemote } from './gitRemote.ts'
 import { LoopWarningLog } from './loopLog.ts'
@@ -40,6 +44,7 @@ import {
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
+  LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
@@ -102,7 +107,7 @@ export function createLoop(deps: LoopDeps) {
   let loggedForgeRateLimitUntil = 0
   const issueCommentCache = new Map<number, {
     updatedAt: string
-    comments: string[]
+    comments: ForgeIssueComment[]
     hasMergeMarker: boolean
   }>()
   const reconciledCycleGates = new Set<number>()
@@ -165,14 +170,15 @@ export function createLoop(deps: LoopDeps) {
     },
   }) as Forge
 
-  async function commentsForIssue(issue: ForgeIssue): Promise<string[]> {
+  async function commentsForIssue(issue: ForgeIssue): Promise<ForgeIssueComment[]> {
     const cached = issueCommentCache.get(issue.number)
     if (cached?.updatedAt === issue.updatedAt) return cached.comments
     const comments = await forge.listIssueComments(issue.number)
     issueCommentCache.set(issue.number, {
       updatedAt: issue.updatedAt,
       comments,
-      hasMergeMarker: comments.some((comment) => /^MERGED: /.test(comment)),
+      hasMergeMarker: comments.some((comment) =>
+        comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
     })
     return comments
   }
@@ -279,10 +285,13 @@ export function createLoop(deps: LoopDeps) {
     await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
   }
 
-  function workerBranchReport(comments: string[]): { branch: string; head: string } | undefined {
+  function workerBranchReport(
+    comments: ForgeIssueComment[],
+  ): { branch: string; head: string } | undefined {
     for (const comment of [...comments].reverse()) {
-      const branch = /^Branch: (task\/[A-Za-z0-9][A-Za-z0-9._-]*)$/m.exec(comment)?.[1]
-      const head = /^Head commit: ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/m.exec(comment)?.[1]
+      if (!comment.author.hasWriteAccess) continue
+      const branch = /^Branch: (task\/[A-Za-z0-9][A-Za-z0-9._-]*)$/m.exec(comment.body)?.[1]
+      const head = /^Head commit: ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/m.exec(comment.body)?.[1]
       if (branch !== undefined && head !== undefined) return { branch, head }
     }
     return undefined
@@ -295,7 +304,8 @@ export function createLoop(deps: LoopDeps) {
     runBranch: string,
   ): Promise<void> {
     const comment = issueMergeComment(taskId, mergeCommit, runBranch)
-    if (!(await commentsForIssue(issue)).includes(comment)) {
+    if (!(await commentsForIssue(issue)).some((candidate) =>
+      candidate.author.hasWriteAccess && candidate.body === comment)) {
       await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
     }
     await forge.removeLabel(issue.number, LABEL_MERGE_READY)
@@ -785,7 +795,8 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function generateScanTask(scanId: string, scope: string): boolean {
-    const text = renderTemplate('scan-template.md', { SCAN_ID: scanId, SCAN_SCOPE: scope })
+    const text = repositoryInspectionPreamble()
+      + renderTemplate('scan-template.md', { SCAN_ID: scanId, SCAN_SCOPE: scope })
     writeFileSync(specFile(paths, scanId), text)
     return true
   }
@@ -828,12 +839,12 @@ export function createLoop(deps: LoopDeps) {
     const acceptedLimits = existsSync(acceptedLimitsFile)
       ? readFileSync(acceptedLimitsFile, 'utf8').trim() || '(none)'
       : '(none)'
-    const text = renderTemplate('review-template.md', {
+    const text = repositoryInspectionPreamble() + renderTemplate('review-template.md', {
       REVIEW_ID: reviewId,
       CYCLE: String(cycle),
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       BASE_BRANCH: baseBranch,
-      ACCEPTED_LIMITS: acceptedLimits,
+      ACCEPTED_LIMITS: frameUntrustedText(acceptedLimits),
     })
     writeFileSync(specFile(paths, reviewId), text)
     return true
@@ -1185,16 +1196,18 @@ export function createLoop(deps: LoopDeps) {
       try {
         const openFindings = knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING)
         const openIssues = openFindings.filter((issue) =>
-          issue.labels.some((label) => [
-            LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
-          ].includes(label)))
+          !issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)
+            && issue.labels.some((label) => [
+              LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
+            ].includes(label)))
         const pendingIssueNumbers: number[] = []
         for (const issue of openIssues) {
           if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
           try {
             const comments = await commentsForIssue(issue)
             const mergeSha = comments
-              .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment)?.[1])
+              .filter((comment) => comment.author.hasWriteAccess)
+              .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment.body)?.[1])
               .find((sha) => sha !== undefined
                 && git(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
             if (mergeSha !== undefined) continue
@@ -1407,11 +1420,13 @@ export function createLoop(deps: LoopDeps) {
 
         const expectedComment = issueMergeComment(taskId, mergeCommit, runBranch)
         let comments = await forge.listIssueComments(linkedIssue)
-        if (!comments.includes(expectedComment)) {
+        if (!comments.some((comment) =>
+          comment.author.hasWriteAccess && comment.body === expectedComment)) {
           await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
           comments = await forge.listIssueComments(linkedIssue)
         }
-        if (!comments.includes(expectedComment)) {
+        if (!comments.some((comment) =>
+          comment.author.hasWriteAccess && comment.body === expectedComment)) {
           throw new Error('merge comment is not visible after publishing it')
         }
         confirmIssuePromotion(paths, linkedIssue)
@@ -1618,7 +1633,8 @@ export function createLoop(deps: LoopDeps) {
           if (capacity > 0) {
             if (cachedUser === undefined) cachedUser = await forge.currentUser()
             for (const issue of openFindings.filter((candidate) =>
-              candidate.labels.includes(LABEL_READY))) {
+              candidate.labels.includes(LABEL_READY)
+                && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR))) {
               if (capacity <= 0) break
               if (issue.assignees.length > 0) continue
               if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
@@ -1628,6 +1644,16 @@ export function createLoop(deps: LoopDeps) {
                 event('Claimed', shortTaskId(result.taskId), `#${issue.number}`)
                 if (result.pendingMerge) await mergeCompletedTask(result.taskId)
                 capacity -= 1
+              } else if (result.outcome === 'untrusted-author') {
+                // The poll's shared listing predates the label mutation. Reflect it
+                // locally so this quarantined issue cannot hold today's idle gate open.
+                if (!issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
+                  issue.labels.push(LABEL_UNTRUSTED_AUTHOR)
+                }
+                event(
+                  'WARN',
+                  `issue #${result.issueNumber} by @${result.author} is not trusted for execution; labeled ${LABEL_UNTRUSTED_AUTHOR}`,
+                )
               } else if (result.outcome === 'unparseable') {
                 if (!decisionAlreadyRecorded(result.reason)) {
                   appendFileSync(decisionsFile, `${result.reason}\n`)

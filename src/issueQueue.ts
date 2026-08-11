@@ -12,6 +12,7 @@ import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
 } from './tasks.ts'
+import { frameUntrustedText } from './templates.ts'
 
 // The issue queue: scan findings become forge issues, workers claim them, and the
 // merge that lands a fix closes its issue through the promotion PR. This is the
@@ -24,6 +25,7 @@ export const LABEL_READY = 'loop:ready'
 export const LABEL_IN_PROGRESS = 'loop:in-progress'
 export const LABEL_MERGE_READY = 'loop:merge-ready'
 export const LABEL_MERGE_FAILED = 'loop:merge-failed'
+export const LABEL_UNTRUSTED_AUTHOR = 'loop:untrusted-author'
 const LIFECYCLE_LABELS = [
   LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
 ] as const
@@ -362,6 +364,7 @@ function isReadyToClaim(issue: ForgeIssue): boolean {
     && issue.assignees.length === 0
     && issue.labels.includes(LABEL_READY)
     && !issue.labels.includes(LABEL_IN_PROGRESS)
+    && !issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)
 }
 
 /** Preserve claimed work; otherwise keep the oldest match and close ready duplicates. */
@@ -852,6 +855,7 @@ export type ClaimResult
     pendingMerge: boolean
   }
     | { outcome: 'lost-race'; issueNumber: number }
+    | { outcome: 'untrusted-author'; issueNumber: number; author: string }
     | { outcome: 'unparseable'; issueNumber: number; reason: string }
 
 async function releasePartialClaim(forge: Forge, issueNumber: number, me: string): Promise<void> {
@@ -890,6 +894,16 @@ export async function claimIssue(
     const current = await forge.getIssue(issue.number)
     if (!isReadyToClaim(current)) {
       return { outcome: 'lost-race', issueNumber: issue.number }
+    }
+    if (!current.author.hasWriteAccess) {
+      if (!current.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
+        await forge.addLabel(issue.number, LABEL_UNTRUSTED_AUTHOR)
+      }
+      return {
+        outcome: 'untrusted-author',
+        issueNumber: issue.number,
+        author: current.author.login,
+      }
     }
 
     await forge.assignIssue(issue.number, me)
@@ -952,7 +966,7 @@ export async function claimIssue(
       if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', parsed.requirement, taskId)
       if (!existsSync(specFile(paths, taskId))) {
         newTaskSpec(paths, taskId)
-        appendRequirements(taskId, parsed.requirement)
+        appendRequirements(taskId, frameUntrustedText(parsed.requirement))
       }
       if (parsed.effort !== undefined && ['minimal', 'low', 'medium', 'high'].includes(parsed.effort)) {
         mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
@@ -1000,7 +1014,8 @@ export async function reapStaleLeases(
   locallyRunningIssues: ReadonlySet<number> = new Set(),
   knownOpenFindings?: readonly ForgeIssue[],
   hasMergeMarker: (issue: ForgeIssue) => Promise<boolean> = async (issue) =>
-    (await forge.listIssueComments(issue.number)).some((comment) => /^MERGED: /.test(comment)),
+    (await forge.listIssueComments(issue.number)).some((comment) =>
+      comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
 ): Promise<number[]> {
   const reaped: number[] = []
   const openIssues = knownOpenFindings ?? await forge.listOpenIssues(LABEL_IN_PROGRESS)
@@ -1055,4 +1070,8 @@ export async function ensureQueueLabels(forge: Forge): Promise<void> {
   await forge.ensureLabel(LABEL_IN_PROGRESS, 'Claimed loop work; the assignee holds the lease')
   await forge.ensureLabel(LABEL_MERGE_READY, 'Completed worker branch waiting for the merger')
   await forge.ensureLabel(LABEL_MERGE_FAILED, 'Worker branch that the merger could not adopt')
+  await forge.ensureLabel(
+    LABEL_UNTRUSTED_AUTHOR,
+    'Finding authored by an account without repository write access; inspect manually',
+  )
 }

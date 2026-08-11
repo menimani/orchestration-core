@@ -42,15 +42,27 @@ export interface CreatePrOptions {
   draft: boolean
 }
 
+export interface ForgeAuthor {
+  login: string
+  /** The forge's verdict that this account is allowed to write to the repository. */
+  hasWriteAccess: boolean
+}
+
 export interface ForgeIssue {
   number: number
   state: 'open' | 'closed'
   title: string
   body: string
+  author: ForgeAuthor
   labels: string[]
   assignees: string[]
   /** ISO timestamp of the last update — the stale-lease clock. */
   updatedAt: string
+}
+
+export interface ForgeIssueComment {
+  body: string
+  author: ForgeAuthor
 }
 
 export interface CreateIssueOptions {
@@ -122,8 +134,8 @@ export interface Forge {
   getIssue(issueNumber: number): Promise<ForgeIssue>
   /** Add a comment to an issue. */
   commentIssue(issueNumber: number, comment: string): Promise<void>
-  /** Issue comment bodies, oldest first. */
-  listIssueComments(issueNumber: number): Promise<string[]>
+  /** Issue comments with normalized authorship, oldest first. */
+  listIssueComments(issueNumber: number): Promise<ForgeIssueComment[]>
   /** Open issues carrying the label, newest first. */
   listOpenIssues(label: string): Promise<ForgeIssue[]>
   /** Closed issues carrying the label, newest first. */
