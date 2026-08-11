@@ -1190,7 +1190,7 @@ describe('completion marker output', () => {
       forgeStatus = { ...forgeStatus, isDraft: false }
     }
 
-    await loop.postLoopPr()
+    expect(await loop.postLoopPr()).toBe(true)
 
     expect(logged).toContain(
       'LOOP_DONE: https://example.test/pull/1 — The body still reflects history and must be rewritten as a final summary.',
@@ -1212,7 +1212,7 @@ describe('completion marker output', () => {
       throw new Error('promotion failed')
     }
 
-    await loop.postLoopPr()
+    expect(await loop.postLoopPr()).toBe(false)
 
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
     expect(logged).not.toContain('Completed Loop        PR #1')
@@ -1227,11 +1227,43 @@ describe('completion marker output', () => {
     git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
     const loop = makeLoop()
 
-    await loop.postLoopPr()
+    expect(await loop.postLoopPr()).toBe(false)
 
     expect(prStatusCalls).toBe(3)
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
     expect(logged).not.toContain('Completed Loop        PR #1')
+  })
+
+  it('keeps the final gate state until draft promotion is confirmed', async () => {
+    initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ autoPr: true, reviewEnabled: false, maxScanCycles: 1 })
+    let promotions = 0
+    fakeForge.markPrReady = async () => {
+      promotions += 1
+      if (promotions === 1) throw new Error('promotion failed')
+      if (promotions === 3) forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(true)
   })
 })
 

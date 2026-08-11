@@ -1014,10 +1014,10 @@ export function createLoop(deps: LoopDeps) {
   }
 
   /** After the final gate: promote the draft PR and print LOOP_DONE. */
-  async function postLoopPr(): Promise<void> {
-    if (!(await ensureDraftPr('final'))) return
+  async function postLoopPr(): Promise<boolean> {
+    if (!(await ensureDraftPr('final'))) return false
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
-    if (prUrl === '') return
+    if (prUrl === '') return false
     const branch = git(['branch', '--show-current']).trim()
     let status = await forge.prStatus(branch)
     if (status.isDraft) {
@@ -1025,15 +1025,16 @@ export function createLoop(deps: LoopDeps) {
         await forge.markPrReady(branch)
         status = await forge.prStatus(branch)
       } catch {
-        return
+        return false
       }
     }
-    if (status.state !== 'open' || status.isDraft) return
+    if (status.state !== 'open' || status.isDraft) return false
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
     log(`LOOP_DONE: ${prUrl} — The body still reflects history and must be rewritten as a final summary.`)
     const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
     event('Completed', 'Loop', prNumber === undefined ? '' : `PR #${prNumber}`)
+    return true
   }
 
   /**
@@ -1245,14 +1246,14 @@ export function createLoop(deps: LoopDeps) {
     foldScanYields(currentScans)
 
     if (currentScans >= config.maxScanCycles) {
-      if (config.autoPr) await postLoopPr()
+      if (config.autoPr && !(await postLoopPr())) return 'continue'
       cleanupSessionState()
       return 'done'
     }
 
     const emptyScans = readCount(emptyScanFile)
     if (emptyScans >= config.maxEmptyScans) {
-      if (config.autoPr) await postLoopPr()
+      if (config.autoPr && !(await postLoopPr())) return 'continue'
       cleanupSessionState()
       return 'done'
     }
