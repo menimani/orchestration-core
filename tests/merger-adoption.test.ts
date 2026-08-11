@@ -12,6 +12,7 @@ import {
 import { createLoop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { stubProject } from './stubProject.ts'
 
 let tempRoot: string
 let repoRoot: string
@@ -92,6 +93,7 @@ afterEach(() => {
 
 describe('remote task adoption', () => {
   it('guarded-merges a worker branch and records a later failed adoption', async () => {
+    git(repoRoot, ['remote', 'rename', 'origin', 'shared'])
     const task = pushWorkerBranch('20260809_000000_003_auto-remote-fix')
     const issueNumber = await mergeReadyIssue(task.branch, task.head)
     const failedIssueNumber = await mergeReadyIssue(
@@ -100,6 +102,7 @@ describe('remote task adoption', () => {
     )
     let selectedPaths: string[] = []
     const project: ProjectAdapter = {
+      ...stubProject,
       name: 'adoption-test',
       mergeChecks: () => [{
         label: 'Worker file',
@@ -116,7 +119,9 @@ describe('remote task adoption', () => {
     expect(await makeLoop(project).poll()).toBe('continue')
 
     expect(selectedPaths).toContain('worker-change.txt')
-    expect(git(repoRoot, ['log', '-1', '--format=%B'])).toContain(`closes #${issueNumber}`)
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
+      'Merge 20260809_000000_003_auto-remote-fix via orchestration',
+    )
     expect(git(repoRoot, ['rev-list', '--parents', '-n', '1', 'HEAD']).trim().split(' ')).toHaveLength(3)
     expect(logged.join('\n')).toMatch(/Merged 003_auto    commit [0-9a-f]{8}/)
     expect(logged).toContain('Failed 004_auto    log 004_auto.merge.log')
@@ -138,6 +143,7 @@ describe('remote task adoption', () => {
     const issueNumber = await mergeReadyIssue(task.branch, task.head)
     let mergeChecks = 0
     const project: ProjectAdapter = {
+      ...stubProject,
       name: 'adoption-retry-test',
       mergeChecks: () => [{
         label: 'Count merge checks',

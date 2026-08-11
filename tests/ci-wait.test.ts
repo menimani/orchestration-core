@@ -51,6 +51,10 @@ describe('CI wait', () => {
     const wait = scriptedWait([checks, checks])
 
     await expect(wait.run()).resolves.toBe(0)
+    expect(wait.forge.prStatusRefs).toEqual([
+      { kind: 'number', value: 42 },
+      { kind: 'number', value: 42 },
+    ])
     expect(wait.output).toEqual(['optional: skipped', 'test: success'])
   })
 

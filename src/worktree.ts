@@ -1,4 +1,4 @@
-import { resolve } from 'node:path'
+import { win32 } from 'node:path'
 
 interface RemoveOptions {
   force?: boolean
@@ -19,8 +19,10 @@ export interface WorktreeRemovalResult {
 }
 
 function extendedLengthPath(path: string): string {
-  const absolutePath = resolve(path).replaceAll('/', '\\')
-  return absolutePath.startsWith('\\\\?\\') ? absolutePath : `\\\\?\\${absolutePath}`
+  const absolutePath = win32.resolve(path)
+  if (absolutePath.startsWith('\\\\?\\')) return absolutePath
+  if (absolutePath.startsWith('\\\\')) return `\\\\?\\UNC\\${absolutePath.slice(2)}`
+  return `\\\\?\\${absolutePath}`
 }
 
 export function removalFailureDetail(error: unknown): string {

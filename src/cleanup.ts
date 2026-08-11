@@ -87,24 +87,27 @@ function processIsAlive(runtime: CleanupRuntime, pid: number): boolean {
 }
 
 function stopProcess(runtime: CleanupRuntime, pid: number): void {
-  if (!processIsAlive(runtime, pid)) return
+  // Runners are detached, so on POSIX their PID is also the process-group ID.
+  // Probe and signal the group: the leader may have exited while descendants remain.
+  const target = runtime.platform === 'win32' ? pid : -pid
+  if (!processIsAlive(runtime, target)) return
 
   console.log(`Stopping running process: pid=${pid}`)
   try {
     if (runtime.platform === 'win32') {
       runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
     } else {
-      runtime.kill(pid)
+      runtime.kill(target)
     }
   } catch {
     // The command result is not authoritative: verify the process below.
   }
 
   const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
-  while (processIsAlive(runtime, pid) && runtime.now() < deadline) {
+  while (processIsAlive(runtime, target) && runtime.now() < deadline) {
     runtime.sleep(PROCESS_EXIT_POLL_MS)
   }
-  if (processIsAlive(runtime, pid)) {
+  if (processIsAlive(runtime, target)) {
     throw new Error(`Could not stop process ${pid}; task state was retained.`)
   }
 }

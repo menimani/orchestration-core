@@ -7,6 +7,7 @@ import { loadConfig, type LoopConfig } from '../src/config.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
+import { stubProject } from './stubProject.ts'
 
 // The branch-state rules ported from test-loop-branch-state.sh: a stopped loop keeps
 // its cycle state so it can resume after an environment repair, but that state belongs
@@ -28,7 +29,7 @@ function makeLoop(overrides: Partial<LoopConfig> = {}): Loop {
         return process.pid
       },
     },
-    project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
+    project: stubProject,
     log: (line) => logged.push(line),
     now: () => new Date(),
   })

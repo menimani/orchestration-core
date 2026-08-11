@@ -4,9 +4,9 @@ import { join } from 'node:path'
 import { logFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 
 // Deletes what finished tasks leave behind: logs, status files, generated specs, and
-// queue markers. What it never touches: tasks that are not merged or failed, any task
-// whose worktree is still on disk (cleanup decides that fate), specs tracked by git
-// (hand-written history, not loop debris), and loop.log.
+// queue markers. What it never touches: tasks that are not merged (including failed
+// tasks), any task whose worktree is still on disk (cleanup decides that fate), specs
+// tracked by git (hand-written history, not loop debris), and loop.log.
 
 export interface PruneOptions {
   days: number
@@ -61,7 +61,7 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
     } catch {
       continue
     }
-    if (status !== 'merged' && status !== 'failed') continue
+    if (status !== 'merged') continue
 
     if (existsSync(worktreeDir(paths, taskId))) {
       report.kept.push(`kept (worktree still on disk, run cleanup first): ${taskId}`)
