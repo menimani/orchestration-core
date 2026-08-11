@@ -17,12 +17,12 @@ from or equivalent to `orchestration/tests/*.sh`.
 - `tsc --noEmit` joins the repository checks; vitest runs the test suite.
 - No `jq` dependency anywhere (this deletes the Windows-jq-CRLF bug class; the invariant
   it protected — values read from status files compare clean — still holds and is tested).
-- The command surface is the `scripts` block of `orchestration/ts/package.json` —
-  `orchestrate.sh` is not kept (decided 2026-08-08; supersedes the frozen-wrapper plan).
-  Each current command maps to a script of the same name (`npm run -C orchestration/ts
-  loop`, `... delegate -- "<description>"`, `... loop-status`, `queue`, `stop`, `start`,
-  `status`, `logs`, `merge`, `cleanup`, `prune`, `new`, `enqueue`), all dispatching into
-  `src/cli.ts`. The skills (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
+- The command surface is the `scripts` block of the package's `package.json` (the
+  repository-root manifest here, or `orchestration/ts/package.json` when installed as a
+  subtree) — `orchestrate.sh` is not kept (decided 2026-08-08; supersedes the
+  frozen-wrapper plan). Runtime commands map to same-name entries in the command registry
+  in `src/cli.ts`; those two files are the authoritative command list. The skills
+  (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
   the npm form as part of the cutover. A background launch prints status and stop
   commands for the package's actual location: direct `npm run` commands at the repository
   root, or `npm run -C <package-path>` when installed as a subtree. What stays frozen:
