@@ -62,6 +62,16 @@ documentation are written in English.
 Branch as `feature/`, `fix/`, or `chore/`, and never commit to `main` directly. Commit
 subjects begin with `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, or `chore:`.
 
+`.githooks/` enforces both, but Git does not pick hooks up from a clone. Once per
+checkout:
+
+```
+git config core.hooksPath .githooks
+```
+
+Without it the hooks are files nobody runs — which is exactly how they sat unnoticed in
+another repository here.
+
 **Stop and report** before any force push or history rewrite, and when a merge conflict
 touches business logic. Those are the user's decisions to make, not yours.
 
