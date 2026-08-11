@@ -97,7 +97,7 @@ git subtree pull --prefix=orchestration/ts \
 | `AUTO_REVIEW` | false | Review each reviewed cycle's diff and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | Review every Nth cycle; the final cycle is always reviewed |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
-| `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / medium | Reasoning effort per kind of work |
+| `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work |
 
 ## Shared backlog and workers
 
