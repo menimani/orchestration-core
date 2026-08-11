@@ -30,6 +30,7 @@ describe('loadConfig', () => {
       taskGate: 'full',
       forge: 'github',
       runner: 'codex',
+      project: '',
       workerMode: false,
     })
   })

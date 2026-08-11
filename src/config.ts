@@ -114,7 +114,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     taskGate,
     forge: str(env, 'FORGE', 'github'),
     runner: str(env, 'RUNNER', 'codex'),
-    project: str(env, 'PROJECT', 'shiora'),
+    project: str(env, 'PROJECT', ''),
     issueQueueEnabled,
     workerMode,
     issueLeaseHours: num(env, 'ISSUE_LEASE_HOURS', 3),

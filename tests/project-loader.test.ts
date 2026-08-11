@@ -22,11 +22,11 @@ function createFixtureRepository(): string {
   return repository
 }
 
-function writeFixtureAdapter(adapterPath: string, workflow: string): void {
+function writeFixtureAdapter(adapterPath: string, workflow: string, name = 'fixture'): void {
   mkdirSync(dirname(adapterPath), { recursive: true })
   writeFileSync(adapterPath, `
 export const fixtureProject = {
-  name: 'fixture',
+  name: '${name}',
   deployment: {
     workflow: '${workflow}',
     revisionUrl: 'https://example.com/fixture-revision',
@@ -59,6 +59,56 @@ async function loadFromFixtureRepository(packagePath: string): Promise<string | 
 }
 
 describe('project adapter loading', () => {
+  it('discovers the only adapter when PROJECT is unset', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    writeFixtureAdapter(
+      join(orchestrationRoot, 'project', 'project-fixture.ts'),
+      'discovered.yml',
+    )
+
+    const project = await loadProject(orchestrationRoot, {})
+
+    expect(project.deployment?.workflow).toBe('discovered.yml')
+  })
+
+  it('fails discovery with the names of both adapters', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    const projectDirectory = join(orchestrationRoot, 'project')
+    writeFixtureAdapter(join(projectDirectory, 'project-alpha.ts'), 'alpha.yml', 'alpha')
+    writeFixtureAdapter(join(projectDirectory, 'project-beta.ts'), 'beta.yml', 'beta')
+
+    await expect(loadProject(orchestrationRoot, {})).rejects.toThrow(
+      `Could not discover project adapter in ${projectDirectory}: found project-alpha.ts, project-beta.ts. `
+      + 'Expected exactly one project-*.ts file; PROJECT selects between them.',
+    )
+  })
+
+  it('fails discovery with the empty project directory path', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    const projectDirectory = join(orchestrationRoot, 'project')
+    mkdirSync(projectDirectory, { recursive: true })
+
+    await expect(loadProject(orchestrationRoot, {})).rejects.toThrow(
+      `Could not discover project adapter in ${projectDirectory}: found (none). `
+      + 'Expected exactly one project-*.ts file; PROJECT selects between them.',
+    )
+  })
+
+  it('uses PROJECT when multiple adapters are present', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    const projectDirectory = join(orchestrationRoot, 'project')
+    writeFixtureAdapter(join(projectDirectory, 'project-alpha.ts'), 'alpha.yml', 'alpha')
+    writeFixtureAdapter(join(projectDirectory, 'project-beta.ts'), 'beta.yml', 'beta')
+
+    const project = await loadProject(orchestrationRoot, { PROJECT: 'beta' })
+
+    expect(project.deployment?.workflow).toBe('beta.yml')
+  })
+
   it('resolves the adapter when the package is under orchestration/ts', async () => {
     await expect(loadFromFixtureRepository('orchestration/ts')).resolves.toBe('orchestration/ts')
   })
@@ -69,7 +119,6 @@ describe('project adapter loading', () => {
 
   it('loads an explicit absolute PROJECT_ADAPTER path', async () => {
     const project = await loadProject(import.meta.dirname, {
-      PROJECT: 'shiora',
       PROJECT_ADAPTER: fixture,
     })
 
