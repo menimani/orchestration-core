@@ -27,6 +27,7 @@ import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { readTemplate } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { LoopWarningLog } from './loopLog.ts'
+import { execShellSync } from './shell.ts'
 import {
   claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, dropClaimedTaskMaterialization,
   heartbeatIssueForTask,
@@ -1030,7 +1031,7 @@ export function createLoop(deps: LoopDeps) {
 
     const runStep = (cwd: string, command: string, timeout?: number): boolean => {
       try {
-        const out = execFileSync('bash', ['-c', command], {
+        const out = execShellSync(command, {
           cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true, timeout,
         })
