@@ -88,6 +88,10 @@ const FINDING_TERM_ALIASES = new Map([
   ['deleted', 'delete'], ['deleting', 'delete'],
   ['removed', 'remove'], ['removing', 'remove'],
 ])
+const FINDING_ORDER_TERMS = new Set([
+  'above', 'after', 'before', 'below', 'between', 'earlier', 'follow', 'later', 'next',
+  'precede', 'prior', 'then',
+])
 
 function findingParts(description: string): { tag: string | undefined; path: string | undefined } {
   return {
@@ -98,9 +102,10 @@ function findingParts(description: string): { tag: string | undefined; path: str
 
 /**
  * Keep the nouns and actions that distinguish a finding while discarding prose-only
- * variation. Sorting makes word order immaterial; the deliberately small stemming
- * rules cover plural nouns and common past-tense rewrites without treating synonyms
- * as equal.
+ * variation. Sorting makes non-relational word order immaterial; repeated terms and
+ * the neighbors of explicit ordering words remain significant. The deliberately small
+ * stemming rules cover plural nouns and common past-tense rewrites without treating
+ * synonyms as equal.
  */
 function normalizedFindingText(description: string, tag?: string, path?: string): string {
   let text = description.toLowerCase()
@@ -121,7 +126,11 @@ function normalizedFindingText(description: string, tag?: string, path?: string)
     }
     return [word]
   })
-  return [...new Set(terms)].sort().join(' ')
+  const bag = [...terms].sort().join(' ')
+  const order = terms.flatMap((term, index) => FINDING_ORDER_TERMS.has(term)
+    ? [`${terms[index - 1] ?? '^'}>${term}>${terms[index + 1] ?? '$'}`]
+    : [])
+  return order.length === 0 ? bag : `${bag}|${order.join('|')}`
 }
 
 function legacyFingerprintOf(description: string): string | undefined {
@@ -142,7 +151,8 @@ function preGranularityTextFingerprintOf(description: string): string {
  * Advisory identifiers retain their original durable identity. Other findings use
  * tag + first path + a digest of normalized finding terms, so separate requirements
  * in one file remain separate while capitalization, punctuation, grammatical filler,
- * word order, plural/past-tense wording, and issue/commit references do not matter.
+ * non-relational word order, plural/past-tense wording, and issue/commit references do
+ * not matter.
  */
 export function fingerprintOf(description: string): string {
   const advisory = description.toUpperCase().match(/GHSA(-[0-9A-Z]{4}){3}|CVE-\d{4}-\d{4,}/)

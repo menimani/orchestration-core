@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Runner } from '../src/adapters/runner.ts'
-import { logFile, orchPaths, statusFile, worktreeDir, type OrchPaths } from '../src/paths.ts'
+import {
+  branchName, logFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
+} from '../src/paths.ts'
 import { startTask, worktreeAddArgs } from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
@@ -38,22 +40,28 @@ describe('startTask', () => {
     ])
   })
 
-  it('reclaims a stale worktree directory before starting the task', async () => {
+  it('preserves a stale worktree and its unrecovered commits until explicit cleanup', async () => {
     const taskId = '20260809_000000_001_auto-stale-worktree'
     const worktree = worktreeDir(paths, taskId)
     writeFileSync(specFile(paths, taskId), '# stale worktree task\n')
-    mkdirSync(worktree, { recursive: true })
-    writeFileSync(join(worktree, 'stale.txt'), 'left behind\n')
+    git(['worktree', 'add', '-q', worktree, '-b', branchName(taskId)])
+    writeFileSync(join(worktree, 'recovered.txt'), 'runner work\n')
+    execFileSync('git', ['add', 'recovered.txt'], { cwd: worktree, windowsHide: true })
+    execFileSync('git', ['commit', '-qm', 'fix: preserve runner work'], {
+      cwd: worktree, windowsHide: true,
+    })
+    const recoveredHead = git(['rev-parse', branchName(taskId)]).trim()
     writeFileSync(statusFile(paths, taskId), JSON.stringify({
       task_id: taskId, status: 'running', pid: null,
     }))
     const start = vi.fn(async () => process.pid)
 
     await expect(startTask(paths, { start }, taskId, { effort: 'medium' }))
-      .resolves.toEqual({ outcome: 'started', pid: process.pid })
+      .rejects.toThrow('then run cleanup explicitly')
 
-    expect(start).toHaveBeenCalledOnce()
-    expect(existsSync(join(worktree, 'stale.txt'))).toBe(false)
+    expect(start).not.toHaveBeenCalled()
+    expect(readFileSync(join(worktree, 'recovered.txt'), 'utf8')).toBe('runner work\n')
+    expect(git(['rev-parse', branchName(taskId)]).trim()).toBe(recoveredHead)
     expect(readStatus(paths, taskId)?.status).toBe('running')
   })
 
