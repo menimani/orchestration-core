@@ -154,4 +154,22 @@ describe('project adapter loading', () => {
       `Project adapter not found: ${missingPath}`,
     )
   })
+
+  it('names a missing member on the matching project export', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    const adapterPath = join(orchestrationRoot, 'project', 'project-fixture.ts')
+    mkdirSync(dirname(adapterPath), { recursive: true })
+    writeFileSync(adapterPath, `
+export const fixtureProject = {
+  name: 'fixture',
+  mergeChecks: () => [],
+  cycleSuite: () => [],
+}
+`)
+
+    await expect(loadProject(orchestrationRoot, {})).rejects.toThrow(
+      `Project adapter '${adapterPath}' exports project 'fixture' but is missing required member 'pullRequest'`,
+    )
+  })
 })
