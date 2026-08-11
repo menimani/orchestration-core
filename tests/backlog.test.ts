@@ -1,9 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { withBacklogLock } from '../src/backlog.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
 
@@ -16,6 +19,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -40,6 +44,32 @@ async function waitForFiles(files: string[]): Promise<void> {
 }
 
 describe('backlog process lock', () => {
+  it.each([
+    ['without owner metadata', undefined],
+    ['with malformed owner metadata', `${process.pid}\n`],
+  ])('reclaims an aged lock %s', (_description, owner) => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    if (owner !== undefined) writeFileSync(join(lockDir, 'owner'), owner)
+    const old = new Date(Date.now() - 31_000)
+    utimesSync(lockDir, old, old)
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    expect(existsSync(lockDir)).toBe(false)
+  })
+
+  it('bounds acquisition when a live owner keeps the lock', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()}\n`)
+    vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out')
+
+    expect(() => withBacklogLock(backlog, () => undefined))
+      .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+  })
+
   it('serializes a dequeue rewrite with a concurrent enqueue', async () => {
     const backlog = join(paths.queueDir, 'backlog.txt')
     writeFileSync(backlog, 'first-task:0\n')
