@@ -19,6 +19,7 @@ import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.t
 import { deploy } from './deploy.ts'
 import { isScanTaskId, logFile, orchPaths, type OrchPaths } from './paths.ts'
 import { pruneTasks } from './prune.ts'
+import { reportUpstream } from './reportUpstream.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
@@ -138,6 +139,18 @@ const cmdDelegate: Command = async (paths, args) => {
     console.log('The loop is not running. The task waits in the backlog until the loop starts,')
     console.log(`or run the start command with ${result.taskId} to run it now.`)
   }
+  return 0
+}
+
+const cmdReportUpstream: Command = async (paths, args) => {
+  const description = args[0]
+  if (description === undefined || description.trim() === '' || args.length !== 1) {
+    console.error('Usage: report-upstream "<description>"')
+    return 1
+  }
+  const config = loadConfig()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  console.log(await reportUpstream(paths, description, forge))
   return 0
 }
 
@@ -601,6 +614,7 @@ const commands: Record<string, Command> = {
   'new': cmdNew,
   'enqueue': cmdEnqueue,
   'delegate': cmdDelegate,
+  'report-upstream': cmdReportUpstream,
   'start': cmdStart,
   'status': cmdStatus,
   'logs': cmdLogs,
