@@ -1924,6 +1924,45 @@ describe('scanForNextTasks', () => {
     expect(logText()).toContain('WARN growth depth limit 1 ignored findings from deep-parent')
   })
 
+  it('checks the total-task bound before each local finding and keeps the count after completion', async () => {
+    const loop = makeLoop({ maxTotalTasks: 2 })
+    writeFinal('first-scan', [
+      'NEXT_TASK: [BUG] first bounded finding',
+      'NEXT_TASK: [BUG] second bounded finding',
+      'NEXT_TASK: [BUG] third bounded finding',
+    ].join('\n'))
+    await loop.scanForNextTasks('first-scan', 0)
+
+    const generated = readdirSync(paths.tasksDir)
+    expect(generated).toHaveLength(2)
+    writeRawStatus(generated[0]!.replace(/\.md$/, ''), 'merged')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+
+    const restartedLoop = makeLoop({ maxTotalTasks: 2 })
+    writeFinal('second-scan', 'NEXT_TASK: [BUG] terminal work must still consume the budget\n')
+    await restartedLoop.scanForNextTasks('second-scan', 0)
+
+    expect(readdirSync(paths.tasksDir)).toHaveLength(2)
+    expect(readFileSync(join(paths.queueDir, 'total-task-count.txt'), 'utf8')).toBe('2\n')
+    expect(logText()).toContain('WARN task limit 2 ignored findings from first-scan')
+    expect(logText()).toContain('WARN task limit 2 ignored findings from second-scan')
+  })
+
+  it('checks the total-task bound before each remote finding and stores its depth', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true, maxTotalTasks: 1 })
+    writeFinal('remote-scan', [
+      'NEXT_TASK: [BUG] first remote bounded finding',
+      'NEXT_TASK: [BUG] second remote bounded finding',
+    ].join('\n'))
+    await loop.scanForNextTasks('remote-scan', 1)
+
+    expect(fakeForge.issues.size).toBe(1)
+    const issue = [...fakeForge.issues.values()][0]!
+    expect(issue.body).toContain('Depth: 2')
+    expect(readFileSync(join(paths.queueDir, 'total-task-count.txt'), 'utf8')).toBe('1\n')
+    expect(logText()).toContain('WARN task limit 1 ignored findings from remote-scan')
+  })
+
   it('re-admits a review finding whose indexed task failed or already merged', async () => {
     const loop = makeLoop()
     const finding = '[BUG] a defect whose first fix crashed'

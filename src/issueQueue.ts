@@ -160,10 +160,12 @@ export function buildIssueBody(
   effort?: string,
   fingerprints: string[] = [fingerprintOf(description)],
   inspect = false,
+  depth?: number,
 ): string {
   return [
     ...[...new Set(fingerprints)].map((fingerprint) => `Fingerprint: ${fingerprint}`),
     `Parent: ${parentTaskId}`,
+    ...(depth !== undefined ? [`Depth: ${depth}`] : []),
     ...(effort !== undefined ? [`Effort: ${effort}`] : []),
     ...(inspect ? ['Inspect: true'] : []),
     '',
@@ -179,6 +181,7 @@ export interface ParsedIssue {
   fingerprints: string[]
   effort: string | undefined
   inspect: boolean
+  depth: number | undefined
   requirement: string
 }
 
@@ -189,6 +192,8 @@ export function parseIssueBody(body: string): ParsedIssue | undefined {
   const fingerprint = fingerprints[0]
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const inspect = lines.includes('Inspect: true')
+  const depthText = lines.find((line) => line.startsWith('Depth: '))?.slice('Depth: '.length)
+  const depth = depthText !== undefined && /^\d+$/.test(depthText) ? Number(depthText) : undefined
   const requirementStart = lines.indexOf('## Requirement')
   if (fingerprint === undefined || requirementStart === -1) return undefined
   const requirementLines = lines.slice(requirementStart + 1)
@@ -196,7 +201,7 @@ export function parseIssueBody(body: string): ParsedIssue | undefined {
   if (requirementLines.at(-1)?.startsWith('Heartbeat: ') === true) requirementLines.pop()
   const requirement = requirementLines.join('\n').trim()
   if (requirement === '') return undefined
-  return { fingerprint, fingerprints, effort, inspect, requirement }
+  return { fingerprint, fingerprints, effort, inspect, depth, requirement }
 }
 
 export type PublishResult
@@ -573,6 +578,7 @@ export async function publishFinding(
   effort?: string,
   titleText = description,
   fingerprintDescriptions?: string[],
+  depth?: number,
 ): Promise<PublishResult> {
   const fingerprints = [...new Set(
     (fingerprintDescriptions ?? [description]).map((finding) => fingerprintOf(finding)),
@@ -586,7 +592,7 @@ export async function publishFinding(
   const title = titleText.length > 90 ? `${titleText.slice(0, 87)}...` : titleText
   const issueNumber = await forge.createIssue({
     title,
-    body: buildIssueBody(description, parentTaskId, effort, fingerprints),
+    body: buildIssueBody(description, parentTaskId, effort, fingerprints, false, depth),
     labels: [LABEL_FINDING, LABEL_READY],
   })
   // The preflight list is not a lock, and post-create listings can lag too. Re-read
@@ -925,7 +931,7 @@ export async function claimIssue(
       writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
     }
     recordIssueForTask(paths, taskId, issue.number)
-    const enqueue = enqueueTask(paths, taskId, 1)
+    const enqueue = enqueueTask(paths, taskId, parsed.depth ?? 1)
     return {
       outcome: 'claimed',
       taskId,

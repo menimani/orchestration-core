@@ -120,11 +120,14 @@ describe('closed issue lifecycle labels', () => {
 
 describe('issue body round-trip', () => {
   it('parses what it builds', () => {
-    const body = buildIssueBody('[BUG] `src/x/y.ts` does the wrong thing', 'parent-task', 'high')
+    const body = buildIssueBody(
+      '[BUG] `src/x/y.ts` does the wrong thing', 'parent-task', 'high', undefined, false, 2,
+    )
     const parsed = parseIssueBody(body)
     expect(parsed?.fingerprint).toBe(fingerprintOf('[BUG] `src/x/y.ts` does the wrong thing'))
     expect(parsed?.effort).toBe('high')
     expect(parsed?.inspect).toBe(false)
+    expect(parsed?.depth).toBe(2)
     expect(parsed?.requirement).toBe('[BUG] `src/x/y.ts` does the wrong thing')
   })
 
@@ -478,6 +481,19 @@ describe('claimIssue', () => {
     expect(readFileSync(join(paths.queueDir, 'effort', result.taskId), 'utf8').trim()).toBe('high')
     expect(issueNumberForTask(paths, result.taskId)).toBe(issueNumber)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(result.taskId)
+  })
+
+  it('preserves a finding issue depth when claiming it', async () => {
+    const result = await publishFinding(
+      forge, paths, '[BUG] `src/deep.ts` remains broken', 'parent-task',
+      undefined, undefined, undefined, 2,
+    )
+    const claim = await claimIssue(
+      forge, paths, await forge.getIssue(result.issueNumber), 'worker-a', appendRequirement,
+    )
+    if (claim.outcome !== 'claimed') throw new Error(`expected a claim, got ${claim.outcome}`)
+
+    expect(claim.enqueue).toEqual({ outcome: 'enqueued', taskId: claim.taskId, depth: 2 })
   })
 
   it('mints and indexes a fresh task when an identical non-advisory finding returns after merge', async () => {
