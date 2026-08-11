@@ -29,6 +29,7 @@ function runtime(overrides: Partial<ReportUpstreamRuntime> = {}): ReportUpstream
     env: {},
     nodeVersion: 'v24.7.0',
     platform: 'linux',
+    packageRoot: join(repoRoot, 'orchestration', 'ts'),
     git: (_root, args) => args[0] === 'remote'
       ? 'git@github.com:consumer/reporting-repo.git\n'
       : '',
@@ -83,13 +84,60 @@ describe('upstream defect reports', () => {
     expect(forge.repositoryIssues[0]?.body).toContain('- Core version: `2.4.1`')
   })
 
+  it('reads metadata from a package that owns the repository root', async () => {
+    writeFileSync(
+      join(repoRoot, 'package.json'),
+      `${JSON.stringify({ upstreamRepo: 'configured/core', version: '3.1.4' })}\n`,
+    )
+    const forge = makeFakeForge()
+    const gitCalls: string[][] = []
+
+    await reportUpstream(orchPaths(repoRoot), 'A root-package defect.', forge,
+      runtime({
+        packageRoot: repoRoot,
+        git: (_root, args) => {
+          gitCalls.push(args)
+          return args[0] === 'remote' ? 'git@github.com:consumer/reporting-repo.git\n' : ''
+        },
+      }))
+
+    expect(forge.repositoryIssues[0]?.repository).toBe('configured/core')
+    expect(forge.repositoryIssues[0]?.body).toContain('- Core version: `3.1.4`')
+    expect(gitCalls.some((args) => args[0] === 'log')).toBe(false)
+  })
+
+  it('derives the subtree history path from the package root', async () => {
+    const packageRoot = join(repoRoot, 'vendor', 'core')
+    mkdirSync(packageRoot, { recursive: true })
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      `${JSON.stringify({ upstreamRepo: 'configured/core', version: '2.4.1' })}\n`,
+    )
+    const forge = makeFakeForge()
+    const commit = 'abcdef0123456789abcdef0123456789abcdef01'
+    let logArgs: string[] | undefined
+
+    await reportUpstream(orchPaths(repoRoot), 'A nested-package defect.', forge,
+      runtime({
+        packageRoot,
+        git: (_root, args) => {
+          if (args[0] === 'remote') return 'git@github.com:consumer/reporting-repo.git\n'
+          logArgs = args
+          return `git-subtree-split: ${commit}\n`
+        },
+      }))
+
+    expect(logArgs?.slice(-2)).toEqual(['--', 'vendor/core'])
+    expect(forge.repositoryIssues[0]?.body).toContain(`- Core version: \`${commit}\``)
+  })
+
   it('fails clearly when no upstream repository is configured', async () => {
     writePackage({ version: '2.4.1' })
 
     await expect(reportUpstream(
       orchPaths(repoRoot), 'A core defect.', makeFakeForge(), runtime(),
     )).rejects.toThrow(
-      'No upstream repository is configured. Set UPSTREAM_REPO or upstreamRepo in orchestration/ts/package.json.',
+      'No upstream repository is configured. Set UPSTREAM_REPO or upstreamRepo in package.json.',
     )
   })
 
