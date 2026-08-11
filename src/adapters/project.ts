@@ -117,20 +117,46 @@ export interface ProjectAdapter {
   pullRequest: PullRequestPresentation
 }
 
-function isProjectAdapter(value: unknown, name?: string): value is ProjectAdapter {
-  if (typeof value !== 'object' || value === null) return false
+interface ProjectAdapterValidation {
+  candidate: boolean
+  problem?: string
+}
+
+function validateProjectAdapter(value: unknown, name?: string): ProjectAdapterValidation {
+  if (typeof value !== 'object' || value === null) return { candidate: false }
   const candidate = value as Partial<ProjectAdapter>
-  return typeof candidate.name === 'string'
-    && candidate.name !== ''
-    && (name === undefined || candidate.name === name)
-    && typeof candidate.mergeChecks === 'function'
-    && typeof candidate.cycleSuite === 'function'
-    && typeof candidate.pullRequest === 'object'
-    && candidate.pullRequest !== null
-    && Array.isArray(candidate.pullRequest.categories)
-    && typeof candidate.pullRequest.titleFallback === 'string'
-    && typeof candidate.pullRequest.classifyCommit === 'function'
-    && typeof candidate.pullRequest.detectRisks === 'function'
+  if (typeof candidate.name !== 'string' || candidate.name === '') return { candidate: false }
+  if (name !== undefined && candidate.name !== name) return { candidate: false }
+
+  const required = (
+    owner: Record<string, unknown>,
+    member: string,
+    valid: (memberValue: unknown) => boolean,
+    expected: string,
+  ): string | undefined => {
+    if (!(member in owner)) return `is missing required member '${member}'`
+    if (!valid(owner[member])) return `has invalid required member '${member}' (expected ${expected})`
+    return undefined
+  }
+  const topLevel = candidate as Record<string, unknown>
+  const problem = required(topLevel, 'mergeChecks', (member) => typeof member === 'function', 'a function')
+    ?? required(topLevel, 'cycleSuite', (member) => typeof member === 'function', 'a function')
+    ?? required(
+      topLevel,
+      'pullRequest',
+      (member) => typeof member === 'object' && member !== null,
+      'an object',
+    )
+  if (problem !== undefined) return { candidate: true, problem }
+
+  const pullRequest = candidate.pullRequest as unknown as Record<string, unknown>
+  return {
+    candidate: true,
+    problem: required(pullRequest, 'categories', Array.isArray, 'an array')
+      ?? required(pullRequest, 'titleFallback', (member) => typeof member === 'string', 'a string')
+      ?? required(pullRequest, 'classifyCommit', (member) => typeof member === 'function', 'a function')
+      ?? required(pullRequest, 'detectRisks', (member) => typeof member === 'function', 'a function'),
+  }
 }
 
 function discoverProjectAdapter(orchestrationRoot: string): { path: string; name: string } {
@@ -180,8 +206,18 @@ export async function loadProject(
   }
 
   const mod = await import(pathToFileURL(adapterPath).href) as Record<string, unknown>
+  let matchingProblem: string | undefined
   for (const value of Object.values(mod)) {
-    if (isProjectAdapter(value, name)) return value
+    const validation = validateProjectAdapter(value, name)
+    if (!validation.candidate) continue
+    if (validation.problem === undefined) return value as ProjectAdapter
+    matchingProblem ??= validation.problem
+  }
+  if (matchingProblem !== undefined) {
+    const projectName = name ?? 'the matching project'
+    throw new Error(
+      `Project adapter '${adapterPath}' exports project '${projectName}' but ${matchingProblem}`,
+    )
   }
   const expected = name === undefined ? 'a project adapter' : `project '${name}'`
   throw new Error(`Project adapter '${adapterPath}' does not export ${expected}`)
