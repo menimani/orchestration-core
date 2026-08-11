@@ -1727,6 +1727,50 @@ describe('scanForNextTasks', () => {
     ])
   })
 
+  it('retries incomplete finding publication before marking a scan processed', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoMerge: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const taskId = '20250101_000000_017_scan'
+    writeFinal(taskId, [
+      'NEXT_TASK: [BUG] first retryable finding',
+      'NEXT_TASK: [BUG] second retryable finding',
+      'TASK_COMPLETE',
+    ].join('\n'))
+    writeRawStatus(taskId, 'completed')
+
+    const createIssue = fakeForge.createIssue.bind(fakeForge)
+    let attempts = 0
+    fakeForge.createIssue = async (options) => {
+      attempts += 1
+      if (attempts === 2) throw new Error('temporary publication failure')
+      return createIssue(options)
+    }
+
+    await loop.poll()
+
+    const scannedFlag = join(paths.queueDir, 'scanned', taskId)
+    expect(existsSync(scannedFlag)).toBe(false)
+    expect(fakeForge.issues.size).toBe(1)
+    expect(logText()).toContain('WARN could not file finding: temporary publication failure')
+    expect(logged.some((line) => line.startsWith('Completed 017_scan'))).toBe(false)
+
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(true)
+    expect(fakeForge.issues.size).toBe(2)
+    expect([...fakeForge.issues.values()].map((issue) => issue.title)).toEqual([
+      '[BUG] first retryable finding',
+      '[BUG] second retryable finding',
+    ])
+    expect(logged.filter((line) => line.startsWith('Completed 017_scan'))).toHaveLength(1)
+  })
+
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_012_scan', 'NEXT_TASK: [BUG] a finding whose fix must be detectable\n')

@@ -61,6 +61,7 @@ interface QueueEntry {
 interface FindingDispatch {
   findings: string[]
   destinations: string[]
+  reconciled: boolean
 }
 
 export function formatEventLine(name: string, subject = '', detail = ''): string {
@@ -518,17 +519,17 @@ export function createLoop(deps: LoopDeps) {
   async function scanForNextTasks(taskId: string, depth: number): Promise<FindingDispatch> {
     const findings = actionableFindings(finalMessageFile(paths, taskId))
     const destinations: string[] = []
-    if (findings.length === 0) return { findings, destinations }
+    if (findings.length === 0) return { findings, destinations, reconciled: true }
     const isReview = isReviewTaskId(taskId)
 
     const newDepth = depth + 1
     if (newDepth > config.maxGrowthDepth) {
       event('WARN', `growth depth limit ${config.maxGrowthDepth} ignored findings from ${shortTaskId(taskId)}`)
-      return { findings, destinations }
+      return { findings, destinations, reconciled: true }
     }
     if (countAllTasks() >= config.maxTotalTasks) {
       event('WARN', `task limit ${config.maxTotalTasks} ignored findings from ${shortTaskId(taskId)}`)
-      return { findings, destinations }
+      return { findings, destinations, reconciled: true }
     }
 
     if (config.issueQueueEnabled) {
@@ -540,11 +541,12 @@ export function createLoop(deps: LoopDeps) {
           destinations.push(`#${duplicate.issueNumber}`)
         }
       }
-      if (pendingFindings.length === 0) return { findings, destinations }
+      if (pendingFindings.length === 0) return { findings, destinations, reconciled: true }
       const combinesReviewFindings = isReview && pendingFindings.length > 1
       const descriptions = combinesReviewFindings
         ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
         : pendingFindings
+      let reconciled = true
       for (const desc of descriptions) {
         const effort = isReview ? 'high' : undefined
         const title = combinesReviewFindings ? `Review round fixes (${taskId})` : undefined
@@ -558,12 +560,13 @@ export function createLoop(deps: LoopDeps) {
             event('Filed', `#${result.issueNumber}`, `by ${shortTaskId(taskId)}`)
           }
         } catch (error) {
+          reconciled = false
           if (!(error instanceof ForgeRateLimitError)) {
             event('WARN', `could not file finding: ${errorSummary(error)}`)
           }
         }
       }
-      return { findings, destinations }
+      return { findings, destinations, reconciled }
     }
 
     const pendingFindings = isReview
@@ -587,7 +590,7 @@ export function createLoop(deps: LoopDeps) {
         return true
       })
       : findings
-    if (pendingFindings.length === 0) return { findings, destinations }
+    if (pendingFindings.length === 0) return { findings, destinations, reconciled: true }
     const combinesReviewFindings = isReview && pendingFindings.length > 1
     const descriptions = combinesReviewFindings
       ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
@@ -637,7 +640,7 @@ export function createLoop(deps: LoopDeps) {
         // an unenqueueable finding is not worth stopping the poll for
       }
     }
-    return { findings, destinations }
+    return { findings, destinations, reconciled: true }
   }
 
   // A scan writes its findings in prose, so the same advisory comes back worded
@@ -1421,6 +1424,7 @@ export function createLoop(deps: LoopDeps) {
         }
 
         const dispatch = await scanForNextTasks(taskId, depth)
+        if (!dispatch.reconciled) continue
         if (isScanTaskId(taskId)) {
           const findings = dispatch.destinations.length > 0
             ? dispatch.destinations.join(' ')
