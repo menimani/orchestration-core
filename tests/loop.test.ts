@@ -1056,12 +1056,39 @@ describe('failure announcement and burst stop (via poll)', () => {
 })
 
 describe('completion marker output', () => {
+  it('creates and summarizes a PR against the remote default branch', async () => {
+    initializeGitRepo()
+    git(['branch', '-M', 'trunk'])
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'trunk'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk'])
+    git(['switch', '-c', 'feature/default-base'])
+    writeFileSync(join(repoRoot, 'feature.txt'), 'feature\n')
+    git(['add', 'feature.txt'])
+    git(['commit', '-m', 'feat: use the configured base'])
+    forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const loop = makeLoop()
+    const createPr = vi.fn(async () => 'https://example.test/pull/1')
+    fakeForge.createPr = createPr
+
+    expect(await loop.ensureDraftPr('final')).toBe(true)
+
+    expect(createPr).toHaveBeenCalledWith(expect.objectContaining({
+      base: 'trunk',
+      title: 'feat: autonomous scan loop — 1 feature',
+      body: expect.stringContaining('- use the configured base'),
+    }))
+  })
+
   it('emits LOOP_DONE verbatim before the formatted completion row', async () => {
     initializeGitRepo()
     const remote = join(repoRoot, 'remote.git')
     execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
     git(['remote', 'add', 'origin', remote])
     git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
     const loop = makeLoop()
 
     await loop.postLoopPr()

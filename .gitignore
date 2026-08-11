@@ -5,3 +5,4 @@ orchestration/queue/
 orchestration/logs/
 orchestration/worktrees/
 orchestration/tasks/
+orchestration/status/

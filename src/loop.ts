@@ -907,9 +907,17 @@ export function createLoop(deps: LoopDeps) {
       // the gate re-enters and pushes again; a transient push failure is not fatal here
     }
 
-    git(['fetch', 'origin', 'main', '--quiet'])
+    const baseRef = git([
+      'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD',
+    ]).trim()
+    if (!baseRef.startsWith('origin/')) {
+      event('WARN', 'could not get origin default branch; PR skipped')
+      return false
+    }
+    const baseBranch = baseRef.slice('origin/'.length)
+    git(['fetch', 'origin', baseBranch, '--quiet'])
     const cycle = readCount(scanCountFile)
-    const title = prTitle(paths.repoRoot, mode === 'final' ? 'final' : 'cycle',
+    const title = prTitle(paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
       { cycle, maxCycles: config.maxScanCycles })
 
     const status = await forge.prStatus(branch)
@@ -924,7 +932,10 @@ export function createLoop(deps: LoopDeps) {
       }
       if (body.includes(GENERATED_BODY_MARKER)) {
         try {
-          await forge.updatePr(branch, { title, body: buildPrBody(paths.repoRoot, readDecisions()) })
+          await forge.updatePr(branch, {
+            title,
+            body: buildPrBody(paths.repoRoot, baseRef, readDecisions()),
+          })
         } catch (error) {
           if (!(error instanceof ForgeRateLimitError)) event('WARN', 'could not update PR body')
         }
@@ -936,9 +947,9 @@ export function createLoop(deps: LoopDeps) {
     try {
       const url = await forge.createPr({
         branch,
-        base: 'main',
+        base: baseBranch,
         title,
-        body: buildPrBody(paths.repoRoot, readDecisions()),
+        body: buildPrBody(paths.repoRoot, baseRef, readDecisions()),
         draft: true,
       })
       writeFileSync(prUrlFile, `${url}\n`)
