@@ -50,7 +50,8 @@ describe('formatEventLine', () => {
 
 function makeForge(): Forge {
   fakeForge = makeFakeForge()
-  fakeForge.prStatus = async () => {
+  fakeForge.prStatus = async (ref) => {
+    fakeForge.prStatusRefs.push(ref)
     prStatusCalls += 1
     return forgeStatus
   }
@@ -514,6 +515,9 @@ describe('checkPrCiStatus', () => {
       { name: 'b', conclusion: 'success', startedAt: '' },
     ]
     expect(await loop.checkPrCiStatus()).toBe('success')
+    expect(fakeForge.prStatusRefs).toEqual([
+      { kind: 'url', value: 'https://example.test/pull/1' },
+    ])
     forgeStatus.checks = [{ name: 'a', conclusion: 'failure', startedAt: '' }]
     expect(await loop.checkPrCiStatus()).toBe('failure')
   })

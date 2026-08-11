@@ -122,6 +122,31 @@ describe('GitHub upstream issue creation', () => {
 })
 
 describe('GitHub forge JSON schemas', () => {
+  it.each([
+    [{ kind: 'branch', value: 'task/branch' } as const, 'task/branch'],
+    [{ kind: 'number', value: 12 } as const, '12'],
+    [{ kind: 'url', value: 'https://github.com/example/repo/pull/12' } as const,
+      'https://github.com/example/repo/pull/12'],
+  ])('translates a forge-neutral PR reference for gh', async (ref, expected) => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return JSON.stringify({
+        url: 'https://github.com/example/repo/pull/12',
+        state: 'OPEN',
+        isDraft: false,
+        headRefOid: 'abc123',
+        statusCheckRollup: [],
+      })
+    }
+
+    await createGithubForge('repo-root', command).prStatus(ref)
+
+    expect(calls).toEqual([[
+      'pr', 'view', expected, '--json', 'url,state,isDraft,headRefOid,statusCheckRollup',
+    ]])
+  })
+
   it('queries the GraphQL reset when a rate-limit error does not report one', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {
@@ -173,7 +198,7 @@ describe('GitHub forge JSON schemas', () => {
       futurePrField: 'ignored',
     })
 
-    await expect(forge.prStatus('task/branch')).resolves.toEqual({
+    await expect(forge.prStatus({ kind: 'branch', value: 'task/branch' })).resolves.toEqual({
       state: 'open',
       isDraft: true,
       url: 'https://github.com/example/repo/pull/12',
@@ -250,7 +275,7 @@ describe('GitHub forge JSON schemas', () => {
           isDraft: false,
           statusCheckRollup: [],
         },
-        invoke: (forge) => forge.prStatus('task/branch'),
+        invoke: (forge) => forge.prStatus({ kind: 'branch', value: 'task/branch' }),
         command: 'gh pr view',
         path: 'headRefOid',
       },
@@ -308,7 +333,7 @@ describe('GitHub forge JSON schemas', () => {
           headRefOid: 'abc123',
           statusCheckRollup: [{ startedAt: 42 }],
         },
-        invoke: (forge) => forge.prStatus('task/branch'),
+        invoke: (forge) => forge.prStatus({ kind: 'branch', value: 'task/branch' }),
         command: 'gh pr view',
         path: 'statusCheckRollup[0].startedAt',
       },
