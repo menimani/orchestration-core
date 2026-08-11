@@ -673,13 +673,23 @@ describe('runAutoReview', () => {
     expect(logText()).toContain('after 2 rounds')
   })
 
-  it('resumes without a verdict when the review crashed', () => {
-    const loop = makeLoop()
-    loop.runAutoReview(9, false)
-    const reviewId = lastReviewId(9)
-    writeRawStatus(reviewId, 'failed')
-    expect(loop.runAutoReview(9, false)).toBe(true)
+  it('retries a failed ordinary review and stops when its round bound is exhausted', () => {
+    const loop = makeLoop({ maxReviewRounds: 2 })
+    expect(loop.runAutoReview(9, false)).toBe(false)
+    const firstReviewId = lastReviewId(9)
+    writeRawStatus(firstReviewId, 'failed')
+
+    expect(loop.runAutoReview(9, false)).toBe(false)
+    const secondReviewId = lastReviewId(9)
+    expect(secondReviewId).not.toBe(firstReviewId)
+    expect(readFileSync(join(paths.queueDir, 'review-round-9'), 'utf8').trim()).toBe('2')
+    writeRawStatus(secondReviewId, 'failed')
+
+    expect(loop.runAutoReview(9, false)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-9'))).toBe(false)
     expect(logText()).toContain('WARN review 001_review ended failed without a verdict')
+    expect(logText()).toContain('review-cap rounds 2/2')
   })
 
   it('retries a failed final review while a final round remains', () => {
