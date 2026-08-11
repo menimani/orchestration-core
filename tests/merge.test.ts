@@ -72,6 +72,24 @@ afterEach(() => {
 })
 
 describe('removeMergedWorktree', () => {
+  it('uses the Windows UNC namespace for a UNC worktree fallback', () => {
+    const worktree = '\\\\server\\share\\orchestration\\worktrees\\task'
+    const remove = vi.fn()
+    const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Removal failed')
+      return ''
+    })
+
+    removeMergedWorktree(paths, worktree, vi.fn(), {
+      platform: 'win32', remove, git: gitRuntime,
+    })
+
+    expect(remove).toHaveBeenCalledWith(
+      '\\\\?\\UNC\\server\\share\\orchestration\\worktrees\\task',
+      { recursive: true, force: true, maxRetries: 3 },
+    )
+  })
+
   it('uses the Windows long-path fallback and prunes after git removal fails', () => {
     const worktree = worktreeDir(paths, '20260809_102500_100_auto-long-path')
     const remove = vi.fn()
