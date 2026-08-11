@@ -1,0 +1,7 @@
+node_modules/
+
+# Loop state: queues, logs, worktrees and task files are per-checkout runtime data.
+orchestration/queue/
+orchestration/logs/
+orchestration/worktrees/
+orchestration/tasks/

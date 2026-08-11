@@ -20,6 +20,16 @@ function seedTask(pid: number | null): void {
   writeFileSync(join(paths.queueDir, 'scanned', `${taskId}.failed`), '')
 }
 
+// These fixtures declare win32 so the Windows removal path is exercised on every host,
+// and that path prefixes the extended-length marker — meaningless to a Linux filesystem,
+// where rmSync would then silently remove nothing. Strip it before touching real files.
+function plainPath(path: string): string {
+  if (!path.startsWith('\\\\?\\')) return path
+  const withoutMarker = path.slice(4)
+  // The marker comes with Windows separators; a POSIX host needs its own back.
+  return process.platform === 'win32' ? withoutMarker : withoutMarker.replaceAll('\\', '/')
+}
+
 function makeRuntime(overrides: Partial<CleanupRuntime> = {}): CleanupRuntime {
   let worktreeRegistered = true
   let branchPresent = true
@@ -48,8 +58,8 @@ function makeRuntime(overrides: Partial<CleanupRuntime> = {}): CleanupRuntime {
       }
       return ''
     },
-    exists: existsSync,
-    remove: rmSync,
+    exists: (path) => existsSync(plainPath(path)),
+    remove: (path, options) => { rmSync(plainPath(path), options) },
     now: Date.now,
     sleep: () => {},
     ...overrides,
