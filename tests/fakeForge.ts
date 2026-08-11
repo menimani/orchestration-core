@@ -1,6 +1,6 @@
 import type {
   CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue,
-  PrReference, PrStatus,
+  ForgeIssueComment, PrReference, PrStatus,
 } from '../src/adapters/forge.ts'
 
 // An in-memory forge for tests: PR calls answer from a settable status, and the issue
@@ -14,6 +14,7 @@ export interface FakeForge extends Forge {
   prStatusRefs: PrReference[]
   issues: Map<number, ForgeIssue>
   issueComments: Map<number, string[]>
+  issueCommentAuthors: Map<number, Array<{ login: string; hasWriteAccess: boolean }>>
   repositoryIssues: Array<CreateIssueInRepositoryOptions & { labels: string[]; url: string }>
   repositoryLabels: Map<string, Set<string>>
   listOpenIssuesCalls: string[]
@@ -31,6 +32,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     prStatusRefs: [],
     issues: new Map(),
     issueComments: new Map(),
+    issueCommentAuthors: new Map(),
     repositoryIssues: [],
     repositoryLabels: new Map(),
     listOpenIssuesCalls: [],
@@ -75,6 +77,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
         state: 'open',
         title: options.title,
         body: options.body,
+        author: { login: fake.user, hasWriteAccess: true },
         labels: [...options.labels],
         assignees: [...(options.assignees ?? [])],
         updatedAt: fake.clock().toISOString(),
@@ -100,11 +103,18 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       const comments = fake.issueComments.get(issueNumber) ?? []
       comments.push(comment)
       fake.issueComments.set(issueNumber, comments)
+      const authors = fake.issueCommentAuthors.get(issueNumber) ?? []
+      authors.push({ login: fake.user, hasWriteAccess: true })
+      fake.issueCommentAuthors.set(issueNumber, authors)
       issue.updatedAt = fake.clock().toISOString()
     },
-    async listIssueComments(issueNumber: number): Promise<string[]> {
+    async listIssueComments(issueNumber: number): Promise<ForgeIssueComment[]> {
       fake.listIssueCommentsCalls.push(issueNumber)
-      return [...(fake.issueComments.get(issueNumber) ?? [])]
+      const authors = fake.issueCommentAuthors.get(issueNumber) ?? []
+      return (fake.issueComments.get(issueNumber) ?? []).map((body, index) => ({
+        body,
+        author: authors[index] ?? { login: fake.user, hasWriteAccess: true },
+      }))
     },
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
       fake.listOpenIssuesCalls.push(label)
@@ -148,6 +158,9 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
         const comments = fake.issueComments.get(issueNumber) ?? []
         comments.push(comment)
         fake.issueComments.set(issueNumber, comments)
+        const authors = fake.issueCommentAuthors.get(issueNumber) ?? []
+        authors.push({ login: fake.user, hasWriteAccess: true })
+        fake.issueCommentAuthors.set(issueNumber, authors)
       }
     },
   }
