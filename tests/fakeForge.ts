@@ -1,5 +1,5 @@
 import type {
-  CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus,
+  CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus,
 } from '../src/adapters/forge.ts'
 
 // An in-memory forge for tests: PR calls answer from a settable status, and the issue
@@ -12,6 +12,8 @@ export interface FakeForge extends Forge {
   prStatusCalls: number
   issues: Map<number, ForgeIssue>
   issueComments: Map<number, string[]>
+  repositoryIssues: Array<CreateIssueInRepositoryOptions & { labels: string[]; url: string }>
+  repositoryLabels: Map<string, Set<string>>
   listOpenIssuesCalls: string[]
   listIssueCommentsCalls: number[]
   user: string
@@ -26,6 +28,8 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     prStatusCalls: 0,
     issues: new Map(),
     issueComments: new Map(),
+    repositoryIssues: [],
+    repositoryLabels: new Map(),
     listOpenIssuesCalls: [],
     listIssueCommentsCalls: [],
     user,
@@ -68,6 +72,14 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
         updatedAt: fake.clock().toISOString(),
       })
       return issueNumber
+    },
+    async createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string> {
+      const labels = options.optionalLabels.filter(
+        (label) => fake.repositoryLabels.get(options.repository)?.has(label) === true,
+      )
+      const url = `https://example.test/${options.repository}/issues/${fake.repositoryIssues.length + 1}`
+      fake.repositoryIssues.push({ ...options, optionalLabels: [...options.optionalLabels], labels, url })
+      return url
     },
     async getIssue(issueNumber: number): Promise<ForgeIssue> {
       const issue = fake.issues.get(issueNumber)

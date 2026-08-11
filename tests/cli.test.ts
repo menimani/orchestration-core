@@ -47,6 +47,7 @@ describe('command registry', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('deploy')
     expect(result.stderr).toContain('ci-wait')
+    expect(result.stderr).toContain('report-upstream')
   })
 
   it('refuses to start a worker without a base ref', () => {

@@ -86,6 +86,39 @@ describe('GitHub workflow dispatch correlation', () => {
   })
 })
 
+describe('GitHub upstream issue creation', () => {
+  it.each([
+    { available: [{ name: 'upstream:report' }], expectedLabel: true },
+    { available: [], expectedLabel: false },
+  ])('applies the optional label only when it exists', async ({ available, expectedLabel }) => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return args[0] === 'label'
+        ? JSON.stringify(available)
+        : 'https://github.com/menimani/orchestration-core/issues/42\n'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await expect(forge.createIssueInRepository({
+      repository: 'menimani/orchestration-core',
+      title: 'Core defect report',
+      body: 'Report body',
+      optionalLabels: ['upstream:report'],
+    })).resolves.toBe('https://github.com/menimani/orchestration-core/issues/42')
+
+    expect(calls[0]).toEqual([
+      'label', 'list', '--repo', 'menimani/orchestration-core', '--search', 'upstream:report',
+      '--limit', '100', '--json', 'name',
+    ])
+    expect(calls[1]).toEqual([
+      'issue', 'create', '--repo', 'menimani/orchestration-core',
+      '--title', 'Core defect report', '--body', 'Report body',
+      ...(expectedLabel ? ['--label', 'upstream:report'] : []),
+    ])
+  })
+})
+
 describe('GitHub forge JSON schemas', () => {
   it('queries the GraphQL reset when a rate-limit error does not report one', async () => {
     const calls: string[][] = []
