@@ -86,8 +86,9 @@ function categoryOfCommit(repoRoot: string, sha: string, subject: string): Categ
  * can be detected, with "None identified" when nothing applies. Boilerplate caution
  * does not help the reader decide anything.
  */
-export function prRisks(repoRoot: string, decisions: string[]): string {
-  const changed = git(repoRoot, ['diff', '--name-only', 'origin/main..HEAD'])
+export function prRisks(repoRoot: string, baseRef: string, decisions: string[]): string {
+  const comparison = `${baseRef}..HEAD`
+  const changed = git(repoRoot, ['diff', '--name-only', comparison])
     .split(/\r?\n/).filter((line) => line !== '')
   const lines: string[] = []
 
@@ -116,7 +117,7 @@ export function prRisks(repoRoot: string, decisions: string[]): string {
   if (changed.some((file) => /^src\/backend\/.*\/(auth|twofactor)\/|SecurityConfig\.java|\/value\/Url\.java/.test(file))) {
     lines.push('- Touches authentication, 2FA, or URL validation; re-check login, password reset, and any stored URLs that were valid before')
   }
-  const scopingDiff = git(repoRoot, ['diff', 'origin/main..HEAD', '--',
+  const scopingDiff = git(repoRoot, ['diff', comparison, '--',
     'src/backend/src/main/java/**/service/**', 'src/backend/src/main/java/**/repository/**'])
   if (/^[+-].*\.findBy[A-Za-z]+\(/m.test(scopingDiff)) {
     lines.push('- Changes data-scoping queries; result sets may widen or narrow for existing users')
@@ -124,7 +125,7 @@ export function prRisks(repoRoot: string, decisions: string[]): string {
   if (changed.some((file) => /^src\/backend\/.*\/presentation\/(controller|dto)\//.test(file))) {
     lines.push('- Changes API request or response shapes; clients relying on the old contract may break')
   }
-  const deletedTests = git(repoRoot, ['diff', '--name-only', '--diff-filter=D', 'origin/main..HEAD'])
+  const deletedTests = git(repoRoot, ['diff', '--name-only', '--diff-filter=D', comparison])
     .split(/\r?\n/).filter((line) => /test|Test/.test(line))
   if (deletedTests.length > 0) {
     lines.push('- Deletes test files, removing the verification they provided:')
@@ -140,9 +141,9 @@ export function prRisks(repoRoot: string, decisions: string[]): string {
   return `${lines.join('\n')}\n`
 }
 
-function branchCommits(repoRoot: string): Array<{ sha: string; subject: string }> {
+function branchCommits(repoRoot: string, baseRef: string): Array<{ sha: string; subject: string }> {
   // Merge commits are excluded — "Merge xxx via Codex" gives no information.
-  return git(repoRoot, ['log', 'origin/main..HEAD', '--no-merges', '--pretty=%H|%s'])
+  return git(repoRoot, ['log', `${baseRef}..HEAD`, '--no-merges', '--pretty=%H|%s'])
     .split(/\r?\n/).filter((line) => line !== '')
     .map((line) => {
       const sep = line.indexOf('|')
@@ -155,14 +156,19 @@ interface TitleContext {
   maxCycles: number
 }
 
-export function prTitle(repoRoot: string, mode: 'cycle' | 'final', context: TitleContext): string {
+export function prTitle(
+  repoRoot: string,
+  baseRef: string,
+  mode: 'cycle' | 'final',
+  context: TitleContext,
+): string {
   const prefix = 'feat: autonomous scan loop'
   if (mode !== 'final') {
     return `${prefix} — cycle ${context.cycle}/${context.maxCycles}`
   }
 
   const counts = new Map<Category, number>()
-  for (const { sha, subject } of branchCommits(repoRoot)) {
+  for (const { sha, subject } of branchCommits(repoRoot, baseRef)) {
     const category = categoryOfCommit(repoRoot, sha, subject)
     counts.set(category, (counts.get(category) ?? 0) + 1)
   }
@@ -187,11 +193,9 @@ export function prTitle(repoRoot: string, mode: 'cycle' | 'final', context: Titl
   return `${prefix} — ${parts.join(', ')}`
 }
 
-export function buildPrBody(repoRoot: string, decisions: string[]): string {
-  git(repoRoot, ['fetch', 'origin', 'main', '--quiet'])
-
+export function buildPrBody(repoRoot: string, baseRef: string, decisions: string[]): string {
   const sections = new Map<Category, string[]>()
-  for (const { sha, subject } of branchCommits(repoRoot)) {
+  for (const { sha, subject } of branchCommits(repoRoot, baseRef)) {
     const category = categoryOfCommit(repoRoot, sha, subject)
     const area = areaOfCommit(repoRoot, sha)
     // The type prefix is dropped: the section heading already says it. A screen name on
@@ -210,6 +214,6 @@ export function buildPrBody(repoRoot: string, decisions: string[]): string {
     const entries = sections.get(label)
     body += `\n## ${label}\n\n${entries === undefined ? '- None\n' : `${entries.join('\n')}\n`}`
   }
-  body += `\n## Risks\n\n${prRisks(repoRoot, decisions)}`
+  body += `\n## Risks\n\n${prRisks(repoRoot, baseRef, decisions)}`
   return body
 }
