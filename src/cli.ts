@@ -19,6 +19,7 @@ import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.t
 import { deploy } from './deploy.ts'
 import { isScanTaskId, logFile, orchPaths, packageFile, type OrchPaths } from './paths.ts'
 import { pruneTasks } from './prune.ts'
+import { reportUpstream } from './reportUpstream.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
@@ -141,6 +142,18 @@ const cmdDelegate: Command = async (paths, args) => {
   return 0
 }
 
+const cmdReportUpstream: Command = async (paths, args) => {
+  const description = args[0]
+  if (description === undefined || description.trim() === '' || args.length !== 1) {
+    console.error('Usage: report-upstream "<description>"')
+    return 1
+  }
+  const config = loadConfig()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  console.log(await reportUpstream(paths, description, forge))
+  return 0
+}
+
 const cmdStart: Command = async (paths, args) => {
   const taskId = args[0]
   if (taskId === undefined) {
@@ -166,7 +179,7 @@ const cmdStart: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const runner = await loadRunner(config.runner)
-  const project = await loadProject()
+  const project = await loadProject(paths.root)
   const result = await startTask(paths, runner, taskId, {
     effort: effort === '' ? 'medium' : effort,
     model: model === '' ? undefined : model,
@@ -224,7 +237,7 @@ const cmdDeploy: Command = async (paths, args) => {
     return 1
   }
   const config = loadConfig()
-  const project = await loadProject()
+  const project = await loadProject(paths.root)
   if (project.deployment === undefined) {
     console.error(`Project '${project.name}' does not define a deployment.`)
     return 1
@@ -273,7 +286,7 @@ const cmdMerge: Command = async (paths, args) => {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
-      project: await loadProject(),
+      project: await loadProject(paths.root),
       closesIssue: linkedIssue,
     })
     if (linkedIssue !== undefined) {
@@ -536,7 +549,7 @@ async function runLoopDaemon(
     )
     const forge = await loadForge(config.forge, paths.repoRoot)
     const runner = await loadRunner(config.runner)
-    const project = await loadProject()
+    const project = await loadProject(paths.root)
     const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
 
     await loop.initializeIssueQueue()
@@ -601,6 +614,7 @@ const commands: Record<string, Command> = {
   'new': cmdNew,
   'enqueue': cmdEnqueue,
   'delegate': cmdDelegate,
+  'report-upstream': cmdReportUpstream,
   'start': cmdStart,
   'status': cmdStatus,
   'logs': cmdLogs,

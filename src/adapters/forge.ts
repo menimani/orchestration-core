@@ -50,6 +50,14 @@ export interface CreateIssueOptions {
   assignees?: string[]
 }
 
+export interface CreateIssueInRepositoryOptions {
+  repository: string
+  title: string
+  body: string
+  /** Labels to apply when they already exist in the target repository. */
+  optionalLabels: string[]
+}
+
 export interface WorkflowRun {
   id: number
   createdAt: string
@@ -95,6 +103,8 @@ export interface Forge {
   currentUser(): Promise<string>
   ensureLabel(name: string, description: string): Promise<void>
   createIssue(options: CreateIssueOptions): Promise<number>
+  /** Create an issue outside the current repository and return its URL. */
+  createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string>
   getIssue(issueNumber: number): Promise<ForgeIssue>
   /** Add a comment to an issue. */
   commentIssue(issueNumber: number, comment: string): Promise<void>

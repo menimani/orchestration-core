@@ -2,7 +2,8 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
-  CheckConclusion, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus, WorkflowRun,
+  CheckConclusion, CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge,
+  ForgeIssue, PrStatus, WorkflowRun,
 } from './forge.ts'
 import { ForgeRateLimitError } from './forge.ts'
 
@@ -12,6 +13,7 @@ const execFileAsync = promisify(execFile)
 // enough to a URL that a looser match once stored the error text and every later cycle
 // asked gh about a pull request called "check your internet connection".
 const PR_URL_PATTERN = /^https:\/\/\S+\/pull\/\d+$/
+const ISSUE_URL_PATTERN = /^https:\/\/\S+\/issues\/\d+$/
 
 const rollupEntrySchema = z.object({
   __typename: z.string().optional(),
@@ -33,6 +35,7 @@ const prStatusSchema = z.object({
 
 const prBodySchema = z.object({ body: z.string() })
 const currentUserSchema = z.object({ login: z.string() })
+const labelListSchema = z.array(z.object({ name: z.string() }))
 
 const workflowRunSchema = z.object({
   databaseId: z.number(),
@@ -317,6 +320,32 @@ export function createGithubForge(
         throw new Error(`gh issue create returned no issue URL: ${stdout.trim()}`)
       }
       return Number(match[1])
+    },
+
+    async createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string> {
+      const labels: string[] = []
+      for (const label of options.optionalLabels) {
+        const labelArgs = [
+          'label', 'list', '--repo', options.repository, '--search', label,
+          '--limit', '100', '--json', 'name',
+        ]
+        const stdout = await checkedGh(repoRoot, labelArgs)
+        const available = parseGhJson(labelArgs, stdout, labelListSchema)
+        if (available.some((candidate) => candidate.name === label)) labels.push(label)
+      }
+
+      const args = [
+        'issue', 'create', '--repo', options.repository,
+        '--title', options.title, '--body', options.body,
+      ]
+      for (const label of labels) args.push('--label', label)
+      const stdout = await checkedGh(repoRoot, args)
+      const url = stdout.split(/\r?\n/).map((line) => line.trim())
+        .find((line) => ISSUE_URL_PATTERN.test(line))
+      if (url === undefined) {
+        throw new Error(`gh issue create returned no issue URL: ${stdout.trim()}`)
+      }
+      return url
     },
 
     async getIssue(issueNumber: number): Promise<ForgeIssue> {
