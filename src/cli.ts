@@ -1,4 +1,4 @@
-import { spawn, execFileSync, spawnSync } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import {
   appendFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -12,6 +12,7 @@ import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
 import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
+import { followLog } from './logFollower.ts'
 import {
   commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
 } from './issueQueue.ts'
@@ -226,8 +227,8 @@ const cmdLogs: Command = async (paths, args) => {
     return 1
   }
   if (args[1] === '-f') {
-    const result = spawnSync('tail', ['-f', log], { stdio: 'inherit', windowsHide: true })
-    return result.status ?? 0
+    await followLog(log, process.stdout)
+    return 0
   }
   process.stdout.write(readFileSync(log, 'utf8'))
   return 0
