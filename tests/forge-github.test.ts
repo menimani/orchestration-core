@@ -27,7 +27,9 @@ const openIssueFixture = {
 }
 
 function forgeReturning(output: unknown): Forge {
-  const command: GithubCommand = async () => JSON.stringify(output)
+  const command: GithubCommand = async (_root, args) => args[0] === 'repo'
+    ? JSON.stringify({ nameWithOwner: 'example/repo' })
+    : JSON.stringify(output)
   return createGithubForge('repo-root', command)
 }
 
@@ -167,6 +169,69 @@ describe('GitHub upstream issue creation', () => {
   })
 })
 
+describe('GitHub issue queue repository targeting', () => {
+  it('resolves the repository once and passes it on every queue call', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'consumer/project' })
+      if (args[0] === 'issue' && args[1] === 'create') {
+        return 'https://github.com/consumer/project/issues/42\n'
+      }
+      if (args[0] === 'issue' && args[1] === 'list') {
+        return JSON.stringify(args.includes('closed')
+          ? [{ ...openIssueFixture, state: 'CLOSED' }]
+          : [openIssueFixture])
+      }
+      if (args[0] === 'issue' && args[1] === 'view') {
+        return JSON.stringify(args.includes('comments')
+          ? { comments: [{ body: 'Queue comment' }] }
+          : openIssueFixture)
+      }
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.ensureLabel('loop:finding', 'Finding')
+    await forge.createIssue({ title: 'Finding', body: 'Body', labels: ['loop:finding'] })
+    await forge.getIssue(42)
+    await forge.commentIssue(42, 'Comment')
+    await forge.listIssueComments(42)
+    await forge.listOpenIssues('loop:finding')
+    await forge.listClosedIssues('loop:finding')
+    await forge.assignIssue(42, 'worker-one')
+    await forge.unassignIssue(42, 'worker-one')
+    await forge.addLabel(42, 'loop:ready')
+    await forge.removeLabel(42, 'loop:ready')
+    await forge.closeIssue(42, 'Done')
+
+    expect(calls.filter((args) => args[0] === 'repo')).toEqual([
+      ['repo', 'view', '--json', 'nameWithOwner'],
+    ])
+    for (const args of calls.slice(1)) {
+      expect(args, `gh ${args.join(' ')}`).toContain('--repo')
+      expect(args, `gh ${args.join(' ')}`).toContain('consumer/project')
+    }
+  })
+
+  it('fails closed when the current repository cannot be resolved', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') throw new Error('not a git repository')
+      return 'https://github.com/upstream/package/issues/42\n'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await expect(forge.createIssue({
+      title: 'Finding',
+      body: 'Body',
+      labels: ['loop:finding'],
+    })).rejects.toThrow('Unable to resolve the current repository for the issue queue')
+    expect(calls).toEqual([['repo', 'view', '--json', 'nameWithOwner']])
+  })
+})
+
 describe('GitHub forge JSON schemas', () => {
   it.each([
     [{ kind: 'branch', value: 'task/branch' } as const, 'task/branch'],
@@ -197,6 +262,9 @@ describe('GitHub forge JSON schemas', () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
+      if (args.join(' ') === 'repo view --json nameWithOwner') {
+        return JSON.stringify({ nameWithOwner: 'example/repo' })
+      }
       if (args.join(' ') === 'api rate_limit') {
         return JSON.stringify({ resources: { graphql: { reset: 1_786_435_200 } } })
       }
@@ -214,7 +282,8 @@ describe('GitHub forge JSON schemas', () => {
     expect(error).toBeInstanceOf(ForgeRateLimitError)
     expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
     expect(calls.map((args) => args.join(' '))).toEqual([
-      'issue list --state open --label loop:finding --limit 200 --json number,state,title,body,labels,assignees,updatedAt',
+      'repo view --json nameWithOwner',
+      'issue list --state open --repo example/repo --label loop:finding --limit 200 --json number,state,title,body,labels,assignees,updatedAt',
       'api rate_limit',
     ])
   })
