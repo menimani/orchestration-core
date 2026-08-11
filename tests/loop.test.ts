@@ -1460,12 +1460,22 @@ describe('completed task merge recovery', () => {
     expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
   })
 
-  it('stops before reaping when a post-merge comment cannot be confirmed', async () => {
+  it('retries post-merge reconciliation on a later poll without stopping or advancing the gate', async () => {
     const taskId = '20260811_120000_066_auto-unconfirmed-merge'
     initializeGitRepo()
     makeCompletedTask(taskId)
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'review-template.md'),
+      '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const loop = makeLoop({
-      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+      autoMerge: true,
+      issueQueueEnabled: true,
+      scanEnabled: true,
+      maxParallel: 0,
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: true,
     })
     loop.initializeSessionStateForBranch()
     const issueNumber = await fakeForge.createIssue({
@@ -1474,17 +1484,32 @@ describe('completed task merge recovery', () => {
     const issue = fakeForge.issues.get(issueNumber)
     if (issue !== undefined) issue.updatedAt = '2026-08-01T00:00:00.000Z'
     recordIssueForTask(paths, taskId, issueNumber)
-    fakeForge.commentIssue = async () => {
-      throw new Error('comment unavailable')
+    const commentIssue = fakeForge.commentIssue.bind(fakeForge)
+    let attempts = 0
+    fakeForge.commentIssue = async (...args) => {
+      attempts += 1
+      if (attempts === 1) throw new Error('comment unavailable')
+      await commentIssue(...args)
     }
 
     expect(await loop.poll()).toBe('continue')
 
     expect(readStatus(paths, taskId)).toMatchObject({ status: 'merged', run_branch: 'main' })
     expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
-    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(attempts).toBe(1)
     expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
     expect(logText()).toContain(`could not reconcile issue #${issueNumber} after merging 066_auto`)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
+    expect(attempts).toBe(2)
   })
 
   it('retries a failed automerge on the next poll and lets the cycle gate proceed', async () => {
