@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 // The project adapter carries everything the orchestration knows about the repository
 // it runs in: which checks verify a merge, which suites prove a cycle's tip, and which
@@ -68,8 +68,6 @@ export interface ProjectAdapter {
   scanWorktreeSetup?: WorktreeSetupStep[]
 }
 
-const ORCHESTRATION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
-
 function isProjectAdapter(value: unknown, name: string): value is ProjectAdapter {
   if (typeof value !== 'object' || value === null) return false
   const candidate = value as Partial<ProjectAdapter>
@@ -79,13 +77,14 @@ function isProjectAdapter(value: unknown, name: string): value is ProjectAdapter
 }
 
 export async function loadProject(
+  orchestrationRoot: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ProjectAdapter> {
   const name = env['PROJECT'] === undefined || env['PROJECT'] === '' ? 'shiora' : env['PROJECT']
   const configuredPath = env['PROJECT_ADAPTER']
   const adapterPath = configuredPath === undefined || configuredPath === ''
-    ? resolve(ORCHESTRATION_ROOT, 'project', `project-${name}.ts`)
-    : resolve(ORCHESTRATION_ROOT, configuredPath)
+    ? resolve(orchestrationRoot, 'project', `project-${name}.ts`)
+    : resolve(orchestrationRoot, configuredPath)
 
   if (!existsSync(adapterPath)) {
     throw new Error(`Project adapter not found: ${adapterPath}`)
