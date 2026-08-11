@@ -232,6 +232,30 @@ describe('daemon startup', () => {
 })
 
 describe('forge poll budget', () => {
+  it('records an unparseable issue failure and stops with the issue quarantined', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'malformed finding', body: 'no generated structure',
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    const reason = `Issue #${issueNumber} has no parseable requirement. Restore its generated body, remove loop:merge-failed, add loop:ready, unassign the worker, and restart the loop.`
+    expect(readFileSync(join(paths.queueDir, 'decisions.txt'), 'utf8')).toBe(`${reason}\n`)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logged).toContain(`ERROR ${reason}`)
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.labels).toContain('loop:merge-failed')
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(fakeForge.issueComments.get(issueNumber)).toContain(reason)
+  })
+
   it('continues local refresh, merging, and queued work when queue labels are unavailable', async () => {
     const completedTask = '20260811_120000_001_auto-completed'
     const failedTask = '20260811_120001_002_auto-failed'

@@ -1507,10 +1507,13 @@ export function createLoop(deps: LoopDeps) {
                 event('Claimed', shortTaskId(result.taskId), `#${issue.number}`)
                 if (result.pendingMerge) await mergeCompletedTask(result.taskId)
                 capacity -= 1
-              } else {
-                if (result.outcome !== 'lost-race') {
-                  event('WARN', `issue #${issue.number} has no parseable requirement`)
+              } else if (result.outcome === 'unparseable') {
+                if (!decisionAlreadyRecorded(result.reason)) {
+                  appendFileSync(decisionsFile, `${result.reason}\n`)
                 }
+                event('ERROR', result.reason)
+                writeFileSync(stopFile, '')
+                break
               }
             }
           }
