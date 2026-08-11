@@ -74,10 +74,6 @@ export function formatEventLine(name: string, subject = '', detail = ''): string
   return `${name} ${subjectColumn}${detail}`
 }
 
-function isDockerEnvironmentFailure(text: string): boolean {
-  return text.includes('Could not find a valid Docker environment')
-}
-
 export function createLoop(deps: LoopDeps) {
   const {
     paths, config, forge: rawForge, runner, project, log, now, orchestrationDepsRuntime,
@@ -724,8 +720,9 @@ export function createLoop(deps: LoopDeps) {
     let diagnosis = ''
     if (existsSync(mergeLog)) {
       const text = readFileSync(mergeLog, 'utf8')
-      if (isDockerEnvironmentFailure(text)) {
-        diagnosis = 'Docker is not running, and the integration tests need it'
+      const infrastructureFailure = project.classifyInfrastructureFailure?.(text)
+      if (infrastructureFailure !== undefined) {
+        diagnosis = infrastructureFailure.diagnosis
       } else if (/Could not resolve host|Connection refused|Could not transfer artifact/.test(text)) {
         diagnosis = 'the network or a package registry is unreachable'
       }
@@ -1135,8 +1132,13 @@ export function createLoop(deps: LoopDeps) {
       step.requires === undefined || existsSync(join(paths.repoRoot, step.requires)))
     if (steps.some((step) => step.needsDocker)) {
       const probe = project.cycleSuiteDockerProbe
-      if (probe === undefined || !runStep(paths.repoRoot, probe.command, probe.timeoutMs)) {
-        event('ERROR', 'Docker is not running; the cycle suite needs it (start Docker Desktop and restart the loop)')
+      if (probe === undefined) {
+        event('ERROR', 'cycle suite infrastructure probe is not configured')
+        writeFileSync(stopFile, '')
+        return false
+      }
+      if (!runStep(paths.repoRoot, probe.command, probe.timeoutMs)) {
+        event('ERROR', probe.remediation)
         writeFileSync(stopFile, '')
         return false
       }
@@ -1158,8 +1160,9 @@ export function createLoop(deps: LoopDeps) {
 
     if (!ok) {
       const logText = existsSync(suiteLog) ? readFileSync(suiteLog, 'utf8') : ''
-      if (isDockerEnvironmentFailure(logText)) {
-        event('ERROR', `Docker is not running; the cycle suite needs it (start Docker Desktop and restart the loop; log: ${shortLogPath(suiteLog)})`)
+      const infrastructureFailure = project.classifyInfrastructureFailure?.(logText)
+      if (infrastructureFailure !== undefined) {
+        event('ERROR', `${infrastructureFailure.remediation} (log: ${shortLogPath(suiteLog)})`)
       } else if (/is not recognized|command not found|ENOENT/i.test(logText)) {
         event('ERROR', `cycle suite tool missing (log: ${shortLogPath(suiteLog)})`)
       } else {

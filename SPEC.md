@@ -84,9 +84,9 @@ from or equivalent to `orchestration/tests/*.sh`.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. Re-claiming completed-but-unmerged work requests that merge instead
-    of silently treating the task as already processed. When the merge log names Docker
-    or an unreachable registry, say which — "tests failed" misattributes an environment
-    failure to the task's diff.
+    of silently treating the task as already processed. When the project adapter classifies
+    an infrastructure failure, or the merge log names an unreachable registry, say which —
+    "tests failed" misattributes an environment failure to the task's diff.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
 

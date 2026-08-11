@@ -1636,12 +1636,21 @@ describe('noteMergeFailure', () => {
   const mergeLog = (): string => join(paths.logsDir, 'sample.merge.log')
   const stopFile = (): string => join(paths.queueDir, 'stop')
 
-  it('names Docker, counts to the limit, and stops', () => {
-    const loop = makeLoop({ maxConsecutiveMergeFailures: 3 })
-    writeFileSync(mergeLog(), 'Caused by: java.lang.IllegalStateException: Could not find a valid Docker environment. Please see logs\n')
+  it('uses the project infrastructure diagnosis, counts to the limit, and stops', () => {
+    const infrastructureProject: ProjectAdapter = {
+      ...stubProject,
+      classifyInfrastructureFailure: (output) => output.includes('fixture service unavailable')
+        ? {
+            diagnosis: 'the fixture service is unavailable, and the integration tests need it',
+            remediation: 'restart the fixture service and restart the loop',
+          }
+        : undefined,
+    }
+    const loop = makeLoop({ maxConsecutiveMergeFailures: 3 }, infrastructureProject)
+    writeFileSync(mergeLog(), 'fixture service unavailable\n')
     loop.noteMergeFailure(mergeLog())
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('1')
-    expect(logText()).toContain('Docker is not running')
+    expect(logText()).toContain('the fixture service is unavailable')
     expect(existsSync(stopFile())).toBe(false)
 
     loop.noteMergeFailure(mergeLog())
@@ -1664,7 +1673,7 @@ describe('noteMergeFailure', () => {
     const loop = makeLoop()
     writeFileSync(mergeLog(), 'Tests run: 4, Failures: 1\nTests failed. Aborting merge.\n')
     loop.noteMergeFailure(mergeLog())
-    expect(logText()).not.toMatch(/Docker is not running|unreachable/)
+    expect(logText()).not.toMatch(/fixture service is unavailable|unreachable/)
   })
 
   it('recognises the unreachable-registry signature', () => {
@@ -1709,7 +1718,11 @@ describe('runCycleSuite', () => {
   it('stops before running suite steps when the Docker probe fails', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuiteDockerProbe: { command: 'node -e "process.exit(1)"', timeoutMs: 1_000 },
+      cycleSuiteDockerProbe: {
+        command: 'node -e "process.exit(1)"',
+        timeoutMs: 1_000,
+        remediation: 'start the fixture service and restart the loop',
+      },
       cycleSuite: () => [{
         label: 'Docker suite', cwd: '',
         command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
@@ -1723,7 +1736,7 @@ describe('runCycleSuite', () => {
     expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(false)
     expect(existsSync(stopFile())).toBe(true)
     expect(logText()).toContain(
-      'ERROR Docker is not running; the cycle suite needs it (start Docker Desktop and restart the loop)',
+      'ERROR start the fixture service and restart the loop',
     )
   })
 
@@ -1733,6 +1746,7 @@ describe('runCycleSuite', () => {
       cycleSuiteDockerProbe: {
         command: `node -e "require('node:fs').appendFileSync('docker-probes', 'probe\\n')"`,
         timeoutMs: 1_000,
+        remediation: 'start the fixture service and restart the loop',
       },
       cycleSuite: () => [
         {
@@ -1785,20 +1799,29 @@ describe('runCycleSuite', () => {
     expect(existsSync(stopFile())).toBe(true)
   })
 
-  it('attributes a Docker failure after a passing probe to the environment', () => {
+  it('uses project classification after a passing infrastructure probe', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuiteDockerProbe: { command: 'node -e ""', timeoutMs: 1_000 },
+      cycleSuiteDockerProbe: {
+        command: 'node -e ""', timeoutMs: 1_000,
+        remediation: 'start the fixture service and restart the loop',
+      },
+      classifyInfrastructureFailure: (output) => output.includes('fixture service unavailable')
+        ? {
+            diagnosis: 'the fixture service is unavailable',
+            remediation: 'restart the fixture service and restart the loop',
+          }
+        : undefined,
       cycleSuite: () => [{
-        label: 'Docker suite', cwd: '', needsDocker: true,
-        command: `node -e "console.log('Could not find a valid Docker environment'); process.exit(1)"`,
+        label: 'Infrastructure suite', cwd: '', needsDocker: true,
+        command: `node -e "console.log('fixture service unavailable'); process.exit(1)"`,
       }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
 
     expect(loop.runCycleSuite(5)).toBe(false)
 
-    expect(logText()).toContain('ERROR Docker is not running; the cycle suite needs it')
+    expect(logText()).toContain('ERROR restart the fixture service and restart the loop')
     expect(logText()).not.toContain('ERROR cycle suite failed')
     expect(existsSync(stopFile())).toBe(true)
   })
