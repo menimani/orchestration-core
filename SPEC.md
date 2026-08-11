@@ -77,10 +77,10 @@ from or equivalent to `orchestration/tests/*.sh`.
    no new commits — an agent that forgot to commit must not silently lose its work.
    Scan tasks and `--inspect` tasks are exempt (investigation produces no commits).
 9. Pre-merge tests are chosen from the paths the worktree touched. `TASK_GATE=full`
-   runs the full suites per merge; `TASK_GATE=light` runs compile/lint per merge and the
-   full suites once at each cycle-gate entry. Light-gate attribution cost (a suite break
-   at the gate names no task) is accepted and documented; the gate stops the loop rather
-   than promote a failing tip.
+   asks the project adapter for its full merge checks; `TASK_GATE=light` asks it for
+   reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
+   entry. Light-gate attribution cost (a suite break at the gate names no task) is
+   accepted and documented; the gate stops the loop rather than promote a failing tip.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. Re-claiming completed-but-unmerged work requests that merge instead

@@ -113,7 +113,7 @@ git subtree pull --prefix=orchestration/ts \
 |----------|---------|--------|
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |
 | `MAX_PARALLEL` | 3 | Agent processes at once |
-| `TASK_GATE` | full | `light` gates each merge on build and lint, running full suites once per cycle |
+| `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle |
 | `AUTO_REVIEW` | false | Enable agent review of cycle diffs and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
