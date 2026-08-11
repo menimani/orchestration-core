@@ -42,10 +42,7 @@ export function prRisks(
   if (realDecisions.length > 0) {
     lines.push('- Awaiting a decision before this branch is relied on:')
     for (const decision of realDecisions) {
-      // GitHub reads a bare #N in a PR body as an issue reference and links it to some
-      // unrelated pull request from the repository's first week; fencing the number
-      // leaves the sentence as written and stops the link.
-      lines.push(`  - ${decision.replace(/#(\d+)/g, '`#$1`')}`)
+      lines.push(`  - ${decision}`)
     }
   }
 
