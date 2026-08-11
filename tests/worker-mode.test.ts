@@ -120,6 +120,9 @@ describe('worker mode', () => {
     const remoteHead = git(origin, ['rev-parse', `refs/heads/${branchName(taskId)}`]).trim()
     const localTaskHead = git(worktreeDir(paths, taskId), ['rev-parse', 'HEAD']).trim()
     expect(remoteHead).toBe(localTaskHead)
+    expect(git(worktreeDir(paths, taskId), [
+      'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}',
+    ]).trim()).toBe(`shared/${branchName(taskId)}`)
     expect(issue.labels).toContain(LABEL_MERGE_READY)
     expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
     expect(forge.issueComments.get(issueNumber)?.join('\n')).toContain(`Branch: ${branchName(taskId)}`)

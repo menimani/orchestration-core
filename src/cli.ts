@@ -510,6 +510,7 @@ async function runLoopDaemon(
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
+  const recoveryLock = `${pidFile}.recovery`
 
   // PID lock: one loop per repository.
   for (;;) {
@@ -520,19 +521,29 @@ async function runLoopDaemon(
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
 
-    let existing: string
     try {
-      existing = readFileSync(pidFile, 'utf8').trim()
+      mkdirSync(recoveryLock)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
       throw error
     }
-    if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
-      log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
-      return 1
+    try {
+      let existing: string
+      try {
+        existing = readFileSync(pidFile, 'utf8').trim()
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
+        log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
+        return 1
+      }
+      log('WARN: Removing stale PID file')
+      rmSync(pidFile, { force: true })
+    } finally {
+      rmSync(recoveryLock, { recursive: true, force: true })
     }
-    log('WARN: Removing stale PID file')
-    rmSync(pidFile, { force: true })
   }
   const releaseDaemonState = (): void => {
     try {

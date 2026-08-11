@@ -338,6 +338,26 @@ describe('forge poll budget', () => {
     expect(fakeForge.issueComments.size).toBe(0)
   })
 
+  it('keeps issue-backed queued work materialized when queue labels are unavailable', async () => {
+    const taskId = '20260811_120003_004_auto-claimed'
+    initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# claimed issue task\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:2\n`)
+    recordIssueForTask(paths, taskId, 42)
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    fakeForge.ensureLabel = vi.fn().mockRejectedValue(new Error('forge unavailable'))
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toEqual([])
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:2\n`)
+    expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(true)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+  })
+
   it('lists the shared loop issues once for an entire poll', async () => {
     initializeGitRepo()
     const loop = makeLoop({
@@ -1529,6 +1549,22 @@ describe('completion marker output', () => {
       title: 'feat: autonomous scan loop — 1 feature',
       body: expect.stringContaining('- use the configured base'),
     }))
+  })
+
+  it('pushes a fresh topic branch through its only remote and establishes the upstream', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    git(['switch', '-c', 'feature/fresh-topic'])
+    writeFileSync(join(repoRoot, 'fresh.txt'), 'fresh\n')
+    git(['add', 'fresh.txt'])
+    git(['commit', '-m', 'feat: fresh topic'])
+    forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const loop = makeLoop()
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(true)
+
+    expect(git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']))
+      .toBe('origin/feature/fresh-topic')
   })
 
   it('emits LOOP_DONE verbatim and the rewrite reminder as a formatted event', async () => {

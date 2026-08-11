@@ -48,6 +48,31 @@ function lockOwnerIsStale(lockDir: string): boolean {
   return Date.now() - created >= OWNER_GRACE_MS
 }
 
+function recoverStaleLock(lockDir: string): boolean {
+  const recoveryDir = `${lockDir}.recovery`
+  try {
+    mkdirSync(recoveryDir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw error
+  }
+
+  try {
+    // Another waiter may have replaced the stale lock while this process waited for
+    // the recovery mutex. Only the current owner snapshot may be reclaimed.
+    if (!lockOwnerIsStale(lockDir)) return false
+    try {
+      rmSync(lockDir, { recursive: true })
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+  } finally {
+    rmSync(recoveryDir, { recursive: true, force: true })
+  }
+}
+
 /** Serialize backlog read-modify-write operations across loop and CLI processes. */
 export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
   const lockDir = `${backlog}.lock`
@@ -64,14 +89,7 @@ export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code !== 'EEXIST') throw error
-      if (lockOwnerIsStale(lockDir)) {
-        try {
-          rmSync(lockDir, { recursive: true })
-        } catch {
-          // Another waiter may have recovered it first.
-        }
-        continue
-      }
+      if (lockOwnerIsStale(lockDir) && recoverStaleLock(lockDir)) continue
       if (attempts >= MAX_LOCK_RETRIES) {
         throw new Error(`Timed out waiting for the backlog lock: ${backlog}`)
       }
@@ -107,10 +125,15 @@ export function appendBacklogUnless(
   })
 }
 
-export function dequeueBacklog(backlog: string): string | undefined {
+export function dequeueBacklog(
+  backlog: string,
+  shouldDequeue: (line: string) => boolean = () => true,
+): string | undefined {
   return withBacklogLock(backlog, () => {
     const lines = readFileSync(backlog, 'utf8').split(/\r?\n/).filter((line) => line !== '')
-    const first = lines.shift()
+    const index = lines.findIndex(shouldDequeue)
+    if (index === -1) return undefined
+    const [first] = lines.splice(index, 1)
     if (first === undefined) return undefined
 
     const replacement = join(
