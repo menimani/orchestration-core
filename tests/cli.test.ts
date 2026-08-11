@@ -110,6 +110,59 @@ describe('command registry', () => {
   })
 })
 
+describe('report-upstream arguments', () => {
+  it('prints command usage for --help without loading the forge', () => {
+    const result = spawnSync(process.execPath, [CLI, 'report-upstream', '--help'], {
+      cwd: repoRoot,
+      env: { ...process.env, FORGE: 'missing' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('Usage: report-upstream [--dry-run] "<description>"')
+    expect(result.stderr).not.toContain('Unknown FORGE')
+  })
+
+  it('rejects an unrecognised flag without loading the forge', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'report-upstream', '--anything', 'This must not become issue text.'],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, FORGE: 'missing' },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('ERROR: unknown option: --anything')
+    expect(result.stderr).not.toContain('Unknown FORGE')
+  })
+
+  it('prints a report for --dry-run without loading the forge', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'report-upstream', '--dry-run', 'A safely previewed defect.'],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, FORGE: 'missing' },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('Title:\nCore defect reported by ')
+    expect(result.stdout).toContain('Body:\n## Description\n\nA safely previewed defect.')
+    expect(result.stderr).not.toContain('Unknown FORGE')
+  })
+})
+
 describe('logs', () => {
   it('returns a failure when a log follower cannot read a regular file', () => {
     const paths = orchPaths(repoRoot)
