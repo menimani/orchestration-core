@@ -1,5 +1,7 @@
 import type { ReasoningEffort } from './adapters/runner.ts'
 
+const MAX_POLL_INTERVAL_SECONDS = 30 * 60
+
 // Every setting the loop honors, with the defaults the bash implementation shipped.
 // The environment variable names are part of the frozen CLI contract (SPEC.md,
 // "Runtime"): launch commands and the loop-start skill keep working unchanged.
@@ -88,9 +90,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
   if (workerMode && !issueQueueEnabled) {
     throw new Error('WORKER_MODE requires ISSUE_QUEUE_ENABLED=true')
   }
+  const pollIntervalSeconds = num(env, 'POLL_INTERVAL', 30)
+  if (pollIntervalSeconds > MAX_POLL_INTERVAL_SECONDS) {
+    throw new Error(`POLL_INTERVAL must not exceed ${MAX_POLL_INTERVAL_SECONDS} seconds`)
+  }
   return {
     maxParallel,
-    pollIntervalSeconds: num(env, 'POLL_INTERVAL', 30),
+    pollIntervalSeconds,
     autoMerge: bool(env, 'AUTO_MERGE', true),
     testCmd: str(env, 'TEST_CMD', ''),
     skipAutoTest: bool(env, 'SKIP_AUTO_TEST', false),
