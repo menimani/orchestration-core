@@ -872,6 +872,43 @@ describe('cycle gate', () => {
     expect(logged).toContain('CYCLE_COMPLETE: 1/1')
     expect(await loop.triggerScanIfIdle()).toBe('done')
   })
+
+  it('retries a failed CI fix enqueue without consuming an attempt', async () => {
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 1,
+    })
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const attemptFile = join(paths.queueDir, 'ci-fix-emitted-1')
+    const completeFlag = join(paths.queueDir, 'cycle-complete-1')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/1\n')
+    writeFileSync(completeFlag, '')
+    forgeStatus.checks = [{ name: 'test', conclusion: 'failure', startedAt: '' }]
+    const originalPrStatus = fakeForge.prStatus
+    fakeForge.prStatus = async (ref) => {
+      const status = await originalPrStatus(ref)
+      if (prStatusCalls === 2) {
+        rmSync(backlog)
+        mkdirSync(backlog)
+      }
+      return status
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(attemptFile)).toBe(false)
+    expect(existsSync(completeFlag)).toBe(true)
+    expect(logText()).toContain('WARN could not enqueue CI fix:')
+
+    rmSync(backlog, { recursive: true })
+    writeFileSync(backlog, '')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(readFileSync(attemptFile, 'utf8')).toBe('1\n')
+    expect(existsSync(completeFlag)).toBe(false)
+    expect(readFileSync(backlog, 'utf8')).toMatch(/_ci-fix-c1:0\n$/)
+  })
 })
 
 describe('remote issue queue idle detection', () => {
