@@ -43,6 +43,7 @@ afterEach(() => {
 
 describe('pruneTasks', () => {
   const OLD_MERGED = '20250101_000000_001_user-old-merged'
+  const OLD_FAILED = '20250101_000000_004_user-old-failed'
 
   function setUpFixtures(): void {
     makeTask(OLD_MERGED, 'merged', 'old')
@@ -51,6 +52,8 @@ describe('pruneTasks', () => {
 
     makeTask('20990101_000000_001_user-new-merged', 'merged', 'new')
     makeTask('20250101_000000_002_user-old-running', 'running', 'old')
+    makeTask(OLD_FAILED, 'failed', 'old')
+    writeFileSync(join(paths.queueDir, 'scanned', `${OLD_FAILED}.failed`), 'failure evidence\n')
 
     makeTask('20250101_000000_003_user-old-worktree', 'merged', 'old')
     mkdirSync(join(paths.worktreesDir, '20250101_000000_003_user-old-worktree'), { recursive: true })
@@ -75,7 +78,7 @@ describe('pruneTasks', () => {
     expect(existsSync(join(paths.statusDir, `${OLD_MERGED}.json`))).toBe(true)
   })
 
-  it('prunes old finished tasks and keeps everything protected', () => {
+  it('prunes old merged tasks and keeps everything protected', () => {
     setUpFixtures()
     pruneTasks(paths, { days: 14, dryRun: false })
 
@@ -94,6 +97,17 @@ describe('pruneTasks', () => {
     expect(existsSync(join(paths.statusDir, '20990101_000000_001_user-new-merged.json'))).toBe(true)
     expect(existsSync(join(paths.tasksDir, '20990101_000000_001_user-new-merged.md'))).toBe(true)
     expect(existsSync(join(paths.statusDir, '20250101_000000_002_user-old-running.json'))).toBe(true)
+    for (const retained of [
+      join(paths.statusDir, `${OLD_FAILED}.json`),
+      join(paths.logsDir, `${OLD_FAILED}.log`),
+      join(paths.logsDir, `${OLD_FAILED}.merge.log`),
+      join(paths.tasksDir, `${OLD_FAILED}.md`),
+      join(paths.queueDir, 'scanned', OLD_FAILED),
+      join(paths.queueDir, 'scanned', `${OLD_FAILED}.failed`),
+      join(paths.queueDir, 'effort', OLD_FAILED),
+    ]) {
+      expect(existsSync(retained), `failed-task artifact should be retained: ${retained}`).toBe(true)
+    }
     expect(existsSync(join(paths.statusDir, '20250101_000000_003_user-old-worktree.json'))).toBe(true)
     expect(existsSync(join(paths.tasksDir, 'manual-task.md'))).toBe(true)
     expect(existsSync(join(paths.statusDir, 'manual-task.json'))).toBe(false)
