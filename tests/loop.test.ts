@@ -876,41 +876,102 @@ describe('cycle gate', () => {
     expect(await loop.triggerScanIfIdle()).toBe('done')
   })
 
-  it('retries a failed CI fix enqueue without consuming an attempt', async () => {
-    const loop = makeLoop({
-      autoPr: false,
-      reviewEnabled: true,
-      ciGateEnabled: true,
-      maxCiFixAttempts: 1,
-    })
-    const backlog = join(paths.queueDir, 'backlog.txt')
+  function prepareFailedCiGate(): { attemptFile: string; completeFlag: string } {
     const attemptFile = join(paths.queueDir, 'ci-fix-emitted-1')
     const completeFlag = join(paths.queueDir, 'cycle-complete-1')
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/1\n')
     writeFileSync(completeFlag, '')
-    forgeStatus.checks = [{ name: 'test', conclusion: 'failure', startedAt: '' }]
-    const originalPrStatus = fakeForge.prStatus
-    fakeForge.prStatus = async (ref) => {
-      const status = await originalPrStatus(ref)
-      if (prStatusCalls === 2) {
-        rmSync(backlog)
-        mkdirSync(backlog)
-      }
-      return status
-    }
+    forgeStatus.checks = [
+      { name: 'frontend', conclusion: 'failure', startedAt: '' },
+      { name: 'backend', conclusion: 'success', startedAt: '' },
+    ]
+    return { attemptFile, completeFlag }
+  }
+
+  it('enqueues a task with the failed checks and consumes one CI fix attempt', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>((_paths, taskId, depth) => ({
+      outcome: 'enqueued', taskId, depth: depth ?? 0,
+    }))
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 2,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    const taskId = enqueue.mock.calls[0]?.[1]
+    expect(taskId).toMatch(/^20260808_120000_001_ci-fix-c1$/)
+    expect(enqueue).toHaveBeenCalledWith(paths, taskId, 0)
+    const spec = readFileSync(join(paths.tasksDir, `${taskId}.md`), 'utf8').replace(/\r\n/g, '\n')
+    expect(spec).toContain('# 20260808_120000_001_ci-fix-c1: Fix CI failures (scan cycle 1)')
+    expect(spec).toContain('## PR\nhttps://example.test/pull/1')
+    expect(spec).toContain('```\nfrontend: failure\nbackend: success\n```')
+    expect(readFileSync(attemptFile, 'utf8')).toBe('1\n')
+    expect(existsSync(completeFlag)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('preserves the cycle and attempt count when CI fix enqueue fails', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>(() => {
+      throw new Error('queue unavailable')
+    })
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 1,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(existsSync(attemptFile)).toBe(false)
+    expect(existsSync(completeFlag)).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).toContain('WARN could not enqueue CI fix: queue unavailable')
+  })
+
+  it('stops only after successfully enqueued CI fix attempts reach the cap', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>()
+      .mockImplementationOnce(() => { throw new Error('queue unavailable') })
+      .mockImplementation((enqueuePaths, taskId, depth) =>
+        enqueueTask(enqueuePaths, taskId, depth))
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 1,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+    const stopFile = join(paths.queueDir, 'stop')
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(existsSync(attemptFile)).toBe(false)
-    expect(existsSync(completeFlag)).toBe(true)
-    expect(logText()).toContain('WARN could not enqueue CI fix:')
+    expect(existsSync(stopFile)).toBe(false)
 
-    rmSync(backlog, { recursive: true })
-    writeFileSync(backlog, '')
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(readFileSync(attemptFile, 'utf8')).toBe('1\n')
     expect(existsSync(completeFlag)).toBe(false)
-    expect(readFileSync(backlog, 'utf8')).toMatch(/_ci-fix-c1:0\n$/)
+    expect(existsSync(stopFile)).toBe(false)
+
+    // Reaching the numeric cap does not stop while the dispatched fix remains queued.
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(stopFile)).toBe(false)
+
+    const fixId = enqueue.mock.calls[1]?.[1]
+    expect(fixId).toMatch(/^20260808_120000_002_ci-fix-c1$/)
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    writeRawStatus(fixId as string, 'completed')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(enqueue).toHaveBeenCalledTimes(2)
+    expect(readFileSync(attemptFile, 'utf8')).toBe('1\n')
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText()).toContain('ERROR CI still failing after 1 fixes; stopping the loop')
   })
 })
 

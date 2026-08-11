@@ -1070,7 +1070,7 @@ export function createLoop(deps: LoopDeps) {
       FAIL_SUMMARY: failSummary === '' ? '(check the PR checks for details)' : failSummary,
     })
     writeFileSync(specFile(paths, fixId), text)
-    enqueueTask(paths, fixId, 0)
+    enqueueTaskImpl(paths, fixId, 0)
   }
 
   /** After the final gate: promote the draft PR and print LOOP_DONE. */
