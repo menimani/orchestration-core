@@ -42,6 +42,10 @@ from or equivalent to `orchestration/tests/*.sh`.
   marker as an exact standalone line, while a background loop writes that exact line to
   `logs/loop-markers.log`. Their copies in `loop.log` still receive the timestamp and
   cycle prefix, and retain the marker name rather than being rewritten as display events.
+- `report-upstream` requires one explicit, non-blank description. `--help` prints its
+  usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
+  the exact title and body without filing. An interactive invocation prints that same
+  preview and requires confirmation; a declined confirmation never contacts the forge.
 
 ## Task lifecycle
 

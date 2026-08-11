@@ -195,6 +195,16 @@ describe('upstream defect reports', () => {
     )
   })
 
+  it('refuses an empty description before contacting the forge', async () => {
+    writePackage({ upstreamRepo: 'configured/core', version: '2.4.1' })
+    const forge = makeFakeForge()
+
+    await expect(reportUpstream(
+      orchPaths(repoRoot), '  \n\t ', forge, runtime(),
+    )).rejects.toThrow('The report description must not be empty or whitespace only.')
+    expect(forge.repositoryIssues).toHaveLength(0)
+  })
+
   it('files the report without a missing optional label', async () => {
     writePackage({ upstreamRepo: 'configured/core', version: '2.4.1' })
     const forge = makeFakeForge()

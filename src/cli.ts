@@ -22,7 +22,7 @@ import {
   isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
 } from './paths.ts'
 import { pruneTasks } from './prune.ts'
-import { reportUpstream } from './reportUpstream.ts'
+import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
@@ -146,15 +146,24 @@ const cmdDelegate: Command = async (paths, args) => {
 }
 
 const cmdReportUpstream: Command = async (paths, args) => {
-  const description = args[0]
-  if (description === undefined || description.trim() === '' || args.length !== 1) {
-    console.error('Usage: report-upstream "<description>"')
-    return 1
-  }
-  const config = loadConfig()
-  const forge = await loadForge(config.forge, paths.repoRoot)
-  console.log(await reportUpstream(paths, description, forge))
-  return 0
+  return runReportUpstreamCommand(paths, args, {
+    stdinIsTerminal: process.stdin.isTTY === true,
+    output: (message) => console.log(message),
+    error: (message) => console.error(message),
+    confirm: async () => {
+      const rl = createInterface({ input: process.stdin, output: process.stdout })
+      try {
+        const answer = await rl.question('File this issue? [y/N] ')
+        return answer === 'y' || answer === 'Y'
+      } finally {
+        rl.close()
+      }
+    },
+    loadForge: async () => {
+      const config = loadConfig()
+      return loadForge(config.forge, paths.repoRoot)
+    },
+  })
 }
 
 const cmdStart: Command = async (paths, args) => {
