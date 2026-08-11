@@ -73,6 +73,10 @@ function effort(env: NodeJS.ProcessEnv, name: string, fallback: ReasoningEffort)
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
+  const maxParallel = num(env, 'MAX_PARALLEL', 3)
+  if (maxParallel < 1) {
+    throw new Error('MAX_PARALLEL must be at least 1')
+  }
   const taskGate = str(env, 'TASK_GATE', 'full')
   if (taskGate !== 'full' && taskGate !== 'light') {
     throw new Error(`TASK_GATE must be 'full' or 'light', got '${taskGate}'`)
@@ -85,7 +89,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     throw new Error('WORKER_MODE requires ISSUE_QUEUE_ENABLED=true')
   }
   return {
-    maxParallel: num(env, 'MAX_PARALLEL', 3),
+    maxParallel,
     pollIntervalSeconds: num(env, 'POLL_INTERVAL', 30),
     autoMerge: bool(env, 'AUTO_MERGE', true),
     testCmd: str(env, 'TEST_CMD', ''),
