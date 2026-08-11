@@ -1733,15 +1733,18 @@ export function createLoop(deps: LoopDeps) {
                 }
               }
             }
-            try {
-              cleanupTask(paths, entry.taskId, undefined, false)
-              if (released) {
+            if (released) {
+              try {
+                cleanupTask(paths, entry.taskId, undefined, false)
                 dropClaimedTaskMaterialization(paths, entry.taskId)
-              } else {
-                enqueueTask(paths, entry.taskId, entry.depth)
+              } catch (cleanupError) {
+                event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)
               }
-            } catch (cleanupError) {
-              event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)
+            } else {
+              enqueueTask(paths, entry.taskId, entry.depth)
+              // Do not dequeue the same retained materialization again in this poll.
+              // The next poll retries the release while keeping the forge claim linked.
+              break
             }
           } else {
             event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)

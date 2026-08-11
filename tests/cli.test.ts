@@ -442,6 +442,7 @@ describe('loop daemon ownership', () => {
         AUTO_PR: 'false',
         ISSUE_QUEUE_ENABLED: 'false',
         MAX_SCAN_CYCLES: '0',
+        SCAN_ENABLED: 'true',
       },
       encoding: 'utf8',
       windowsHide: true,

@@ -1449,6 +1449,50 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(reclaimed.labels).not.toContain(LABEL_READY)
     expect(reclaimed.assignees).toEqual(['worker-a'])
   })
+
+  it('retains and re-enqueues a claimed task when releasing its issue fails', async () => {
+    initializeGitRepo()
+    const description = '[BUG] retain a claimed task until its issue can be released'
+    const attemptedTaskIds: string[] = []
+    const runner: Runner = {
+      start: async (options) => {
+        attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
+        throw new Error('runner spawn failed')
+      },
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, maxParallel: 1 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'failed release recovery',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const addLabel = fakeForge.addLabel.bind(fakeForge)
+    fakeForge.addLabel = async (number, label) => {
+      if (number === issueNumber && label === LABEL_READY) throw new Error('forge unavailable')
+      await addLabel(number, label)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    const taskId = attemptedTaskIds[0]!
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(attemptedTaskIds).toHaveLength(1)
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.labels).not.toContain(LABEL_READY)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:1\n`)
+    expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(true)
+    expect(existsSync(statusFile(paths, taskId))).toBe(true)
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(existingTaskIdForDesc(paths, 'auto', description)).toBe(taskId)
+  })
 })
 
 describe('completion marker output', () => {

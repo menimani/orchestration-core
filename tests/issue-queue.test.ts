@@ -64,6 +64,15 @@ describe('fingerprintOf', () => {
     expect(first).toBe(second)
   })
 
+  it('distinguishes inverse ordering relationships and repeated terms', () => {
+    const fooBeforeBar = fingerprintOf('[BUG] `src/order.ts` requires foo before bar')
+    const barBeforeFoo = fingerprintOf('[BUG] `src/order.ts` requires bar before foo')
+    const repeatedFoo = fingerprintOf('[BUG] `src/order.ts` requires foo foo before bar')
+
+    expect(fooBeforeBar).not.toBe(barBeforeFoo)
+    expect(fooBeforeBar).not.toBe(repeatedFoo)
+  })
+
   it('falls back to normalized hashed text', () => {
     const a = fingerprintOf('adopt the new expense model or keep the current one')
     const b = fingerprintOf('adopt the new expense model or keep the current one')

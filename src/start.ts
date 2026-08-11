@@ -3,7 +3,6 @@ import { appendFileSync, closeSync, existsSync, openSync, rmSync, writeFileSync 
 import { join } from 'node:path'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
-import { cleanupTask } from './cleanup.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus, writeStatus } from './status.ts'
 import { specFile } from './tasks.ts'
@@ -35,8 +34,8 @@ function processIsAlive(pid: number): boolean {
 /**
  * Create the task's worktree and hand it to the runner.
  * A worktree whose task is already running is a skip, not an error, so the loop
- * does not retry endlessly. A leftover worktree with no live owner is stale and is
- * reclaimed before creation so an abandoned directory cannot block the queue.
+ * does not retry endlessly. A leftover worktree with no live owner may contain work
+ * from a crashed runner, so only the explicit cleanup command may discard it.
  */
 export async function startTask(
   paths: OrchPaths,
@@ -64,7 +63,10 @@ export async function startTask(
     if (status?.pid !== null && status?.pid !== undefined && processIsAlive(status.pid)) {
       return { outcome: 'already-running' }
     }
-    cleanupTask(paths, taskId, undefined, false)
+    throw new Error(
+      `Task worktree already exists without a live owner: ${worktree}\n`
+      + `Inspect it for uncommitted changes or commits, then run cleanup explicitly.`,
+    )
   }
 
   const log = logFile(paths, taskId)
