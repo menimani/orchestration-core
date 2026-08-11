@@ -27,6 +27,12 @@ function writeFixtureAdapter(adapterPath: string, workflow: string, name = 'fixt
   writeFileSync(adapterPath, `
 export const fixtureProject = {
   name: '${name}',
+  pullRequest: {
+    categories: [{ label: 'Changes' }],
+    titleFallback: 'no changes',
+    classifyCommit: () => ({ category: 'Changes' }),
+    detectRisks: () => [],
+  },
   deployment: {
     workflow: '${workflow}',
     revisionUrl: 'https://example.com/fixture-revision',

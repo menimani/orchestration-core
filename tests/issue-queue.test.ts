@@ -15,6 +15,7 @@ import {
 import { existingTaskIdForDesc } from '../src/ids.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { stubProject } from './stubProject.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -863,7 +864,7 @@ describe('loop integration in issue mode', () => {
       },
       forge,
       runner: { start: async (options) => { started.push(options.specFile); return process.pid } },
-      project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
+      project: stubProject,
       log: (line) => logged.push(line),
       now: () => new Date('2026-08-08T12:00:00Z'),
     })
@@ -926,7 +927,7 @@ describe('loop integration in issue mode', () => {
       },
       forge,
       runner: { start: async () => process.pid },
-      project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
+      project: stubProject,
       log: () => {},
       now: () => new Date('2026-08-08T12:00:00Z'),
     })
@@ -962,7 +963,7 @@ describe('loop integration in issue mode', () => {
       config: { ...loadConfig({}), issueQueueEnabled: true, scanEnabled: false, autoMerge: false },
       forge,
       runner: { start: async () => process.pid },
-      project: { name: 'stub', mergeChecks: () => [], cycleSuite: () => [] },
+      project: stubProject,
       log: (line) => logged.push(line),
       now: () => new Date('2026-08-08T12:00:00Z'),
     })

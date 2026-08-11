@@ -54,6 +54,40 @@ export interface WorktreeSetupStep {
   requires?: string
 }
 
+export interface PullRequestCategory {
+  /** Section heading used in the generated pull-request body. */
+  label: string
+  /** Wording used in the final title; omit categories that should not be counted there. */
+  title?: { singular: string; plural: string }
+}
+
+export interface PullRequestCommit {
+  subject: string
+  files: string[]
+}
+
+export interface PullRequestClassification {
+  category: string
+  /** Optional screen or domain label shown before the commit subject. */
+  area?: string
+}
+
+export interface PullRequestChanges {
+  files: string[]
+  deletedFiles: string[]
+  /** Read the branch diff, optionally limited to repository-relative pathspecs. */
+  diff(pathspecs?: string[]): string
+}
+
+export interface PullRequestPresentation {
+  categories: PullRequestCategory[]
+  /** Final-title summary when no category configured for title counts has commits. */
+  titleFallback: string
+  classifyCommit(commit: PullRequestCommit): PullRequestClassification
+  /** Unprefixed bullet text; continuation lines may carry their own indentation. */
+  detectRisks(changes: PullRequestChanges): string[]
+}
+
 export interface ProjectAdapter {
   name: string
   /** Manual production deployment, when this repository has one. */
@@ -68,6 +102,8 @@ export interface ProjectAdapter {
   cycleSuiteDockerProbe?: DockerProbe
   /** Repository-specific preparation required before a scan can inspect a fresh worktree. */
   scanWorktreeSetup?: WorktreeSetupStep[]
+  /** Repository-specific classification and risk signals for the generated pull request. */
+  pullRequest: PullRequestPresentation
 }
 
 function isProjectAdapter(value: unknown, name?: string): value is ProjectAdapter {
@@ -78,6 +114,12 @@ function isProjectAdapter(value: unknown, name?: string): value is ProjectAdapte
     && (name === undefined || candidate.name === name)
     && typeof candidate.mergeChecks === 'function'
     && typeof candidate.cycleSuite === 'function'
+    && typeof candidate.pullRequest === 'object'
+    && candidate.pullRequest !== null
+    && Array.isArray(candidate.pullRequest.categories)
+    && typeof candidate.pullRequest.titleFallback === 'string'
+    && typeof candidate.pullRequest.classifyCommit === 'function'
+    && typeof candidate.pullRequest.detectRisks === 'function'
 }
 
 function discoverProjectAdapter(orchestrationRoot: string): { path: string; name: string } {

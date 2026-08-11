@@ -192,13 +192,15 @@ from or equivalent to `orchestration/tests/*.sh`.
     is substitutable.
 31. Everything the orchestration knows about the repository it runs in — which commands
     verify a merge, which paths make each check relevant, which suites prove a cycle's
-    tip, and which toolchain breakage a reinstall repairs — lives in the project
+    tip, which toolchain breakage a reinstall repairs, and how commits and changed paths
+    become pull-request sections, area labels, and risk bullets — lives in the project
     adapter (`adapters/project.ts`; with neither selection variable set, the single
     `../project/project-*.ts` file is discovered; `PROJECT=<name>` selects
     `../project/project-<name>.ts`; `PROJECT_ADAPTER` overrides the path). The
-    core executes the declarations and owns the generic behavior: output capture,
-    failure attribution, and stop decisions. Porting the orchestration to another
-    repository means writing a project adapter and nothing else.
+    core executes the declarations and owns the generic behavior: Git history and diff
+    collection, pull-request formatting, output capture, failure attribution, and stop
+    decisions. Porting the orchestration to another repository means writing a project
+    adapter and nothing else.
 
 ## The issue queue (new in the rewrite, opt-in)
 

@@ -23,6 +23,7 @@ import {
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { stubProject as sharedStubProject } from './stubProject.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -66,9 +67,8 @@ function makeRunner(): Runner {
 }
 
 const stubProject: ProjectAdapter = {
+  ...sharedStubProject,
   name: 'stub',
-  mergeChecks: () => [],
-  cycleSuite: () => [],
 }
 
 function makeLoop(

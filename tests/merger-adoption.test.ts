@@ -12,6 +12,7 @@ import {
 import { createLoop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { stubProject } from './stubProject.ts'
 
 let tempRoot: string
 let repoRoot: string
@@ -101,6 +102,7 @@ describe('remote task adoption', () => {
     )
     let selectedPaths: string[] = []
     const project: ProjectAdapter = {
+      ...stubProject,
       name: 'adoption-test',
       mergeChecks: () => [{
         label: 'Worker file',
@@ -139,6 +141,7 @@ describe('remote task adoption', () => {
     const issueNumber = await mergeReadyIssue(task.branch, task.head)
     let mergeChecks = 0
     const project: ProjectAdapter = {
+      ...stubProject,
       name: 'adoption-retry-test',
       mergeChecks: () => [{
         label: 'Count merge checks',

@@ -51,7 +51,7 @@ The project adapter is the one you must supply. It lives **outside** this packag
 ```
 your-repo/
   orchestration/
-    project/project-<name>.ts   ← yours: gate commands, path→test selection, cycle suites
+    project/project-<name>.ts   ← yours: gates, suites, PR classification and risk signals
     templates/                  ← yours: what a scan looks for in this repository
     ts/                         ← this package, pulled as a subtree
 ```
@@ -62,8 +62,11 @@ to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explici
 it overrides the conventional path selected by `PROJECT`.
 
 A project adapter answers a few questions: which commands gate a merge, which tests a
-changed path implies, which suites run once per cycle, and how a deployment is verified.
-If the repository intentionally has no PR checks, it may explicitly declare
+changed path implies, which suites run once per cycle, how commits are grouped in the
+generated pull request, which changed paths signal risk, and how a deployment is
+verified. The core supplies commit subjects, changed and deleted paths, and an on-demand
+diff reader; the adapter supplies the repository vocabulary and path rules. If the
+repository intentionally has no PR checks, it may explicitly declare
 `ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
 
 ## Using it

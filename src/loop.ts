@@ -937,7 +937,7 @@ export function createLoop(deps: LoopDeps) {
     const baseBranch = baseRef.slice(remote.length + 1)
     git(['fetch', remote, baseBranch, '--quiet'])
     const cycle = readCount(scanCountFile)
-    const title = prTitle(paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
+    const title = prTitle(project, paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
       { cycle, maxCycles: config.maxScanCycles })
 
     const status = await forge.prStatus(branch)
@@ -957,7 +957,7 @@ export function createLoop(deps: LoopDeps) {
         try {
           await forge.updatePr(branch, {
             title,
-            body: buildPrBody(paths.repoRoot, baseRef, readDecisions()),
+            body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
           })
         } catch (error) {
           if (!(error instanceof ForgeRateLimitError)) {
@@ -975,7 +975,7 @@ export function createLoop(deps: LoopDeps) {
         branch,
         base: baseBranch,
         title,
-        body: buildPrBody(paths.repoRoot, baseRef, readDecisions()),
+        body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
         draft: true,
       })
       writeFileSync(prUrlFile, `${url}\n`)
