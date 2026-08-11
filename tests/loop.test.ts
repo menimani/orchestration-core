@@ -648,6 +648,29 @@ describe('runAutoReview', () => {
     expect(logText()).toContain('WARN review 001_review ended failed without a verdict')
   })
 
+  it('retries a failed final review while a final round remains', () => {
+    const loop = makeLoop({ maxFinalReviewRounds: 2 })
+    expect(loop.runAutoReview(5, true)).toBe(false)
+    const failedReviewId = lastReviewId(5)
+    writeRawStatus(failedReviewId, 'failed')
+
+    expect(loop.runAutoReview(5, true)).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'review-round-5'), 'utf8').trim()).toBe('2')
+    expect(lastReviewId(5)).not.toBe(failedReviewId)
+    expect(logText()).toContain('ended failed without a verdict')
+  })
+
+  it('stops after a failed final review exhausts the final rounds', () => {
+    const loop = makeLoop({ maxFinalReviewRounds: 1 })
+    expect(loop.runAutoReview(5, true)).toBe(false)
+    writeRawStatus(lastReviewId(5), 'failed')
+    const stopFile = join(paths.queueDir, 'stop')
+
+    expect(loop.runAutoReview(5, true)).toBe(false)
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText()).toContain('review-cap rounds 1/1')
+  })
+
   it('skips off-cadence cycles and reviews on-cadence ones', () => {
     const loop = makeLoop({ reviewEveryNCycles: 2 })
     expect(loop.runAutoReview(3, false)).toBe(true)

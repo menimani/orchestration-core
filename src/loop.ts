@@ -809,12 +809,15 @@ export function createLoop(deps: LoopDeps) {
     if (lastId !== '') {
       const status = readStatus(paths, lastId)?.status
       if (status !== 'completed' && status !== 'merged') {
-        // A review that crashed says nothing about the diff. Resuming is the honest
-        // outcome: blocking the cycle on it would stall the loop on a broken reviewer.
         event('WARN', `review ${shortTaskId(lastId)} ended ${status ?? 'unknown'} without a verdict`)
-        return true
-      }
-      if (actionableFindings(finalMessageFile(paths, lastId)).length === 0) {
+        if (!isFinal) {
+          // A review that crashed says nothing about the diff. Resuming is the honest
+          // outcome: blocking an ordinary cycle on it would stall the loop on a broken reviewer.
+          return true
+        }
+        // The final cycle cannot treat a missing verdict as clean. Fall through so the
+        // attempt is retried within the final-round bound or stops at that bound.
+      } else if (actionableFindings(finalMessageFile(paths, lastId)).length === 0) {
         return true
       }
     }
