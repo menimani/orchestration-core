@@ -1308,7 +1308,7 @@ describe('completion marker output', () => {
     }))
   })
 
-  it('emits LOOP_DONE verbatim before the formatted completion row', async () => {
+  it('emits LOOP_DONE verbatim and the rewrite reminder as a formatted event', async () => {
     initializeGitRepo()
     const remote = join(repoRoot, 'remote.git')
     execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
@@ -1322,12 +1322,13 @@ describe('completion marker output', () => {
 
     expect(await loop.postLoopPr()).toBe(true)
 
-    expect(logged).toContain(
-      'LOOP_DONE: https://example.test/pull/1 — The body still reflects history and must be rewritten as a final summary.',
-    )
+    const marker = 'LOOP_DONE: https://example.test/pull/1'
+    const reminder = 'Status PR body     still reflects history and must be rewritten as a final summary.'
+    expect(logged).toContain(marker)
+    expect(logged).toContain(reminder)
     expect(logged).toContain('Completed Loop        PR #1')
-    expect(logged.indexOf('LOOP_DONE: https://example.test/pull/1 — The body still reflects history and must be rewritten as a final summary.'))
-      .toBeLessThan(logged.indexOf('Completed Loop        PR #1'))
+    expect(logged.indexOf(marker)).toBeLessThan(logged.indexOf(reminder))
+    expect(logged.indexOf(reminder)).toBeLessThan(logged.indexOf('Completed Loop        PR #1'))
   })
 
   it('does not emit LOOP_DONE when draft promotion fails', async () => {
