@@ -1358,6 +1358,7 @@ export function createLoop(deps: LoopDeps) {
     let burstFailures = 0
     const mergeAttempts = new Set<string>()
     const locallyRunningIssues = new Set<number>()
+    let issueReconciliationPending = false
 
     const reconcileMergedIssue = async (
       taskId: string,
@@ -1386,7 +1387,9 @@ export function createLoop(deps: LoopDeps) {
         if (!(error instanceof ForgeRateLimitError)) {
           event('WARN', `could not reconcile issue #${linkedIssue} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`)
         }
-        writeFileSync(stopFile, '')
+        // The promotion record is the retry state. Keep this poll local-only so the
+        // cycle gate cannot advance before a later poll confirms the forge marker.
+        issueReconciliationPending = true
         return false
       }
     }
@@ -1527,7 +1530,7 @@ export function createLoop(deps: LoopDeps) {
       // poll retries instead of wedging the cycle gate forever.
       if (status === 'completed' && !config.workerMode) {
         await mergeCompletedTask(taskId)
-        if (existsSync(stopFile)) break
+        if (issueReconciliationPending || existsSync(stopFile)) break
       }
     }
 
@@ -1540,7 +1543,8 @@ export function createLoop(deps: LoopDeps) {
     }
 
     let openFindings: ForgeIssue[] | null = null
-    if (config.issueQueueEnabled && remoteOperationsAvailable && !existsSync(stopFile)) {
+    if (config.issueQueueEnabled && remoteOperationsAvailable && !existsSync(stopFile)
+      && !issueReconciliationPending) {
       try {
         openFindings = await forge.listOpenIssues(LABEL_FINDING)
         warningLog.recovered('list-loop-issues')
@@ -1660,7 +1664,7 @@ export function createLoop(deps: LoopDeps) {
         }
       }
 
-      if (!config.workerMode) {
+      if (!config.workerMode && !issueReconciliationPending) {
         const outcome = await triggerScanIfIdle(
           config.issueQueueEnabled ? openFindings : undefined,
         )
