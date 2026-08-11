@@ -13,6 +13,8 @@ specific failure; the comments in the source name the incident rather than the p
 
 - Node 23.6 or later — the TypeScript sources are executed natively, with no build step
 - git
+- Bash on Windows (for example, Git Bash), with `bash` available on `PATH` — the bundled
+  Codex runner uses it to launch the Codex CLI safely
 - An agent CLI (the bundled runner adapter drives [Codex](https://openai.com/codex/))
 - A forge CLI (the bundled forge adapter drives GitHub through `gh`)
 
@@ -68,11 +70,20 @@ npm ci --prefix orchestration/ts
 ```
 
 Then start a run on a topic branch — never on your default branch, because the loop
-commits and merges on its own:
+commits and merges on its own. On POSIX shells:
 
 ```bash
 MAX_SCAN_CYCLES=12 MAX_PARALLEL=8 AUTO_REVIEW=true \
   node orchestration/ts/src/cli.ts loop --daemon
+```
+
+On Windows PowerShell (with `bash` on `PATH` as described above):
+
+```powershell
+$env:MAX_SCAN_CYCLES = '12'
+$env:MAX_PARALLEL = '8'
+$env:AUTO_REVIEW = 'true'
+node orchestration/ts/src/cli.ts loop --daemon
 ```
 
 `node orchestration/ts/src/cli.ts` with no arguments lists every command: `delegate` hands
