@@ -1,6 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { spawn, type ChildProcess } from 'node:child_process'
+import {
+  existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
@@ -11,6 +15,28 @@ import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
 
 let repoRoot: string
 let paths: OrchPaths
+
+function childOutput(child: ChildProcess): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+    child.on('error', reject)
+    child.on('exit', (code) => {
+      if (code === 0) resolve(stdout.trim())
+      else reject(new Error(`child exited ${code}: ${stderr}`))
+    })
+  })
+}
+
+async function waitForFiles(files: string[]): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (!files.every((file) => existsSync(file))) {
+    if (Date.now() >= deadline) throw new Error('children did not reach ID allocation')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
 
 beforeEach(() => {
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-lib-'))
@@ -146,6 +172,30 @@ describe('task ids', () => {
     expect(next).toBe('20260809_090000_001_b')
   })
 
+  it('serializes sequence allocation across processes', async () => {
+    const lockDir = join(paths.queueDir, 'task-seq.txt.lock')
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()}\n`)
+    const idsModule = pathToFileURL(join(process.cwd(), 'src', 'ids.ts')).href
+    const pathsModule = pathToFileURL(join(process.cwd(), 'src', 'paths.ts')).href
+    const readyFiles = Array.from({ length: 4 }, (_, index) => join(repoRoot, `sequence-ready-${index}`))
+    const children = readyFiles.map((readyFile, index) => spawn(process.execPath, [
+      '--input-type=module', '--eval',
+      `const [{ writeFileSync }, { newTaskId }, { orchPaths }] = await Promise.all([import('node:fs'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})]); writeFileSync(process.argv[3], ''); console.log(newTaskId(orchPaths(process.argv[1]), process.argv[2], new Date(2026, 7, 8, 9, 30, 5)))`,
+      repoRoot, `child-${index}`, readyFile,
+    ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }))
+    const outputs = children.map(childOutput)
+
+    await waitForFiles(readyFiles)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(children.every((child) => child.exitCode === null)).toBe(true)
+    rmSync(lockDir, { recursive: true })
+
+    const ids = await Promise.all(outputs)
+    expect(new Set(ids).size).toBe(4)
+    expect(ids.map((id) => id.split('_')[2]).sort()).toEqual(['001', '002', '003', '004'])
+  })
+
   it('slugs descriptions to lowercase alphanumerics capped at 30', () => {
     expect(descSlug('Fix the Header LAYOUT (mobile)')).toBe('fix-the-header-layout-mobile')
     expect(descSlug('x'.repeat(50)).length).toBe(30)
@@ -156,6 +206,29 @@ describe('task ids', () => {
     writeFileSync(join(paths.tasksDir, `${first}.md`), '# spec\n')
     const second = taskIdForDesc(paths, 'auto', 'fix the flaky calendar test')
     expect(second).toBe(first)
+  })
+
+  it('serializes description-index creation across processes', async () => {
+    const lockDir = join(paths.queueDir, 'task-seq.txt.lock')
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()}\n`)
+    const idsModule = pathToFileURL(join(process.cwd(), 'src', 'ids.ts')).href
+    const pathsModule = pathToFileURL(join(process.cwd(), 'src', 'paths.ts')).href
+    const readyFiles = Array.from({ length: 4 }, (_, index) => join(repoRoot, `desc-ready-${index}`))
+    const children = readyFiles.map((readyFile) => spawn(process.execPath, [
+      '--input-type=module', '--eval',
+      `const [{ writeFileSync }, { join }, { taskIdForDesc }, { orchPaths }] = await Promise.all([import('node:fs'), import('node:path'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})]); writeFileSync(process.argv[3], ''); const paths = orchPaths(process.argv[1]); const id = taskIdForDesc(paths, 'auto', process.argv[2]); writeFileSync(join(paths.tasksDir, id + '.md'), '# spec\\n'); console.log(id)`,
+      repoRoot, 'the same concurrent finding', readyFile,
+    ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }))
+    const outputs = children.map(childOutput)
+
+    await waitForFiles(readyFiles)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(children.every((child) => child.exitCode === null)).toBe(true)
+    rmSync(lockDir, { recursive: true })
+
+    const ids = await Promise.all(outputs)
+    expect(new Set(ids).size).toBe(1)
   })
 
   it('mints a fresh id when the indexed spec is gone', () => {
