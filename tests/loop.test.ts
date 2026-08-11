@@ -201,6 +201,20 @@ describe('daemon startup', () => {
     expect(failedInstall).toHaveBeenCalledTimes(2)
   })
 
+  it('synchronizes a package at the repository root', () => {
+    writeFileSync(join(repoRoot, 'package.json'), '{"dependencies":{}}\n')
+    writeFileSync(join(repoRoot, 'package-lock.json'), '{"lockfileVersion":3}\n')
+    const install = vi.fn()
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install,
+      packageRoot: repoRoot,
+    })
+
+    expect(install).toHaveBeenCalledOnce()
+    expect(install).toHaveBeenCalledWith(repoRoot)
+  })
+
   it('leaves a package outside the repository alone', () => {
     // A CLI pointed at another checkout — a fixture, another clone — must never
     // reinstall the package it is itself running from. The suite learned this the hard

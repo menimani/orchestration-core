@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { isAbsolute, join, relative } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
 import {
@@ -65,9 +65,15 @@ const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
 }
 
 const ORCHESTRATION_MANIFESTS = new Set([
-  'orchestration/ts/package.json',
-  'orchestration/ts/package-lock.json',
+  packageFile('package.json'),
+  packageFile('package-lock.json'),
 ])
+
+function orchestrationManifests(root: string): Set<string> {
+  return new Set(
+    [...ORCHESTRATION_MANIFESTS].map((manifest) => resolve(root, relative(PACKAGE_ROOT, manifest))),
+  )
+}
 
 function orchestrationLockHash(root: string): string | undefined {
   const lockFile = join(root, 'package-lock.json')
@@ -122,7 +128,8 @@ function syncOrchestrationDepsAfterMerge(
   const changed = git(paths.repoRoot, [
     'diff', '--name-only', firstParent, mergeCommit,
   ]).split(/\r?\n/).filter((path) => path !== '')
-  if (!changed.some((path) => ORCHESTRATION_MANIFESTS.has(path))) return
+  const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
+  if (!changed.some((path) => manifests.has(resolve(paths.repoRoot, path)))) return
   installOrchestrationDeps(`after ${shortTaskId(taskId)}`, event, runtime)
 }
 
@@ -149,10 +156,10 @@ function orchestrationDepsMissing(root: string): boolean {
   )
 }
 
-/** Whether `directory` lies inside `root`, so a repository only ever syncs its own copy. */
+/** Whether `directory` is `root` or lies inside it, so a repository only syncs its own copy. */
 function isInside(root: string, directory: string): boolean {
   const offset = relative(root, directory)
-  return offset !== '' && !offset.startsWith('..') && !isAbsolute(offset)
+  return !offset.startsWith('..') && !isAbsolute(offset)
 }
 
 export function syncOrchestrationDepsAtStartup(

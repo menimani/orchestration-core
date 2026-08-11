@@ -275,6 +275,24 @@ describe('mergeTask', () => {
     )
   })
 
+  it('installs orchestration dependencies when the package is at the repository root', async () => {
+    const taskId = '20260808_000000_013_user-updates-root-dependency'
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, 'package.json'), '{"dependencies":{}}\n')
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'fix: update root dependency'])
+    const install = vi.fn()
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light',
+      project: noCheckProject,
+      orchestrationDepsRuntime: { install, packageRoot: repoRoot },
+    })
+
+    expect(install).toHaveBeenCalledOnce()
+    expect(install).toHaveBeenCalledWith(repoRoot)
+  })
+
   it('does not install orchestration dependencies when the merge leaves manifests unchanged', async () => {
     const taskId = '20260808_000000_011_user-changes-source'
     await makeCompletedTask(taskId, { commit: true })
