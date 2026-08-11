@@ -62,6 +62,23 @@ describe('command registry', () => {
   })
 })
 
+describe('logs', () => {
+  it('returns a failure when a log follower cannot read a regular file', () => {
+    const paths = orchPaths(repoRoot)
+    const taskId = 'directory-log'
+    mkdirSync(join(paths.logsDir, taskId + '.log'), { recursive: true })
+
+    const result = spawnSync(process.execPath, [CLI, 'logs', taskId, '-f'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Cannot follow a non-file')
+  })
+})
+
 describe('manual merge', () => {
   it('builds merge options that close the task-linked issue', async () => {
     git(['config', 'user.email', 'test@example.com'])
