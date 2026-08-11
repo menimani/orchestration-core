@@ -355,8 +355,8 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   runMergeChecks(worktree, currentBranch, options, io)
 
   const mergeMessage = options.closesIssue === undefined
-    ? `Merge ${taskId} via Codex`
-    : `Merge ${taskId} via Codex (closes #${options.closesIssue})`
+    ? `Merge ${taskId} via orchestration`
+    : `Merge ${taskId} via orchestration (closes #${options.closesIssue})`
   try {
     git(paths.repoRoot, ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage])
   } catch {
@@ -432,7 +432,7 @@ export async function mergeRemoteTask(
   const io = mergeIo(options.outputFile)
   const depsEvent = options.onOrchestrationDepsEvent
     ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
-  const mergeMessage = `Merge ${taskId} via Codex (closes #${issueNumber})`
+  const mergeMessage = `Merge ${taskId} via orchestration (closes #${issueNumber})`
   try {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     try {

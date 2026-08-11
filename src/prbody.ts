@@ -142,7 +142,7 @@ export function prRisks(repoRoot: string, baseRef: string, decisions: string[]):
 }
 
 function branchCommits(repoRoot: string, baseRef: string): Array<{ sha: string; subject: string }> {
-  // Merge commits are excluded — "Merge xxx via Codex" gives no information.
+  // Merge commits are excluded — "Merge xxx via orchestration" gives no information.
   return git(repoRoot, ['log', `${baseRef}..HEAD`, '--no-merges', '--pretty=%H|%s'])
     .split(/\r?\n/).filter((line) => line !== '')
     .map((line) => {
