@@ -60,6 +60,8 @@ Point `PROJECT=<name>` at it, or give `PROJECT_ADAPTER` an explicit path.
 
 A project adapter answers a few questions: which commands gate a merge, which tests a
 changed path implies, which suites run once per cycle, and how a deployment is verified.
+If the repository intentionally has no PR checks, it may explicitly declare
+`ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
 
 ## Using it
 

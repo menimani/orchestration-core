@@ -18,7 +18,7 @@ export interface PrStatus {
   state: PrState
   isDraft: boolean
   url: string
-  /** Head commit SHA — the core's no-checks grace window is measured from its push. */
+  /** Head commit SHA reported by the forge. */
   headSha: string
   checks: PrCheck[]
 }
