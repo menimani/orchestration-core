@@ -4,6 +4,7 @@ import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
+import type { Forge } from './adapters/forge.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
 import {
@@ -31,10 +32,12 @@ export interface MergeOptions {
   /** The repository's own knowledge: which checks verify a merge, and when. */
   project: ProjectAdapter
   /**
-   * Issue this merge resolves. The reference rides the merge commit, so the forge
-   * closes the issue when the promotion PR lands the commit on the default branch.
+   * Issue this merge resolves. Its forge decorates the merge commit so promotion
+   * closes the issue when the commit lands on the default branch.
    */
   closesIssue?: number | undefined
+  /** Required for a linked issue; the core does not know forge-specific closing syntax. */
+  forge?: Pick<Forge, 'issueClosingCommitMessage'> | undefined
   /**
    * When set, everything the merge prints — including test output — goes to this file
    * instead of stdout, so a loop's log stays readable and the details stay findable.
@@ -346,9 +349,13 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     )
   }
 
+  const baseMergeMessage = `Merge ${taskId} via orchestration`
+  if (options.closesIssue !== undefined && options.forge === undefined) {
+    throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
+  }
   const mergeMessage = options.closesIssue === undefined
-    ? `Merge ${taskId} via orchestration`
-    : `Merge ${taskId} via orchestration (closes #${options.closesIssue})`
+    ? baseMergeMessage
+    : options.forge!.issueClosingCommitMessage(baseMergeMessage, options.closesIssue)
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
@@ -455,7 +462,11 @@ export async function mergeRemoteTask(
   const io = mergeIo(options.outputFile)
   const depsEvent = options.onOrchestrationDepsEvent
     ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
-  const mergeMessage = `Merge ${taskId} via orchestration (closes #${issueNumber})`
+  const baseMergeMessage = `Merge ${taskId} via orchestration`
+  if (options.forge === undefined) {
+    throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
+  }
+  const mergeMessage = options.forge.issueClosingCommitMessage(baseMergeMessage, issueNumber)
   try {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     try {

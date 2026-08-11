@@ -201,6 +201,10 @@ export function createGithubForge(
   })
 
   return {
+    issueClosingCommitMessage(message: string, issueNumber: number): string {
+      return `${message} (closes #${issueNumber})`
+    },
+
     async prStatus(ref: PrReference): Promise<PrStatus> {
       let stdout: string
       const args = [

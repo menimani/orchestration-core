@@ -57,6 +57,16 @@ function run(overrides: Partial<GithubWorkflowRun>): GithubWorkflowRun {
   }
 }
 
+describe('GitHub issue promotion', () => {
+  it('adds GitHub issue-closing syntax to merge commit messages', () => {
+    const forge = createGithubForge('repo-root')
+
+    expect(forge.issueClosingCommitMessage('Merge task via orchestration', 42)).toBe(
+      'Merge task via orchestration (closes #42)',
+    )
+  })
+})
+
 describe('GitHub workflow dispatch correlation', () => {
   it('ignores newer concurrent and same-second runs with another token or ref', () => {
     const wanted = run({ databaseId: 71 })

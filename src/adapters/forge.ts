@@ -92,6 +92,9 @@ export class ForgeRateLimitError extends Error {
 }
 
 export interface Forge {
+  /** Decorate a merge commit message so promotion closes the linked issue. */
+  issueClosingCommitMessage(message: string, issueNumber: number): string
+
   /** Find the PR identified by the supplied reference, or state 'none' when absent. */
   prStatus(ref: PrReference): Promise<PrStatus>
   /** The current body text of the PR for a branch or URL. */
