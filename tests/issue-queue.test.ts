@@ -542,16 +542,25 @@ describe('claimIssue', () => {
     expect(readdirSync(paths.tasksDir)).toEqual([])
   })
 
-  it('leaves an unparseable issue claimed for a person instead of bouncing it', async () => {
+  it('quarantines an unparseable issue with an actionable reason', async () => {
     const issueNumber = await forge.createIssue({
       title: 'hand-written', body: 'no structure here', labels: [LABEL_FINDING, LABEL_READY],
     })
     const issue = await forge.getIssue(issueNumber)
     const result = await claimIssue(forge, paths, issue, 'worker-a', appendRequirement)
-    expect(result.outcome).toBe('unparseable')
+    if (result.outcome !== 'unparseable') {
+      throw new Error(`expected an unparseable claim, got ${result.outcome}`)
+    }
+    expect(result).toEqual({
+      outcome: 'unparseable',
+      issueNumber,
+      reason: `Issue #${issueNumber} has no parseable requirement. Restore its generated body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`,
+    })
     const after = await forge.getIssue(issueNumber)
     expect(after.assignees).toEqual(['worker-a'])
-    expect(after.labels).toContain(LABEL_IN_PROGRESS)
+    expect(after.labels).toContain(LABEL_MERGE_FAILED)
+    expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(forge.issueComments.get(issueNumber)).toEqual([result.reason])
   })
 
   it('serializes a claim with duplicate reconciliation and does not materialize a closed issue', async () => {
@@ -610,6 +619,22 @@ describe('claimIssue', () => {
 })
 
 describe('reapStaleLeases', () => {
+  it('does not return a quarantined claim failure to the ready queue', async () => {
+    const base = new Date('2026-08-08T12:00:00Z')
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'claim failed', body: 'malformed',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED],
+    })
+    await forge.assignIssue(issueNumber, 'worker-a')
+
+    expect(await reapStaleLeases(forge, paths, 3, base)).toEqual([])
+    const after = await forge.getIssue(issueNumber)
+    expect(after.assignees).toEqual(['worker-a'])
+    expect(after.labels).not.toContain(LABEL_READY)
+    expect(after.labels).toContain(LABEL_IN_PROGRESS)
+  })
+
   it('returns quiet leases to ready and leaves live ones alone', async () => {
     const base = new Date('2026-08-08T12:00:00Z')
     forge.clock = () => new Date('2026-08-08T06:00:00Z')

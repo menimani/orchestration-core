@@ -815,7 +815,7 @@ export type ClaimResult
     pendingMerge: boolean
   }
     | { outcome: 'lost-race'; issueNumber: number }
-    | { outcome: 'unparseable'; issueNumber: number }
+    | { outcome: 'unparseable'; issueNumber: number; reason: string }
 
 async function releasePartialClaim(forge: Forge, issueNumber: number, me: string): Promise<void> {
   // Release assignment first: ready issues with an assignee are invisible to both
@@ -894,9 +894,14 @@ export async function claimIssue(
 
     const parsed = parseIssueBody(claimed.body)
     if (parsed === undefined) {
-      // A finding whose body lost its structure cannot become a task; leave it claimed
-      // so it does not bounce between workers, and let a person look.
-      return { outcome: 'unparseable', issueNumber: issue.number }
+      // Quarantine a finding whose body lost its structure. Merge-failed is the existing
+      // terminal queue state: unlike in-progress it is not a lease that stale reaping
+      // may return to the claim path. Keep the assignment and body for inspection.
+      const reason = `Issue #${issue.number} has no parseable requirement. Restore its generated body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`
+      await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
+      await forge.commentIssue(issue.number, reason)
+      await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
+      return { outcome: 'unparseable', issueNumber: issue.number, reason }
     }
 
     const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)
@@ -951,7 +956,8 @@ export async function reapStaleLeases(
   const reaped: number[] = []
   const openIssues = knownOpenFindings ?? await forge.listOpenIssues(LABEL_IN_PROGRESS)
   for (const issue of openIssues.filter((candidate) =>
-    candidate.labels.includes(LABEL_IN_PROGRESS))) {
+    candidate.labels.includes(LABEL_IN_PROGRESS)
+      && !candidate.labels.includes(LABEL_MERGE_FAILED))) {
     if (locallyRunningIssues.has(issue.number)) continue
     const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
     if (ageMs < leaseHours * 3600 * 1000) continue
