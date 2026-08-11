@@ -47,13 +47,34 @@ function repositoryFromRemote(remote: string): string | undefined {
   }
 }
 
-function reportingRepository(paths: OrchPaths, runtime: ReportUpstreamRuntime): string {
+function currentBranchRemote(paths: OrchPaths, runtime: ReportUpstreamRuntime): string | undefined {
   try {
-    const remote = runtime.git(paths.repoRoot, ['remote', 'get-url', 'origin'])
-    return repositoryFromRemote(remote) ?? basename(paths.repoRoot)
+    const branch = runtime.git(paths.repoRoot, ['branch', '--show-current']).trim()
+    if (branch === '') return undefined
+    return configuredString(runtime.git(paths.repoRoot, [
+      'config', '--get', `branch.${branch}.remote`,
+    ]))
   } catch {
-    return basename(paths.repoRoot)
+    return undefined
   }
+}
+
+function reportingRepository(paths: OrchPaths, runtime: ReportUpstreamRuntime): string {
+  const configuredRemote = currentBranchRemote(paths, runtime)
+  const remotes = configuredRemote === undefined || configuredRemote === 'origin'
+    ? ['origin']
+    : [configuredRemote, 'origin']
+  for (const remote of remotes) {
+    try {
+      const repository = repositoryFromRemote(
+        runtime.git(paths.repoRoot, ['remote', 'get-url', remote]),
+      )
+      if (repository !== undefined) return repository
+    } catch {
+      // Try the conventional remote before falling back to the local directory name.
+    }
+  }
+  return basename(paths.repoRoot)
 }
 
 function packageSubtreePath(paths: OrchPaths, packageRoot: string): string | undefined {

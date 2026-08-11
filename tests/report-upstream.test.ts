@@ -84,6 +84,57 @@ describe('upstream defect reports', () => {
     expect(forge.repositoryIssues[0]?.body).toContain('- Core version: `2.4.1`')
   })
 
+  it("uses the current branch's configured remote for the reporting repository", async () => {
+    writePackage({ upstreamRepo: 'configured/core', version: '2.4.1' })
+    const forge = makeFakeForge()
+    const gitCalls: string[][] = []
+
+    await reportUpstream(orchPaths(repoRoot), 'A core defect.', forge,
+      runtime({
+        git: (_root, args) => {
+          gitCalls.push(args)
+          if (args[0] === 'branch') return 'task/report-upstream\n'
+          if (args[0] === 'config') return 'shared\n'
+          if (args[0] === 'remote') return 'https://github.com/consumer/current-repo.git\n'
+          return ''
+        },
+      }))
+
+    expect(gitCalls).toContainEqual(['remote', 'get-url', 'shared'])
+    expect(gitCalls).not.toContainEqual(['remote', 'get-url', 'origin'])
+    expect(forge.repositoryIssues[0]?.title)
+      .toBe('Core defect reported by consumer/current-repo')
+    expect(forge.repositoryIssues[0]?.body)
+      .toContain('- Repository: `consumer/current-repo`')
+  })
+
+  it('falls back to origin when the configured branch remote has no usable URL', async () => {
+    writePackage({ upstreamRepo: 'configured/core', version: '2.4.1' })
+    const forge = makeFakeForge()
+    const remoteCalls: string[][] = []
+
+    await reportUpstream(orchPaths(repoRoot), 'A core defect.', forge,
+      runtime({
+        git: (_root, args) => {
+          if (args[0] === 'branch') return 'main\n'
+          if (args[0] === 'config') return 'shared\n'
+          if (args[0] === 'remote') {
+            remoteCalls.push(args)
+            if (args[2] === 'shared') throw new Error('missing remote')
+            return 'git@github.com:consumer/origin-repo.git\n'
+          }
+          return ''
+        },
+      }))
+
+    expect(remoteCalls).toEqual([
+      ['remote', 'get-url', 'shared'],
+      ['remote', 'get-url', 'origin'],
+    ])
+    expect(forge.repositoryIssues[0]?.title)
+      .toBe('Core defect reported by consumer/origin-repo')
+  })
+
   it('reads metadata from a package that owns the repository root', async () => {
     writeFileSync(
       join(repoRoot, 'package.json'),
@@ -122,8 +173,11 @@ describe('upstream defect reports', () => {
         packageRoot,
         git: (_root, args) => {
           if (args[0] === 'remote') return 'git@github.com:consumer/reporting-repo.git\n'
-          logArgs = args
-          return `git-subtree-split: ${commit}\n`
+          if (args[0] === 'log') {
+            logArgs = args
+            return `git-subtree-split: ${commit}\n`
+          }
+          return ''
         },
       }))
 
