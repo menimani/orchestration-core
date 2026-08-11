@@ -74,6 +74,13 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ MAX_PARALLEL: '0' })).toThrow(/MAX_PARALLEL must be at least 1/)
   })
 
+  it('rejects a poll interval longer than the issue heartbeat interval', () => {
+    expect(loadConfig({ POLL_INTERVAL: '1800' }).pollIntervalSeconds).toBe(1800)
+    expect(() => loadConfig({ POLL_INTERVAL: '1801' })).toThrow(
+      /POLL_INTERVAL must not exceed 1800 seconds/,
+    )
+  })
+
   it('enables worker mode only with the issue queue', () => {
     expect(loadConfig({ ISSUE_QUEUE_ENABLED: 'true', WORKER_MODE: 'true' }).workerMode).toBe(true)
     expect(() => loadConfig({ WORKER_MODE: 'true' })).toThrow(/requires ISSUE_QUEUE_ENABLED=true/)
