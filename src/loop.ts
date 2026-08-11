@@ -1225,6 +1225,9 @@ export function createLoop(deps: LoopDeps) {
           if (!runAutoReview(currentScans, cycleIsFinal(currentScans))) return 'continue'
           writeFileSync(resumeFlag, '')
         } else if (config.reviewEnabled) {
+          // There is no manual-review command that can release this gate. Preserve the
+          // poll boundary, but make the transition reachable without operator state.
+          writeFileSync(resumeFlag, '')
           return 'continue'
         } else {
           writeFileSync(resumeFlag, '')

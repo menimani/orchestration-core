@@ -689,6 +689,23 @@ describe('cycleIsFinal', () => {
   })
 })
 
+describe('cycle gate', () => {
+  it('resumes when review is enabled but automatic review is disabled', async () => {
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: false,
+      maxScanCycles: 1,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(true)
+    expect(logged).toContain('CYCLE_COMPLETE: 1/1')
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+  })
+})
+
 describe('remote issue queue idle detection', () => {
   beforeEach(() => {
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
