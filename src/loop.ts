@@ -54,6 +54,7 @@ export interface LoopDeps {
   log: (line: string) => void
   now: () => Date
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
+  enqueueTask?: typeof enqueueTask
 }
 
 interface QueueEntry {
@@ -77,6 +78,7 @@ export function formatEventLine(name: string, subject = '', detail = ''): string
 export function createLoop(deps: LoopDeps) {
   const {
     paths, config, forge: rawForge, runner, project, log, now, orchestrationDepsRuntime,
+    enqueueTask: enqueueTaskImpl = enqueueTask,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
@@ -618,6 +620,7 @@ export function createLoop(deps: LoopDeps) {
     const descriptions = combinesReviewFindings
       ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
       : pendingFindings
+    let reconciled = true
     for (const desc of descriptions) {
       if (!hasTaskCapacity(taskId)) continue
       const existing = existingTaskIdForDesc(paths, 'auto', desc)
@@ -659,13 +662,13 @@ export function createLoop(deps: LoopDeps) {
         writeFileSync(effortFile, 'high\n')
       }
       try {
-        const enqueue = enqueueTask(paths, newId, newDepth)
+        const enqueue = enqueueTaskImpl(paths, newId, newDepth)
         if (enqueue.outcome === 'enqueued') recordPublishedTask()
       } catch {
-        // an unenqueueable finding is not worth stopping the poll for
+        reconciled = false
       }
     }
-    return { findings, destinations, reconciled: true }
+    return { findings, destinations, reconciled }
   }
 
   // A scan writes its findings in prose, so the same advisory comes back worded

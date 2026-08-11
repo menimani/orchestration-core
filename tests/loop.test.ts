@@ -13,7 +13,7 @@ import {
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
-import { createLoop, formatEventLine, type Loop } from '../src/loop.ts'
+import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
   syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
@@ -22,6 +22,7 @@ import {
 } from '../src/paths.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
+import { enqueueTask } from '../src/tasks.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
 
@@ -78,6 +79,7 @@ function makeLoop(
   orchestrationDepsRuntime?: OrchestrationDepsRuntime,
   clock: () => Date = () => new Date(2026, 7, 8, 12, 0, 0),
   runner: Runner = makeRunner(),
+  enqueueTaskImpl: NonNullable<LoopDeps['enqueueTask']> = enqueueTask,
 ): Loop {
   const config = { ...loadConfig({}), ...overrides }
   return createLoop({
@@ -89,6 +91,7 @@ function makeLoop(
     log: (line) => logged.push(line),
     now: clock,
     orchestrationDepsRuntime,
+    enqueueTask: enqueueTaskImpl,
   })
 }
 
@@ -2111,6 +2114,40 @@ describe('scanForNextTasks', () => {
       '[BUG] second retryable finding',
     ])
     expect(logged.filter((line) => line.startsWith('Completed 017_scan'))).toHaveLength(1)
+  })
+
+  it('leaves a local finding unreconciled when enqueue fails so a later scan retries it', async () => {
+    initializeGitRepo()
+    let attempts = 0
+    const loop = makeLoop(
+      { scanEnabled: false, autoMerge: false, maxParallel: 0 },
+      stubProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
+      (...args) => {
+        attempts += 1
+        if (attempts === 1) throw new Error('temporary local queue failure')
+        return enqueueTask(...args)
+      },
+    )
+    loop.initializeSessionStateForBranch()
+    const taskId = '20250101_000000_018_scan'
+    writeFinal(taskId, [
+      'NEXT_TASK: [BUG] retry a finding after a local queue failure',
+      'TASK_COMPLETE',
+    ].join('\n'))
+    writeRawStatus(taskId, 'completed')
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const scannedFlag = join(paths.queueDir, 'scanned', taskId)
+
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(false)
+    expect(readdirSync(paths.tasksDir)).toHaveLength(1)
+
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(true)
+    expect(attempts).toBe(2)
+    expect(readFileSync(backlog, 'utf8').trim()).toMatch(/:1$/)
   })
 
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {
