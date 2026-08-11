@@ -1067,11 +1067,7 @@ export function createLoop(deps: LoopDeps) {
       FAIL_SUMMARY: failSummary === '' ? '(check the PR checks for details)' : failSummary,
     })
     writeFileSync(specFile(paths, fixId), text)
-    try {
-      enqueueTask(paths, fixId, 0)
-    } catch {
-      // spec was just written; enqueue cannot miss it
-    }
+    enqueueTask(paths, fixId, 0)
   }
 
   /** After the final gate: promote the draft PR and print LOOP_DONE. */
@@ -1291,7 +1287,12 @@ export function createLoop(deps: LoopDeps) {
             } catch {
               failSummary = ''
             }
-            generateCiFixTask(currentScans, prUrl, failSummary)
+            try {
+              generateCiFixTask(currentScans, prUrl, failSummary)
+            } catch (error) {
+              event('WARN', `could not enqueue CI fix: ${errorSummary(error)}`)
+              return 'continue'
+            }
             writeFileSync(ciFixFlag, `${attempts + 1}\n`)
             rmSync(completeFlag, { force: true })
           } else {
