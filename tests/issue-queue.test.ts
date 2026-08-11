@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -558,6 +560,33 @@ describe('claimIssue', () => {
     expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
     expect(readdirSync(paths.tasksDir)).toEqual([])
   })
+
+  it.each([
+    ['writing the task spec', () => {
+      rmSync(paths.tasksDir, { recursive: true })
+      writeFileSync(paths.tasksDir, '')
+    }],
+    ['recording the issue mapping', () => {
+      writeFileSync(join(paths.queueDir, 'issue-map'), '')
+    }],
+    ['enqueueing the task', () => {
+      mkdirSync(join(paths.queueDir, 'backlog.txt'))
+    }],
+  ] as const)(
+    'releases the issue when %s fails after the remote claim',
+    async (_description, setUpFailure) => {
+      const issueNumber = await readyIssue('[BUG] `src/a/b.ts` fails during materialization')
+      const issue = await forge.getIssue(issueNumber)
+      setUpFailure()
+
+      await expect(claimIssue(forge, paths, issue, 'worker-a', appendRequirement)).rejects.toThrow()
+
+      const after = await forge.getIssue(issueNumber)
+      expect(after.assignees).toEqual([])
+      expect(after.labels).toContain(LABEL_READY)
+      expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
+    },
+  )
 
   it('quarantines an unparseable issue with an actionable reason', async () => {
     const issueNumber = await forge.createIssue({

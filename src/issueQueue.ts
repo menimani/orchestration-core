@@ -941,34 +941,46 @@ export async function claimIssue(
       return { outcome: 'unparseable', issueNumber: issue.number, reason }
     }
 
-    const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)
-    const needsFreshTask = existing !== undefined
-      && readStatus(paths, existing)?.status === 'merged'
-      && !fingerprintOf(parsed.requirement).startsWith('advisory:')
-    const taskId = needsFreshTask
-      ? newTaskId(paths, `auto-${descSlug(parsed.requirement)}`)
-      : taskIdForDesc(paths, 'auto', parsed.requirement)
-    if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', parsed.requirement, taskId)
-    if (!existsSync(specFile(paths, taskId))) {
-      newTaskSpec(paths, taskId)
-      appendRequirements(taskId, parsed.requirement)
-    }
-    if (parsed.effort !== undefined && ['minimal', 'low', 'medium', 'high'].includes(parsed.effort)) {
-      mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
-      writeFileSync(join(paths.queueDir, 'effort', taskId), `${parsed.effort}\n`)
-    }
-    if (parsed.inspect) {
-      mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
-      writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
-    }
-    recordIssueForTask(paths, taskId, issue.number)
-    const enqueue = enqueueTask(paths, taskId, parsed.depth ?? 1)
-    return {
-      outcome: 'claimed',
-      taskId,
-      issueNumber: issue.number,
-      enqueue,
-      pendingMerge: enqueue.outcome === 'already-processed' && enqueue.status === 'completed',
+    try {
+      const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)
+      const needsFreshTask = existing !== undefined
+        && readStatus(paths, existing)?.status === 'merged'
+        && !fingerprintOf(parsed.requirement).startsWith('advisory:')
+      const taskId = needsFreshTask
+        ? newTaskId(paths, `auto-${descSlug(parsed.requirement)}`)
+        : taskIdForDesc(paths, 'auto', parsed.requirement)
+      if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', parsed.requirement, taskId)
+      if (!existsSync(specFile(paths, taskId))) {
+        newTaskSpec(paths, taskId)
+        appendRequirements(taskId, parsed.requirement)
+      }
+      if (parsed.effort !== undefined && ['minimal', 'low', 'medium', 'high'].includes(parsed.effort)) {
+        mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+        writeFileSync(join(paths.queueDir, 'effort', taskId), `${parsed.effort}\n`)
+      }
+      if (parsed.inspect) {
+        mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
+        writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
+      }
+      recordIssueForTask(paths, taskId, issue.number)
+      const enqueue = enqueueTask(paths, taskId, parsed.depth ?? 1)
+      return {
+        outcome: 'claimed',
+        taskId,
+        issueNumber: issue.number,
+        enqueue,
+        pendingMerge: enqueue.outcome === 'already-processed' && enqueue.status === 'completed',
+      }
+    } catch (error) {
+      try {
+        await releasePartialClaim(forge, issue.number, me)
+      } catch (releaseError) {
+        throw new AggregateError(
+          [error, releaseError],
+          `Claim materialization and compensation both failed for issue #${issue.number}`,
+        )
+      }
+      throw error
     }
   })
 }
