@@ -199,13 +199,18 @@ from or equivalent to `orchestration/tests/*.sh`.
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
     same growth bounds. An issue is filed once per fingerprint: the advisory
     identifier when one is named, else the finding's tag plus the first path it
-    names, else the hashed text with whole-line semantics. Review findings are checked
+    names and a digest of normalized finding terms, else that normalized digest alone.
+    Normalization ignores case, punctuation, whitespace, word order, grammatical filler,
+    plural and selected action-word forms, and issue/commit references; distinct terms
+    still distinguish separate requirements in one file. Review findings are checked
     independently before unresolved findings are combined; a combined issue stores every
     constituent fingerprint, so it also suppresses a later individual report while
     that work remains pending. Once a non-advisory issue's task merges into the run
     branch, a later scan or review observed the post-fix tree and the same fingerprint
     becomes fresh work; advisory identifiers remain durable deduplication keys across
-    merges because the same advisory recurs with different prose.
+    merges because the same advisory recurs with different prose. Pre-granularity open
+    issue bodies are interpreted from their requirement text, and their coarse local
+    ledger entry is replaced when encountered, avoiding a one-time duplicate round.
 33. Worker daemons claim a ready issue by self-assignment. The forge login is the worker
     identity, and every daemon that may claim concurrently must authenticate as a
     distinct forge account. Under that invariant, a simultaneous claim is settled

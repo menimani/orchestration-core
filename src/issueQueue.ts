@@ -81,20 +81,79 @@ async function withIssueCoordination<T>(
   }
 }
 
+const FINDING_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'be', 'for', 'from', 'in', 'is', 'must', 'of', 'on', 'should',
+  'that', 'the', 'these', 'this', 'those', 'to', 'was', 'were', 'with',
+])
+const FINDING_TERM_ALIASES = new Map([
+  ['collapsed', 'collapse'], ['collapsing', 'collapse'],
+  ['deleted', 'delete'], ['deleting', 'delete'],
+  ['removed', 'remove'], ['removing', 'remove'],
+])
+
+function findingParts(description: string): { tag: string | undefined; path: string | undefined } {
+  return {
+    tag: /^\[([A-Z]+)\]/.exec(description)?.[1]?.toLowerCase(),
+    path: description.match(/[A-Za-z0-9_./-]*\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/)?.[0],
+  }
+}
+
 /**
- * A scan words the same finding differently every cycle, so text cannot be the
- * identity. What survives rewording: an advisory identifier when one is named, else
- * the finding's tag plus the first path it names. Only when neither exists does the
- * text itself (hashed) become the identity, with whole-line semantics — the same
- * limit the decision dedup accepts.
+ * Keep the nouns and actions that distinguish a finding while discarding prose-only
+ * variation. Sorting makes word order immaterial; the deliberately small stemming
+ * rules cover plural nouns and common past-tense rewrites without treating synonyms
+ * as equal.
+ */
+function normalizedFindingText(description: string, tag?: string, path?: string): string {
+  let text = description.toLowerCase()
+  if (tag !== undefined) text = text.replace(new RegExp(`^\\[${tag}\\]`, 'i'), ' ')
+  if (path !== undefined) text = text.replace(path.toLowerCase(), ' ')
+  text = text
+    .replace(/\b(?:issue|commit)\s*#?\s*(?:[0-9a-f]{7,40}|\d+)\b/gi, ' ')
+    .replace(/#\d+\b/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+
+  const terms = text.trim().split(/\s+/).flatMap((word) => {
+    if (word === '' || FINDING_STOP_WORDS.has(word)) return []
+    const alias = FINDING_TERM_ALIASES.get(word)
+    if (alias !== undefined) return [alias]
+    if (word.endsWith('ies') && word.length > 4) return [`${word.slice(0, -3)}y`]
+    if (word.endsWith('s') && !/(ss|us|is|news)$/.test(word) && word.length > 3) {
+      return [word.slice(0, -1)]
+    }
+    return [word]
+  })
+  return [...new Set(terms)].sort().join(' ')
+}
+
+function legacyFingerprintOf(description: string): string | undefined {
+  const { tag, path } = findingParts(description)
+  return tag !== undefined && path !== undefined ? `${tag}:${path}` : undefined
+}
+
+function legacyFingerprintFor(fingerprint: string): string | undefined {
+  const match = /^([a-z]+:.+):[0-9a-f]{16}$/.exec(fingerprint)
+  return match?.[1]
+}
+
+function preGranularityTextFingerprintOf(description: string): string {
+  return `text:${createHash('sha256').update(description).digest('hex').slice(0, 16)}`
+}
+
+/**
+ * Advisory identifiers retain their original durable identity. Other findings use
+ * tag + first path + a digest of normalized finding terms, so separate requirements
+ * in one file remain separate while capitalization, punctuation, grammatical filler,
+ * word order, plural/past-tense wording, and issue/commit references do not matter.
  */
 export function fingerprintOf(description: string): string {
   const advisory = description.toUpperCase().match(/GHSA(-[0-9A-Z]{4}){3}|CVE-\d{4}-\d{4,}/)
   if (advisory !== null) return `advisory:${advisory[0]}`
-  const tag = /^\[([A-Z]+)\]/.exec(description)?.[1]?.toLowerCase()
-  const path = description.match(/[A-Za-z0-9_./-]*\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/)?.[0]
-  if (tag !== undefined && path !== undefined) return `${tag}:${path}`
-  return `text:${createHash('sha256').update(description).digest('hex').slice(0, 16)}`
+  const { tag, path } = findingParts(description)
+  const normalized = normalizedFindingText(description, tag, path)
+  const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 16)
+  if (tag !== undefined && path !== undefined) return `${tag}:${path}:${digest}`
+  return `text:${digest}`
 }
 
 export function buildIssueBody(
@@ -171,14 +230,63 @@ function writeFingerprintLedger(
 
 function recordFingerprint(paths: OrchPaths, fingerprint: string, issueNumber: number): void {
   const ledger = fingerprintLedger(paths)
+  const legacyFingerprint = legacyFingerprintFor(fingerprint)
   const recorded = ledger.filter((entry) => entry.fingerprint === fingerprint)
-  if (recorded.length === 1 && recorded[0]?.issueNumber === issueNumber) return
-  const otherFingerprints = ledger.filter((entry) => entry.fingerprint !== fingerprint)
+  const hasLegacyEntry = legacyFingerprint !== undefined
+    && ledger.some((entry) => entry.fingerprint === legacyFingerprint)
+  if (recorded.length === 1 && recorded[0]?.issueNumber === issueNumber && !hasLegacyEntry) return
+  const otherFingerprints = ledger.filter((entry) => entry.fingerprint !== fingerprint
+    && entry.fingerprint !== legacyFingerprint)
   writeFingerprintLedger(paths, [...otherFingerprints, { fingerprint, issueNumber }])
 }
 
 function issueFingerprints(issue: ForgeIssue): string[] {
-  return parseIssueBody(issue.body)?.fingerprints ?? []
+  const parsed = parseIssueBody(issue.body)
+  if (parsed === undefined) return []
+  const requirementLines = parsed.requirement.split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\d+[.)]\s*/, ''))
+  return parsed.fingerprints.map((fingerprint) => {
+    if (isAdvisoryFingerprint(fingerprint)
+      || legacyFingerprintFor(fingerprint) !== undefined) return fingerprint
+
+    // Pre-granularity issue bodies retain their old value on the forge. Interpret
+    // that value through the requirement text so dedup remains continuous, then let
+    // ledger migration replace the corresponding old local entry.
+    const matchingLine = requirementLines.find((line) => fingerprint.startsWith('text:')
+      ? preGranularityTextFingerprintOf(line) === fingerprint
+      : legacyFingerprintOf(line) === fingerprint)
+    if (matchingLine !== undefined) return fingerprintOf(matchingLine)
+    if (fingerprint.startsWith('text:')) {
+      return preGranularityTextFingerprintOf(parsed.requirement) === fingerprint
+        ? fingerprintOf(parsed.requirement)
+        : fingerprint
+    }
+    return legacyFingerprintOf(parsed.requirement) === fingerprint
+      ? fingerprintOf(parsed.requirement)
+      : fingerprint
+  })
+}
+
+function migrateFingerprintLedgerForIssue(paths: OrchPaths, issue: ForgeIssue): void {
+  const stored = parseIssueBody(issue.body)?.fingerprints ?? []
+  const effective = issueFingerprints(issue)
+  const replacements = stored.flatMap((fingerprint, index) => {
+    const replacement = effective[index]
+    return replacement !== undefined && replacement !== fingerprint
+      ? [{ fingerprint, replacement }]
+      : []
+  })
+  if (replacements.length === 0) return
+  let ledger = fingerprintLedger(paths)
+  let changed = false
+  for (const { fingerprint, replacement } of replacements) {
+    if (!ledger.some((entry) => entry.fingerprint === fingerprint)) continue
+    ledger = ledger.filter((entry) => entry.fingerprint !== fingerprint
+      && entry.fingerprint !== replacement)
+    ledger.push({ fingerprint: replacement, issueNumber: issue.number })
+    changed = true
+  }
+  if (changed) writeFingerprintLedger(paths, ledger)
 }
 
 function hasIssueFingerprint(issue: ForgeIssue, fingerprint: string): boolean {
@@ -319,6 +427,7 @@ async function reconcileCreatedFinding(
 /** Revisit forge-persisted fingerprints on every poll after listing lag has cleared. */
 export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPaths): Promise<void> {
   let openFindings = await forge.listOpenIssues(LABEL_FINDING)
+  for (const issue of openFindings) migrateFingerprintLedgerForIssue(paths, issue)
   const byFingerprintSet = new Map<string, { fingerprints: string[]; issues: ForgeIssue[] }>()
   for (const issue of openFindings) {
     const fingerprints = issueFingerprints(issue)
@@ -394,11 +503,9 @@ async function findExistingFinding(
     if (recordedIssue?.state === 'open'
       && recordedIssue.labels.includes(LABEL_FINDING)
       && hasIssueFingerprint(recordedIssue, fingerprint)
-      // An issue whose fix already merged must not suppress a new finding with the
-      // same coarse fingerprint: the tag+first-path identity collapses distinct
-      // defects in one file, and a review's fresh finding about new code was eaten
-      // by a merged-but-unpromoted issue exactly this way. Advisory identifiers are
-      // deliberately durable because the same advisory recurs with different prose.
+      // An issue whose fix already merged must not suppress a newly observed finding.
+      // Advisory identifiers are deliberately durable because the same advisory
+      // recurs with different prose.
       && issueSuppressesFingerprint(paths, recordedIssue, fingerprint)) {
       const fingerprints = issueFingerprints(recordedIssue)
       const survivor = (await reconcileOpenFindings(
@@ -415,6 +522,7 @@ async function findExistingFinding(
     .sort((a, b) => Number(isClaimed(b)) - Number(isClaimed(a)) || a.number - b.number)
   const existing = matching[0]
   if (existing === undefined) return undefined
+  migrateFingerprintLedgerForIssue(paths, existing)
   const existingIssueNumber = (await reconcileOpenFindings(
     forge, paths, issueFingerprints(existing), existing.number, undefined, onMutation,
   )) ?? existing.number

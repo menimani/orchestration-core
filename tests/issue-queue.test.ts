@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,12 +38,29 @@ describe('fingerprintOf', () => {
       .toBe('advisory:CVE-2026-22030')
   })
 
-  it('identifies an ordinary finding by tag and first named path', () => {
-    expect(fingerprintOf('[BUG] `src/frontend/src/pages/StatisticsPage.tsx` accepts an inverted range'))
-      .toBe('bug:src/frontend/src/pages/StatisticsPage.tsx')
+  it('distinguishes ordinary findings by normalized text after tag and first path', () => {
+    const closeButtons = fingerprintOf(
+      '[LAYOUT] Remove the close buttons from `src/frontend/src/pages/CalendarPage.tsx`',
+    )
+    const addButtons = fingerprintOf(
+      '[LAYOUT] Collapse the add buttons in `src/frontend/src/pages/CalendarPage.tsx`',
+    )
+    expect(closeButtons).toMatch(/^layout:src\/frontend\/src\/pages\/CalendarPage\.tsx:[0-9a-f]{16}$/)
+    expect(closeButtons).not.toBe(addButtons)
   })
 
-  it('falls back to hashed text with whole-line semantics', () => {
+  it('collapses grammatical rewording, punctuation, and issue or commit references', () => {
+    const first = fingerprintOf(
+      '[LAYOUT] `src/frontend/styles.css`: Remove empty .live-event-form rules (#448).',
+    )
+    const second = fingerprintOf(
+      '[LAYOUT] The empty rules for .live-event-form should be removed in '
+      + '`src/frontend/styles.css`; issue 921, commit deadbeef.',
+    )
+    expect(first).toBe(second)
+  })
+
+  it('falls back to normalized hashed text', () => {
     const a = fingerprintOf('adopt the new expense model or keep the current one')
     const b = fingerprintOf('adopt the new expense model or keep the current one')
     const c = fingerprintOf('drop the legacy artist link or migrate it')
@@ -103,7 +121,7 @@ describe('issue body round-trip', () => {
   it('parses what it builds', () => {
     const body = buildIssueBody('[BUG] `src/x/y.ts` does the wrong thing', 'parent-task', 'high')
     const parsed = parseIssueBody(body)
-    expect(parsed?.fingerprint).toBe('bug:src/x/y.ts')
+    expect(parsed?.fingerprint).toBe(fingerprintOf('[BUG] `src/x/y.ts` does the wrong thing'))
     expect(parsed?.effort).toBe('high')
     expect(parsed?.inspect).toBe(false)
     expect(parsed?.requirement).toBe('[BUG] `src/x/y.ts` does the wrong thing')
@@ -117,14 +135,70 @@ describe('issue body round-trip', () => {
 describe('publishFinding', () => {
   it('reports an immediate duplicate while the remote issue list still lags', async () => {
     forge.listOpenIssues = async () => []
-    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
+    const firstDescription = '[BUG] `src/a/b.ts` Remove empty .live-event-form rules'
+    const secondDescription = '[BUG] The empty rules for .live-event-form should be removed in `src/a/b.ts`'
+    const first = await publishFinding(forge, paths, firstDescription, 'scan-1')
     expect(first.outcome).toBe('created')
     const issue = await forge.getIssue(first.issueNumber)
     expect(issue.labels).toEqual([LABEL_FINDING, LABEL_READY])
 
-    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks in a different wording', 'scan-2')
+    const second = await publishFinding(forge, paths, secondDescription, 'scan-2')
     expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
     expect(forge.issues.size).toBe(1)
+  })
+
+  it('files different requirements with the same tag and path as separate issues', async () => {
+    const closeButtons = '[LAYOUT] Remove close buttons from `src/frontend/src/pages/CalendarPage.tsx`'
+    const addButtons = '[LAYOUT] Collapse add buttons in `src/frontend/src/pages/CalendarPage.tsx`'
+
+    const first = await publishFinding(forge, paths, closeButtons, 'delegate-1')
+    const second = await publishFinding(forge, paths, addButtons, 'delegate-2')
+
+    expect(first.outcome).toBe('created')
+    expect(second.outcome).toBe('created')
+    expect(second.issueNumber).not.toBe(first.issueNumber)
+    expect(forge.issues.size).toBe(2)
+  })
+
+  it('reuses a pre-granularity issue and replaces its coarse ledger entry', async () => {
+    const original = '[LAYOUT] `src/frontend/styles.css`: Remove empty .live-event-form rules.'
+    const legacyFingerprint = 'layout:src/frontend/styles.css'
+    const issueNumber = await forge.createIssue({
+      title: original,
+      body: buildIssueBody(original, 'old-scan', undefined, [legacyFingerprint]),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    writeFileSync(join(paths.queueDir, 'issue-fingerprints'), `${legacyFingerprint} ${issueNumber}\n`)
+
+    const result = await publishFinding(
+      forge, paths,
+      '[LAYOUT] The empty rules for .live-event-form should be removed in `src/frontend/styles.css`.',
+      'new-scan',
+    )
+
+    expect(result).toEqual({ outcome: 'duplicate', issueNumber })
+    expect(forge.issues.size).toBe(1)
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprintOf(original)} ${issueNumber}\n`)
+  })
+
+  it('migrates a pre-granularity text fallback without filing a duplicate', async () => {
+    const original = 'Remove empty .live-event-form rules.'
+    const oldFingerprint = `text:${createHash('sha256').update(original).digest('hex').slice(0, 16)}`
+    const issueNumber = await forge.createIssue({
+      title: original,
+      body: buildIssueBody(original, 'old-scan', undefined, [oldFingerprint]),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    writeFileSync(join(paths.queueDir, 'issue-fingerprints'), `${oldFingerprint} ${issueNumber}\n`)
+
+    const result = await publishFinding(
+      forge, paths, 'The empty .live-event-form rules should be removed.', 'new-scan',
+    )
+
+    expect(result).toEqual({ outcome: 'duplicate', issueNumber })
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprintOf(original)} ${issueNumber}\n`)
   })
 
   it('reconciles concurrent creations when post-creation issue lists also lag', async () => {
@@ -157,7 +231,7 @@ describe('publishFinding', () => {
 
     const results = await Promise.all([
       publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1'),
-      publishFinding(forge, otherPaths, '[BUG] `src/a/b.ts` breaks differently', 'scan-2'),
+      publishFinding(forge, otherPaths, '[BUG] `src/a/b.ts` breaks', 'scan-2'),
     ])
 
     expect(results).toEqual([
@@ -167,8 +241,9 @@ describe('publishFinding', () => {
     expect((await listOpenIssues(LABEL_FINDING)).map((issue) => issue.number)).toEqual([1])
     expect((await forge.getIssue(2)).state).toBe('closed')
     expect(listCalls).toBeGreaterThanOrEqual(5)
-    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
-    expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
+    const fingerprint = fingerprintOf('[BUG] `src/a/b.ts` breaks')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8')).toBe(`${fingerprint} 1\n`)
+    expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8')).toBe(`${fingerprint} 1\n`)
   })
 
   it('reconciles concurrent creations on a later poll after the retry window expires', async () => {
@@ -197,7 +272,7 @@ describe('publishFinding', () => {
 
     const results = await Promise.all([
       publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1'),
-      publishFinding(forge, otherPaths, '[BUG] `src/a/b.ts` breaks differently', 'scan-2'),
+      publishFinding(forge, otherPaths, '[BUG] `src/a/b.ts` breaks', 'scan-2'),
     ])
     expect(results).toEqual([
       { outcome: 'created', issueNumber: 1 },
@@ -209,7 +284,8 @@ describe('publishFinding', () => {
 
     expect((await listOpenIssues(LABEL_FINDING)).map((issue) => issue.number)).toEqual([1])
     expect((await forge.getIssue(2)).state).toBe('closed')
-    expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8')).toBe('bug:src/a/b.ts 1\n')
+    expect(readFileSync(join(otherPaths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprintOf('[BUG] `src/a/b.ts` breaks')} 1\n`)
   })
 
   it('closes an individual issue fully subsumed by a combined review issue', async () => {
@@ -231,8 +307,8 @@ describe('publishFinding', () => {
     expect((await forge.getIssue(individual)).state).toBe('closed')
     expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8').split(/\r?\n/))
       .toEqual(expect.arrayContaining([
-        `bug:src/a.ts ${combined.issueNumber}`,
-        `test:src/b.test.ts ${combined.issueNumber}`,
+        `${fingerprintOf(findingA)} ${combined.issueNumber}`,
+        `${fingerprintOf(findingB)} ${combined.issueNumber}`,
       ]))
   })
 
@@ -280,13 +356,12 @@ describe('publishFinding', () => {
   })
 
   it('does not let a merged-but-unpromoted issue suppress a new same-fingerprint finding', async () => {
-    // The coarse tag+first-path fingerprint collapses distinct defects in one file;
-    // once an issue's fix has merged locally, a fresh finding is new work, not a dup.
+    // Once an issue's fix has merged locally, a fresh observation is new work, not a dup.
     const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-1')
     recordIssueForTask(paths, 'task-first-fix', first.issueNumber)
     recordIssuePromotion(paths, 'task-first-fix', 'a'.repeat(40), 'chore/run-branch')
 
-    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks differently', 'review-2')
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-2')
     await reconcileFindingFingerprints(forge, paths)
 
     expect(second.outcome).toBe('created')
@@ -294,7 +369,7 @@ describe('publishFinding', () => {
     expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
     expect((await forge.getIssue(second.issueNumber)).state).toBe('open')
     expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
-      .toBe(`bug:src/a/b.ts ${second.issueNumber}\n`)
+      .toBe(`${fingerprintOf('[BUG] `src/a/b.ts` breaks')} ${second.issueNumber}\n`)
   })
 
   it('still suppresses a same-fingerprint finding while the first issue is in progress', async () => {
@@ -303,7 +378,7 @@ describe('publishFinding', () => {
     await forge.addLabel(first.issueNumber, LABEL_IN_PROGRESS)
     await forge.removeLabel(first.issueNumber, LABEL_READY)
 
-    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks differently', 'review-2')
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-2')
 
     expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
     expect(forge.issues.size).toBe(1)
@@ -333,11 +408,11 @@ describe('publishFinding', () => {
     await forge.closeIssue(first.issueNumber, 'fixed')
     forge.listOpenIssues = async () => []
 
-    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks again', 'scan-2')
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-2')
 
     expect(second).toEqual({ outcome: 'created', issueNumber: 2 })
     expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
-      .toBe('bug:src/a/b.ts 2\n')
+      .toBe(`${fingerprintOf('[BUG] `src/a/b.ts` breaks')} 2\n`)
   })
 
   it('drops a ledger entry when the open issue no longer carries its fingerprint', async () => {
@@ -346,11 +421,11 @@ describe('publishFinding', () => {
     if (issue === undefined) throw new Error('expected the published issue')
     issue.body = buildIssueBody('[BUG] `src/other.ts` breaks', 'edited')
 
-    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks again', 'scan-2')
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-2')
 
     expect(second).toEqual({ outcome: 'created', issueNumber: 2 })
     expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
-      .toBe('bug:src/a/b.ts 2\n')
+      .toBe(`${fingerprintOf('[BUG] `src/a/b.ts` breaks')} 2\n`)
   })
 
   it('drops a ledger entry when the open issue is no longer a finding', async () => {
@@ -359,11 +434,11 @@ describe('publishFinding', () => {
     if (issue === undefined) throw new Error('expected the published issue')
     issue.labels = issue.labels.filter((label) => label !== LABEL_FINDING)
 
-    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks again', 'scan-2')
+    const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-2')
 
     expect(second).toEqual({ outcome: 'created', issueNumber: 2 })
     expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
-      .toBe('bug:src/a/b.ts 2\n')
+      .toBe(`${fingerprintOf('[BUG] `src/a/b.ts` breaks')} 2\n`)
   })
 
   it('lets a distinct finding through', async () => {
@@ -667,12 +742,13 @@ describe('issue map', () => {
 
 describe('publishDelegatedTask', () => {
   it('publishes ready work for the daemon and never materializes under the delegator login', async () => {
-    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const description = '[BUG] `src/a/b.ts` Remove empty .live-event-form rules'
     const first = await publishDelegatedTask(
       forge, paths, description, 'user-task-1', 'high', true,
     )
     const second = await publishDelegatedTask(
-      forge, paths, '[BUG] `src/a/b.ts` breaks with new wording', 'user-task-2',
+      forge, paths, '[BUG] The empty rules for .live-event-form should be removed in `src/a/b.ts`',
+      'user-task-2',
     )
 
     expect(first).toEqual({ outcome: 'created', issueNumber: 1, materialize: false })
@@ -764,7 +840,7 @@ describe('loop integration in issue mode', () => {
     // a later poll, even though the fingerprint is never published again.
     const duplicate = await forge.createIssue({
       title: 'late duplicate',
-      body: buildIssueBody('[BUG] `src/a/b.ts` breaks differently', 'another-scan'),
+      body: buildIssueBody('[BUG] `src/a/b.ts` breaks on empty input', 'another-scan'),
       labels: [LABEL_FINDING, LABEL_READY],
     })
     await loop.poll()
