@@ -62,7 +62,6 @@ const githubIssueSchema = z.object({
   title: z.string(),
   body: z.string(),
   author: githubAuthorSchema,
-  authorAssociation: z.string(),
   labels: z.array(z.object({ name: z.string() })),
   assignees: z.array(z.object({ login: z.string() })),
   updatedAt: z.string(),
@@ -460,7 +459,7 @@ export function createGithubForge(
       const repository = await issueQueueRepository()
       const args = ['issue', 'view', String(issueNumber),
         '--repo', repository,
-        '--json', 'number,state,title,body,author,authorAssociation,labels,assignees,updatedAt']
+        '--json', 'number,state,title,body,author,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
       return normalizeIssue(parseGhJson(args, stdout, githubIssueSchema))
     },
@@ -490,7 +489,7 @@ export function createGithubForge(
       const args = ['issue', 'list', '--state', 'open',
         '--repo', repository,
         '--label', label, '--limit', '200',
-        '--json', 'number,state,title,body,author,authorAssociation,labels,assignees,updatedAt']
+        '--json', 'number,state,title,body,author,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
       return Promise.all(parseGhJson(args, stdout, openGithubIssueListSchema).map(normalizeIssue))
     },
@@ -500,7 +499,7 @@ export function createGithubForge(
       const args = ['issue', 'list', '--state', 'closed',
         '--repo', repository,
         '--label', label, '--limit', '200',
-        '--json', 'number,state,title,body,author,authorAssociation,labels,assignees,updatedAt']
+        '--json', 'number,state,title,body,author,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
       return Promise.all(parseGhJson(args, stdout, closedGithubIssueListSchema).map(normalizeIssue))
     },

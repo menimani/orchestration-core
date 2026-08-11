@@ -326,7 +326,7 @@ describe('GitHub forge JSON schemas', () => {
     expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
     expect(calls.map((args) => args.join(' '))).toEqual([
       'repo view --json nameWithOwner',
-      'issue list --state open --repo example/repo --label loop:finding --limit 200 --json number,state,title,body,author,authorAssociation,labels,assignees,updatedAt',
+      'issue list --state open --repo example/repo --label loop:finding --limit 200 --json number,state,title,body,author,labels,assignees,updatedAt',
       'api rate_limit',
     ])
   })
@@ -538,6 +538,46 @@ describe('GitHub forge JSON schemas', () => {
       const error = await validationError(testCase.output, testCase.invoke)
       expect(error.message).toContain(testCase.command)
       expect(error.message).toContain(testCase.path)
+    }
+  })
+})
+
+describe('gh JSON field selections', () => {
+  // gh rejects the whole command when a --json selection names a field it does not
+  // support, so an invalid name is not a degraded response but a dead adapter. The
+  // fake forge in every other test answers whatever it is asked, which is exactly
+  // why 'authorAssociation' — a field gh offers on comments but not on issues —
+  // reached a release and stopped the loop before its first scan.
+  const ISSUE_FIELDS = new Set([
+    'assignees', 'author', 'body', 'closed', 'closedAt', 'comments', 'createdAt',
+    'id', 'isPinned', 'labels', 'milestone', 'number', 'projectCards', 'projectItems',
+    'reactionGroups', 'state', 'stateReason', 'title', 'updatedAt', 'url',
+  ])
+
+  it('asks issue list and issue view only for fields gh supports', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'api') return JSON.stringify({ permission: 'admin', role_name: 'admin' })
+      if (args[1] === 'view') return JSON.stringify(openIssueFixture)
+      return '[]'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.listOpenIssues('loop:finding')
+    await forge.listClosedIssues('loop:finding')
+    await forge.getIssue(1)
+
+    const selections = calls
+      .filter((args) => args[0] === 'issue' && (args[1] === 'list' || args[1] === 'view'))
+      .map((args) => args[args.indexOf('--json') + 1] as string)
+
+    expect(selections.length).toBe(3)
+    for (const selection of selections) {
+      for (const field of selection.split(',')) {
+        expect(ISSUE_FIELDS.has(field), `gh does not offer ${field} on issues`).toBe(true)
+      }
     }
   })
 })
