@@ -10,6 +10,15 @@ import { writeStatus } from '../src/status.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'src', 'cli.ts')
+
+// Several of these run `cli.ts loop` and rely on the loop deciding to exit — a
+// burst-failure cap, an exhausted cycle cap, a rejected PID lock. When a condition stops
+// holding, a synchronous spawn becomes a permanent block: `spawnSync` cannot be
+// interrupted by vitest's test timeout, so the worker freezes with no failure and no
+// output. That happened inside a merge gate twice, and each attempt sat for fifty minutes
+// before anyone thought to look at the process list. A bound turns it into a failed test.
+const CLI_TIMEOUT_MS = 120_000
+
 const CORE_ENV = {
   ...process.env,
   PROJECT: 'shiora',
@@ -60,6 +69,7 @@ describe('command registry', () => {
       cwd: repoRoot,
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(1)
@@ -73,6 +83,7 @@ describe('command registry', () => {
       cwd: repoRoot,
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(1)
@@ -90,6 +101,7 @@ describe('command registry', () => {
       },
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(1)
@@ -108,6 +120,7 @@ describe('logs', () => {
       cwd: repoRoot,
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(1)
@@ -139,6 +152,7 @@ describe('manual merge', () => {
       env: CORE_ENV,
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(0)
@@ -178,6 +192,7 @@ describe('manual merge', () => {
       env: CORE_ENV,
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(1)
@@ -199,6 +214,7 @@ describe('manually promoted run ending', () => {
       env: { ...process.env, MAX_SCAN_CYCLES: '3' },
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(0)
@@ -219,6 +235,7 @@ describe('manually promoted run ending', () => {
       env: { ...process.env, MAX_SCAN_CYCLES: '8' },
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(0)
@@ -232,6 +249,7 @@ describe('manually promoted run ending', () => {
       cwd: repoRoot,
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(1)
@@ -269,6 +287,7 @@ describe('loop daemon ownership', () => {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     }))
     const completions = children.map(childCompletion)
 
@@ -326,6 +345,7 @@ describe('loop daemon ownership', () => {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     }))
     const completions = children.map(childCompletion)
 
@@ -370,6 +390,7 @@ describe('loop daemon ownership', () => {
       },
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(0)
@@ -402,6 +423,7 @@ describe('loop daemon ownership', () => {
         },
         encoding: 'utf8',
         windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
       },
     )
 
@@ -423,6 +445,7 @@ describe('loop daemon ownership', () => {
       env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(1)
@@ -446,6 +469,7 @@ describe('loop daemon ownership', () => {
       },
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(0)
@@ -467,6 +491,7 @@ describe('loop daemon ownership', () => {
       },
       encoding: 'utf8',
       windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
     })
 
     expect(result.status).toBe(0)
