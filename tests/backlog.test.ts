@@ -70,6 +70,43 @@ describe('backlog process lock', () => {
       .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
   })
 
+  it('serializes simultaneous recovery of one stale lock', async () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    const counter = join(repoRoot, 'mutation-count')
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'owner'), `999999999 ${Date.now() - 31_000}\n`)
+    writeFileSync(counter, '0\n')
+
+    const backlogModule = pathToFileURL(join(process.cwd(), 'src', 'backlog.ts')).href
+    const script = [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalRmSync = fs.rmSync',
+      'fs.rmSync = function (file, ...args) {',
+      '  if (file === process.argv[2]) {',
+      '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150)',
+      '  }',
+      '  return originalRmSync.call(this, file, ...args)',
+      '}',
+      'syncBuiltinESMExports()',
+      `const { withBacklogLock } = await import(${JSON.stringify(backlogModule)})`,
+      'withBacklogLock(process.argv[1], () => {',
+      "  const value = Number(fs.readFileSync(process.argv[3], 'utf8'))",
+      '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)',
+      "  fs.writeFileSync(process.argv[3], `${value + 1}\\n`)",
+      '})',
+    ].join('\n')
+    const children = Array.from({ length: 2 }, () => spawn(process.execPath, [
+      '--input-type=module', '--eval', script, backlog, lockDir, counter,
+    ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }))
+
+    await Promise.all(children.map(completion))
+
+    expect(readFileSync(counter, 'utf8')).toBe('2\n')
+    expect(existsSync(`${lockDir}.recovery`)).toBe(false)
+  })
+
   it('serializes a dequeue rewrite with a concurrent enqueue', async () => {
     const backlog = join(paths.queueDir, 'backlog.txt')
     writeFileSync(backlog, 'first-task:0\n')

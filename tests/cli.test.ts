@@ -264,7 +264,7 @@ describe('loop daemon ownership', () => {
         ...CORE_ENV,
         AUTO_PR: 'false',
         ISSUE_QUEUE_ENABLED: 'false',
-        POLL_INTERVAL: '60',
+        POLL_INTERVAL: '1',
         SCAN_ENABLED: 'false',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -277,6 +277,10 @@ describe('loop daemon ownership', () => {
         () => children.filter((child) => child.exitCode !== null).length >= children.length - 1,
         'competing loop starts did not reject the PID lock',
       )
+      await waitUntil(
+        () => existsSync(daemonFile('cycle-cap.txt')),
+        'winning loop did not finish daemon initialization',
+      )
       writeFileSync(daemonFile('stop'), '')
       const results = await Promise.all(completions)
 
@@ -284,6 +288,64 @@ describe('loop daemon ownership', () => {
       const rejected = results.filter((result) => result.code === 1)
       expect(rejected).toHaveLength(children.length - 1)
       expect(rejected.every((result) => result.output.includes('Loop is already running'))).toBe(true)
+    } finally {
+      for (const child of children) {
+        if (child.exitCode === null) child.kill()
+      }
+    }
+  })
+
+  it('allows only one concurrent starter to reclaim a stale PID file', async () => {
+    mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
+    writeFileSync(daemonFile('loop.pid'), '999999999\n')
+    const wrapper = join(repoRoot, 'start-stale-loop.mjs')
+    const cliUrl = pathToFileURL(CLI).href
+    writeFileSync(wrapper, [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalWriteFileSync = fs.writeFileSync',
+      'fs.writeFileSync = function (file, ...args) {',
+      "  if (typeof file === 'string' && /[\\\\/]loop\\.pid$/.test(file)) {",
+      '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250)',
+      '  }',
+      '  return originalWriteFileSync.call(this, file, ...args)',
+      '}',
+      'syncBuiltinESMExports()',
+      `await import(${JSON.stringify(cliUrl)})`,
+      '',
+    ].join('\n'))
+
+    const children = Array.from({ length: 6 }, () => spawn(process.execPath, [wrapper, 'loop'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        POLL_INTERVAL: '1',
+        SCAN_ENABLED: 'false',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    }))
+    const completions = children.map(childCompletion)
+
+    try {
+      await waitUntil(
+        () => children.filter((child) => child.exitCode !== null).length >= children.length - 1,
+        'competing stale-PID recoveries did not settle on one owner',
+      )
+      await waitUntil(
+        () => existsSync(daemonFile('cycle-cap.txt')),
+        'winning stale-PID recovery did not finish daemon initialization',
+      )
+      writeFileSync(daemonFile('stop'), '')
+      const results = await Promise.all(completions)
+
+      expect(results.filter((result) => result.code === 0)).toHaveLength(1)
+      const rejected = results.filter((result) => result.code === 1)
+      expect(rejected).toHaveLength(children.length - 1)
+      expect(rejected.every((result) => result.output.includes('Loop is already running'))).toBe(true)
+      expect(existsSync(`${daemonFile('loop.pid')}.recovery`)).toBe(false)
     } finally {
       for (const child of children) {
         if (child.exitCode === null) child.kill()

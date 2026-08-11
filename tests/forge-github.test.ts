@@ -29,9 +29,17 @@ const openIssueFixture = {
 }
 
 function forgeReturning(output: unknown): Forge {
-  const command: GithubCommand = async (_root, args) => args[0] === 'repo'
-    ? JSON.stringify({ nameWithOwner: 'example/repo' })
-    : JSON.stringify(output)
+  const command: GithubCommand = async (_root, args) => {
+    if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+    if (args[0] === 'api' && args[1]?.includes('/collaborators/')) {
+      const login = args[1].split('/').at(-2)
+      return JSON.stringify({
+        permission: login === 'outside-user' ? 'none' : 'admin',
+        role_name: login === 'outside-user' ? null : 'admin',
+      })
+    }
+    return JSON.stringify(output)
+  }
   return createGithubForge('repo-root', command)
 }
 
@@ -177,6 +185,7 @@ describe('GitHub issue queue repository targeting', () => {
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
       if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'consumer/project' })
+      if (args[0] === 'api') return JSON.stringify({ permission: 'write' })
       if (args[0] === 'issue' && args[1] === 'create') {
         return 'https://github.com/consumer/project/issues/42\n'
       }
@@ -213,7 +222,7 @@ describe('GitHub issue queue repository targeting', () => {
     expect(calls.filter((args) => args[0] === 'repo')).toEqual([
       ['repo', 'view', '--json', 'nameWithOwner'],
     ])
-    for (const args of calls.slice(1)) {
+    for (const args of calls.slice(1).filter((args) => args[0] !== 'api')) {
       expect(args, `gh ${args.join(' ')}`).toContain('--repo')
       expect(args, `gh ${args.join(' ')}`).toContain('consumer/project')
     }
@@ -234,6 +243,35 @@ describe('GitHub issue queue repository targeting', () => {
       labels: ['loop:finding'],
     })).rejects.toThrow('Unable to resolve the current repository for the issue queue')
     expect(calls).toEqual([['repo', 'view', '--json', 'nameWithOwner']])
+  })
+})
+
+describe('GitHub author permissions', () => {
+  it('trusts actual write-level permission, not author association, and caches each login', async () => {
+    const calls: string[][] = []
+    const issues = [
+      { ...openIssueFixture, number: 1, author: { login: 'read-member' }, authorAssociation: 'MEMBER' },
+      { ...openIssueFixture, number: 2, author: { login: 'triage-collaborator' }, authorAssociation: 'COLLABORATOR' },
+      { ...openIssueFixture, number: 3, author: { login: 'maintainer' }, authorAssociation: 'NONE' },
+      { ...openIssueFixture, number: 4, author: { login: 'maintainer' }, authorAssociation: 'MEMBER' },
+    ]
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'issue') return JSON.stringify(issues)
+      const login = args[1]?.split('/').at(-2)
+      const permission = login === 'read-member' ? 'read'
+        : login === 'triage-collaborator' ? 'triage'
+          : 'maintain'
+      return JSON.stringify({ permission })
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    const normalized = await forge.listOpenIssues('loop:ready')
+
+    expect(normalized.map((issue) => issue.author.hasWriteAccess))
+      .toEqual([false, false, true, true])
+    expect(calls.filter((args) => args[0] === 'api')).toHaveLength(3)
   })
 })
 

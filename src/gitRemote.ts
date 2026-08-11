@@ -9,14 +9,35 @@ function git(repoRoot: string, args: string[]): string {
   }).trim()
 }
 
-/** Return the remote named by the current local branch's configured upstream. */
+function optionalGit(repoRoot: string, args: string[]): string {
+  try {
+    return git(repoRoot, args)
+  } catch {
+    return ''
+  }
+}
+
+/** Return the branch remote, an explicit push remote, or the only repository remote. */
 export function currentBranchRemote(repoRoot: string): string {
   const branch = git(repoRoot, ['branch', '--show-current'])
   if (branch === '') throw new Error('the current checkout is not on a branch')
 
-  const remote = git(repoRoot, [
-    'for-each-ref', '--format=%(upstream:remotename)', `refs/heads/${branch}`,
-  ])
-  if (remote === '') throw new Error(`current branch '${branch}' has no upstream`)
-  return remote
+  const remotes = new Set(
+    optionalGit(repoRoot, ['remote']).split(/\r?\n/).filter((remote) => remote !== ''),
+  )
+  const configured = [
+    optionalGit(repoRoot, [
+      'for-each-ref', '--format=%(upstream:remotename)', `refs/heads/${branch}`,
+    ]),
+    optionalGit(repoRoot, ['config', '--get', `branch.${branch}.pushRemote`]),
+    optionalGit(repoRoot, ['config', '--get', 'remote.pushDefault']),
+    optionalGit(repoRoot, ['config', '--get', `branch.${branch}.remote`]),
+  ].find((remote) => remotes.has(remote))
+  if (configured !== undefined) return configured
+
+  if (remotes.size === 1) return [...remotes][0]!
+  if (remotes.size === 0) throw new Error('repository has no configured remote')
+  throw new Error(
+    `current branch '${branch}' has no upstream and the repository has multiple remotes`,
+  )
 }

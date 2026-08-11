@@ -36,6 +36,10 @@ const prStatusSchema = z.object({
 const prBodySchema = z.object({ body: z.string() })
 const currentUserSchema = z.object({ login: z.string() })
 const repositorySchema = z.object({ nameWithOwner: z.string().min(1) })
+const repositoryPermissionSchema = z.object({
+  permission: z.string(),
+  role_name: z.string().nullable().optional(),
+})
 const labelListSchema = z.array(z.object({ name: z.string() }))
 
 const workflowRunSchema = z.object({
@@ -83,17 +87,7 @@ export type RollupEntry = z.infer<typeof rollupEntrySchema>
 export type GithubWorkflowRun = z.infer<typeof workflowRunSchema>
 type GithubIssue = z.infer<typeof githubIssueSchema>
 
-const WRITE_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
-
-function normalizeAuthor(
-  author: { login: string } | null,
-  association: string,
-): ForgeAuthor {
-  return {
-    login: author?.login ?? '(unknown)',
-    hasWriteAccess: author !== null && WRITE_ASSOCIATIONS.has(association),
-  }
-}
+const WRITE_PERMISSIONS = new Set(['write', 'maintain', 'admin'])
 
 function schemaPath(path: PropertyKey[]): string {
   if (path.length === 0) return '(root)'
@@ -251,6 +245,56 @@ export function createGithubForge(
     })()
     return issueQueueRepositoryPromise
   }
+
+  const authorPermissionCache = new Map<string, Promise<boolean>>()
+  const normalizeAuthor = async (author: { login: string } | null): Promise<ForgeAuthor> => {
+    if (author === null) return { login: '(unknown)', hasWriteAccess: false }
+    const repository = await issueQueueRepository()
+    const cacheKey = `${repository.toLowerCase()}\0${author.login.toLowerCase()}`
+    let permissionPromise = authorPermissionCache.get(cacheKey)
+    if (permissionPromise === undefined) {
+      permissionPromise = (async () => {
+        const encodedRepository = repository.split('/').map(encodeURIComponent).join('/')
+        const args = [
+          'api', `repos/${encodedRepository}/collaborators/${encodeURIComponent(author.login)}/permission`,
+        ]
+        try {
+          const data = parseGhJson(
+            args,
+            await checkedGh(repoRoot, args),
+            repositoryPermissionSchema,
+          )
+          return WRITE_PERMISSIONS.has(data.permission.toLowerCase())
+            || (data.role_name !== undefined
+              && data.role_name !== null
+              && WRITE_PERMISSIONS.has(data.role_name.toLowerCase()))
+        } catch (error) {
+          // Missing collaborators and transient permission lookup failures are both
+          // untrusted. Rate limits retain their reset signal so the loop can wait.
+          if (error instanceof ForgeRateLimitError) throw error
+          return false
+        }
+      })()
+      authorPermissionCache.set(cacheKey, permissionPromise)
+    }
+    try {
+      return { login: author.login, hasWriteAccess: await permissionPromise }
+    } catch (error) {
+      authorPermissionCache.delete(cacheKey)
+      throw error
+    }
+  }
+
+  const normalizeIssue = async (issue: GithubIssue): Promise<ForgeIssue> => ({
+    number: issue.number,
+    state: issue.state === 'OPEN' ? 'open' : 'closed',
+    title: issue.title,
+    body: issue.body,
+    author: await normalizeAuthor(issue.author),
+    labels: issue.labels.map((label) => label.name),
+    assignees: issue.assignees.map((assignee) => assignee.login),
+    updatedAt: issue.updatedAt,
+  })
 
   return {
     issueClosingCommitMessage(message: string, issueNumber: number): string {
@@ -435,10 +479,10 @@ export function createGithubForge(
       ]
       const stdout = await checkedGh(repoRoot, args)
       const data = parseGhJson(args, stdout, issueCommentsSchema)
-      return data.comments.map((comment) => ({
+      return Promise.all(data.comments.map(async (comment) => ({
         body: comment.body,
-        author: normalizeAuthor(comment.author, comment.authorAssociation),
-      }))
+        author: await normalizeAuthor(comment.author),
+      })))
     },
 
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
@@ -448,7 +492,7 @@ export function createGithubForge(
         '--label', label, '--limit', '200',
         '--json', 'number,state,title,body,author,authorAssociation,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
-      return parseGhJson(args, stdout, openGithubIssueListSchema).map(normalizeIssue)
+      return Promise.all(parseGhJson(args, stdout, openGithubIssueListSchema).map(normalizeIssue))
     },
 
     async listClosedIssues(label: string): Promise<ForgeIssue[]> {
@@ -458,7 +502,7 @@ export function createGithubForge(
         '--label', label, '--limit', '200',
         '--json', 'number,state,title,body,author,authorAssociation,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
-      return parseGhJson(args, stdout, closedGithubIssueListSchema).map(normalizeIssue)
+      return Promise.all(parseGhJson(args, stdout, closedGithubIssueListSchema).map(normalizeIssue))
     },
 
     async assignIssue(issueNumber: number, user: string): Promise<void> {
@@ -495,18 +539,5 @@ export function createGithubForge(
         'issue', 'close', String(issueNumber), '--repo', repository, '--comment', comment,
       ])
     },
-  }
-}
-
-function normalizeIssue(issue: GithubIssue): ForgeIssue {
-  return {
-    number: issue.number,
-    state: issue.state === 'OPEN' ? 'open' : 'closed',
-    title: issue.title,
-    body: issue.body,
-    author: normalizeAuthor(issue.author, issue.authorAssociation),
-    labels: issue.labels.map((label) => label.name),
-    assignees: issue.assignees.map((assignee) => assignee.login),
-    updatedAt: issue.updatedAt,
   }
 }

@@ -277,7 +277,7 @@ export function createLoop(deps: LoopDeps) {
 
     const branch = branchName(taskId)
     const remote = currentBranchRemote(paths.repoRoot)
-    gitIn(worktree, ['push', '--quiet', remote, branch])
+    gitIn(worktree, ['push', '--quiet', '--set-upstream', remote, branch])
     const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
     await forge.commentIssue(issueNumber,
       `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}`)
@@ -470,8 +470,12 @@ export function createLoop(deps: LoopDeps) {
     return false
   }
 
-  function dequeueNext(): QueueEntry | undefined {
-    const first = dequeueBacklog(queueFile)
+  function dequeueNext(remoteOperationsAvailable = true): QueueEntry | undefined {
+    const first = dequeueBacklog(queueFile, (line) => {
+      if (remoteOperationsAvailable) return true
+      const taskId = line.split(':', 1)[0]
+      return taskId !== undefined && issueNumberForTask(paths, taskId) === undefined
+    })
     if (first === undefined) return undefined
     const sep = first.indexOf(':')
     const depthRaw = sep === -1 ? '' : first.slice(sep + 1)
@@ -979,7 +983,7 @@ export function createLoop(deps: LoopDeps) {
     let remote: string
     try {
       remote = currentBranchRemote(paths.repoRoot)
-      execFileSync('git', ['push', '--quiet', remote, branch], {
+      execFileSync('git', ['push', '--quiet', '--set-upstream', remote, branch], {
         cwd: paths.repoRoot,
         stdio: 'ignore',
         windowsHide: true,
@@ -1675,7 +1679,7 @@ export function createLoop(deps: LoopDeps) {
 
       for (;;) {
         if (running >= config.maxParallel) break
-        const entry = dequeueNext()
+        const entry = dequeueNext(remoteOperationsAvailable)
         if (entry === undefined) break
         writeFileSync(join(scannedDir, `${entry.taskId}.depth`), `${entry.depth}\n`)
 
@@ -1701,10 +1705,12 @@ export function createLoop(deps: LoopDeps) {
         } catch (error) {
           const issueNumber = issueNumberForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumber !== undefined) {
+            let released = false
             if (remoteOperationsAvailable) {
               try {
                 if (cachedUser === undefined) cachedUser = await forge.currentUser()
                 await releaseIssueClaim(forge, issueNumber, cachedUser)
+                released = true
                 event('Released', shortTaskId(entry.taskId), 'startup failed')
               } catch (releaseError) {
                 if (!(releaseError instanceof ForgeRateLimitError)) {
@@ -1714,7 +1720,11 @@ export function createLoop(deps: LoopDeps) {
             }
             try {
               cleanupTask(paths, entry.taskId, undefined, false)
-              dropClaimedTaskMaterialization(paths, entry.taskId)
+              if (released) {
+                dropClaimedTaskMaterialization(paths, entry.taskId)
+              } else {
+                enqueueTask(paths, entry.taskId, entry.depth)
+              }
             } catch (cleanupError) {
               event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)
             }
