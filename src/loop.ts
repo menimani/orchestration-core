@@ -90,6 +90,7 @@ export function createLoop(deps: LoopDeps) {
   const runBranchFile = join(paths.queueDir, 'run-branch.txt')
   const decisionsFile = join(paths.queueDir, 'decisions.txt')
   const prUrlFile = join(paths.queueDir, 'pr-url.txt')
+  const totalTaskCountFile = join(paths.queueDir, 'total-task-count.txt')
 
   mkdirSync(scannedDir, { recursive: true })
   ensureBacklog(queueFile)
@@ -426,14 +427,37 @@ export function createLoop(deps: LoopDeps) {
     return readFileSync(queueFile, 'utf8').split(/\r?\n/).filter((line) => line !== '').length
   }
 
-  // Merged/failed tasks are finished and do not count, so status files from past
-  // sessions cannot consume MAX_TOTAL_TASKS and block new task generation.
+  // This is a cumulative session counter, not a snapshot of active local work. A
+  // generated task continues to consume the growth budget after it finishes or is
+  // published to a remote issue queue. The fallback seeds upgrades from current-session
+  // active and scanned state; cleanup writes an explicit zero so old tasks are not recounted.
   function countAllTasks(): number {
-    const active = listTaskIds(paths).filter((taskId) => {
+    if (existsSync(totalTaskCountFile)) return readCount(totalTaskCountFile)
+    const taskIds = new Set(listTaskIds(paths).filter((taskId) => {
       const status = readStatus(paths, taskId)?.status
       return status === 'running' || status === 'completed'
-    }).length
-    return queueLength() + active
+    }))
+    if (existsSync(queueFile)) {
+      for (const line of readFileSync(queueFile, 'utf8').split(/\r?\n/)) {
+        const taskId = line.split(':', 1)[0]
+        if (taskId !== undefined && taskId !== '') taskIds.add(taskId)
+      }
+    }
+    for (const name of readdirSync(scannedDir)) {
+      taskIds.add(name.replace(/\.(?:depth|failed)$/, ''))
+    }
+    writeFileSync(totalTaskCountFile, `${taskIds.size}\n`)
+    return taskIds.size
+  }
+
+  function recordPublishedTask(): void {
+    writeFileSync(totalTaskCountFile, `${countAllTasks() + 1}\n`)
+  }
+
+  function hasTaskCapacity(taskId: string): boolean {
+    if (countAllTasks() < config.maxTotalTasks) return true
+    event('WARN', `task limit ${config.maxTotalTasks} ignored findings from ${shortTaskId(taskId)}`)
+    return false
   }
 
   function dequeueNext(): QueueEntry | undefined {
@@ -530,11 +554,6 @@ export function createLoop(deps: LoopDeps) {
       event('WARN', `growth depth limit ${config.maxGrowthDepth} ignored findings from ${shortTaskId(taskId)}`)
       return { findings, destinations, reconciled: true }
     }
-    if (countAllTasks() >= config.maxTotalTasks) {
-      event('WARN', `task limit ${config.maxTotalTasks} ignored findings from ${shortTaskId(taskId)}`)
-      return { findings, destinations, reconciled: true }
-    }
-
     if (config.issueQueueEnabled) {
       let pendingFindings = findings
       if (isReview) {
@@ -551,15 +570,18 @@ export function createLoop(deps: LoopDeps) {
         : pendingFindings
       let reconciled = true
       for (const desc of descriptions) {
+        if (!hasTaskCapacity(taskId)) continue
         const effort = isReview ? 'high' : undefined
         const title = combinesReviewFindings ? `Review round fixes (${taskId})` : undefined
         try {
           const result = await publishFinding(
             forge, paths, desc, taskId, effort, title,
             combinesReviewFindings ? pendingFindings : undefined,
+            newDepth,
           )
           destinations.push(`#${result.issueNumber}`)
           if (result.outcome === 'created') {
+            recordPublishedTask()
             event('Filed', `#${result.issueNumber}`, `by ${shortTaskId(taskId)}`)
           }
         } catch (error) {
@@ -599,6 +621,7 @@ export function createLoop(deps: LoopDeps) {
       ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
       : pendingFindings
     for (const desc of descriptions) {
+      if (!hasTaskCapacity(taskId)) continue
       const existing = existingTaskIdForDesc(paths, 'auto', desc)
       const needsFreshTask = existing !== undefined
         && readStatus(paths, existing)?.status === 'merged'
@@ -638,7 +661,8 @@ export function createLoop(deps: LoopDeps) {
         writeFileSync(effortFile, 'high\n')
       }
       try {
-        enqueueTask(paths, newId, newDepth)
+        const enqueue = enqueueTask(paths, newId, newDepth)
+        if (enqueue.outcome === 'enqueued') recordPublishedTask()
       } catch {
         // an unenqueueable finding is not worth stopping the poll for
       }
@@ -881,6 +905,7 @@ export function createLoop(deps: LoopDeps) {
       mkdirSync(scannedDir, { recursive: true })
     }
     writeFileSync(scanCountFile, '0\n')
+    writeFileSync(totalTaskCountFile, '0\n')
   }
 
   /**
