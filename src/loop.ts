@@ -1411,6 +1411,12 @@ export function createLoop(deps: LoopDeps) {
         log(`FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.log`)
         appendFileSync(join(paths.queueDir, `failed-${cycleNow}`), `${taskId}\n`)
+        // Failures can arrive while the cycle gate is waiting on CI or review. The
+        // completed marker predates this loss, so force the gate to report it and
+        // verify the branch again before promotion.
+        if (cycleNow > 0) {
+          rmSync(join(paths.queueDir, `cycle-complete-${cycleNow}`), { force: true })
+        }
         writeFileSync(failedFlag, '')
         burstFailures += 1
       }
