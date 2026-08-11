@@ -35,6 +35,9 @@ import { currentBranchRemote } from './gitRemote.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import { execShellSync } from './shell.ts'
 import {
+  updateCoreBeforeCycle, type CoreUpdateOutcome,
+} from './coreUpdate.ts'
+import {
   claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, confirmIssuePromotion,
   dropClaimedTaskMaterialization,
   heartbeatIssueForTask,
@@ -60,6 +63,7 @@ export interface LoopDeps {
   now: () => Date
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   enqueueTask?: typeof enqueueTask
+  updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
 }
 
 interface QueueEntry {
@@ -121,6 +125,14 @@ export function createLoop(deps: LoopDeps) {
     }
     log(formatEventLine(name, subject, detail))
   }
+
+  const updateCore = deps.updateCoreBeforeCycle ?? ((cycle: number) =>
+    updateCoreBeforeCycle(
+      paths,
+      config,
+      cycle,
+      (name, subject, detail = '') => event(name, subject, detail),
+    ))
 
   function compactEvent(name: string, subject: string, detail: string): void {
     log(`${formatEventLine(name, subject)}  ${detail}`)
@@ -1191,7 +1203,7 @@ export function createLoop(deps: LoopDeps) {
   /** The inter-cycle gate and idle scan dispatch. */
   async function triggerScanIfIdle(
     knownOpenFindings?: readonly ForgeIssue[] | null,
-  ): Promise<'continue' | 'done'> {
+  ): Promise<'continue' | 'done' | 'restart'> {
     if (!config.scanEnabled) return 'continue'
     if (countRunning() > 0 || queueLength() > 0) return 'continue'
     if (isScanRunning()) return 'continue'
@@ -1351,6 +1363,9 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const nextCycle = currentScans + 1
+    // This is the only safe restart boundary: the previous gate is closed, no task is
+    // running, and the next cycle has not yet consumed its number or started a scan.
+    if (await updateCore(nextCycle) === 'restart') return 'restart'
     writeFileSync(scanCountFile, `${nextCycle}\n`)
     const nScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
 
@@ -1383,8 +1398,8 @@ export function createLoop(deps: LoopDeps) {
     return 'continue'
   }
 
-  /** One poll iteration. Returns 'stopped' | 'done' | 'continue'. */
-  async function poll(): Promise<'stopped' | 'done' | 'continue'> {
+  /** One poll iteration. Returns 'stopped' | 'done' | 'continue' | 'restart'. */
+  async function poll(): Promise<'stopped' | 'done' | 'continue' | 'restart'> {
     const currentBranch = git(['branch', '--show-current']).trim()
     const recordedBranch = existsSync(runBranchFile)
       ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
@@ -1739,6 +1754,7 @@ export function createLoop(deps: LoopDeps) {
           config.issueQueueEnabled ? openFindings : undefined,
         )
         if (outcome === 'done') return 'done'
+        if (outcome === 'restart') return 'restart'
       }
     }
 
@@ -1757,7 +1773,7 @@ export function createLoop(deps: LoopDeps) {
     return 'continue'
   }
 
-  async function guardedPoll(): Promise<'stopped' | 'done' | 'continue'> {
+  async function guardedPoll(): Promise<'stopped' | 'done' | 'continue' | 'restart'> {
     try {
       return await poll()
     } catch (error) {

@@ -565,6 +565,9 @@ async function runLoopDaemon(
 
   try {
     writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+    log(formatEventLine(
+      'Mode', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
+    ))
 
     // A stale stop file is cleared only after the PID lock is taken, so another
     // instance's signal is never removed.
@@ -599,6 +602,18 @@ async function runLoopDaemon(
       if (outcome !== 'continue') {
         wake.cancel()
         await wake.outcome
+        if (outcome === 'restart') {
+          // Node has no portable exec(2). Release ownership first, then replace this
+          // daemon with the same command, environment, working tree, and stdio.
+          releaseDaemonState()
+          const replacement = spawn(process.execPath, process.argv.slice(1), {
+            cwd: paths.repoRoot,
+            env: process.env,
+            stdio: 'inherit',
+            windowsHide: true,
+          })
+          replacement.unref()
+        }
         return 0
       }
       await wake.outcome

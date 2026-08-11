@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ReasoningEffort } from './adapters/runner.ts'
+import { PACKAGE_ROOT } from './paths.ts'
 
 const MAX_POLL_INTERVAL_SECONDS = 30 * 60
 
@@ -43,6 +46,25 @@ export interface LoopConfig {
   workerMode: boolean
   /** Hours an in-progress issue may sit unupdated before its lease is reaped. */
   issueLeaseHours: number
+  /** Pull the consumed orchestration subtree at the safe pre-cycle boundary. */
+  coreAutoUpdate: boolean
+  /** Git remote, URL, or owner/repository shorthand for the shared core. */
+  upstreamRemote: string
+  /** Branch fetched and pulled into the shared-core subtree. */
+  upstreamBranch: string
+}
+
+interface PackageMetadata {
+  upstreamRepo?: unknown
+}
+
+function defaultUpstreamRemote(): string {
+  const metadata = JSON.parse(
+    readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'),
+  ) as PackageMetadata
+  return typeof metadata.upstreamRepo === 'string' && metadata.upstreamRepo.trim() !== ''
+    ? metadata.upstreamRepo.trim()
+    : ''
 }
 
 function num(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -128,5 +150,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     issueQueueEnabled,
     workerMode,
     issueLeaseHours: num(env, 'ISSUE_LEASE_HOURS', 3),
+    coreAutoUpdate: bool(env, 'CORE_AUTO_UPDATE', true),
+    upstreamRemote: str(env, 'UPSTREAM_REMOTE', defaultUpstreamRemote()),
+    upstreamBranch: str(env, 'UPSTREAM_BRANCH', 'main'),
   }
 }

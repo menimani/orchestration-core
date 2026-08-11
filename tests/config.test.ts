@@ -32,6 +32,9 @@ describe('loadConfig', () => {
       runner: 'codex',
       project: '',
       workerMode: false,
+      coreAutoUpdate: true,
+      upstreamRemote: 'menimani/orchestration-core',
+      upstreamBranch: 'main',
     })
   })
 
@@ -44,6 +47,9 @@ describe('loadConfig', () => {
       REVIEW_EFFORT: 'low',
       TASK_EFFORT: 'high',
       TASK_MODEL: 'task-model',
+      CORE_AUTO_UPDATE: 'false',
+      UPSTREAM_REMOTE: 'shared-core',
+      UPSTREAM_BRANCH: 'stable',
     })
     expect(config.maxParallel).toBe(12)
     expect(config.reviewEveryNCycles).toBe(3)
@@ -52,6 +58,9 @@ describe('loadConfig', () => {
     expect(config.reviewEffort).toBe('low')
     expect(config.taskEffort).toBe('high')
     expect(config.taskModel).toBe('task-model')
+    expect(config.coreAutoUpdate).toBe(false)
+    expect(config.upstreamRemote).toBe('shared-core')
+    expect(config.upstreamBranch).toBe('stable')
   })
 
   it('clamps SCAN_PARALLEL to the four defined checklist groups', () => {
