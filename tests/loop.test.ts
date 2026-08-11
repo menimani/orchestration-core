@@ -147,6 +147,10 @@ afterEach(() => {
 })
 
 describe('daemon startup', () => {
+  function fixturePackageRoot(): string {
+    return join(repoRoot, 'orchestration', 'ts')
+  }
+
   function writeOrchestrationManifests(lockVersion: string): void {
     mkdirSync(join(repoRoot, 'orchestration', 'ts'), { recursive: true })
     writeFileSync(join(repoRoot, 'orchestration', 'ts', 'package.json'), JSON.stringify({
@@ -167,7 +171,7 @@ describe('daemon startup', () => {
     syncOrchestrationDepsAtStartup(
       paths,
       (name, subject) => logged.push(`${name} ${subject}`),
-      { install },
+      { install, packageRoot: fixturePackageRoot() },
     )
 
     expect(install).toHaveBeenCalledOnce()
@@ -181,15 +185,15 @@ describe('daemon startup', () => {
 
   it('reinstalls after a lockfile change and retries a failed upgrade on restart', () => {
     writeOrchestrationManifests('{"lockfileVersion":3}\n')
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: successfulInstall })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: successfulInstall, packageRoot: fixturePackageRoot() })
     writeFileSync(
       join(repoRoot, 'orchestration', 'ts', 'package-lock.json'),
       '{"lockfileVersion":3,"packages":{"node_modules/zod":{"version":"4.5.0"}}}\n',
     )
     const failedInstall = vi.fn(() => { throw new Error('registry unavailable') })
 
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall })
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
 
     expect(failedInstall).toHaveBeenCalledTimes(2)
   })
