@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
   branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId,
-  orchPaths, statusFile, type OrchPaths,
+  orchPaths, packageScriptCommand, statusFile, type OrchPaths,
 } from '../src/paths.ts'
 import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
 
@@ -95,6 +95,18 @@ describe('status files', () => {
   it('derives the final message path from the log path', () => {
     expect(finalMessageFile(paths, 'task-alpha'))
       .toBe(join(paths.logsDir, 'task-alpha.final'))
+  })
+})
+
+describe('package script commands', () => {
+  it('runs scripts directly when the package is the repository root', () => {
+    expect(packageScriptCommand(repoRoot, 'loop-status', repoRoot))
+      .toBe('npm run loop-status')
+  })
+
+  it('selects the package directory when it is installed as a subtree', () => {
+    expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'ts')))
+      .toBe('npm run -C orchestration/ts stop')
   })
 })
 
