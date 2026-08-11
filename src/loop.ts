@@ -31,7 +31,8 @@ import { currentBranchRemote } from './gitRemote.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import { execShellSync } from './shell.ts'
 import {
-  claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, dropClaimedTaskMaterialization,
+  claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, confirmIssuePromotion,
+  dropClaimedTaskMaterialization,
   heartbeatIssueForTask,
   fingerprintOf, issueMergeComment,
   issueNumberForTask, issuePromotionForIssue, publishFinding, reapStaleLeases,
@@ -1354,6 +1355,38 @@ export function createLoop(deps: LoopDeps) {
     const mergeAttempts = new Set<string>()
     const locallyRunningIssues = new Set<number>()
 
+    const reconcileMergedIssue = async (
+      taskId: string,
+      linkedIssue: number,
+      mergeCommit: string,
+      runBranch: string,
+    ): Promise<boolean> => {
+      try {
+        recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
+        const promotion = issuePromotionForIssue(paths, linkedIssue)
+        if (promotion === undefined) throw new Error('promotion record was not persisted')
+        if (!remoteOperationsAvailable || promotion.commentConfirmed === true) return true
+
+        const expectedComment = issueMergeComment(taskId, mergeCommit, runBranch)
+        let comments = await forge.listIssueComments(linkedIssue)
+        if (!comments.includes(expectedComment)) {
+          await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
+          comments = await forge.listIssueComments(linkedIssue)
+        }
+        if (!comments.includes(expectedComment)) {
+          throw new Error('merge comment is not visible after publishing it')
+        }
+        confirmIssuePromotion(paths, linkedIssue)
+        return true
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          event('WARN', `could not reconcile issue #${linkedIssue} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+        }
+        writeFileSync(stopFile, '')
+        return false
+      }
+    }
+
     const mergeCompletedTask = async (taskId: string): Promise<void> => {
       if (!config.autoMerge || mergeAttempts.has(taskId)) return
       mergeAttempts.add(taskId)
@@ -1375,22 +1408,7 @@ export function createLoop(deps: LoopDeps) {
         writeFileSync(mergeFailureFile, '0\n')
         if (linkedIssue !== undefined) {
           const runBranch = git(['branch', '--show-current']).trim()
-          try {
-            recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
-            if (remoteOperationsAvailable) {
-              await commentOnIssueMerge(
-                forge,
-                linkedIssue,
-                taskId,
-                mergeCommit,
-                runBranch,
-              )
-            }
-          } catch (error) {
-            if (!(error instanceof ForgeRateLimitError)) {
-              event('WARN', `could not link issue #${linkedIssue} to merge: ${errorSummary(error)}`)
-            }
-          }
+          await reconcileMergedIssue(taskId, linkedIssue, mergeCommit, runBranch)
         }
         // A task delegated while the gate was waiting merges commits the gate has
         // already pushed past; clearing the flag makes the gate push and verify
@@ -1413,6 +1431,19 @@ export function createLoop(deps: LoopDeps) {
         ? (await refreshTask(paths, taskId))?.status
         : before.status
       if (status === undefined) continue
+
+      if (status === 'merged' && config.issueQueueEnabled) {
+        const mergedStatus = readStatus(paths, taskId)
+        const linkedIssue = issueNumberForTask(paths, taskId)
+        if (linkedIssue !== undefined
+          && mergedStatus?.merge_commit !== undefined
+          && mergedStatus.run_branch !== undefined) {
+          const reconciled = await reconcileMergedIssue(
+            taskId, linkedIssue, mergedStatus.merge_commit, mergedStatus.run_branch,
+          )
+          if (!reconciled) break
+        }
+      }
 
       const linkedIssue = status === 'running' ? issueNumberForTask(paths, taskId) : undefined
       if (linkedIssue !== undefined && remoteOperationsAvailable) {
@@ -1492,6 +1523,7 @@ export function createLoop(deps: LoopDeps) {
       // poll retries instead of wedging the cycle gate forever.
       if (status === 'completed' && !config.workerMode) {
         await mergeCompletedTask(taskId)
+        if (existsSync(stopFile)) break
       }
     }
 

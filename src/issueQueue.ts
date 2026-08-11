@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import {
@@ -703,6 +705,7 @@ export interface IssuePromotion {
   issueNumber: number
   mergeCommit: string
   runBranch: string
+  commentConfirmed?: boolean
 }
 
 function promotionDir(paths: OrchPaths): string {
@@ -743,10 +746,38 @@ export function recordIssuePromotion(
   const issueNumber = issueNumberForTask(paths, taskId)
   if (issueNumber === undefined) return undefined
   mkdirSync(promotionDir(paths), { recursive: true })
-  writeFileSync(promotionFile(paths, issueNumber), `${JSON.stringify({
-    taskId, issueNumber, mergeCommit, runBranch,
-  })}\n`)
+  const file = promotionFile(paths, issueNumber)
+  const temporaryFile = join(promotionDir(paths), `.${issueNumber}.${process.pid}.tmp`)
+  const existing = issuePromotionForIssue(paths, issueNumber)
+  const commentConfirmed = existing?.taskId === taskId
+    && existing.mergeCommit === mergeCommit
+    && existing.runBranch === runBranch
+    && existing.commentConfirmed === true
+  try {
+    writeFileSync(temporaryFile, `${JSON.stringify({
+      taskId, issueNumber, mergeCommit, runBranch,
+      ...(commentConfirmed ? { commentConfirmed: true } : {}),
+    })}\n`)
+    renameSync(temporaryFile, file)
+  } finally {
+    rmSync(temporaryFile, { force: true })
+  }
   return issueNumber
+}
+
+/** Persist that the exact merge marker is visible on the forge. */
+export function confirmIssuePromotion(paths: OrchPaths, issueNumber: number): void {
+  const promotion = issuePromotionForIssue(paths, issueNumber)
+  if (promotion === undefined || promotion.commentConfirmed === true) return
+  const temporaryFile = join(promotionDir(paths), `.${issueNumber}.${process.pid}.tmp`)
+  try {
+    writeFileSync(temporaryFile, `${JSON.stringify({
+      ...promotion, commentConfirmed: true,
+    })}\n`)
+    renameSync(temporaryFile, promotionFile(paths, issueNumber))
+  } finally {
+    rmSync(temporaryFile, { force: true })
+  }
 }
 
 async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Promise<void> {
@@ -969,9 +1000,12 @@ export async function reapStaleLeases(
     if (ageMs < leaseHours * 3600 * 1000) continue
     const promotion = issuePromotionForIssue(paths, issue.number)
     if (promotion !== undefined) {
-      await commentOnIssueMerge(
-        forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
-      )
+      if (promotion.commentConfirmed !== true) {
+        await commentOnIssueMerge(
+          forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
+        )
+        confirmIssuePromotion(paths, issue.number)
+      }
       continue
     }
     if (await hasMergeMarker(issue)) {

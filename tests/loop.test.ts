@@ -9,8 +9,8 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
-  buildIssueBody, recordIssueForTask, recordIssuePromotion, LABEL_FINDING, LABEL_IN_PROGRESS,
-  LABEL_READY,
+  buildIssueBody, issuePromotionForIssue, recordIssueForTask, recordIssuePromotion,
+  LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop, formatEventLine, type Loop } from '../src/loop.ts'
@@ -1398,6 +1398,72 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
+  it('rebuilds a lost promotion record from merged status before stale-lease reaping', async () => {
+    const taskId = '20260811_120000_065_auto-reconcile-merge'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'stale merged fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+
+    expect(await loop.poll()).toBe('continue')
+    const mergedStatus = readStatus(paths, taskId)
+    expect(mergedStatus).toMatchObject({
+      status: 'merged',
+      run_branch: 'main',
+    })
+    expect(mergedStatus?.merge_commit).toBe(git(['rev-parse', 'HEAD']))
+
+    rmSync(join(paths.queueDir, 'issue-promotion', `${issueNumber}.json`))
+    fakeForge.issueComments.delete(issueNumber)
+    const issue = fakeForge.issues.get(issueNumber)
+    if (issue !== undefined) issue.updatedAt = '2026-08-01T00:00:00.000Z'
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({
+      taskId,
+      issueNumber,
+      mergeCommit: mergedStatus?.merge_commit,
+      runBranch: 'main',
+      commentConfirmed: true,
+    })
+    expect(fakeForge.issueComments.get(issueNumber)).toHaveLength(1)
+    expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
+  })
+
+  it('stops before reaping when a post-merge comment cannot be confirmed', async () => {
+    const taskId = '20260811_120000_066_auto-unconfirmed-merge'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'stale merged fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    const issue = fakeForge.issues.get(issueNumber)
+    if (issue !== undefined) issue.updatedAt = '2026-08-01T00:00:00.000Z'
+    recordIssueForTask(paths, taskId, issueNumber)
+    fakeForge.commentIssue = async () => {
+      throw new Error('comment unavailable')
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'merged', run_branch: 'main' })
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
+    expect(logText()).toContain(`could not reconcile issue #${issueNumber} after merging 066_auto`)
+  })
+
   it('retries a failed automerge on the next poll and lets the cycle gate proceed', async () => {
     const taskId = '20260810_040800_064_auto-retry-merge'
     initializeGitRepo()
