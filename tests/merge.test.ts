@@ -233,6 +233,26 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
+  it('runs checks against the task merged with intervening run-branch commits', async () => {
+    const taskId = '20260808_000000_014_user-combined-check'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(repoRoot, 'run.txt'), 'newer run work\n')
+    git(repoRoot, ['add', 'run.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add newer run work'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'full',
+      project: stubProject,
+      testCmd: 'node -e "const fs=require(\'node:fs\'); process.exit(fs.existsSync(\'run.txt\') && fs.existsSync(\'20260808_000000_014_user-combined-check.txt\') ? 1 : 0)"',
+    })).rejects.toThrow(/Tests failed/)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
   it('throws MergeError instances so callers can count merge failures', async () => {
     const taskId = '20260808_000000_007_user-error-type'
     await makeCompletedTask(taskId)

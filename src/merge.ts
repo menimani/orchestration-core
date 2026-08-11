@@ -346,17 +346,35 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     )
   }
 
-  io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
-  try {
-    io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
-  } catch {
-    // an empty inspection diff is fine
-  }
-  runMergeChecks(worktree, currentBranch, options, io)
-
   const mergeMessage = options.closesIssue === undefined
     ? `Merge ${taskId} via orchestration`
     : `Merge ${taskId} via orchestration (closes #${options.closesIssue})`
+  const prospectiveWorktree = join(
+    paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
+  )
+  try {
+    git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', prospectiveWorktree, currentBranch])
+    try {
+      git(prospectiveWorktree, ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage])
+    } catch {
+      try {
+        git(prospectiveWorktree, ['merge', '--abort'])
+      } catch {
+        // nothing to abort
+      }
+      throw new MergeError('A merge conflict occurred. Rebase the worktree, then retry the merge.')
+    }
+    io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
+    try {
+      io.out(git(prospectiveWorktree, ['diff', `${currentBranch}...HEAD`]))
+    } catch {
+      // an empty inspection diff is fine
+    }
+    runMergeChecks(prospectiveWorktree, currentBranch, options, io)
+  } finally {
+    removeTemporaryWorktree(paths, prospectiveWorktree)
+  }
+
   try {
     git(paths.repoRoot, ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage])
   } catch {
