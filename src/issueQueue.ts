@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import {
@@ -10,6 +12,7 @@ import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
 } from './tasks.ts'
+import { frameUntrustedText } from './templates.ts'
 
 // The issue queue: scan findings become forge issues, workers claim them, and the
 // merge that lands a fix closes its issue through the promotion PR. This is the
@@ -22,6 +25,7 @@ export const LABEL_READY = 'loop:ready'
 export const LABEL_IN_PROGRESS = 'loop:in-progress'
 export const LABEL_MERGE_READY = 'loop:merge-ready'
 export const LABEL_MERGE_FAILED = 'loop:merge-failed'
+export const LABEL_UNTRUSTED_AUTHOR = 'loop:untrusted-author'
 const LIFECYCLE_LABELS = [
   LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
 ] as const
@@ -170,10 +174,12 @@ export function buildIssueBody(
   effort?: string,
   fingerprints: string[] = [fingerprintOf(description)],
   inspect = false,
+  depth?: number,
 ): string {
   return [
     ...[...new Set(fingerprints)].map((fingerprint) => `Fingerprint: ${fingerprint}`),
     `Parent: ${parentTaskId}`,
+    ...(depth !== undefined ? [`Depth: ${depth}`] : []),
     ...(effort !== undefined ? [`Effort: ${effort}`] : []),
     ...(inspect ? ['Inspect: true'] : []),
     '',
@@ -189,6 +195,7 @@ export interface ParsedIssue {
   fingerprints: string[]
   effort: string | undefined
   inspect: boolean
+  depth: number | undefined
   requirement: string
 }
 
@@ -199,6 +206,8 @@ export function parseIssueBody(body: string): ParsedIssue | undefined {
   const fingerprint = fingerprints[0]
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const inspect = lines.includes('Inspect: true')
+  const depthText = lines.find((line) => line.startsWith('Depth: '))?.slice('Depth: '.length)
+  const depth = depthText !== undefined && /^\d+$/.test(depthText) ? Number(depthText) : undefined
   const requirementStart = lines.indexOf('## Requirement')
   if (fingerprint === undefined || requirementStart === -1) return undefined
   const requirementLines = lines.slice(requirementStart + 1)
@@ -206,7 +215,7 @@ export function parseIssueBody(body: string): ParsedIssue | undefined {
   if (requirementLines.at(-1)?.startsWith('Heartbeat: ') === true) requirementLines.pop()
   const requirement = requirementLines.join('\n').trim()
   if (requirement === '') return undefined
-  return { fingerprint, fingerprints, effort, inspect, requirement }
+  return { fingerprint, fingerprints, effort, inspect, depth, requirement }
 }
 
 export type PublishResult
@@ -365,6 +374,7 @@ function isReadyToClaim(issue: ForgeIssue): boolean {
     && issue.assignees.length === 0
     && issue.labels.includes(LABEL_READY)
     && !issue.labels.includes(LABEL_IN_PROGRESS)
+    && !issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)
 }
 
 /** Preserve claimed work; otherwise keep the oldest match and close ready duplicates. */
@@ -583,6 +593,7 @@ export async function publishFinding(
   effort?: string,
   titleText = description,
   fingerprintDescriptions?: string[],
+  depth?: number,
 ): Promise<PublishResult> {
   const fingerprints = [...new Set(
     (fingerprintDescriptions ?? [description]).map((finding) => fingerprintOf(finding)),
@@ -596,7 +607,7 @@ export async function publishFinding(
   const title = titleText.length > 90 ? `${titleText.slice(0, 87)}...` : titleText
   const issueNumber = await forge.createIssue({
     title,
-    body: buildIssueBody(description, parentTaskId, effort, fingerprints),
+    body: buildIssueBody(description, parentTaskId, effort, fingerprints, false, depth),
     labels: [LABEL_FINDING, LABEL_READY],
   })
   // The preflight list is not a lock, and post-create listings can lag too. Re-read
@@ -707,6 +718,7 @@ export interface IssuePromotion {
   issueNumber: number
   mergeCommit: string
   runBranch: string
+  commentConfirmed?: boolean
 }
 
 function promotionDir(paths: OrchPaths): string {
@@ -747,10 +759,38 @@ export function recordIssuePromotion(
   const issueNumber = issueNumberForTask(paths, taskId)
   if (issueNumber === undefined) return undefined
   mkdirSync(promotionDir(paths), { recursive: true })
-  writeFileSync(promotionFile(paths, issueNumber), `${JSON.stringify({
-    taskId, issueNumber, mergeCommit, runBranch,
-  })}\n`)
+  const file = promotionFile(paths, issueNumber)
+  const temporaryFile = join(promotionDir(paths), `.${issueNumber}.${process.pid}.tmp`)
+  const existing = issuePromotionForIssue(paths, issueNumber)
+  const commentConfirmed = existing?.taskId === taskId
+    && existing.mergeCommit === mergeCommit
+    && existing.runBranch === runBranch
+    && existing.commentConfirmed === true
+  try {
+    writeFileSync(temporaryFile, `${JSON.stringify({
+      taskId, issueNumber, mergeCommit, runBranch,
+      ...(commentConfirmed ? { commentConfirmed: true } : {}),
+    })}\n`)
+    renameSync(temporaryFile, file)
+  } finally {
+    rmSync(temporaryFile, { force: true })
+  }
   return issueNumber
+}
+
+/** Persist that the exact merge marker is visible on the forge. */
+export function confirmIssuePromotion(paths: OrchPaths, issueNumber: number): void {
+  const promotion = issuePromotionForIssue(paths, issueNumber)
+  if (promotion === undefined || promotion.commentConfirmed === true) return
+  const temporaryFile = join(promotionDir(paths), `.${issueNumber}.${process.pid}.tmp`)
+  try {
+    writeFileSync(temporaryFile, `${JSON.stringify({
+      ...promotion, commentConfirmed: true,
+    })}\n`)
+    renameSync(temporaryFile, promotionFile(paths, issueNumber))
+  } finally {
+    rmSync(temporaryFile, { force: true })
+  }
 }
 
 async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Promise<void> {
@@ -825,7 +865,25 @@ export type ClaimResult
     pendingMerge: boolean
   }
     | { outcome: 'lost-race'; issueNumber: number }
-    | { outcome: 'unparseable'; issueNumber: number }
+    | { outcome: 'untrusted-author'; issueNumber: number; author: string }
+    | { outcome: 'unparseable'; issueNumber: number; reason: string }
+
+async function releasePartialClaim(forge: Forge, issueNumber: number, me: string): Promise<void> {
+  // Release assignment first: ready issues with an assignee are invisible to both
+  // claim polling and stale-lease reaping. The remaining mutations restore the
+  // ordinary ready state even when the failed request took effect remotely.
+  await forge.unassignIssue(issueNumber, me)
+  const current = await forge.getIssue(issueNumber)
+  if (current.state !== 'open') return
+  // Add ready before removing in-progress so another label failure still leaves
+  // the issue visible to stale-lease reconciliation.
+  if (!current.labels.includes(LABEL_READY)) {
+    await forge.addLabel(issueNumber, LABEL_READY)
+  }
+  if (current.labels.includes(LABEL_IN_PROGRESS)) {
+    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+  }
+}
 
 /**
  * Claim one ready issue and materialize it as a local task. Assignment is the
@@ -847,6 +905,16 @@ export async function claimIssue(
     if (!isReadyToClaim(current)) {
       return { outcome: 'lost-race', issueNumber: issue.number }
     }
+    if (!current.author.hasWriteAccess) {
+      if (!current.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
+        await forge.addLabel(issue.number, LABEL_UNTRUSTED_AUTHOR)
+      }
+      return {
+        outcome: 'untrusted-author',
+        issueNumber: issue.number,
+        author: current.author.login,
+      }
+    }
 
     await forge.assignIssue(issue.number, me)
     const afterAssignment = await forge.getIssue(issue.number)
@@ -858,8 +926,20 @@ export async function claimIssue(
       await forge.unassignIssue(issue.number, me)
       return { outcome: 'lost-race', issueNumber: issue.number }
     }
-    await forge.addLabel(issue.number, LABEL_IN_PROGRESS)
-    await forge.removeLabel(issue.number, LABEL_READY)
+    try {
+      await forge.addLabel(issue.number, LABEL_IN_PROGRESS)
+      await forge.removeLabel(issue.number, LABEL_READY)
+    } catch (error) {
+      try {
+        await releasePartialClaim(forge, issue.number, me)
+      } catch (releaseError) {
+        throw new AggregateError(
+          [error, releaseError],
+          `Claim mutation and compensation both failed for issue #${issue.number}`,
+        )
+      }
+      throw error
+    }
 
     // A remote reconciler can still close or relabel the issue because its process
     // does not share this coordinator. Revalidate after every claim mutation and
@@ -875,39 +955,56 @@ export async function claimIssue(
 
     const parsed = parseIssueBody(claimed.body)
     if (parsed === undefined) {
-      // A finding whose body lost its structure cannot become a task; leave it claimed
-      // so it does not bounce between workers, and let a person look.
-      return { outcome: 'unparseable', issueNumber: issue.number }
+      // Quarantine a finding whose body lost its structure. Merge-failed is the existing
+      // terminal queue state: unlike in-progress it is not a lease that stale reaping
+      // may return to the claim path. Keep the assignment and body for inspection.
+      const reason = `Issue #${issue.number} has no parseable requirement. Restore its generated body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`
+      await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
+      await forge.commentIssue(issue.number, reason)
+      await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
+      return { outcome: 'unparseable', issueNumber: issue.number, reason }
     }
 
-    const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)
-    const needsFreshTask = existing !== undefined
-      && readStatus(paths, existing)?.status === 'merged'
-      && !fingerprintOf(parsed.requirement).startsWith('advisory:')
-    const taskId = needsFreshTask
-      ? newTaskId(paths, `auto-${descSlug(parsed.requirement)}`)
-      : taskIdForDesc(paths, 'auto', parsed.requirement)
-    if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', parsed.requirement, taskId)
-    if (!existsSync(specFile(paths, taskId))) {
-      newTaskSpec(paths, taskId)
-      appendRequirements(taskId, parsed.requirement)
-    }
-    if (parsed.effort !== undefined && ['minimal', 'low', 'medium', 'high'].includes(parsed.effort)) {
-      mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
-      writeFileSync(join(paths.queueDir, 'effort', taskId), `${parsed.effort}\n`)
-    }
-    if (parsed.inspect) {
-      mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
-      writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
-    }
-    recordIssueForTask(paths, taskId, issue.number)
-    const enqueue = enqueueTask(paths, taskId, 1)
-    return {
-      outcome: 'claimed',
-      taskId,
-      issueNumber: issue.number,
-      enqueue,
-      pendingMerge: enqueue.outcome === 'already-processed' && enqueue.status === 'completed',
+    try {
+      const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)
+      const needsFreshTask = existing !== undefined
+        && readStatus(paths, existing)?.status === 'merged'
+        && !fingerprintOf(parsed.requirement).startsWith('advisory:')
+      const taskId = needsFreshTask
+        ? newTaskId(paths, `auto-${descSlug(parsed.requirement)}`)
+        : taskIdForDesc(paths, 'auto', parsed.requirement)
+      if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', parsed.requirement, taskId)
+      if (!existsSync(specFile(paths, taskId))) {
+        newTaskSpec(paths, taskId)
+        appendRequirements(taskId, frameUntrustedText(parsed.requirement))
+      }
+      if (parsed.effort !== undefined && ['minimal', 'low', 'medium', 'high'].includes(parsed.effort)) {
+        mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+        writeFileSync(join(paths.queueDir, 'effort', taskId), `${parsed.effort}\n`)
+      }
+      if (parsed.inspect) {
+        mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
+        writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
+      }
+      recordIssueForTask(paths, taskId, issue.number)
+      const enqueue = enqueueTask(paths, taskId, parsed.depth ?? 1)
+      return {
+        outcome: 'claimed',
+        taskId,
+        issueNumber: issue.number,
+        enqueue,
+        pendingMerge: enqueue.outcome === 'already-processed' && enqueue.status === 'completed',
+      }
+    } catch (error) {
+      try {
+        await releasePartialClaim(forge, issue.number, me)
+      } catch (releaseError) {
+        throw new AggregateError(
+          [error, releaseError],
+          `Claim materialization and compensation both failed for issue #${issue.number}`,
+        )
+      }
+      throw error
     }
   })
 }
@@ -927,26 +1024,45 @@ export async function reapStaleLeases(
   locallyRunningIssues: ReadonlySet<number> = new Set(),
   knownOpenFindings?: readonly ForgeIssue[],
   hasMergeMarker: (issue: ForgeIssue) => Promise<boolean> = async (issue) =>
-    (await forge.listIssueComments(issue.number)).some((comment) => /^MERGED: /.test(comment)),
+    (await forge.listIssueComments(issue.number)).some((comment) =>
+      comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
 ): Promise<number[]> {
   const reaped: number[] = []
   const openIssues = knownOpenFindings ?? await forge.listOpenIssues(LABEL_IN_PROGRESS)
   for (const issue of openIssues.filter((candidate) =>
-    candidate.labels.includes(LABEL_IN_PROGRESS))) {
+    candidate.labels.includes(LABEL_IN_PROGRESS)
+      && !candidate.labels.includes(LABEL_MERGE_FAILED))) {
     if (locallyRunningIssues.has(issue.number)) continue
     const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
     if (ageMs < leaseHours * 3600 * 1000) continue
     const promotion = issuePromotionForIssue(paths, issue.number)
     if (promotion !== undefined) {
-      await commentOnIssueMerge(
-        forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
-      )
+      if (promotion.commentConfirmed !== true) {
+        await commentOnIssueMerge(
+          forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
+        )
+        confirmIssuePromotion(paths, issue.number)
+      }
       continue
     }
     if (await hasMergeMarker(issue)) {
       continue
     }
-    for (const assignee of issue.assignees) {
+
+    // The listing is only a candidate snapshot. A heartbeat, quarantine, or new
+    // assignment may land while promotion metadata and comments are checked, so
+    // re-read every part of the lease immediately before changing it.
+    const current = await forge.getIssue(issue.number)
+    const currentAgeMs = now.getTime() - new Date(current.updatedAt).getTime()
+    if (current.state !== 'open'
+      || !current.labels.includes(LABEL_IN_PROGRESS)
+      || current.labels.includes(LABEL_MERGE_FAILED)
+      || currentAgeMs < leaseHours * 3600 * 1000
+      || current.assignees.length !== issue.assignees.length
+      || current.assignees.some((assignee) => !issue.assignees.includes(assignee))) {
+      continue
+    }
+    for (const assignee of current.assignees) {
       await forge.unassignIssue(issue.number, assignee)
     }
     await forge.addLabel(issue.number, LABEL_READY)
@@ -964,4 +1080,8 @@ export async function ensureQueueLabels(forge: Forge): Promise<void> {
   await forge.ensureLabel(LABEL_IN_PROGRESS, 'Claimed loop work; the assignee holds the lease')
   await forge.ensureLabel(LABEL_MERGE_READY, 'Completed worker branch waiting for the merger')
   await forge.ensureLabel(LABEL_MERGE_FAILED, 'Worker branch that the merger could not adopt')
+  await forge.ensureLabel(
+    LABEL_UNTRUSTED_AUTHOR,
+    'Finding authored by an account without repository write access; inspect manually',
+  )
 }

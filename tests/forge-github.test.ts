@@ -20,6 +20,8 @@ const openIssueFixture = {
   state: 'OPEN',
   title: 'Validate forge JSON',
   body: 'Task body',
+  author: { login: 'maintainer-one' },
+  authorAssociation: 'MEMBER',
   labels: [{ name: 'loop:ready', color: 'ffffff' }],
   assignees: [{ login: 'worker-one', databaseId: 10 }],
   updatedAt: '2026-08-10T01:00:00Z',
@@ -27,7 +29,17 @@ const openIssueFixture = {
 }
 
 function forgeReturning(output: unknown): Forge {
-  const command: GithubCommand = async () => JSON.stringify(output)
+  const command: GithubCommand = async (_root, args) => {
+    if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+    if (args[0] === 'api' && args[1]?.includes('/collaborators/')) {
+      const login = args[1].split('/').at(-2)
+      return JSON.stringify({
+        permission: login === 'outside-user' ? 'none' : 'admin',
+        role_name: login === 'outside-user' ? null : 'admin',
+      })
+    }
+    return JSON.stringify(output)
+  }
   return createGithubForge('repo-root', command)
 }
 
@@ -56,6 +68,52 @@ function run(overrides: Partial<GithubWorkflowRun>): GithubWorkflowRun {
     ...overrides,
   }
 }
+
+describe('GitHub issue promotion', () => {
+  it('adds GitHub issue-closing syntax to merge commit messages', () => {
+    const forge = createGithubForge('repo-root')
+
+    expect(forge.issueClosingCommitMessage('Merge task via orchestration', 42)).toBe(
+      'Merge task via orchestration (closes #42)',
+    )
+  })
+})
+
+describe('GitHub pull request bodies', () => {
+  it('fences issue-number-like references when creating a pull request', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return 'https://github.com/example/repo/pull/12\n'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.createPr({
+      branch: 'task/branch',
+      base: 'main',
+      title: 'Generated PR',
+      body: 'Decision #12 remains open',
+      draft: false,
+    })
+
+    expect(calls[0]).toContain('Decision `#12` remains open')
+  })
+
+  it('fences issue-number-like references when updating a pull request', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.updatePr('task/branch', { body: 'Decision #12 remains open' })
+
+    expect(calls[0]).toEqual([
+      'pr', 'edit', 'task/branch', '--body', 'Decision `#12` remains open',
+    ])
+  })
+})
 
 describe('GitHub workflow dispatch correlation', () => {
   it('ignores newer concurrent and same-second runs with another token or ref', () => {
@@ -121,11 +179,135 @@ describe('GitHub upstream issue creation', () => {
   })
 })
 
+describe('GitHub issue queue repository targeting', () => {
+  it('resolves the repository once and passes it on every queue call', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'consumer/project' })
+      if (args[0] === 'api') return JSON.stringify({ permission: 'write' })
+      if (args[0] === 'issue' && args[1] === 'create') {
+        return 'https://github.com/consumer/project/issues/42\n'
+      }
+      if (args[0] === 'issue' && args[1] === 'list') {
+        return JSON.stringify(args.includes('closed')
+          ? [{ ...openIssueFixture, state: 'CLOSED' }]
+          : [openIssueFixture])
+      }
+      if (args[0] === 'issue' && args[1] === 'view') {
+        return JSON.stringify(args.includes('comments')
+          ? { comments: [{
+            body: 'Queue comment', author: { login: 'maintainer-one' },
+            authorAssociation: 'MEMBER',
+          }] }
+          : openIssueFixture)
+      }
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.ensureLabel('loop:finding', 'Finding')
+    await forge.createIssue({ title: 'Finding', body: 'Body', labels: ['loop:finding'] })
+    await forge.getIssue(42)
+    await forge.commentIssue(42, 'Comment')
+    await forge.listIssueComments(42)
+    await forge.listOpenIssues('loop:finding')
+    await forge.listClosedIssues('loop:finding')
+    await forge.assignIssue(42, 'worker-one')
+    await forge.unassignIssue(42, 'worker-one')
+    await forge.addLabel(42, 'loop:ready')
+    await forge.removeLabel(42, 'loop:ready')
+    await forge.closeIssue(42, 'Done')
+
+    expect(calls.filter((args) => args[0] === 'repo')).toEqual([
+      ['repo', 'view', '--json', 'nameWithOwner'],
+    ])
+    for (const args of calls.slice(1).filter((args) => args[0] !== 'api')) {
+      expect(args, `gh ${args.join(' ')}`).toContain('--repo')
+      expect(args, `gh ${args.join(' ')}`).toContain('consumer/project')
+    }
+  })
+
+  it('fails closed when the current repository cannot be resolved', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') throw new Error('not a git repository')
+      return 'https://github.com/upstream/package/issues/42\n'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await expect(forge.createIssue({
+      title: 'Finding',
+      body: 'Body',
+      labels: ['loop:finding'],
+    })).rejects.toThrow('Unable to resolve the current repository for the issue queue')
+    expect(calls).toEqual([['repo', 'view', '--json', 'nameWithOwner']])
+  })
+})
+
+describe('GitHub author permissions', () => {
+  it('trusts actual write-level permission, not author association, and caches each login', async () => {
+    const calls: string[][] = []
+    const issues = [
+      { ...openIssueFixture, number: 1, author: { login: 'read-member' }, authorAssociation: 'MEMBER' },
+      { ...openIssueFixture, number: 2, author: { login: 'triage-collaborator' }, authorAssociation: 'COLLABORATOR' },
+      { ...openIssueFixture, number: 3, author: { login: 'maintainer' }, authorAssociation: 'NONE' },
+      { ...openIssueFixture, number: 4, author: { login: 'maintainer' }, authorAssociation: 'MEMBER' },
+    ]
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'issue') return JSON.stringify(issues)
+      const login = args[1]?.split('/').at(-2)
+      const permission = login === 'read-member' ? 'read'
+        : login === 'triage-collaborator' ? 'triage'
+          : 'maintain'
+      return JSON.stringify({ permission })
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    const normalized = await forge.listOpenIssues('loop:ready')
+
+    expect(normalized.map((issue) => issue.author.hasWriteAccess))
+      .toEqual([false, false, true, true])
+    expect(calls.filter((args) => args[0] === 'api')).toHaveLength(3)
+  })
+})
+
 describe('GitHub forge JSON schemas', () => {
+  it.each([
+    [{ kind: 'branch', value: 'task/branch' } as const, 'task/branch'],
+    [{ kind: 'number', value: 12 } as const, '12'],
+    [{ kind: 'url', value: 'https://github.com/example/repo/pull/12' } as const,
+      'https://github.com/example/repo/pull/12'],
+  ])('translates a forge-neutral PR reference for gh', async (ref, expected) => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return JSON.stringify({
+        url: 'https://github.com/example/repo/pull/12',
+        state: 'OPEN',
+        isDraft: false,
+        headRefOid: 'abc123',
+        statusCheckRollup: [],
+      })
+    }
+
+    await createGithubForge('repo-root', command).prStatus(ref)
+
+    expect(calls).toEqual([[
+      'pr', 'view', expected, '--json', 'url,state,isDraft,headRefOid,statusCheckRollup',
+    ]])
+  })
+
   it('queries the GraphQL reset when a rate-limit error does not report one', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
+      if (args.join(' ') === 'repo view --json nameWithOwner') {
+        return JSON.stringify({ nameWithOwner: 'example/repo' })
+      }
       if (args.join(' ') === 'api rate_limit') {
         return JSON.stringify({ resources: { graphql: { reset: 1_786_435_200 } } })
       }
@@ -143,7 +325,8 @@ describe('GitHub forge JSON schemas', () => {
     expect(error).toBeInstanceOf(ForgeRateLimitError)
     expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
     expect(calls.map((args) => args.join(' '))).toEqual([
-      'issue list --state open --label loop:finding --limit 200 --json number,state,title,body,labels,assignees,updatedAt',
+      'repo view --json nameWithOwner',
+      'issue list --state open --repo example/repo --label loop:finding --limit 200 --json number,state,title,body,author,authorAssociation,labels,assignees,updatedAt',
       'api rate_limit',
     ])
   })
@@ -173,7 +356,7 @@ describe('GitHub forge JSON schemas', () => {
       futurePrField: 'ignored',
     })
 
-    await expect(forge.prStatus('task/branch')).resolves.toEqual({
+    await expect(forge.prStatus({ kind: 'branch', value: 'task/branch' })).resolves.toEqual({
       state: 'open',
       isDraft: true,
       url: 'https://github.com/example/repo/pull/12',
@@ -215,6 +398,7 @@ describe('GitHub forge JSON schemas', () => {
       state: 'open',
       title: 'Validate forge JSON',
       body: 'Task body',
+      author: { login: 'maintainer-one', hasWriteAccess: true },
       labels: ['loop:ready'],
       assignees: ['worker-one'],
       updatedAt: '2026-08-10T01:00:00Z',
@@ -226,9 +410,19 @@ describe('GitHub forge JSON schemas', () => {
     await expect(forgeReturning([{ ...openIssueFixture, state: 'CLOSED' }])
       .listClosedIssues('loop:done')).resolves.toEqual([{ ...normalizedOpenIssue, state: 'closed' }])
     await expect(forgeReturning({
-      comments: [{ body: 'claimed', futureCommentField: 1 }],
+      comments: [{
+        body: 'claimed', author: { login: 'outside-user' },
+        authorAssociation: 'NONE', futureCommentField: 1,
+      }],
       futureCommentsField: true,
-    }).listIssueComments(357)).resolves.toEqual(['claimed'])
+    }).listIssueComments(357)).resolves.toEqual([{
+      body: 'claimed', author: { login: 'outside-user', hasWriteAccess: false },
+    }])
+    await expect(forgeReturning({
+      ...openIssueFixture, author: null, authorAssociation: 'NONE',
+    }).getIssue(357)).resolves.toMatchObject({
+      author: { login: '(unknown)', hasWriteAccess: false },
+    })
   })
 
   it('validates and normalizes the current user response', async () => {
@@ -250,7 +444,7 @@ describe('GitHub forge JSON schemas', () => {
           isDraft: false,
           statusCheckRollup: [],
         },
-        invoke: (forge) => forge.prStatus('task/branch'),
+        invoke: (forge) => forge.prStatus({ kind: 'branch', value: 'task/branch' }),
         command: 'gh pr view',
         path: 'headRefOid',
       },
@@ -273,7 +467,7 @@ describe('GitHub forge JSON schemas', () => {
         path: 'labels[0].name',
       },
       {
-        output: { comments: [{}] },
+        output: { comments: [{ author: { login: 'worker' }, authorAssociation: 'MEMBER' }] },
         invoke: (forge) => forge.listIssueComments(357),
         command: 'gh issue view',
         path: 'comments[0].body',
@@ -308,7 +502,7 @@ describe('GitHub forge JSON schemas', () => {
           headRefOid: 'abc123',
           statusCheckRollup: [{ startedAt: 42 }],
         },
-        invoke: (forge) => forge.prStatus('task/branch'),
+        invoke: (forge) => forge.prStatus({ kind: 'branch', value: 'task/branch' }),
         command: 'gh pr view',
         path: 'statusCheckRollup[0].startedAt',
       },
@@ -331,7 +525,9 @@ describe('GitHub forge JSON schemas', () => {
         path: '[0].updatedAt',
       },
       {
-        output: { comments: [{ body: 42 }] },
+        output: { comments: [{
+          body: 42, author: { login: 'worker' }, authorAssociation: 'MEMBER',
+        }] },
         invoke: (forge) => forge.listIssueComments(357),
         command: 'gh issue view',
         path: 'comments[0].body',

@@ -107,6 +107,51 @@ describe('cleanupTask', () => {
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
   })
 
+  it('signals and verifies the detached process group on POSIX', () => {
+    seedTask(12345)
+    let groupAlive = true
+    const kill = vi.fn((target: number, signal?: NodeJS.Signals | number) => {
+      expect(target).toBe(-12345)
+      if (signal !== 0) groupAlive = false
+      if (!groupAlive && signal === 0) {
+        const error = new Error('process group is gone') as NodeJS.ErrnoException
+        error.code = 'ESRCH'
+        throw error
+      }
+    })
+    const runtime = makeRuntime({ platform: 'linux', kill })
+
+    cleanupTask(paths, taskId, runtime)
+
+    expect(kill).toHaveBeenCalledWith(-12345)
+    expect(kill).toHaveBeenCalledWith(-12345, 0)
+    expect(existsSync(statusFile(paths, taskId))).toBe(false)
+  })
+
+  it('retains task state while POSIX process-group descendants remain alive', () => {
+    seedTask(12345)
+    let now = 0
+    const kill = vi.fn((target: number) => {
+      expect(target).toBe(-12345)
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const runtime = makeRuntime({
+      platform: 'linux',
+      kill,
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+    })
+
+    expect(() => cleanupTask(paths, taskId, runtime))
+      .toThrow('Could not stop process 12345; task state was retained.')
+
+    expect(kill).toHaveBeenCalledWith(-12345)
+    expect(kill).not.toHaveBeenCalledWith(12345, expect.anything())
+    expectTaskStateToExist()
+    expect(existsSync(worktree)).toBe(true)
+    expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
+  })
+
   it('retains task state when the worktree remains after both removal attempts', () => {
     seedTask(null)
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})

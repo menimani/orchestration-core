@@ -1,4 +1,9 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ReasoningEffort } from './adapters/runner.ts'
+import { PACKAGE_ROOT } from './paths.ts'
+
+const MAX_POLL_INTERVAL_SECONDS = 30 * 60
 
 // Every setting the loop honors, with the defaults the bash implementation shipped.
 // The environment variable names are part of the frozen CLI contract (SPEC.md,
@@ -41,6 +46,25 @@ export interface LoopConfig {
   workerMode: boolean
   /** Hours an in-progress issue may sit unupdated before its lease is reaped. */
   issueLeaseHours: number
+  /** Pull the consumed orchestration subtree at the safe pre-cycle boundary. */
+  coreAutoUpdate: boolean
+  /** Git remote, URL, or owner/repository shorthand for the shared core. */
+  upstreamRemote: string
+  /** Branch fetched and pulled into the shared-core subtree. */
+  upstreamBranch: string
+}
+
+interface PackageMetadata {
+  upstreamRepo?: unknown
+}
+
+function defaultUpstreamRemote(): string {
+  const metadata = JSON.parse(
+    readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'),
+  ) as PackageMetadata
+  return typeof metadata.upstreamRepo === 'string' && metadata.upstreamRepo.trim() !== ''
+    ? metadata.upstreamRepo.trim()
+    : ''
 }
 
 function num(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -73,6 +97,10 @@ function effort(env: NodeJS.ProcessEnv, name: string, fallback: ReasoningEffort)
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
+  const maxParallel = num(env, 'MAX_PARALLEL', 3)
+  if (maxParallel < 1) {
+    throw new Error('MAX_PARALLEL must be at least 1')
+  }
   const taskGate = str(env, 'TASK_GATE', 'full')
   if (taskGate !== 'full' && taskGate !== 'light') {
     throw new Error(`TASK_GATE must be 'full' or 'light', got '${taskGate}'`)
@@ -84,9 +112,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
   if (workerMode && !issueQueueEnabled) {
     throw new Error('WORKER_MODE requires ISSUE_QUEUE_ENABLED=true')
   }
+  const pollIntervalSeconds = num(env, 'POLL_INTERVAL', 30)
+  if (pollIntervalSeconds > MAX_POLL_INTERVAL_SECONDS) {
+    throw new Error(`POLL_INTERVAL must not exceed ${MAX_POLL_INTERVAL_SECONDS} seconds`)
+  }
   return {
-    maxParallel: num(env, 'MAX_PARALLEL', 3),
-    pollIntervalSeconds: num(env, 'POLL_INTERVAL', 30),
+    maxParallel,
+    pollIntervalSeconds,
     autoMerge: bool(env, 'AUTO_MERGE', true),
     testCmd: str(env, 'TEST_CMD', ''),
     skipAutoTest: bool(env, 'SKIP_AUTO_TEST', false),
@@ -114,9 +146,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     taskGate,
     forge: str(env, 'FORGE', 'github'),
     runner: str(env, 'RUNNER', 'codex'),
-    project: str(env, 'PROJECT', 'shiora'),
+    project: str(env, 'PROJECT', ''),
     issueQueueEnabled,
     workerMode,
     issueLeaseHours: num(env, 'ISSUE_LEASE_HOURS', 3),
+    coreAutoUpdate: bool(env, 'CORE_AUTO_UPDATE', true),
+    upstreamRemote: str(env, 'UPSTREAM_REMOTE', defaultUpstreamRemote()),
+    upstreamBranch: str(env, 'UPSTREAM_BRANCH', 'main'),
   }
 }

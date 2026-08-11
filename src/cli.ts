@@ -1,4 +1,4 @@
-import { spawn, execFileSync, spawnSync } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import {
   appendFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -12,12 +12,15 @@ import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
 import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
+import { followLog } from './logFollower.ts'
 import {
   commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
 } from './issueQueue.ts'
 import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
 import { deploy } from './deploy.ts'
-import { isScanTaskId, logFile, orchPaths, packageFile, type OrchPaths } from './paths.ts'
+import {
+  isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
+} from './paths.ts'
 import { pruneTasks } from './prune.ts'
 import { reportUpstream } from './reportUpstream.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
@@ -160,8 +163,9 @@ const cmdStart: Command = async (paths, args) => {
     console.error('Usage: start <task-id> [--effort minimal|low|medium|high] [--model <model>]')
     return 1
   }
-  let effort = (process.env['CODEX_EFFORT'] ?? '') as ReasoningEffort | ''
-  let model = process.env['CODEX_MODEL'] ?? ''
+  const config = loadConfig()
+  let effort = config.taskEffort
+  let model = config.taskModel
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--effort') {
       const value = args[++i]
@@ -177,11 +181,10 @@ const cmdStart: Command = async (paths, args) => {
       return 1
     }
   }
-  const config = loadConfig()
   const runner = await loadRunner(config.runner)
   const project = await loadProject(paths.root)
   const result = await startTask(paths, runner, taskId, {
-    effort: effort === '' ? 'medium' : effort,
+    effort,
     model: model === '' ? undefined : model,
     setup: isScanTaskId(taskId) ? project.scanWorktreeSetup : undefined,
     report: (line) => console.log(line),
@@ -224,8 +227,8 @@ const cmdLogs: Command = async (paths, args) => {
     return 1
   }
   if (args[1] === '-f') {
-    const result = spawnSync('tail', ['-f', log], { stdio: 'inherit', windowsHide: true })
-    return result.status ?? 0
+    await followLog(log, process.stdout)
+    return 0
   }
   process.stdout.write(readFileSync(log, 'utf8'))
   return 0
@@ -282,12 +285,16 @@ const cmdMerge: Command = async (paths, args) => {
   }
   try {
     const linkedIssue = issueNumberForTask(paths, taskId)
+    const forge = linkedIssue === undefined
+      ? undefined
+      : await loadForge(config.forge, paths.repoRoot)
     const mergeCommit = await mergeTask(paths, taskId, {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(paths.root),
       closesIssue: linkedIssue,
+      forge,
     })
     if (linkedIssue !== undefined) {
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
@@ -297,8 +304,7 @@ const cmdMerge: Command = async (paths, args) => {
       }).trim()
       recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
       try {
-        const forge = await loadForge(config.forge, paths.repoRoot)
-        await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
+        await commentOnIssueMerge(forge!, linkedIssue, taskId, mergeCommit, runBranch)
       } catch (error) {
         console.error(
           `WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`,
@@ -433,8 +439,8 @@ const cmdLoop: Command = async (paths, args) => {
     child.unref()
     console.log(`Started the loop in the background (PID=${child.pid})`)
     console.log(`Log: ${loopLog}`)
-    console.log('Check: npm run -C orchestration/ts loop-status')
-    console.log('Stop: npm run -C orchestration/ts stop')
+    console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
+    console.log(`Stop: ${packageScriptCommand(paths.repoRoot, 'stop')}`)
     return 0
   }
   const markerOutput = args[0] === '--marker-output' ? args[1] : undefined
@@ -504,18 +510,41 @@ async function runLoopDaemon(
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
+  const recoveryLock = `${pidFile}.recovery`
 
   // PID lock: one loop per repository.
-  if (existsSync(pidFile)) {
-    const existing = readFileSync(pidFile, 'utf8').trim()
-    if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
-      log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
-      return 1
+  for (;;) {
+    try {
+      writeFileSync(pidFile, `${process.pid}\n`, { flag: 'wx' })
+      break
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
-    log('WARN: Removing stale PID file')
-    rmSync(pidFile, { force: true })
+
+    try {
+      mkdirSync(recoveryLock)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
+      throw error
+    }
+    try {
+      let existing: string
+      try {
+        existing = readFileSync(pidFile, 'utf8').trim()
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
+        log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
+        return 1
+      }
+      log('WARN: Removing stale PID file')
+      rmSync(pidFile, { force: true })
+    } finally {
+      rmSync(recoveryLock, { recursive: true, force: true })
+    }
   }
-  writeFileSync(pidFile, `${process.pid}\n`)
   const releaseDaemonState = (): void => {
     try {
       removeIssueModeMarker(paths, process.pid)
@@ -536,6 +565,9 @@ async function runLoopDaemon(
 
   try {
     writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+    log(formatEventLine(
+      'Mode', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
+    ))
 
     // A stale stop file is cleared only after the PID lock is taken, so another
     // instance's signal is never removed.
@@ -570,6 +602,18 @@ async function runLoopDaemon(
       if (outcome !== 'continue') {
         wake.cancel()
         await wake.outcome
+        if (outcome === 'restart') {
+          // Node has no portable exec(2). Release ownership first, then replace this
+          // daemon with the same command, environment, working tree, and stdio.
+          releaseDaemonState()
+          const replacement = spawn(process.execPath, process.argv.slice(1), {
+            cwd: paths.repoRoot,
+            env: process.env,
+            stdio: 'inherit',
+            windowsHide: true,
+          })
+          replacement.unref()
+        }
         return 0
       }
       await wake.outcome
