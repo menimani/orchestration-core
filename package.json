@@ -1,7 +1,9 @@
 {
   "name": "shiora-orchestration",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
+  "upstreamRepo": "menimani/orchestration-core",
   "engines": {
     "node": ">=23.6"
   },
@@ -14,6 +16,7 @@
     "queue": "node src/cli.ts queue",
     "stop": "node src/cli.ts stop",
     "delegate": "node src/cli.ts delegate",
+    "report-upstream": "node src/cli.ts report-upstream",
     "start": "node src/cli.ts start",
     "status": "node src/cli.ts status",
     "logs": "node src/cli.ts logs",
