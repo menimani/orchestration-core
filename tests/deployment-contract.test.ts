@@ -30,6 +30,15 @@ describe('production deployment identity contract', () => {
     expect(backendDockerfile).toContain('org.opencontainers.image.revision=$DEPLOY_COMMIT_SHA')
   })
 
+  it('keeps superseded deploys from moving production backwards', () => {
+    const workflow = source('.github/workflows/deploy.yml')
+
+    expect(workflow).toMatch(/concurrency:\n\s+group: deploy\n\s+cancel-in-progress: true/)
+    expect(workflow).toMatch(/allow_rollback:\n(?:\s+.*\n)*?\s+default: false\n\s+type: boolean/)
+    expect(workflow).toContain('if: ${{ !inputs.allow_rollback }}')
+    expect(workflow).toContain('git merge-base --is-ancestor "$GITHUB_SHA" "$CURRENT_REVISION"')
+  })
+
   it('notifies after both image building and deployment have finished', () => {
     const workflow = source('.github/workflows/deploy.yml')
 
