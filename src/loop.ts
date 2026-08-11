@@ -26,6 +26,7 @@ import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import { readTemplate } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
+import { currentBranchRemote } from './gitRemote.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import { execShellSync } from './shell.ts'
 import {
@@ -268,7 +269,8 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const branch = branchName(taskId)
-    gitIn(worktree, ['push', '--quiet', 'origin', branch])
+    const remote = currentBranchRemote(paths.repoRoot)
+    gitIn(worktree, ['push', '--quiet', remote, branch])
     const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
     await forge.commentIssue(issueNumber,
       `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}`)
@@ -334,6 +336,7 @@ export function createLoop(deps: LoopDeps) {
       }
       let adoptionTaskId: string | undefined
       try {
+        const remote = currentBranchRemote(paths.repoRoot)
         const report = workerBranchReport(await commentsForIssue(issue))
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
@@ -343,20 +346,21 @@ export function createLoop(deps: LoopDeps) {
         event('Merging', shortTaskId(taskId))
         try {
           execFileSync('git', [
-            'fetch', '--quiet', 'origin',
-            `+refs/heads/${report.branch}:refs/remotes/origin/${report.branch}`,
+            'fetch', '--quiet', remote,
+            `+refs/heads/${report.branch}:refs/remotes/${remote}/${report.branch}`,
           ], {
             cwd: paths.repoRoot,
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
         } catch {
-          throw new MergeError(`Could not fetch ${report.branch} from origin.`)
+          throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
 
         const mergeCommit = await mergeRemoteTask(
           paths,
           issue.number,
+          remote,
           report.branch,
           report.head,
           {
@@ -762,8 +766,15 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
-    const baseBranch = git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']).trim()
-      || 'origin/main'
+    let baseBranch = 'main'
+    try {
+      const remote = currentBranchRemote(paths.repoRoot)
+      baseBranch = git([
+        'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
+      ]).trim() || `${remote}/main`
+    } catch {
+      // A review can still run against a local main branch before a remote is configured.
+    }
     const acceptedLimitsFile = join(paths.root, 'accepted-limits.md')
     const acceptedLimits = existsSync(acceptedLimitsFile)
       ? readFileSync(acceptedLimitsFile, 'utf8').trim() || '(none)'
@@ -903,8 +914,10 @@ export function createLoop(deps: LoopDeps) {
       event('WARN', 'could not get branch name; PR skipped')
       return false
     }
+    let remote: string
     try {
-      execFileSync('git', ['push', '--quiet', 'origin', branch], {
+      remote = currentBranchRemote(paths.repoRoot)
+      execFileSync('git', ['push', '--quiet', remote, branch], {
         cwd: paths.repoRoot,
         stdio: 'ignore',
         windowsHide: true,
@@ -915,14 +928,14 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const baseRef = git([
-      'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD',
+      'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
     ]).trim()
-    if (!baseRef.startsWith('origin/')) {
-      event('WARN', 'could not get origin default branch; PR skipped')
+    if (!baseRef.startsWith(`${remote}/`)) {
+      event('WARN', `could not get ${remote} default branch; PR skipped`)
       return false
     }
-    const baseBranch = baseRef.slice('origin/'.length)
-    git(['fetch', 'origin', baseBranch, '--quiet'])
+    const baseBranch = baseRef.slice(remote.length + 1)
+    git(['fetch', remote, baseBranch, '--quiet'])
     const cycle = readCount(scanCountFile)
     const title = prTitle(paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
       { cycle, maxCycles: config.maxScanCycles })
