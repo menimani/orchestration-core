@@ -806,28 +806,26 @@ export function createLoop(deps: LoopDeps) {
     const maxRounds = isFinal ? config.maxFinalReviewRounds : config.maxReviewRounds
     const rounds = readCount(roundFile)
     const lastId = existsSync(idFile) ? readFileSync(idFile, 'utf8').replace(/[\s\r\n]/g, '') : ''
+    let missingVerdict = false
 
     if (lastId !== '') {
       const status = readStatus(paths, lastId)?.status
       if (status !== 'completed' && status !== 'merged') {
         event('WARN', `review ${shortTaskId(lastId)} ended ${status ?? 'unknown'} without a verdict`)
-        if (!isFinal) {
-          // A review that crashed says nothing about the diff. Resuming is the honest
-          // outcome: blocking an ordinary cycle on it would stall the loop on a broken reviewer.
-          return true
-        }
-        // The final cycle cannot treat a missing verdict as clean. Fall through so the
-        // attempt is retried within the final-round bound or stops at that bound.
+        missingVerdict = true
+        // A crashed review says nothing about the diff, regardless of whether this is
+        // the final cycle. Fall through to retry within the applicable round bound.
       } else if (actionableFindings(finalMessageFile(paths, lastId)).length === 0) {
         return true
       }
     }
 
     if (rounds >= maxRounds) {
-      if (isFinal) {
+      if (isFinal || missingVerdict) {
         // Promoting here would ship findings nobody resolved — the failure the round
-        // cap used to allow. Rounds this persistent signal something structural, which
-        // is a person's call, so the loop stops instead of promoting.
+        // cap used to allow — or trust a review that never produced a verdict. Rounds
+        // this persistent signal something structural, which is a person's call, so
+        // the loop stops instead of promoting.
         // Ending at the cap is the run's normal handoff to a person, not a malfunction,
         // so it closes the log as a first-class event rather than a bare ERROR.
         event('Stopped', 'Loop', `review-cap rounds ${rounds}/${maxRounds}`)
