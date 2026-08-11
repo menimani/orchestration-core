@@ -126,8 +126,9 @@ from or equivalent to `orchestration/tests/*.sh`.
     flag (the gate re-verifies before the next round reads the corrected diff). A clean
     round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle.
     `REVIEW_EVERY_N_CYCLES` skips review on off-cycles (the next reviewed cycle still
-    reads their work). The final cycle is always reviewed, and its rounds continue until
-    one is clean, bounded by `MAX_FINAL_REVIEW_ROUNDS`; exceeding that stops the loop
+    reads their work). When automatic review is enabled, the final cycle is always
+    reviewed, and its rounds continue until one is clean, bounded by
+    `MAX_FINAL_REVIEW_ROUNDS`; exceeding that stops the loop
     for a person instead of promoting a branch its own review keeps rejecting.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,

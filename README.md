@@ -2,8 +2,9 @@
 
 An autonomous improvement loop for a software repository. It scans the codebase, turns
 what it finds into tasks, runs them through an agent CLI in isolated git worktrees, merges
-what passes the repository's own tests, reviews the accumulated diff, and opens the pull
-request — unattended, for as many cycles as you allow.
+what passes the repository's own tests, reviews the accumulated diff when
+`AUTO_REVIEW=true`, and opens the pull request — unattended, for as many cycles as you
+allow.
 
 It is deliberately made of ordinary parts: git worktrees, a text queue, forge issues, and
 the tests the repository already had. Every behaviour in `SPEC.md` was learned from a
@@ -21,16 +22,16 @@ specific failure; the comments in the source name the incident rather than the p
 ## How a run works
 
 ```
-scan → tasks → run in worktrees → test → merge → cycle gate → … → review → promote
+scan → tasks → run in worktrees → test → merge → cycle gate → … → review (AUTO_REVIEW=true only) → promote
 ```
 
 Each cycle scans the repository, queues what the scan reports, executes queued tasks in
 parallel worktrees, and merges each one only after the tests selected for the paths it
 touched pass against the branch tip. Cycles end at a gate that pushes and updates a draft
-pull request. The final cycle is reviewed by an agent reading the whole branch diff; a
-round that raises findings turns them into fix tasks and reads the corrected diff again.
-The run ends by promoting the pull request, or by stopping for a person when its own
-review will not converge.
+pull request. With `AUTO_REVIEW=true`, the final cycle is reviewed by an agent reading
+the whole branch diff; a round that raises findings turns them into fix tasks and reads
+the corrected diff again. The run ends by promoting the pull request, or, when automatic
+review is enabled, by stopping for a person if that review will not converge.
 
 Nothing here decides that shipping is safe. Deployment stays a human action.
 
@@ -113,8 +114,8 @@ git subtree pull --prefix=orchestration/ts \
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |
 | `MAX_PARALLEL` | 3 | Agent processes at once |
 | `TASK_GATE` | full | `light` gates each merge on build and lint, running full suites once per cycle |
-| `AUTO_REVIEW` | false | Review each reviewed cycle's diff and queue the findings as fixes |
-| `REVIEW_EVERY_N_CYCLES` | 1 | Review every Nth cycle; the final cycle is always reviewed |
+| `AUTO_REVIEW` | false | Enable agent review of cycle diffs and queue the findings as fixes |
+| `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work |
 
