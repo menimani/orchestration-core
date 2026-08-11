@@ -92,6 +92,7 @@ afterEach(() => {
 
 describe('remote task adoption', () => {
   it('guarded-merges a worker branch and records a later failed adoption', async () => {
+    git(repoRoot, ['remote', 'rename', 'origin', 'shared'])
     const task = pushWorkerBranch('20260809_000000_003_auto-remote-fix')
     const issueNumber = await mergeReadyIssue(task.branch, task.head)
     const failedIssueNumber = await mergeReadyIssue(

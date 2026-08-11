@@ -362,9 +362,9 @@ describe('mergeRemoteTask', () => {
     git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
     const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
     git(repoRoot, ['switch', '-q', 'main'])
-    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    git(repoRoot, ['update-ref', `refs/remotes/shared/${branch}`, expectedHead])
 
-    await mergeRemoteTask(paths, 219, branch, expectedHead, {
+    await mergeRemoteTask(paths, 219, 'shared', branch, expectedHead, {
       taskGate: 'light', project: noCheckProject,
     })
 
@@ -387,7 +387,7 @@ describe('mergeRemoteTask', () => {
     git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
     const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
 
-    await expect(mergeRemoteTask(paths, 220, branch, expectedHead, {
+    await expect(mergeRemoteTask(paths, 220, 'origin', branch, expectedHead, {
       taskGate: 'light',
       project: stubProject,
       testCmd: 'node -e "const fs=require(\'node:fs\'); process.exit(fs.existsSync(\'run.txt\') && fs.existsSync(\'task.txt\') ? 1 : 0)"',

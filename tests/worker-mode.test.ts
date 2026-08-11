@@ -106,6 +106,7 @@ afterEach(() => {
 
 describe('worker mode', () => {
   it('pushes a completed task and relabels its issue as merge-ready without merging locally', async () => {
+    git(repoRoot, ['remote', 'rename', 'origin', 'shared'])
     const taskId = '20260809_000000_001_auto-shared-fix'
     await completedTask(taskId, true)
     const issueNumber = await claimedIssue(taskId)

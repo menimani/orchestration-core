@@ -59,13 +59,14 @@ describe('worker command checkout validation', () => {
   it('fast-forwards a checkout that is strictly behind the base ref before launching', async () => {
     commit(merger, 'orchestration/ts/src/config.ts', supportedConfig, 'feat: add worker support')
     git(merger, ['push', '-q', 'origin', 'HEAD:main'])
+    git(worker, ['remote', 'rename', 'origin', 'shared'])
     const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
     const workerDependencies: WorkerCommandDependencies = {
       verifyWorkerSupport: verifyWorkerModeSupported,
       launchDaemon: launch,
     }
 
-    await expect(runWorkerCommand(orchPaths(worker), 'origin/main', workerDependencies))
+    await expect(runWorkerCommand(orchPaths(worker), 'shared/main', workerDependencies))
       .resolves.toBe(0)
 
     expect(readFileSync(join(worker, 'orchestration/ts/src/config.ts'), 'utf8').trim())

@@ -395,6 +395,7 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
 export async function mergeRemoteTask(
   paths: OrchPaths,
   issueNumber: number,
+  remote: string,
   branch: string,
   expectedHead: string,
   options: MergeOptions,
@@ -406,7 +407,7 @@ export async function mergeRemoteTask(
     throw new MergeError(`Issue #${issueNumber} reported an invalid head commit: ${expectedHead}`)
   }
 
-  const remoteRef = `refs/remotes/origin/${branch}`
+  const remoteRef = `refs/remotes/${remote}/${branch}`
   let fetchedHead: string
   try {
     fetchedHead = git(paths.repoRoot, ['rev-parse', '--verify', remoteRef]).trim()
