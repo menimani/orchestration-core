@@ -201,6 +201,20 @@ describe('daemon startup', () => {
     expect(failedInstall).toHaveBeenCalledTimes(2)
   })
 
+  it('synchronizes a package at the repository root', () => {
+    writeFileSync(join(repoRoot, 'package.json'), '{"dependencies":{}}\n')
+    writeFileSync(join(repoRoot, 'package-lock.json'), '{"lockfileVersion":3}\n')
+    const install = vi.fn()
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install,
+      packageRoot: repoRoot,
+    })
+
+    expect(install).toHaveBeenCalledOnce()
+    expect(install).toHaveBeenCalledWith(repoRoot)
+  })
+
   it('leaves a package outside the repository alone', () => {
     // A CLI pointed at another checkout — a fixture, another clone — must never
     // reinstall the package it is itself running from. The suite learned this the hard
@@ -1227,7 +1241,10 @@ describe('runCycleSuite', () => {
   it('is a no-op under full task gates', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuite: () => [{ label: 'Marker', cwd: '', command: 'touch suite-ran' }],
+      cycleSuite: () => [{
+        label: 'Marker', cwd: '',
+        command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
+      }],
     }
     const loop = makeLoop({ taskGate: 'full' }, suiteProject)
     expect(loop.runCycleSuite(1)).toBe(true)
@@ -1237,7 +1254,10 @@ describe('runCycleSuite', () => {
   it('runs the project suite under light gates and continues on a pass', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuite: () => [{ label: 'Marker', cwd: '', command: 'touch suite-ran' }],
+      cycleSuite: () => [{
+        label: 'Marker', cwd: '',
+        command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
+      }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
     expect(loop.runCycleSuite(1)).toBe(true)
@@ -1249,9 +1269,11 @@ describe('runCycleSuite', () => {
   it('stops before running suite steps when the Docker probe fails', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuiteDockerProbe: { command: 'exit 1', timeoutMs: 1_000 },
+      cycleSuiteDockerProbe: { command: 'node -e "process.exit(1)"', timeoutMs: 1_000 },
       cycleSuite: () => [{
-        label: 'Docker suite', cwd: '', command: 'touch suite-ran', needsDocker: true,
+        label: 'Docker suite', cwd: '',
+        command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
+        needsDocker: true,
       }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
@@ -1268,10 +1290,21 @@ describe('runCycleSuite', () => {
   it('probes once and runs Docker-dependent suite steps when the probe passes', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuiteDockerProbe: { command: 'echo probe >> docker-probes', timeoutMs: 1_000 },
+      cycleSuiteDockerProbe: {
+        command: `node -e "require('node:fs').appendFileSync('docker-probes', 'probe\\n')"`,
+        timeoutMs: 1_000,
+      },
       cycleSuite: () => [
-        { label: 'First Docker suite', cwd: '', command: 'touch suite-ran', needsDocker: true },
-        { label: 'Second Docker suite', cwd: '', command: 'touch suite-ran-again', needsDocker: true },
+        {
+          label: 'First Docker suite', cwd: '',
+          command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
+          needsDocker: true,
+        },
+        {
+          label: 'Second Docker suite', cwd: '',
+          command: `node -e "require('node:fs').writeFileSync('suite-ran-again', '')"`,
+          needsDocker: true,
+        },
       ],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
@@ -1287,7 +1320,10 @@ describe('runCycleSuite', () => {
   it('stops the loop rather than promote a failing tip', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuite: () => [{ label: 'Failing', cwd: '', command: 'echo "Tests run: 4, Failures: 1"; exit 1' }],
+      cycleSuite: () => [{
+        label: 'Failing', cwd: '',
+        command: `node -e "console.log('Tests run: 4, Failures: 1'); process.exit(1)"`,
+      }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
     expect(loop.runCycleSuite(2)).toBe(false)
@@ -1300,7 +1336,7 @@ describe('runCycleSuite', () => {
       ...stubProject,
       cycleSuite: () => [{
         label: 'Broken toolchain', cwd: '',
-        command: 'echo "vitest is not recognized as an internal or external command"; exit 1',
+        command: `node -e "console.log('vitest is not recognized as an internal or external command'); process.exit(1)"`,
       }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
@@ -1312,10 +1348,10 @@ describe('runCycleSuite', () => {
   it('attributes a Docker failure after a passing probe to the environment', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuiteDockerProbe: { command: 'true', timeoutMs: 1_000 },
+      cycleSuiteDockerProbe: { command: 'node -e ""', timeoutMs: 1_000 },
       cycleSuite: () => [{
         label: 'Docker suite', cwd: '', needsDocker: true,
-        command: 'echo "Could not find a valid Docker environment"; exit 1',
+        command: `node -e "console.log('Could not find a valid Docker environment'); process.exit(1)"`,
       }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
@@ -1333,7 +1369,8 @@ describe('runCycleSuite', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
       cycleSuite: () => [{
-        label: 'Failing test', cwd: '', command: 'echo "Tests run: 4, Failures: 1"; exit 1',
+        label: 'Failing test', cwd: '',
+        command: `node -e "console.log('Tests run: 4, Failures: 1'); process.exit(1)"`,
       }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
@@ -1350,8 +1387,13 @@ describe('runCycleSuite', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
       cycleSuite: () => [{
-        label: 'Repairable', cwd: '', command: 'touch suite-ran',
-        repairWhenMissing: { path: 'launcher-shim', command: 'touch repaired', message: 'the launcher is missing' },
+        label: 'Repairable', cwd: '',
+        command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
+        repairWhenMissing: {
+          path: 'launcher-shim',
+          command: `node -e "require('node:fs').writeFileSync('repaired', '')"`,
+          message: 'the launcher is missing',
+        },
       }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
@@ -1367,7 +1409,9 @@ describe('runCycleSuite', () => {
   it('skips a step whose required path is absent', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
-      cycleSuite: () => [{ label: 'Absent', cwd: 'nowhere', command: 'exit 1', requires: 'nowhere' }],
+      cycleSuite: () => [{
+        label: 'Absent', cwd: 'nowhere', command: 'node -e "process.exit(1)"', requires: 'nowhere',
+      }],
     }
     const loop = makeLoop({ taskGate: 'light' }, suiteProject)
     expect(loop.runCycleSuite(6)).toBe(true)
