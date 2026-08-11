@@ -1117,6 +1117,25 @@ describe('failure announcement and burst stop (via poll)', () => {
       .toBeLessThan(logged.indexOf('CYCLE_COMPLETE: 1/3'))
   })
 
+  it('invalidates a completed cycle gate when a new task failure is observed', async () => {
+    const taskId = '20260809_000001_002_auto-late-failure'
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: false,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeRawStatus(taskId, 'failed')
+
+    expect(await loop.poll()).toBe('continue')
+
+    const lossNote = `Cycle 1 lost 1 task(s) to failure, so their findings are not in this branch: ${taskId}`
+    expect(readFileSync(join(paths.queueDir, 'decisions.txt'), 'utf8')).toBe(`${lossNote}\n`)
+    expect(logged).toContain('CYCLE_COMPLETE: 1/3')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+  })
+
   it('does not start queued work or scans while a stop is pending', async () => {
     const loop = makeLoop({ autoMerge: false, scanEnabled: true, maxBurstFailures: 1 })
     writeRawStatus('f1', 'running', null)
