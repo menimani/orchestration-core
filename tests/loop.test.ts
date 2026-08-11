@@ -232,6 +232,33 @@ describe('daemon startup', () => {
 })
 
 describe('forge poll budget', () => {
+  it('continues local refresh, merging, and queued work when queue labels are unavailable', async () => {
+    const completedTask = '20260811_120000_001_auto-completed'
+    const failedTask = '20260811_120001_002_auto-failed'
+    const queuedTask = '20260811_120002_003_auto-queued'
+    initializeGitRepo()
+    makeCompletedTask(completedTask)
+    writeRawStatus(failedTask, 'running', null)
+    writeFileSync(join(paths.tasksDir, `${queuedTask}.md`), '# queued spec\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${queuedTask}:0\n`)
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    recordIssueForTask(paths, completedTask, 17)
+    fakeForge.ensureLabel = vi.fn().mockRejectedValue(new Error('forge unavailable'))
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, completedTask)?.status).toBe('merged')
+    expect(readStatus(paths, failedTask)?.status).toBe('failed')
+    expect(logged).toContain(`FAILED: ${failedTask} — log: ${join(paths.logsDir, `${failedTask}.log`)}`)
+    expect(runnerStarts).toEqual([join(paths.tasksDir, `${queuedTask}.md`)])
+    expect(fakeForge.listOpenIssuesCalls).toEqual([])
+    expect(fakeForge.issueComments.size).toBe(0)
+  })
+
   it('lists the shared loop issues once for an entire poll', async () => {
     initializeGitRepo()
     const loop = makeLoop({
