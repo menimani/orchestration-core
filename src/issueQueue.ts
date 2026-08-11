@@ -817,6 +817,23 @@ export type ClaimResult
     | { outcome: 'lost-race'; issueNumber: number }
     | { outcome: 'unparseable'; issueNumber: number }
 
+async function releasePartialClaim(forge: Forge, issueNumber: number, me: string): Promise<void> {
+  // Release assignment first: ready issues with an assignee are invisible to both
+  // claim polling and stale-lease reaping. The remaining mutations restore the
+  // ordinary ready state even when the failed request took effect remotely.
+  await forge.unassignIssue(issueNumber, me)
+  const current = await forge.getIssue(issueNumber)
+  if (current.state !== 'open') return
+  // Add ready before removing in-progress so another label failure still leaves
+  // the issue visible to stale-lease reconciliation.
+  if (!current.labels.includes(LABEL_READY)) {
+    await forge.addLabel(issueNumber, LABEL_READY)
+  }
+  if (current.labels.includes(LABEL_IN_PROGRESS)) {
+    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+  }
+}
+
 /**
  * Claim one ready issue and materialize it as a local task. Assignment is the
  * exclusivity primitive; because a forge allows several assignees, a simultaneous
@@ -848,8 +865,20 @@ export async function claimIssue(
       await forge.unassignIssue(issue.number, me)
       return { outcome: 'lost-race', issueNumber: issue.number }
     }
-    await forge.addLabel(issue.number, LABEL_IN_PROGRESS)
-    await forge.removeLabel(issue.number, LABEL_READY)
+    try {
+      await forge.addLabel(issue.number, LABEL_IN_PROGRESS)
+      await forge.removeLabel(issue.number, LABEL_READY)
+    } catch (error) {
+      try {
+        await releasePartialClaim(forge, issue.number, me)
+      } catch (releaseError) {
+        throw new AggregateError(
+          [error, releaseError],
+          `Claim mutation and compensation both failed for issue #${issue.number}`,
+        )
+      }
+      throw error
+    }
 
     // A remote reconciler can still close or relabel the issue because its process
     // does not share this coordinator. Revalidate after every claim mutation and

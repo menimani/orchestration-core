@@ -515,6 +515,33 @@ describe('claimIssue', () => {
     expect(after.labels).toContain(LABEL_READY)
   })
 
+  it.each([
+    ['adding in-progress', 'addLabel'],
+    ['removing ready', 'removeLabel'],
+  ] as const)('releases the issue when %s fails during a claim', async (_description, method) => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks during label mutation')
+    const issue = await forge.getIssue(issueNumber)
+    const mutateLabel = forge[method].bind(forge)
+    let failed = false
+    forge[method] = async (number, label) => {
+      await mutateLabel(number, label)
+      if (number === issueNumber && !failed) {
+        failed = true
+        throw new Error(`${method} failed after applying`)
+      }
+    }
+
+    await expect(claimIssue(forge, paths, issue, 'worker-a', appendRequirement))
+      .rejects.toThrow(`${method} failed after applying`)
+
+    const after = await forge.getIssue(issueNumber)
+    expect(after.assignees).toEqual([])
+    expect(after.labels).toContain(LABEL_READY)
+    expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
   it('leaves an unparseable issue claimed for a person instead of bouncing it', async () => {
     const issueNumber = await forge.createIssue({
       title: 'hand-written', body: 'no structure here', labels: [LABEL_FINDING, LABEL_READY],
