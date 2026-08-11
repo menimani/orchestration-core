@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { openSync, readFileSync } from 'node:fs'
+import { closeSync, openSync, readFileSync } from 'node:fs'
 import type { Runner, RunnerStartOptions } from './runner.ts'
 
 // The spec content is the prompt, passed as one
@@ -40,14 +40,32 @@ export function createCodexRunner(): Runner {
         : args
 
       return new Promise((resolve, reject) => {
-        const child = spawn(command, commandArgs, {
-          cwd: options.worktree,
-          detached: true,
-          stdio: ['ignore', logFd, logFd],
-          windowsHide: true,
+        let logFdClosed = false
+        const closeLogFd = (): void => {
+          if (logFdClosed) return
+          closeSync(logFd)
+          logFdClosed = true
+        }
+
+        let child
+        try {
+          child = spawn(command, commandArgs, {
+            cwd: options.worktree,
+            detached: true,
+            stdio: ['ignore', logFd, logFd],
+            windowsHide: true,
+          })
+        } catch (error) {
+          closeLogFd()
+          reject(error)
+          return
+        }
+        child.once('error', (error) => {
+          closeLogFd()
+          reject(error)
         })
-        child.once('error', reject)
         child.once('spawn', () => {
+          closeLogFd()
           child.unref()
           if (child.pid === undefined) {
             reject(new Error('codex spawned without a PID'))
