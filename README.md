@@ -40,11 +40,11 @@ Nothing here decides that shipping is safe. Deployment stays a human action.
 The core knows nothing about your forge, your agent CLI, or your repository. Three seams
 carry all of that:
 
-| Adapter | Selected by | Bundled implementation | Replace it to… |
-|---------|-------------|------------------------|----------------|
-| forge   | `FORGE`     | `forge-github` (`gh`)  | move to Gitea, GitLab, … |
-| runner  | `RUNNER`    | `runner-codex`         | drive a different agent CLI |
-| project | discovery or `PROJECT` | none — you write it | describe *your* repository |
+| Adapter | Selector | Valid selector value | Bundled implementation | Replace it to… |
+|---------|----------|----------------------|------------------------|----------------|
+| forge   | `FORGE`  | `github`             | `forge-github` (`gh`)  | move to Gitea, GitLab, … |
+| runner  | `RUNNER` | `codex`              | `runner-codex`         | drive a different agent CLI |
+| project | discovery or `PROJECT` | project name | none — you write it | describe *your* repository |
 
 The project adapter is the one you must supply. It lives **outside** this package so a
 `git subtree pull` never touches it:
