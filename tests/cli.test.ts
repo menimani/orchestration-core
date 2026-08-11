@@ -90,7 +90,7 @@ describe('manual merge', () => {
 
     expect(result.status).toBe(0)
     expect(git(['log', '-1', '--format=%s']).trim()).toBe(
-      `Merge ${taskId} via Codex (closes #197)`,
+      `Merge ${taskId} via orchestration (closes #197)`,
     )
     const mergeCommit = git(['rev-parse', 'HEAD']).trim()
     expect(JSON.parse(readFileSync(

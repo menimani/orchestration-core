@@ -182,7 +182,9 @@ describe('mergeTask', () => {
     )
 
     expect(mergeCommit).toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
-    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(`Merge ${taskId} via Codex`)
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
+      `Merge ${taskId} via orchestration`,
+    )
     expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(true)
     expect(existsSync(worktree)).toBe(false)
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
@@ -352,6 +354,25 @@ describe('mergeTask', () => {
 })
 
 describe('mergeRemoteTask', () => {
+  it('uses a runner-neutral merge commit message', async () => {
+    const branch = 'task/remote-runner-neutral-message'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+
+    await mergeRemoteTask(paths, 219, branch, expectedHead, {
+      taskGate: 'light', project: noCheckProject,
+    })
+
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
+      'Merge remote-runner-neutral-message via orchestration (closes #219)',
+    )
+  })
+
   it('runs checks against the worker branch merged with the current branch', async () => {
     const branch = 'task/remote-combined-check'
     git(repoRoot, ['switch', '-qc', branch])
