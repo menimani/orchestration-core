@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
 import {
@@ -149,12 +149,23 @@ function orchestrationDepsMissing(root: string): boolean {
   )
 }
 
+/** Whether `directory` lies inside `root`, so a repository only ever syncs its own copy. */
+function isInside(root: string, directory: string): boolean {
+  const offset = relative(root, directory)
+  return offset !== '' && !offset.startsWith('..') && !isAbsolute(offset)
+}
+
 export function syncOrchestrationDepsAtStartup(
   paths: OrchPaths,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
 ): void {
-  if (!orchestrationDepsMissing(runtime.packageRoot ?? PACKAGE_ROOT)) return
+  const root = runtime.packageRoot ?? PACKAGE_ROOT
+  // Installing is for the copy this repository carries. A CLI pointed at some other
+  // checkout — a test fixture, another clone — must not reinstall the package it is
+  // itself running from.
+  if (!isInside(paths.repoRoot, root)) return
+  if (!orchestrationDepsMissing(root)) return
   installOrchestrationDeps('at startup', event, runtime)
 }
 

@@ -178,7 +178,10 @@ describe('daemon startup', () => {
     expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
     expect(logged).toContain('Installed  orchestration deps  at startup')
 
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install })
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install,
+      packageRoot: fixturePackageRoot(),
+    })
 
     expect(install).toHaveBeenCalledOnce()
   })
@@ -196,6 +199,21 @@ describe('daemon startup', () => {
     syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
 
     expect(failedInstall).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves a package outside the repository alone', () => {
+    // A CLI pointed at another checkout — a fixture, another clone — must never
+    // reinstall the package it is itself running from. The suite learned this the hard
+    // way: the real package's node_modules was reinstalled mid-test-run.
+    writeOrchestrationManifests('{"lockfileVersion":3}\n')
+    const install = vi.fn(successfulInstall)
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install,
+      packageRoot: mkdtempSync(join(tmpdir(), 'orch-elsewhere-')),
+    })
+
+    expect(install).not.toHaveBeenCalled()
   })
 })
 
