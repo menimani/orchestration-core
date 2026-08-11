@@ -16,6 +16,7 @@ let repoRoot: string
 let paths: OrchPaths
 
 const installProject: ProjectAdapter = {
+  ...stubProject,
   name: 'install-test',
   mergeChecks: () => [{
     label: 'Fixture check',
@@ -30,6 +31,7 @@ const installProject: ProjectAdapter = {
 }
 
 const noCheckProject: ProjectAdapter = {
+  ...stubProject,
   name: 'no-check',
   mergeChecks: () => [],
   cycleSuite: () => [],

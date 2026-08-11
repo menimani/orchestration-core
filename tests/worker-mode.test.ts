@@ -14,6 +14,7 @@ import {
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { writeStatus } from '../src/status.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { stubProject } from './stubProject.ts'
 
 let tempRoot: string
 let repoRoot: string
@@ -27,6 +28,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 const project: ProjectAdapter = {
+  ...stubProject,
   name: 'worker-test',
   mergeChecks: () => [],
   cycleSuite: () => [],

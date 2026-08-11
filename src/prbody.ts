@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import type { ProjectAdapter, PullRequestChanges } from './adapters/project.ts'
 
 // The generated pull request. The title reports different things depending on when it
 // is read — mid-run, how many cycles are left; promoted, what landed — and both the
@@ -7,8 +8,6 @@ import { execFileSync } from 'node:child_process'
 // text is still generated; a hand-edited body loses it and is never overwritten again.
 
 export const GENERATED_BODY_MARKER = '<!-- marker: autonomous scan loop -->'
-
-export type Category = 'Features' | 'Bug Fixes' | 'Security' | 'Project Operations'
 
 function git(repoRoot: string, args: string[]): string {
   try {
@@ -25,68 +24,12 @@ function filesOfCommit(repoRoot: string, sha: string): string[] {
     .split(/\r?\n/).filter((line) => line !== '')
 }
 
-/**
- * Estimate which screen or domain a commit changed from the files it touched. With
- * many screens the reader cannot grasp the overall picture from type alone.
- */
-function areaOfCommit(repoRoot: string, sha: string): string {
-  const files = filesOfCommit(repoRoot, sha)
-
-  for (const file of files) {
-    const page = /src\/frontend\/src\/pages\/([A-Za-z]+)Page\.tsx/.exec(file)
-    if (page !== null) {
-      return (page[1] as string).replace(/([a-z])([A-Z])/g, '$1 $2')
-    }
-  }
-  for (const file of files) {
-    const component = /src\/frontend\/src\/components\/([a-z]+)\//.exec(file)
-    if (component !== null) {
-      return `${component[1]} components`
-    }
-  }
-  for (const file of files) {
-    const domain = /src\/backend\/src\/(?:main|test)\/java\/.*\/(?:service|model|integration)\/([a-z]+)\//.exec(file)
-    if (domain !== null) {
-      const name = domain[1] as string
-      return `${name.charAt(0).toUpperCase()}${name.slice(1)} (backend)`
-    }
-  }
-
-  // Prefer product code over tools, because there are commits that include both.
-  if (files.some((file) => file.startsWith('src/backend/'))) return 'Backend'
-  if (files.some((file) => file.startsWith('src/frontend/'))) return 'Frontend'
-  if (files.some((file) => file.startsWith('orchestration/'))) return 'Orchestration'
-  if (files.some((file) => file.startsWith('.github/'))) return 'CI'
-  return 'Other'
-}
-
-/**
- * Sort a commit into a review-oriented section. Security is picked up first from both
- * the touched files and the subject, because with type prefixes alone a change that
- * affects authentication is buried in bug fixes.
- */
-function categoryOfCommit(repoRoot: string, sha: string, subject: string): Category {
-  const files = filesOfCommit(repoRoot, sha)
-
-  if (files.some((file) => /\/(auth|twofactor)\/|SecurityConfig\.java|\/value\/Url\.java/.test(file))
-    || /escape|token|lockout|authenticat|authoriz|ownership|xss|injection|csrf|password|2fa|two-factor|permission/i.test(subject)) {
-    return 'Security'
-  }
-
-  const product = files.filter((file) => !/^(orchestration\/|\.github\/)/.test(file))
-  if (files.length > 0 && product.length === 0) {
-    return 'Project Operations'
-  }
-
-  return subject.startsWith('feat:') ? 'Features' : 'Bug Fixes'
-}
-
-/**
- * Actual risk factors detected from the changes, as bullet points — only facts that
- * can be detected, with "None identified" when nothing applies. Boilerplate caution
- * does not help the reader decide anything.
- */
-export function prRisks(repoRoot: string, baseRef: string, decisions: string[]): string {
+export function prRisks(
+  project: ProjectAdapter,
+  repoRoot: string,
+  baseRef: string,
+  decisions: string[],
+): string {
   const comparison = `${baseRef}..HEAD`
   const changed = git(repoRoot, ['diff', '--name-only', comparison])
     .split(/\r?\n/).filter((line) => line !== '')
@@ -106,36 +49,13 @@ export function prRisks(repoRoot: string, baseRef: string, decisions: string[]):
     }
   }
 
-  if (changed.length === 0) {
-    if (lines.length === 0) return '- None identified\n'
-    return `${lines.join('\n')}\n`
+  const changes: PullRequestChanges = {
+    files: changed,
+    deletedFiles: git(repoRoot, ['diff', '--name-only', '--diff-filter=D', comparison])
+      .split(/\r?\n/).filter((line) => line !== ''),
+    diff: (pathspecs = []) => git(repoRoot, ['diff', comparison, '--', ...pathspecs]),
   }
-
-  if (changed.some((file) => file.startsWith('src/backend/src/main/resources/db/migration/'))) {
-    lines.push('- Adds a Flyway migration; the schema change applies on deploy and is not automatically reversible')
-  }
-  if (changed.some((file) => /^src\/backend\/.*\/(auth|twofactor)\/|SecurityConfig\.java|\/value\/Url\.java/.test(file))) {
-    lines.push('- Touches authentication, 2FA, or URL validation; re-check login, password reset, and any stored URLs that were valid before')
-  }
-  const scopingDiff = git(repoRoot, ['diff', comparison, '--',
-    'src/backend/src/main/java/**/service/**', 'src/backend/src/main/java/**/repository/**'])
-  if (/^[+-].*\.findBy[A-Za-z]+\(/m.test(scopingDiff)) {
-    lines.push('- Changes data-scoping queries; result sets may widen or narrow for existing users')
-  }
-  if (changed.some((file) => /^src\/backend\/.*\/presentation\/(controller|dto)\//.test(file))) {
-    lines.push('- Changes API request or response shapes; clients relying on the old contract may break')
-  }
-  const deletedTests = git(repoRoot, ['diff', '--name-only', '--diff-filter=D', comparison])
-    .split(/\r?\n/).filter((line) => /test|Test/.test(line))
-  if (deletedTests.length > 0) {
-    lines.push('- Deletes test files, removing the verification they provided:')
-    for (const file of deletedTests) {
-      lines.push(`  - ${file}`)
-    }
-  }
-  if (changed.some((file) => file === 'src/backend/pom.xml' || file === 'src/frontend/vite.config.ts')) {
-    lines.push('- Adjusts coverage or build configuration; the strictness of the CI gate may have changed')
-  }
+  for (const risk of project.pullRequest.detectRisks(changes)) lines.push(`- ${risk}`)
 
   if (lines.length === 0) return '- None identified\n'
   return `${lines.join('\n')}\n`
@@ -157,6 +77,7 @@ interface TitleContext {
 }
 
 export function prTitle(
+  project: ProjectAdapter,
   repoRoot: string,
   baseRef: string,
   mode: 'cycle' | 'final',
@@ -167,53 +88,53 @@ export function prTitle(
     return `${prefix} — cycle ${context.cycle}/${context.maxCycles}`
   }
 
-  const counts = new Map<Category, number>()
+  const counts = new Map<string, number>()
   for (const { sha, subject } of branchCommits(repoRoot, baseRef)) {
-    const category = categoryOfCommit(repoRoot, sha, subject)
+    const category = project.pullRequest.classifyCommit({
+      subject,
+      files: filesOfCommit(repoRoot, sha),
+    }).category
     counts.set(category, (counts.get(category) ?? 0) + 1)
   }
 
-  // Project Operations is counted but never shown: the number of tooling commits does
-  // not help anyone decide whether to review. Plurals are irregular, so both spellings
-  // are carried — "fix" + "s" gives "fixs".
-  const specs: Array<{ key: Category; singular: string; plural: string }> = [
-    { key: 'Features', singular: 'feature', plural: 'features' },
-    { key: 'Bug Fixes', singular: 'fix', plural: 'fixes' },
-    { key: 'Security', singular: 'security fix', plural: 'security fixes' },
-  ]
   const parts: string[] = []
-  for (const { key, singular, plural } of specs) {
-    const n = counts.get(key) ?? 0
-    if (n === 0) continue
-    parts.push(n === 1 ? `1 ${singular}` : `${n} ${plural}`)
+  for (const { label, title } of project.pullRequest.categories) {
+    if (title === undefined) continue
+    const n = counts.get(label) ?? 0
+    if (n > 0) parts.push(n === 1 ? `1 ${title.singular}` : `${n} ${title.plural}`)
   }
   if (parts.length === 0) {
-    return `${prefix} — tooling and documentation only`
+    return `${prefix} — ${project.pullRequest.titleFallback}`
   }
   return `${prefix} — ${parts.join(', ')}`
 }
 
-export function buildPrBody(repoRoot: string, baseRef: string, decisions: string[]): string {
-  const sections = new Map<Category, string[]>()
+export function buildPrBody(
+  project: ProjectAdapter,
+  repoRoot: string,
+  baseRef: string,
+  decisions: string[],
+): string {
+  const sections = new Map<string, string[]>()
   for (const { sha, subject } of branchCommits(repoRoot, baseRef)) {
-    const category = categoryOfCommit(repoRoot, sha, subject)
-    const area = areaOfCommit(repoRoot, sha)
+    const { category, area } = project.pullRequest.classifyCommit({
+      subject,
+      files: filesOfCommit(repoRoot, sha),
+    })
     // The type prefix is dropped: the section heading already says it. A screen name on
     // a tooling change would be meaningless, so those go without the area label.
     const bullet = subject.replace(/^[a-z]+: /, '')
-    const entry = category === 'Project Operations' || area === 'Other'
-      ? `- ${bullet}`
-      : `- [${area}] ${bullet}`
+    const entry = area === undefined ? `- ${bullet}` : `- [${area}] ${bullet}`
     sections.set(category, [...(sections.get(category) ?? []), entry])
   }
 
   // No summary section: the headings and their bullets are the summary. Headings are
   // published even when empty, because "none" is information for the reader too.
   let body = `${GENERATED_BODY_MARKER}\n`
-  for (const label of ['Features', 'Bug Fixes', 'Security', 'Project Operations'] as Category[]) {
+  for (const { label } of project.pullRequest.categories) {
     const entries = sections.get(label)
     body += `\n## ${label}\n\n${entries === undefined ? '- None\n' : `${entries.join('\n')}\n`}`
   }
-  body += `\n## Risks\n\n${prRisks(repoRoot, baseRef, decisions)}`
+  body += `\n## Risks\n\n${prRisks(project, repoRoot, baseRef, decisions)}`
   return body
 }
