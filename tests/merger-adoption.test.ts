@@ -7,7 +7,7 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
 import {
-  issuePromotionForIssue, LABEL_MERGE_FAILED, LABEL_MERGE_READY,
+  issuePromotionForIssue, LABEL_FINDING, LABEL_MERGE_FAILED, LABEL_MERGE_READY,
 } from '../src/issueQueue.ts'
 import { createLoop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
@@ -33,7 +33,7 @@ async function mergeReadyIssue(branch: string, head: string): Promise<number> {
   const issueNumber = await forge.createIssue({
     title: 'worker task',
     body: 'Shared worker task.',
-    labels: [LABEL_MERGE_READY],
+    labels: [LABEL_FINDING, LABEL_MERGE_READY],
   })
   await forge.commentIssue(issueNumber,
     `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}`)

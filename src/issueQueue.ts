@@ -50,12 +50,10 @@ export async function closeIssueAndRemoveLifecycleLabels(
 
 /** Strip stale queue-position labels from issues closed by the forge. */
 export async function reconcileClosedIssueLifecycleLabels(forge: Forge): Promise<void> {
-  const issuesByLabel = await Promise.all(LIFECYCLE_LABELS.map(async (label) => ({
-    label,
-    issues: await forge.listClosedIssues(label),
-  })))
-  await Promise.all(issuesByLabel.flatMap(({ label, issues }) =>
-    issues.map((issue) => forge.removeLabel(issue.number, label))))
+  const issues = await forge.listClosedIssues(LABEL_FINDING)
+  await Promise.all(issues.flatMap((issue) => LIFECYCLE_LABELS
+    .filter((label) => issue.labels.includes(label))
+    .map((label) => forge.removeLabel(issue.number, label))))
 }
 
 async function withIssueCoordination<T>(
@@ -425,8 +423,13 @@ async function reconcileCreatedFinding(
 }
 
 /** Revisit forge-persisted fingerprints on every poll after listing lag has cleared. */
-export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPaths): Promise<void> {
-  let openFindings = await forge.listOpenIssues(LABEL_FINDING)
+export async function reconcileFindingFingerprints(
+  forge: Forge,
+  paths: OrchPaths,
+  knownOpenFindings?: readonly ForgeIssue[],
+): Promise<void> {
+  let openFindings = [...(knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING))]
+  const closedIssueNumbers = new Set<number>()
   for (const issue of openFindings) migrateFingerprintLedgerForIssue(paths, issue)
   const byFingerprintSet = new Map<string, { fingerprints: string[]; issues: ForgeIssue[] }>()
   for (const issue of openFindings) {
@@ -438,7 +441,10 @@ export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPath
     byFingerprintSet.set(key, group)
   }
   for (const { fingerprints, issues } of byFingerprintSet.values()) {
-    const survivor = await reconcileOpenFindings(forge, paths, fingerprints, undefined, issues)
+    const survivor = await reconcileOpenFindings(
+      forge, paths, fingerprints, undefined, issues,
+      (issueNumber) => closedIssueNumbers.add(issueNumber),
+    )
     if (survivor !== undefined) {
       for (const fingerprint of fingerprints) recordFingerprint(paths, fingerprint, survivor)
     }
@@ -448,7 +454,9 @@ export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPath
   // scan issue carrying {A}. Prefer claimed work, then the broadest ready issue, and
   // close a ready issue only when every one of its constituents is already covered.
   // Partially overlapping issues stay open so their unmatched findings are not lost.
-  openFindings = await forge.listOpenIssues(LABEL_FINDING)
+  openFindings = knownOpenFindings === undefined
+    ? await forge.listOpenIssues(LABEL_FINDING)
+    : openFindings.filter((issue) => !closedIssueNumbers.has(issue.number))
   const ordered = openFindings
     .filter((issue) => issueFingerprints(issue).length > 0)
     .sort((a, b) => Number(isClaimed(b)) - Number(isClaimed(a))
@@ -471,7 +479,10 @@ export async function reconcileFindingFingerprints(forge: Forge, paths: OrchPath
           return
         }
         if (isReadyToClose(current, fingerprints)) {
-          await closeDuplicate(forge, issue.number, coveredBy[0] as number)
+          await closeDuplicate(
+            forge, issue.number, coveredBy[0] as number,
+            (issueNumber) => closedIssueNumbers.add(issueNumber),
+          )
         }
       })
       continue
@@ -904,9 +915,14 @@ export async function reapStaleLeases(
   leaseHours: number,
   now: Date,
   locallyRunningIssues: ReadonlySet<number> = new Set(),
+  knownOpenFindings?: readonly ForgeIssue[],
+  hasMergeMarker: (issue: ForgeIssue) => Promise<boolean> = async (issue) =>
+    (await forge.listIssueComments(issue.number)).some((comment) => /^MERGED: /.test(comment)),
 ): Promise<number[]> {
   const reaped: number[] = []
-  for (const issue of await forge.listOpenIssues(LABEL_IN_PROGRESS)) {
+  const openIssues = knownOpenFindings ?? await forge.listOpenIssues(LABEL_IN_PROGRESS)
+  for (const issue of openIssues.filter((candidate) =>
+    candidate.labels.includes(LABEL_IN_PROGRESS))) {
     if (locallyRunningIssues.has(issue.number)) continue
     const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
     if (ageMs < leaseHours * 3600 * 1000) continue
@@ -917,7 +933,7 @@ export async function reapStaleLeases(
       )
       continue
     }
-    if ((await forge.listIssueComments(issue.number)).some((comment) => /^MERGED: /.test(comment))) {
+    if (await hasMergeMarker(issue)) {
       continue
     }
     for (const assignee of issue.assignees) {

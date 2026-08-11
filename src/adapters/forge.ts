@@ -58,6 +58,20 @@ export interface WorkflowRun {
   conclusion: string | null
 }
 
+/** A forge quota exhaustion with the instant at which calls may resume. */
+export class ForgeRateLimitError extends Error {
+  readonly resetAt: Date
+
+  constructor(
+    resetAt: Date,
+    options?: ErrorOptions,
+  ) {
+    super(`Forge rate limit exhausted until ${resetAt.toISOString()}`, options)
+    this.name = 'ForgeRateLimitError'
+    this.resetAt = resetAt
+  }
+}
+
 export interface Forge {
   /** Find the open PR for a branch, or state 'none' when there is not one. */
   prStatus(branch: string): Promise<PrStatus>

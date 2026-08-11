@@ -537,16 +537,9 @@ async function runLoopDaemon(
     const forge = await loadForge(config.forge, paths.repoRoot)
     const runner = await loadRunner(config.runner)
     const project = await loadProject(config.project)
-    if (config.issueQueueEnabled) {
-      const { ensureQueueLabels, reconcileClosedIssueLifecycleLabels } = await import('./issueQueue.ts')
-      await ensureQueueLabels(forge)
-      try {
-        await reconcileClosedIssueLifecycleLabels(forge)
-      } catch (error) {
-        log(`WARN could not reconcile closed issue lifecycle labels: ${(error as Error).message}`)
-      }
-    }
     const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
+
+    await loop.initializeIssueQueue()
 
     loop.initializeSessionStateForBranch()
 

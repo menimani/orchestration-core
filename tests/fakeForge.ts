@@ -12,6 +12,8 @@ export interface FakeForge extends Forge {
   prStatusCalls: number
   issues: Map<number, ForgeIssue>
   issueComments: Map<number, string[]>
+  listOpenIssuesCalls: string[]
+  listIssueCommentsCalls: number[]
   user: string
   clock: () => Date
 }
@@ -24,6 +26,8 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     prStatusCalls: 0,
     issues: new Map(),
     issueComments: new Map(),
+    listOpenIssuesCalls: [],
+    listIssueCommentsCalls: [],
     user,
     clock: () => new Date(),
 
@@ -79,9 +83,11 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       issue.updatedAt = fake.clock().toISOString()
     },
     async listIssueComments(issueNumber: number): Promise<string[]> {
+      fake.listIssueCommentsCalls.push(issueNumber)
       return [...(fake.issueComments.get(issueNumber) ?? [])]
     },
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
+      fake.listOpenIssuesCalls.push(label)
       return [...fake.issues.values()]
         .filter((issue) => issue.state === 'open' && issue.labels.includes(label))
         .map((issue) => ({ ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }))

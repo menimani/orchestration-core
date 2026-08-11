@@ -3,7 +3,7 @@ import {
   appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { join, relative } from 'node:path'
-import type { Forge } from './adapters/forge.ts'
+import { ForgeRateLimitError, type Forge, type ForgeIssue } from './adapters/forge.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
@@ -32,8 +32,9 @@ import {
   fingerprintOf, issueMergeComment,
   issueNumberForTask, issuePromotionForIssue, publishFinding, reapStaleLeases,
   recordIssueForTask, recordIssuePromotion, releaseIssueClaim,
-  reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints, unresolvedFindings,
-  LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
+  ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
+  unresolvedFindings,
+  LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
 } from './issueQueue.ts'
 
 // The loop core. Every behavior here was learned from a specific failure — the comments
@@ -72,7 +73,9 @@ function isDockerEnvironmentFailure(text: string): boolean {
 }
 
 export function createLoop(deps: LoopDeps) {
-  const { paths, config, forge, runner, project, log, now, orchestrationDepsRuntime } = deps
+  const {
+    paths, config, forge: rawForge, runner, project, log, now, orchestrationDepsRuntime,
+  } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
   const scannedDir = join(paths.queueDir, 'scanned')
@@ -90,6 +93,15 @@ export function createLoop(deps: LoopDeps) {
   let cachedUser: string | undefined
   const warningLog = new LoopWarningLog(paths, log, now)
   let remoteWaitState: { pending: string; loggedAt: number } | undefined
+  let forgeRateLimitUntil = 0
+  let loggedForgeRateLimitUntil = 0
+  const issueCommentCache = new Map<number, {
+    updatedAt: string
+    comments: string[]
+    hasMergeMarker: boolean
+  }>()
+  const reconciledCycleGates = new Set<number>()
+  let issueQueueInitialized = !config.issueQueueEnabled
 
   function event(name: string, subject = '', detail = ''): void {
     if (name === 'WARN') {
@@ -102,6 +114,90 @@ export function createLoop(deps: LoopDeps) {
 
   function compactEvent(name: string, subject: string, detail: string): void {
     log(`${formatEventLine(name, subject)}  ${detail}`)
+  }
+
+  function rateLimitTime(resetAt: Date): string {
+    return new Intl.DateTimeFormat('en-GB', {
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(resetAt)
+  }
+
+  function noteForgeRateLimit(error: ForgeRateLimitError): void {
+    const currentTime = now().getTime()
+    const resetTime = Number.isFinite(error.resetAt.getTime())
+      ? error.resetAt.getTime()
+      : currentTime + 60_000
+    forgeRateLimitUntil = Math.max(forgeRateLimitUntil, resetTime)
+    if (loggedForgeRateLimitUntil !== forgeRateLimitUntil) {
+      compactEvent(
+        'Waiting', 'forge',
+        `rate limit until ${rateLimitTime(new Date(forgeRateLimitUntil))}`,
+      )
+      loggedForgeRateLimitUntil = forgeRateLimitUntil
+    }
+  }
+
+  const forge = new Proxy(rawForge, {
+    get(target, property, receiver) {
+      const member = Reflect.get(target, property, receiver)
+      if (typeof member !== 'function') return member
+      return async (...args: unknown[]) => {
+        const currentTime = now().getTime()
+        if (forgeRateLimitUntil > currentTime) {
+          throw new ForgeRateLimitError(new Date(forgeRateLimitUntil))
+        }
+        if (forgeRateLimitUntil !== 0) {
+          forgeRateLimitUntil = 0
+          loggedForgeRateLimitUntil = 0
+        }
+        try {
+          return await Reflect.apply(member, target, args)
+        } catch (error) {
+          if (error instanceof ForgeRateLimitError) noteForgeRateLimit(error)
+          throw error
+        }
+      }
+    },
+  }) as Forge
+
+  async function commentsForIssue(issue: ForgeIssue): Promise<string[]> {
+    const cached = issueCommentCache.get(issue.number)
+    if (cached?.updatedAt === issue.updatedAt) return cached.comments
+    const comments = await forge.listIssueComments(issue.number)
+    issueCommentCache.set(issue.number, {
+      updatedAt: issue.updatedAt,
+      comments,
+      hasMergeMarker: comments.some((comment) => /^MERGED: /.test(comment)),
+    })
+    return comments
+  }
+
+  async function issueHasMergeMarker(issue: ForgeIssue): Promise<boolean> {
+    await commentsForIssue(issue)
+    return issueCommentCache.get(issue.number)?.hasMergeMarker ?? false
+  }
+
+  async function initializeIssueQueue(): Promise<boolean> {
+    if (issueQueueInitialized) return true
+    try {
+      await ensureQueueLabels(forge)
+    } catch (error) {
+      if (!(error instanceof ForgeRateLimitError)) {
+        warning('ensure-queue-labels', 'ensuring issue queue labels',
+          `could not ensure issue queue labels: ${errorSummary(error)}`)
+      }
+      return false
+    }
+    try {
+      await reconcileClosedIssueLifecycleLabels(forge)
+      warningLog.recovered('reconcile-closed-issue-labels')
+    } catch (error) {
+      if (error instanceof ForgeRateLimitError) return false
+      warning('reconcile-closed-issue-labels', 'reconciling closed issue labels',
+        `could not reconcile closed issue labels: ${errorSummary(error)}`)
+    }
+    issueQueueInitialized = true
+    return true
   }
 
   function orchestrationDepsEvent(name: 'Installed' | 'WARN', subject: string): void {
@@ -186,28 +282,33 @@ export function createLoop(deps: LoopDeps) {
   }
 
   async function updateAdoptedIssue(
-    issueNumber: number,
+    issue: ForgeIssue,
     taskId: string,
     mergeCommit: string,
     runBranch: string,
   ): Promise<void> {
     const comment = issueMergeComment(taskId, mergeCommit, runBranch)
-    if (!(await forge.listIssueComments(issueNumber)).includes(comment)) {
-      await commentOnIssueMerge(forge, issueNumber, taskId, mergeCommit, runBranch)
+    if (!(await commentsForIssue(issue)).includes(comment)) {
+      await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
     }
-    await forge.removeLabel(issueNumber, LABEL_MERGE_READY)
+    await forge.removeLabel(issue.number, LABEL_MERGE_READY)
   }
 
-  async function adoptRemoteTasks(): Promise<void> {
-    let issues: Awaited<ReturnType<Forge['listOpenIssues']>>
-    try {
-      issues = await forge.listOpenIssues(LABEL_MERGE_READY)
-      warningLog.recovered('list-merge-ready-issues')
-    } catch (error) {
-      warning('list-merge-ready-issues', 'listing merge-ready issues',
-        `could not list merge-ready issues: ${errorSummary(error)}`)
-      return
+  async function adoptRemoteTasks(openFindings?: readonly ForgeIssue[]): Promise<void> {
+    let findings = openFindings
+    if (findings === undefined) {
+      try {
+        findings = await forge.listOpenIssues(LABEL_FINDING)
+        warningLog.recovered('list-loop-issues')
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          warning('list-loop-issues', 'listing loop issues',
+            `could not list loop issues: ${errorSummary(error)}`)
+        }
+        return
+      }
     }
+    const issues = findings.filter((issue) => issue.labels.includes(LABEL_MERGE_READY))
 
     for (const issue of issues) {
       if (existsSync(stopFile)) return
@@ -216,19 +317,20 @@ export function createLoop(deps: LoopDeps) {
       if (adopted !== undefined) {
         try {
           await updateAdoptedIssue(
-            issue.number,
+            issue,
             adopted.taskId,
             adopted.mergeCommit,
             adopted.runBranch,
           )
         } catch (error) {
+          if (error instanceof ForgeRateLimitError) return
           event('WARN', `could not update adopted issue #${issue.number}: ${errorSummary(error)}`)
         }
         continue
       }
       let adoptionTaskId: string | undefined
       try {
-        const report = workerBranchReport(await forge.listIssueComments(issue.number))
+        const report = workerBranchReport(await commentsForIssue(issue))
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
         }
@@ -268,14 +370,16 @@ export function createLoop(deps: LoopDeps) {
         recordIssueForTask(paths, taskId, issue.number)
         recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
         try {
-          await updateAdoptedIssue(issue.number, taskId, mergeCommit, runBranch)
+          await updateAdoptedIssue(issue, taskId, mergeCommit, runBranch)
         } catch (error) {
+          if (error instanceof ForgeRateLimitError) return
           event('WARN', `could not update adopted issue #${issue.number}: ${errorSummary(error)}`)
         }
         const cycle = readCount(scanCountFile)
         if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
       } catch (error) {
+        if (error instanceof ForgeRateLimitError) return
         const message = error instanceof Error ? error.message : String(error)
         appendFileSync(mergeLog, `${message}\n`)
         if (adoptionTaskId === undefined) {
@@ -286,13 +390,17 @@ export function createLoop(deps: LoopDeps) {
         try {
           await forge.commentIssue(issue.number, `Remote task adoption failed: ${message}`)
         } catch (commentError) {
-          event('WARN', `could not comment on issue #${issue.number}: ${errorSummary(commentError)}`)
+          if (!(commentError instanceof ForgeRateLimitError)) {
+            event('WARN', `could not comment on issue #${issue.number}: ${errorSummary(commentError)}`)
+          }
         }
         try {
           await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
           await forge.removeLabel(issue.number, LABEL_MERGE_READY)
         } catch (labelError) {
-          event('WARN', `could not relabel issue #${issue.number}: ${errorSummary(labelError)}`)
+          if (!(labelError instanceof ForgeRateLimitError)) {
+            event('WARN', `could not relabel issue #${issue.number}: ${errorSummary(labelError)}`)
+          }
         }
         noteMergeFailure(mergeLog)
       }
@@ -448,7 +556,9 @@ export function createLoop(deps: LoopDeps) {
             event('Filed', `#${result.issueNumber}`, `by ${shortTaskId(taskId)}`)
           }
         } catch (error) {
-          event('WARN', `could not file finding: ${errorSummary(error)}`)
+          if (!(error instanceof ForgeRateLimitError)) {
+            event('WARN', `could not file finding: ${errorSummary(error)}`)
+          }
         }
       }
       return { findings, destinations }
@@ -822,8 +932,8 @@ export function createLoop(deps: LoopDeps) {
       if (body.includes(GENERATED_BODY_MARKER)) {
         try {
           await forge.updatePr(branch, { title, body: buildPrBody(paths.repoRoot, readDecisions()) })
-        } catch {
-          event('WARN', 'could not update PR body')
+        } catch (error) {
+          if (!(error instanceof ForgeRateLimitError)) event('WARN', 'could not update PR body')
         }
       }
       writeFileSync(prUrlFile, `${status.url}\n`)
@@ -841,7 +951,9 @@ export function createLoop(deps: LoopDeps) {
       writeFileSync(prUrlFile, `${url}\n`)
       return true
     } catch (error) {
-      event('WARN', `could not create PR: ${errorSummary(error)}`)
+      if (!(error instanceof ForgeRateLimitError)) {
+        event('WARN', `could not create PR: ${errorSummary(error)}`)
+      }
       return false
     }
   }
@@ -980,43 +1092,37 @@ export function createLoop(deps: LoopDeps) {
   }
 
   /** The inter-cycle gate and idle scan dispatch. */
-  async function triggerScanIfIdle(): Promise<'continue' | 'done'> {
+  async function triggerScanIfIdle(
+    knownOpenFindings?: readonly ForgeIssue[] | null,
+  ): Promise<'continue' | 'done'> {
     if (!config.scanEnabled) return 'continue'
     if (countRunning() > 0 || queueLength() > 0) return 'continue'
     if (isScanRunning()) return 'continue'
     if (config.issueQueueEnabled) {
+      if (knownOpenFindings === null) return 'continue'
       try {
-        await reconcileClosedIssueLifecycleLabels(forge)
-        warningLog.recovered('reconcile-closed-issue-labels')
-      } catch (error) {
-        warning('reconcile-closed-issue-labels', 'reconciling closed issue labels',
-          `could not reconcile closed issue labels: ${errorSummary(error)}`)
-      }
-      try {
-        const issues = await Promise.all([
-          forge.listOpenIssues(LABEL_READY),
-          forge.listOpenIssues(LABEL_IN_PROGRESS),
-          forge.listOpenIssues(LABEL_MERGE_READY),
-          forge.listOpenIssues(LABEL_MERGE_FAILED),
-        ])
-        const openIssues = new Map(issues.flat().map((issue) => [issue.number, issue]))
-        const pendingIssues = await Promise.all([...openIssues.values()].map(async (issue) => {
-          if (issuePromotionForIssue(paths, issue.number) !== undefined) return undefined
+        const openFindings = knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING)
+        const openIssues = openFindings.filter((issue) =>
+          issue.labels.some((label) => [
+            LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
+          ].includes(label)))
+        const pendingIssueNumbers: number[] = []
+        for (const issue of openIssues) {
+          if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
           try {
-            const comments = await forge.listIssueComments(issue.number)
+            const comments = await commentsForIssue(issue)
             const mergeSha = comments
               .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment)?.[1])
               .find((sha) => sha !== undefined
                 && git(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
-            if (mergeSha !== undefined) return undefined
+            if (mergeSha !== undefined) continue
           } catch (error) {
+            if (error instanceof ForgeRateLimitError) return 'continue'
             event('WARN', `could not inspect issue #${issue.number}: ${errorSummary(error)}`)
           }
-          return issue.number
-        }))
-        const pendingIssueNumbers = pendingIssues
-          .filter((issueNumber): issueNumber is number => issueNumber !== undefined)
-          .sort((a, b) => a - b)
+          pendingIssueNumbers.push(issue.number)
+        }
+        pendingIssueNumbers.sort((a, b) => a - b)
         const remoteCount = pendingIssueNumbers.length
         warningLog.recovered('count-remote-issue-work')
         if (remoteCount > 0) {
@@ -1035,8 +1141,10 @@ export function createLoop(deps: LoopDeps) {
         }
         remoteWaitState = undefined
       } catch (error) {
-        warning('count-remote-issue-work', 'counting remote issue work',
-          `could not count remote issue work: ${errorSummary(error)}`)
+        if (!(error instanceof ForgeRateLimitError)) {
+          warning('count-remote-issue-work', 'counting remote issue work',
+            `could not count remote issue work: ${errorSummary(error)}`)
+        }
         return 'continue'
       }
     }
@@ -1050,6 +1158,18 @@ export function createLoop(deps: LoopDeps) {
 
       if (!existsSync(resumeFlag)) {
         if (!existsSync(completeFlag)) {
+          if (config.issueQueueEnabled && !reconciledCycleGates.has(currentScans)) {
+            try {
+              await reconcileClosedIssueLifecycleLabels(forge)
+              warningLog.recovered('reconcile-closed-issue-labels')
+              reconciledCycleGates.add(currentScans)
+            } catch (error) {
+              if (error instanceof ForgeRateLimitError) return 'continue'
+              warning('reconcile-closed-issue-labels', 'reconciling closed issue labels',
+                `could not reconcile closed issue labels: ${errorSummary(error)}`)
+              reconciledCycleGates.add(currentScans)
+            }
+          }
           // A cycle that lost tasks did not do what it set out to do, and the PR cannot
           // show it: work that never ran leaves no diff to notice it by.
           const failedFile = join(paths.queueDir, `failed-${currentScans}`)
@@ -1173,6 +1293,8 @@ export function createLoop(deps: LoopDeps) {
       return 'stopped'
     }
 
+    if (!(await initializeIssueQueue())) return 'continue'
+
     let burstFailures = 0
     const mergeAttempts = new Set<string>()
     const locallyRunningIssues = new Set<number>()
@@ -1208,7 +1330,9 @@ export function createLoop(deps: LoopDeps) {
               runBranch,
             )
           } catch (error) {
-            event('WARN', `could not link issue #${linkedIssue} to merge: ${errorSummary(error)}`)
+            if (!(error instanceof ForgeRateLimitError)) {
+              event('WARN', `could not link issue #${linkedIssue} to merge: ${errorSummary(error)}`)
+            }
           }
         }
         // A task delegated while the gate was waiting merges commits the gate has
@@ -1240,8 +1364,10 @@ export function createLoop(deps: LoopDeps) {
           await heartbeatIssueForTask(forge, paths, taskId, now())
           warningLog.recovered(`heartbeat-${taskId}`)
         } catch (error) {
-          warning(`heartbeat-${taskId}`, `heartbeat for ${shortTaskId(taskId)}`,
-            `heartbeat failed for ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+          if (!(error instanceof ForgeRateLimitError)) {
+            warning(`heartbeat-${taskId}`, `heartbeat for ${shortTaskId(taskId)}`,
+              `heartbeat failed for ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+          }
         }
       }
 
@@ -1273,7 +1399,9 @@ export function createLoop(deps: LoopDeps) {
             await publishWorkerCompletion(taskId, linkedIssue)
             writeFileSync(scannedFlag, '')
           } catch (error) {
-            event('WARN', `could not publish ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+            if (!(error instanceof ForgeRateLimitError)) {
+              event('WARN', `could not publish ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+            }
           }
           continue
         }
@@ -1310,8 +1438,21 @@ export function createLoop(deps: LoopDeps) {
       writeFileSync(stopFile, '')
     }
 
-    if (!config.workerMode && config.issueQueueEnabled && !existsSync(stopFile)) {
-      await adoptRemoteTasks()
+    let openFindings: ForgeIssue[] | null = null
+    if (config.issueQueueEnabled && !existsSync(stopFile)) {
+      try {
+        openFindings = await forge.listOpenIssues(LABEL_FINDING)
+        warningLog.recovered('list-loop-issues')
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          warning('list-loop-issues', 'listing loop issues',
+            `could not list loop issues: ${errorSummary(error)}`)
+        }
+      }
+    }
+
+    if (!config.workerMode && openFindings !== null && !existsSync(stopFile)) {
+      await adoptRemoteTasks(openFindings)
     }
 
     let running = countRunning()
@@ -1319,23 +1460,26 @@ export function createLoop(deps: LoopDeps) {
     // Nothing new starts while a stop is pending: without this the burst detector above
     // would fill the parallel slots with the very outage it just stopped for.
     if (!existsSync(stopFile)) {
-      if (config.issueQueueEnabled) {
+      if (config.issueQueueEnabled && openFindings !== null) {
         // The shared backlog: reap quiet leases, then claim ready issues into the
         // local queue up to capacity. A forge outage degrades to local-only work for
         // this poll rather than stopping anything.
         try {
-          await reconcileFindingFingerprints(forge, paths)
+          await reconcileFindingFingerprints(forge, paths, openFindings)
           await reapStaleLeases(
             forge,
             paths,
             config.issueLeaseHours,
             now(),
             locallyRunningIssues,
+            openFindings,
+            issueHasMergeMarker,
           )
           let capacity = config.maxParallel - running - queueLength()
           if (capacity > 0) {
             if (cachedUser === undefined) cachedUser = await forge.currentUser()
-            for (const issue of await forge.listOpenIssues(LABEL_READY)) {
+            for (const issue of openFindings.filter((candidate) =>
+              candidate.labels.includes(LABEL_READY))) {
               if (capacity <= 0) break
               if (issue.assignees.length > 0) continue
               if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
@@ -1354,8 +1498,10 @@ export function createLoop(deps: LoopDeps) {
           }
           warningLog.recovered('issue-queue-sync')
         } catch (error) {
-          warning('issue-queue-sync', 'syncing the issue queue',
-            `issue queue unreachable: ${errorSummary(error)}`)
+          if (!(error instanceof ForgeRateLimitError)) {
+            warning('issue-queue-sync', 'syncing the issue queue',
+              `issue queue unreachable: ${errorSummary(error)}`)
+          }
         }
       }
 
@@ -1392,7 +1538,9 @@ export function createLoop(deps: LoopDeps) {
               await releaseIssueClaim(forge, issueNumber, cachedUser)
               event('Released', shortTaskId(entry.taskId), 'startup failed')
             } catch (releaseError) {
-              event('WARN', `${shortTaskId(entry.taskId)} startup failed and issue #${issueNumber} could not be released: ${errorSummary(releaseError)}`)
+              if (!(releaseError instanceof ForgeRateLimitError)) {
+                event('WARN', `${shortTaskId(entry.taskId)} startup failed and issue #${issueNumber} could not be released: ${errorSummary(releaseError)}`)
+              }
             }
             try {
               cleanupTask(paths, entry.taskId, undefined, false)
@@ -1407,7 +1555,9 @@ export function createLoop(deps: LoopDeps) {
       }
 
       if (!config.workerMode) {
-        const outcome = await triggerScanIfIdle()
+        const outcome = await triggerScanIfIdle(
+          config.issueQueueEnabled ? openFindings : undefined,
+        )
         if (outcome === 'done') return 'done'
       }
     }
@@ -1427,9 +1577,21 @@ export function createLoop(deps: LoopDeps) {
     return 'continue'
   }
 
+  async function guardedPoll(): Promise<'stopped' | 'done' | 'continue'> {
+    try {
+      return await poll()
+    } catch (error) {
+      // Even a reset far beyond the ordinary poll window is an external wait, not a
+      // branch failure. The proxy suppresses all further forge calls until it expires.
+      if (error instanceof ForgeRateLimitError) return 'continue'
+      throw error
+    }
+  }
+
   return {
     // exported for the daemon
-    poll,
+    poll: guardedPoll,
+    initializeIssueQueue,
     initializeSessionStateForBranch,
     cleanupSessionState,
     // exported for tests

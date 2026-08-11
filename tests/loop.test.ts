@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Forge, PrStatus } from '../src/adapters/forge.ts'
+import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
@@ -195,6 +195,69 @@ describe('daemon startup', () => {
     syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall })
 
     expect(failedInstall).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('forge poll budget', () => {
+  it('lists the shared loop issues once for an entire poll', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    await fakeForge.createIssue({
+      title: 'pending repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
+    })
+
+    await loop.poll()
+
+    expect(fakeForge.listOpenIssuesCalls).toEqual([LABEL_FINDING])
+  })
+
+  it('does not re-read comments while an issue updatedAt is unchanged', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: true, autoMerge: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'pending repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
+    })
+
+    await loop.poll()
+    await loop.poll()
+
+    expect(fakeForge.listIssueCommentsCalls).toEqual([issueNumber])
+  })
+
+  it('defers forge calls until a long reported rate-limit reset and logs one wait', async () => {
+    initializeGitRepo()
+    let current = new Date(2026, 7, 11, 14, 0, 0)
+    const resetAt = new Date(2026, 7, 11, 14, 40, 0)
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 0,
+    }, stubProject, undefined, () => current)
+    loop.initializeSessionStateForBranch()
+    const listOpenIssues = fakeForge.listOpenIssues.bind(fakeForge)
+    let attempts = 0
+    fakeForge.listOpenIssues = async (label) => {
+      attempts += 1
+      if (attempts === 1) throw new ForgeRateLimitError(resetAt)
+      return listOpenIssues(label)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+    current = new Date(2026, 7, 11, 14, 30, 0)
+    expect(await loop.poll()).toBe('continue')
+    expect(attempts).toBe(1)
+    expect(logged.filter((line) => line.startsWith('Waiting forge  rate limit until')))
+      .toEqual(['Waiting forge  rate limit until 14:40'])
+
+    current = resetAt
+    expect(await loop.poll()).toBe('continue')
+    expect(attempts).toBe(2)
+    expect(logged.filter((line) => line.startsWith('Waiting forge  rate limit until')))
+      .toHaveLength(1)
   })
 })
 
@@ -623,7 +686,7 @@ describe('remote issue queue idle detection', () => {
     await fakeForge.createIssue({
       title: 'pending fix',
       body: '',
-      labels: ['loop:ready', 'loop:in-progress'],
+      labels: [LABEL_FINDING, 'loop:ready', 'loop:in-progress'],
     })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
@@ -635,7 +698,7 @@ describe('remote issue queue idle detection', () => {
     expect(logged).toHaveLength(1)
 
     await fakeForge.createIssue({
-      title: 'another pending fix', body: '', labels: ['loop:in-progress'],
+      title: 'another pending fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
     await loop.triggerScanIfIdle()
     expect(logged.at(-1)).toBe('Waiting remote  issues #1 #2')
@@ -651,7 +714,9 @@ describe('remote issue queue idle detection', () => {
 
   it('defers the cycle gate and review while an in-progress issue is open', async () => {
     const loop = makeReviewLoop(true)
-    await fakeForge.createIssue({ title: 'claimed fix', body: '', labels: ['loop:in-progress'] })
+    await fakeForge.createIssue({
+      title: 'claimed fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
+    })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
@@ -662,7 +727,9 @@ describe('remote issue queue idle detection', () => {
 
   it('defers the cycle gate and review while a merge-failed issue is open', async () => {
     const loop = makeReviewLoop(true)
-    await fakeForge.createIssue({ title: 'adoption needs repair', body: '', labels: ['loop:merge-failed'] })
+    await fakeForge.createIssue({
+      title: 'adoption needs repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
+    })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
@@ -687,7 +754,7 @@ describe('remote issue queue idle detection', () => {
   it('enters the gate when an in-progress issue has a local promotion record', async () => {
     const loop = makeReviewLoop(true)
     const issueNumber = await fakeForge.createIssue({
-      title: 'locally merged fix', body: '', labels: ['loop:in-progress'],
+      title: 'locally merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
     recordIssueForTask(paths, 'merged-task', issueNumber)
     recordIssuePromotion(paths, 'merged-task', 'abc123', 'feature/run-9')
@@ -702,7 +769,7 @@ describe('remote issue queue idle detection', () => {
     const mergeSha = initializeGitRepo()
     const loop = makeReviewLoop(true)
     const issueNumber = await fakeForge.createIssue({
-      title: 'remotely merged fix', body: '', labels: ['loop:in-progress'],
+      title: 'remotely merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
     await fakeForge.commentIssue(
       issueNumber,
@@ -725,7 +792,7 @@ describe('remote issue queue idle detection', () => {
     git(['switch', 'main'])
     const loop = makeReviewLoop(true)
     const issueNumber = await fakeForge.createIssue({
-      title: 'foreign merged fix', body: '', labels: ['loop:in-progress'],
+      title: 'foreign merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
     await fakeForge.commentIssue(
       issueNumber,
@@ -741,7 +808,7 @@ describe('remote issue queue idle detection', () => {
   it('does not exempt a merge marker with no parseable SHA', async () => {
     const loop = makeReviewLoop(true)
     const issueNumber = await fakeForge.createIssue({
-      title: 'unverifiable merged fix', body: '', labels: ['loop:in-progress'],
+      title: 'unverifiable merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
     await fakeForge.commentIssue(issueNumber, 'MERGED: remote-task\nMerged by another checkout.')
 
@@ -1014,7 +1081,7 @@ describe('completed task merge recovery', () => {
     }, transientProject)
     loop.initializeSessionStateForBranch()
     const issueNumber = await fakeForge.createIssue({
-      title: 'pending fix', body: '', labels: ['loop:in-progress'],
+      title: 'pending fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
     recordIssueForTask(paths, taskId, issueNumber)
 
@@ -1048,7 +1115,7 @@ describe('completed task merge recovery', () => {
     const listOpenIssues = fakeForge.listOpenIssues.bind(fakeForge)
     let exposedCompletion = false
     fakeForge.listOpenIssues = async (label) => {
-      if (label === LABEL_READY && !exposedCompletion) {
+      if (label === LABEL_FINDING && !exposedCompletion) {
         exposedCompletion = true
         writeRawStatus(taskId, 'completed')
       }

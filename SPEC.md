@@ -236,6 +236,13 @@ from or equivalent to `orchestration/tests/*.sh`.
     comment instead of unassigning or relabeling the issue. That refreshes `updatedAt`
     again, keeping the issue claimed until promotion closes it. A forge outage degrades a
     poll to local-only work; it never stops the loop. Labels are ensured at loop startup.
+    The daemon lists open `loop:finding` issues once per poll and partitions that snapshot
+    locally for adoption, reconciliation, lease reaping, claiming, and cycle-gate idle
+    detection. MERGED-marker comment reads are cached by issue number and `updatedAt`.
+    Closed lifecycle labels are reconciled at startup and once on cycle-gate entry, not on
+    every idle poll. A forge rate-limit response pauses further forge calls until its
+    reported reset (querying `rate_limit` when needed), logs one aligned `Waiting forge`
+    event, and resumes without attributing even a long wait to the branch.
     The daemon records issue mode in
     `queue/issue-mode` so a separate `delegate` process can publish ready work for the
     daemon to claim and materialize locally, including any effort or inspection setting.
@@ -255,8 +262,8 @@ from or equivalent to `orchestration/tests/*.sh`.
     `Status     Running=<n>  Queue=<n>` event; because workers never scan, their loop-log
     prefix carries cycle zero rather than a worker-specific replacement for the cycle.
 36. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
-    processing local completions, each stop-file-free poll adopts open
-    `loop:merge-ready` issues: it reads the reported branch and head, fetches that branch
+    processing local completions, each stop-file-free poll adopts `loop:merge-ready`
+    issues from that poll's shared finding snapshot: it reads the reported branch and head, fetches that branch
     from `origin`, verifies the head and that it adds commits to the current branch, runs
     the project adapter's path-selected checks in a detached worktree, and merges with
     `--no-ff` and `closes #N`. It persists a successful adoption before updating the

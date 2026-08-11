@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type {
   CheckConclusion, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue, PrStatus, WorkflowRun,
 } from './forge.ts'
+import { ForgeRateLimitError } from './forge.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -59,6 +60,11 @@ const openGithubIssueListSchema = z.array(githubIssueSchema.extend({ state: z.li
 const closedGithubIssueListSchema = z.array(githubIssueSchema.extend({ state: z.literal('CLOSED') }))
 const issueCommentsSchema = z.object({
   comments: z.array(z.object({ body: z.string() })),
+})
+const rateLimitSchema = z.object({
+  resources: z.object({
+    graphql: z.object({ reset: z.number() }),
+  }),
 })
 
 export type RollupEntry = z.infer<typeof rollupEntrySchema>
@@ -136,12 +142,53 @@ async function gh(repoRoot: string, args: string[]): Promise<string> {
   return stdout
 }
 
+function commandErrorText(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const commandError = error as Error & { stdout?: unknown; stderr?: unknown }
+  return [error.message, commandError.stdout, commandError.stderr]
+    .filter((part): part is string => typeof part === 'string')
+    .join('\n')
+}
+
+function reportedResetAt(text: string): Date | undefined {
+  const epoch = /(?:x-ratelimit-reset|reset(?:s|ting)?(?: at)?)[^\d]{0,8}(\d{10})/i.exec(text)?.[1]
+  if (epoch !== undefined) return new Date(Number(epoch) * 1000)
+  const iso = /(?:reset(?:s|ting)?(?: at)?|until)\s*:?\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/i
+    .exec(text)?.[1]
+  return iso === undefined ? undefined : new Date(iso)
+}
+
+function isRateLimitFailure(error: unknown): boolean {
+  return /rate.?limit|HTTP 429/i.test(commandErrorText(error))
+}
+
 export type GithubCommand = (repoRoot: string, args: string[]) => Promise<string>
 
 export function createGithubForge(
   repoRoot: string = process.cwd(),
   runGh: GithubCommand = gh,
 ): Forge {
+  const checkedGh: GithubCommand = async (root, args) => {
+    try {
+      return await runGh(root, args)
+    } catch (error) {
+      if (!isRateLimitFailure(error)) throw error
+      let resetAt = reportedResetAt(commandErrorText(error))
+      if (resetAt === undefined) {
+        try {
+          const rateLimitArgs = ['api', 'rate_limit']
+          const stdout = await runGh(root, rateLimitArgs)
+          const reset = parseGhJson(rateLimitArgs, stdout, rateLimitSchema).resources.graphql.reset
+          resetAt = new Date(reset * 1000)
+        } catch {
+          // A short fallback still suppresses the poll storm when even rate_limit is unavailable.
+          resetAt = new Date(Date.now() + 60_000)
+        }
+      }
+      throw new ForgeRateLimitError(resetAt, { cause: error })
+    }
+  }
+
   const parseWorkflowRun = (data: GithubWorkflowRun): WorkflowRun => ({
     id: data.databaseId,
     createdAt: data.createdAt,
@@ -158,8 +205,9 @@ export function createGithubForge(
         '--json', 'url,state,isDraft,headRefOid,statusCheckRollup',
       ]
       try {
-        stdout = await runGh(repoRoot, args)
-      } catch {
+        stdout = await checkedGh(repoRoot, args)
+      } catch (error) {
+        if (error instanceof ForgeRateLimitError) throw error
         return { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
       }
       const data = parseGhJson(args, stdout, prStatusSchema)
@@ -182,7 +230,7 @@ export function createGithubForge(
 
     async prBody(ref: string): Promise<string> {
       const args = ['pr', 'view', ref, '--json', 'body']
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       return `${parseGhJson(args, stdout, prBodySchema).body}\n`
     },
 
@@ -195,7 +243,7 @@ export function createGithubForge(
         '--body', options.body,
       ]
       if (options.draft) args.push('--draft')
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       const url = stdout.split(/\r?\n/).map((line) => line.trim())
         .find((line) => PR_URL_PATTERN.test(line))
       if (url === undefined) {
@@ -209,15 +257,15 @@ export function createGithubForge(
       if (fields.title !== undefined) args.push('--title', fields.title)
       if (fields.body !== undefined) args.push('--body', fields.body)
       if (args.length === 3) return
-      await runGh(repoRoot, args)
+      await checkedGh(repoRoot, args)
     },
 
     async markPrReady(ref: string): Promise<void> {
-      await runGh(repoRoot, ['pr', 'ready', ref])
+      await checkedGh(repoRoot, ['pr', 'ready', ref])
     },
 
     async dispatchWorkflow(workflow: string, ref: string, dispatchToken: string): Promise<void> {
-      await runGh(repoRoot, [
+      await checkedGh(repoRoot, [
         'workflow', 'run', workflow, '--ref', ref,
         '--field', `dispatch_token=${dispatchToken}`,
       ])
@@ -232,7 +280,7 @@ export function createGithubForge(
         'run', 'list', '--workflow', workflow, '--event', 'workflow_dispatch', '--limit', '100',
         '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
       ]
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       const run = workflowRunForDispatch(
         parseGhJson(args, stdout, workflowRunListSchema), ref, dispatchToken,
       )
@@ -244,26 +292,26 @@ export function createGithubForge(
         'run', 'view', String(runId),
         '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
       ]
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       return parseWorkflowRun(parseGhJson(args, stdout, workflowRunSchema))
     },
 
     async currentUser(): Promise<string> {
       const args = ['api', 'user']
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       return parseGhJson(args, stdout, currentUserSchema).login
     },
 
     async ensureLabel(name: string, description: string): Promise<void> {
       // --force updates an existing label instead of failing on it.
-      await runGh(repoRoot, ['label', 'create', name, '--description', description, '--force'])
+      await checkedGh(repoRoot, ['label', 'create', name, '--description', description, '--force'])
     },
 
     async createIssue(options: CreateIssueOptions): Promise<number> {
       const args = ['issue', 'create', '--title', options.title, '--body', options.body]
       for (const label of options.labels) args.push('--label', label)
       for (const assignee of options.assignees ?? []) args.push('--assignee', assignee)
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       const match = /\/issues\/(\d+)\s*$/.exec(stdout.trim())
       if (match === null) {
         throw new Error(`gh issue create returned no issue URL: ${stdout.trim()}`)
@@ -274,19 +322,19 @@ export function createGithubForge(
     async getIssue(issueNumber: number): Promise<ForgeIssue> {
       const args = ['issue', 'view', String(issueNumber),
         '--json', 'number,state,title,body,labels,assignees,updatedAt']
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       return normalizeIssue(parseGhJson(args, stdout, githubIssueSchema))
     },
 
     async commentIssue(issueNumber: number, comment: string): Promise<void> {
-      await runGh(repoRoot, ['issue', 'comment', String(issueNumber), '--body', comment])
+      await checkedGh(repoRoot, ['issue', 'comment', String(issueNumber), '--body', comment])
     },
 
     async listIssueComments(issueNumber: number): Promise<string[]> {
       const args = [
         'issue', 'view', String(issueNumber), '--json', 'comments',
       ]
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       const data = parseGhJson(args, stdout, issueCommentsSchema)
       return data.comments.map((comment) => comment.body)
     },
@@ -295,7 +343,7 @@ export function createGithubForge(
       const args = ['issue', 'list', '--state', 'open',
         '--label', label, '--limit', '200',
         '--json', 'number,state,title,body,labels,assignees,updatedAt']
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       return parseGhJson(args, stdout, openGithubIssueListSchema).map(normalizeIssue)
     },
 
@@ -303,28 +351,28 @@ export function createGithubForge(
       const args = ['issue', 'list', '--state', 'closed',
         '--label', label, '--limit', '200',
         '--json', 'number,state,title,body,labels,assignees,updatedAt']
-      const stdout = await runGh(repoRoot, args)
+      const stdout = await checkedGh(repoRoot, args)
       return parseGhJson(args, stdout, closedGithubIssueListSchema).map(normalizeIssue)
     },
 
     async assignIssue(issueNumber: number, user: string): Promise<void> {
-      await runGh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-assignee', user])
+      await checkedGh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-assignee', user])
     },
 
     async unassignIssue(issueNumber: number, user: string): Promise<void> {
-      await runGh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-assignee', user])
+      await checkedGh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-assignee', user])
     },
 
     async addLabel(issueNumber: number, label: string): Promise<void> {
-      await runGh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-label', label])
+      await checkedGh(repoRoot, ['issue', 'edit', String(issueNumber), '--add-label', label])
     },
 
     async removeLabel(issueNumber: number, label: string): Promise<void> {
-      await runGh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-label', label])
+      await checkedGh(repoRoot, ['issue', 'edit', String(issueNumber), '--remove-label', label])
     },
 
     async closeIssue(issueNumber: number, comment: string): Promise<void> {
-      await runGh(repoRoot, ['issue', 'close', String(issueNumber), '--comment', comment])
+      await checkedGh(repoRoot, ['issue', 'close', String(issueNumber), '--comment', comment])
     },
   }
 }

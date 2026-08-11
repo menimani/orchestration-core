@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   createGithubForge, workflowRunForDispatch, type GithubCommand, type GithubWorkflowRun,
 } from '../src/adapters/forge-github.ts'
-import type { Forge } from '../src/adapters/forge.ts'
+import { ForgeRateLimitError, type Forge } from '../src/adapters/forge.ts'
 
 const workflowRunFixture = {
   databaseId: 71,
@@ -87,6 +87,32 @@ describe('GitHub workflow dispatch correlation', () => {
 })
 
 describe('GitHub forge JSON schemas', () => {
+  it('queries the GraphQL reset when a rate-limit error does not report one', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args.join(' ') === 'api rate_limit') {
+        return JSON.stringify({ resources: { graphql: { reset: 1_786_435_200 } } })
+      }
+      throw new Error('GraphQL: API rate limit exceeded')
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    let error: unknown
+    try {
+      await forge.listOpenIssues('loop:finding')
+    } catch (caught) {
+      error = caught
+    }
+
+    expect(error).toBeInstanceOf(ForgeRateLimitError)
+    expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
+    expect(calls.map((args) => args.join(' '))).toEqual([
+      'issue list --state open --label loop:finding --limit 200 --json number,state,title,body,labels,assignees,updatedAt',
+      'api rate_limit',
+    ])
+  })
+
   it('validates and normalizes PR details and check rollups', async () => {
     const forge = forgeReturning({
       url: 'https://github.com/example/repo/pull/12',
