@@ -904,8 +904,9 @@ export function createLoop(deps: LoopDeps) {
         stdio: 'ignore',
         windowsHide: true,
       })
-    } catch {
-      // the gate re-enters and pushes again; a transient push failure is not fatal here
+    } catch (error) {
+      event('WARN', `could not push branch: ${errorSummary(error)}`)
+      return false
     }
 
     const baseRef = git([
@@ -1189,7 +1190,7 @@ export function createLoop(deps: LoopDeps) {
 
           if (!runCycleSuite(currentScans)) return 'continue'
 
-          if (config.autoPr) await ensureDraftPr('cycle')
+          if (config.autoPr && !(await ensureDraftPr('cycle'))) return 'continue'
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
           log(`CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
           const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]

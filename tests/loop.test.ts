@@ -1087,6 +1087,21 @@ describe('failure announcement and burst stop (via poll)', () => {
 })
 
 describe('completion marker output', () => {
+  it('returns failure and leaves the cycle gate incomplete when the branch cannot be pushed', async () => {
+    initializeGitRepo()
+    git(['remote', 'add', 'origin', join(repoRoot, 'missing-remote.git')])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ autoPr: true })
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logText()).toContain('WARN could not push branch:')
+    expect(logText()).not.toContain('CYCLE_COMPLETE:')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(prStatusCalls).toBe(0)
+  })
+
   it('creates and summarizes a PR against the remote default branch', async () => {
     initializeGitRepo()
     git(['branch', '-M', 'trunk'])
