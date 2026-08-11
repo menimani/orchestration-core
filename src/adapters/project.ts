@@ -43,6 +43,15 @@ export interface DockerProbe {
   command: string
   /** Maximum time to wait for the probe before treating Docker as unavailable. */
   timeoutMs: number
+  /** Project-specific recovery guidance when the probe fails. */
+  remediation: string
+}
+
+export interface InfrastructureFailure {
+  /** Short attribution suitable for a merge-failure warning. */
+  diagnosis: string
+  /** Recovery guidance suitable for a cycle-suite error. */
+  remediation: string
 }
 
 export interface WorktreeSetupStep {
@@ -100,6 +109,8 @@ export interface ProjectAdapter {
   cycleSuite(): SuiteStep[]
   /** Repository-specific probe used when a cycle suite step needs Docker. */
   cycleSuiteDockerProbe?: DockerProbe
+  /** Classify repository-specific infrastructure failures found in command output. */
+  classifyInfrastructureFailure?: (output: string) => InfrastructureFailure | undefined
   /** Repository-specific preparation required before a scan can inspect a fresh worktree. */
   scanWorktreeSetup?: WorktreeSetupStep[]
   /** Repository-specific classification and risk signals for the generated pull request. */
