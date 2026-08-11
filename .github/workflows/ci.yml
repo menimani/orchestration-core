@@ -1,0 +1,32 @@
+name: CI
+
+# The core is executed as TypeScript without a build step, so the gate is the type
+# checker plus the suite that pins SPEC.md. Node 24 is the floor the sources assume.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - run: npx tsc --noEmit
+
+      # Single-threaded: the suite drives real git repositories in temporary
+      # directories, and parallel workers made their fixtures race on a shared runner.
+      - run: npm test -- --pool=threads --poolOptions.threads.singleThread
