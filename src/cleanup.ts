@@ -1,12 +1,12 @@
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { existsSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { branchName, finalMessageFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
 import { removeWorktreeWithFallback } from './worktree.ts'
-
-const PROCESS_EXIT_TIMEOUT_MS = 5_000
-const PROCESS_EXIT_POLL_MS = 50
+import {
+  systemProcessTreeRuntime, terminateProcessTree, type ProcessTreeRuntime,
+} from './processTree.ts'
 
 interface CommandOptions {
   cwd?: string
@@ -19,34 +19,19 @@ interface RemoveOptions {
   recursive?: boolean
 }
 
-export interface CleanupRuntime {
-  platform: NodeJS.Platform
-  spawn(command: string, args: readonly string[]): void
-  kill(pid: number, signal?: NodeJS.Signals | number): void
+export interface CleanupRuntime extends ProcessTreeRuntime {
   execFile(command: string, args: readonly string[], options: CommandOptions): string
   exists(path: string): boolean
   remove(path: string, options: RemoveOptions): void
-  now(): number
-  sleep(milliseconds: number): void
 }
 
 const systemRuntime: CleanupRuntime = {
-  platform: process.platform,
-  spawn: (command, args) => {
-    spawnSync(command, [...args], { windowsHide: true })
-  },
-  kill: (pid, signal) => {
-    process.kill(pid, signal)
-  },
+  ...systemProcessTreeRuntime,
   execFile: (command, args, options) => {
     return execFileSync(command, [...args], { ...options, encoding: 'utf8' })
   },
   exists: existsSync,
   remove: rmSync,
-  now: Date.now,
-  sleep: (milliseconds) => {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
-  },
 }
 
 function git(runtime: CleanupRuntime, paths: OrchPaths, args: readonly string[]): string {
@@ -76,38 +61,10 @@ function branchExists(runtime: CleanupRuntime, paths: OrchPaths, branch: string)
   return output.split(/\r?\n/).includes(ref)
 }
 
-function processIsAlive(runtime: CleanupRuntime, pid: number): boolean {
-  try {
-    runtime.kill(pid, 0)
-    return true
-  } catch (error) {
-    // A permission or other probe failure does not prove that the process stopped.
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
-  }
-}
-
 function stopProcess(runtime: CleanupRuntime, pid: number): void {
-  // Runners are detached, so on POSIX their PID is also the process-group ID.
-  // Probe and signal the group: the leader may have exited while descendants remain.
-  const target = runtime.platform === 'win32' ? pid : -pid
-  if (!processIsAlive(runtime, target)) return
-
-  console.log(`Stopping running process: pid=${pid}`)
   try {
-    if (runtime.platform === 'win32') {
-      runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
-    } else {
-      runtime.kill(target)
-    }
+    if (terminateProcessTree(pid, runtime)) console.log(`Stopping running process: pid=${pid}`)
   } catch {
-    // The command result is not authoritative: verify the process below.
-  }
-
-  const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
-  while (processIsAlive(runtime, target) && runtime.now() < deadline) {
-    runtime.sleep(PROCESS_EXIT_POLL_MS)
-  }
-  if (processIsAlive(runtime, target)) {
     throw new Error(`Could not stop process ${pid}; task state was retained.`)
   }
 }
