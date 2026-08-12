@@ -368,7 +368,8 @@ so authorship and verified ancestry must both hold.
     daemon is execution-only: it never scans, enters a cycle gate, creates or updates a
     pull request, runs a review, or merges. It claims and heartbeats ready issues through
     the standard path and starts their local tasks. A completed task with commits pushes
-    `task/<id>` to `origin`, comments the branch and exact head commit on its issue, and
+    `task/<id>` to the configured push remote, comments the branch and exact head commit
+    on its issue, and
     swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection with no
     commits comments and closes its issue instead. Its poll status uses the shared
     `Status     Running=<n>  Queue=<n>` event; because workers never scan, their loop-log
@@ -376,7 +377,8 @@ so authorship and verified ancestry must both hold.
 36. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts `loop:merge-ready`
     issues from that poll's shared finding snapshot: it reads the reported branch and head, fetches that branch
-    from `origin`, verifies the head and that it adds commits to the current branch, runs
+    from the configured push remote, verifies the head and that it adds commits to the
+    current branch, runs
     the project adapter's path-selected checks in a detached worktree, and merges with
     `--no-ff` and `closes #N`. It persists a successful adoption before updating the
     issue, so a later poll retries failed metadata updates without merging again. A
