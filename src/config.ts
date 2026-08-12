@@ -79,7 +79,9 @@ function num(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
 function bool(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
   const raw = env[name]
   if (raw === undefined || raw === '') return fallback
-  return raw === 'true'
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${name} must be 'true' or 'false', got '${raw}'`)
 }
 
 function str(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
