@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
@@ -184,5 +185,28 @@ describe('remote task adoption', () => {
     expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
       .toHaveLength(1)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
+  })
+
+  it('invalidates the completed cycle when a post-merge forge update is rate-limited', async () => {
+    const task = pushWorkerBranch('20260809_000000_006_auto-rate-limited-adoption')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const loop = makeLoop(stubProject)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const completeFlag = join(paths.queueDir, 'cycle-complete-1')
+    writeFileSync(completeFlag, '')
+    let completeFlagAtUpdate = true
+    forge.commentIssue = async () => {
+      completeFlagAtUpdate = existsSync(completeFlag)
+      throw new ForgeRateLimitError(new Date('2026-08-09T12:05:00Z'))
+    }
+
+    await loop.adoptRemoteTasks()
+
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({
+      issueNumber,
+      mergeCommit: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    })
+    expect(completeFlagAtUpdate).toBe(false)
+    expect(existsSync(completeFlag)).toBe(false)
   })
 })
