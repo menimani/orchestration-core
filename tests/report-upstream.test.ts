@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { parseIssueBody } from '../src/issueQueue.ts'
 import { orchPaths } from '../src/paths.ts'
 import {
-  prepareUpstreamReport, reportUpstream, type ReportUpstreamRuntime,
+  prepareUpstreamReport, submitUpstreamReport, type ReportUpstreamRuntime,
 } from '../src/reportUpstream.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
@@ -47,12 +47,14 @@ describe('upstream defect reports', () => {
     forge.repositoryLabels.set('configured/core', new Set(['upstream:report']))
     const commit = '0123456789abcdef0123456789abcdef01234567'
 
-    const url = await reportUpstream(orchPaths(repoRoot), 'The queue loses a finding.', forge,
-      runtime({
+    const report = prepareUpstreamReport(
+      orchPaths(repoRoot), 'The queue loses a finding.', runtime({
         git: (_root, args) => args[0] === 'remote'
           ? 'git@github.com:consumer/reporting-repo.git\n'
           : `git-subtree-dir: orchestration/ts\ngit-subtree-split: ${commit}\n`,
-      }))
+      }),
+    )
+    const url = await submitUpstreamReport(report, forge)
 
     expect(url).toBe('https://example.test/configured/core/issues/1')
     expect(forge.repositoryIssues).toHaveLength(1)
@@ -93,8 +95,11 @@ describe('upstream defect reports', () => {
     writePackage({ upstreamRepo: 'configured/core', version: '2.4.1' })
     const forge = makeFakeForge()
 
-    await reportUpstream(orchPaths(repoRoot), 'A core defect.', forge,
-      runtime({ env: { UPSTREAM_REPO: 'environment/core' } }))
+    const report = prepareUpstreamReport(
+      orchPaths(repoRoot), 'A core defect.',
+      runtime({ env: { UPSTREAM_REPO: 'environment/core' } }),
+    )
+    await submitUpstreamReport(report, forge)
 
     expect(forge.repositoryIssues[0]?.repository).toBe('environment/core')
     expect(forge.repositoryIssues[0]?.body).toContain('- Core version: `2.4.1`')
@@ -105,8 +110,8 @@ describe('upstream defect reports', () => {
     const forge = makeFakeForge()
     const gitCalls: string[][] = []
 
-    await reportUpstream(orchPaths(repoRoot), 'A core defect.', forge,
-      runtime({
+    const report = prepareUpstreamReport(
+      orchPaths(repoRoot), 'A core defect.', runtime({
         git: (_root, args) => {
           gitCalls.push(args)
           if (args[0] === 'branch') return 'task/report-upstream\n'
@@ -114,7 +119,9 @@ describe('upstream defect reports', () => {
           if (args[0] === 'remote') return 'https://github.com/consumer/current-repo.git\n'
           return ''
         },
-      }))
+      }),
+    )
+    await submitUpstreamReport(report, forge)
 
     expect(gitCalls).toContainEqual(['remote', 'get-url', 'shared'])
     expect(gitCalls).not.toContainEqual(['remote', 'get-url', 'origin'])
@@ -129,8 +136,8 @@ describe('upstream defect reports', () => {
     const forge = makeFakeForge()
     const remoteCalls: string[][] = []
 
-    await reportUpstream(orchPaths(repoRoot), 'A core defect.', forge,
-      runtime({
+    const report = prepareUpstreamReport(
+      orchPaths(repoRoot), 'A core defect.', runtime({
         git: (_root, args) => {
           if (args[0] === 'branch') return 'main\n'
           if (args[0] === 'config') return 'shared\n'
@@ -141,7 +148,9 @@ describe('upstream defect reports', () => {
           }
           return ''
         },
-      }))
+      }),
+    )
+    await submitUpstreamReport(report, forge)
 
     expect(remoteCalls).toEqual([
       ['remote', 'get-url', 'shared'],
@@ -159,14 +168,16 @@ describe('upstream defect reports', () => {
     const forge = makeFakeForge()
     const gitCalls: string[][] = []
 
-    await reportUpstream(orchPaths(repoRoot), 'A root-package defect.', forge,
-      runtime({
+    const report = prepareUpstreamReport(
+      orchPaths(repoRoot), 'A root-package defect.', runtime({
         packageRoot: repoRoot,
         git: (_root, args) => {
           gitCalls.push(args)
           return args[0] === 'remote' ? 'git@github.com:consumer/reporting-repo.git\n' : ''
         },
-      }))
+      }),
+    )
+    await submitUpstreamReport(report, forge)
 
     expect(forge.repositoryIssues[0]?.repository).toBe('configured/core')
     expect(forge.repositoryIssues[0]?.body).toContain('- Core version: `3.1.4`')
@@ -184,8 +195,8 @@ describe('upstream defect reports', () => {
     const commit = 'abcdef0123456789abcdef0123456789abcdef01'
     let logArgs: string[] | undefined
 
-    await reportUpstream(orchPaths(repoRoot), 'A nested-package defect.', forge,
-      runtime({
+    const report = prepareUpstreamReport(
+      orchPaths(repoRoot), 'A nested-package defect.', runtime({
         packageRoot,
         git: (_root, args) => {
           if (args[0] === 'remote') return 'git@github.com:consumer/reporting-repo.git\n'
@@ -195,39 +206,40 @@ describe('upstream defect reports', () => {
           }
           return ''
         },
-      }))
+      }),
+    )
+    await submitUpstreamReport(report, forge)
 
     expect(logArgs?.slice(-2)).toEqual(['--', 'vendor/core'])
     expect(forge.repositoryIssues[0]?.body).toContain(`- Core version: \`${commit}\``)
   })
 
-  it('fails clearly when no upstream repository is configured', async () => {
+  it('fails clearly when no upstream repository is configured', () => {
     writePackage({ version: '2.4.1' })
 
-    await expect(reportUpstream(
-      orchPaths(repoRoot), 'A core defect.', makeFakeForge(), runtime(),
-    )).rejects.toThrow(
+    expect(() => prepareUpstreamReport(
+      orchPaths(repoRoot), 'A core defect.', runtime(),
+    )).toThrow(
       'No upstream repository is configured. Set UPSTREAM_REPO or upstreamRepo in package.json.',
     )
   })
 
-  it('refuses an empty description before contacting the forge', async () => {
+  it('refuses an empty description before preparing a report', () => {
     writePackage({ upstreamRepo: 'configured/core', version: '2.4.1' })
-    const forge = makeFakeForge()
 
-    await expect(reportUpstream(
-      orchPaths(repoRoot), '  \n\t ', forge, runtime(),
-    )).rejects.toThrow('The report description must not be empty or whitespace only.')
-    expect(forge.repositoryIssues).toHaveLength(0)
+    expect(() => prepareUpstreamReport(
+      orchPaths(repoRoot), '  \n\t ', runtime(),
+    )).toThrow('The report description must not be empty or whitespace only.')
   })
 
   it('files the report without a missing optional label', async () => {
     writePackage({ upstreamRepo: 'configured/core', version: '2.4.1' })
     const forge = makeFakeForge()
 
-    await expect(reportUpstream(
-      orchPaths(repoRoot), 'A core defect.', forge, runtime(),
-    )).resolves.toBe('https://example.test/configured/core/issues/1')
+    const report = prepareUpstreamReport(orchPaths(repoRoot), 'A core defect.', runtime())
+
+    await expect(submitUpstreamReport(report, forge))
+      .resolves.toBe('https://example.test/configured/core/issues/1')
     expect(forge.repositoryIssues[0]?.labels).toEqual([])
   })
 })
