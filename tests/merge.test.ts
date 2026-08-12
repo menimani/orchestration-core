@@ -452,7 +452,10 @@ describe('mergeTask', () => {
     writeFileSync(join(worktree, 'orchestration', 'ts', 'package.json'), '{"dependencies":{}}\n')
     git(worktree, ['add', 'orchestration/ts/package.json'])
     git(worktree, ['commit', '-qm', 'feat: add orchestration dependency'])
-    const install = vi.fn()
+    const statusDuringInstall: Array<string | undefined> = []
+    const install = vi.fn(() => {
+      statusDuringInstall.push(readStatus(paths, taskId)?.status)
+    })
     const event = vi.fn()
 
     await mergeTask(paths, taskId, {
@@ -464,6 +467,7 @@ describe('mergeTask', () => {
 
     expect(install).toHaveBeenCalledOnce()
     expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
+    expect(statusDuringInstall).toEqual(['merged'])
     expect(event).toHaveBeenCalledWith(
       'Installed', ' orchestration deps  after 010_user',
     )
