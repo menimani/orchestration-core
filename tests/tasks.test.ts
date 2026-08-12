@@ -1,14 +1,15 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import {
   buildIssueBody, issueNumberForTask, parseIssueBody,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
 } from '../src/issueQueue.ts'
 import {
-  delegateTask, delegateTaskVisible, enqueueTask, isIssueModeActive, newTaskSpec,
+  delegateTask, delegateTaskVisible, enqueueTask, isIssueModeActive, isLoopRunning, newTaskSpec,
   removeIssueModeMarker, specFile, writeIssueModeMarker,
 } from '../src/tasks.ts'
 import { makeFakeForge } from './fakeForge.ts'
@@ -36,6 +37,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -144,6 +146,17 @@ describe('delegateTask', () => {
     writeIssueModeMarker(paths, true, 2147483647)
 
     expect(isIssueModeActive(paths, {})).toBe(false)
+  })
+
+  it('uses the operating-system liveness verdict for daemon markers', () => {
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    writeIssueModeMarker(paths, true, 2147483647)
+    writeFileSync(join(paths.queueDir, 'loop.pid'), '2147483646\n')
+
+    expect(isIssueModeActive(paths, {})).toBe(true)
+    expect(isLoopRunning(paths)).toBe(true)
+    expect(processIsAlive).toHaveBeenNthCalledWith(1, 2147483647)
+    expect(processIsAlive).toHaveBeenNthCalledWith(2, 2147483646)
   })
 
   it('removes only the issue-mode marker owned by the exiting daemon', () => {
