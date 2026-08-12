@@ -295,6 +295,37 @@ describe('forge poll budget', () => {
     }
   })
 
+  it('shows two review-origin fixes in the task log', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 2,
+    })
+    loop.initializeSessionStateForBranch()
+    await Promise.all([
+      fakeForge.createIssue({
+        title: '[BUG] `src/first.ts` review finding',
+        body: buildIssueBody(
+          '[BUG] `src/first.ts` review finding', '20260808_000000_001_review-c1',
+        ),
+        labels: [LABEL_FINDING, LABEL_READY],
+      }),
+      fakeForge.createIssue({
+        title: '[TEST] `src/second.ts` review finding',
+        body: buildIssueBody(
+          '[TEST] `src/second.ts` review finding', '20260808_000000_002_review-c2',
+        ),
+        labels: [LABEL_FINDING, LABEL_READY],
+      }),
+    ])
+
+    await loop.poll()
+
+    const claimed = logged.filter((line) => line.startsWith('Claimed'))
+    expect(claimed).toHaveLength(2)
+    expect(claimed.every((line) => /^Claimed \d{3}_fix\s/.test(line))).toBe(true)
+    expect(logged.filter((line) => /^Started \d{3}_fix\s/.test(line))).toHaveLength(2)
+  })
+
   it('returns every failed group member as singleton-ready work', async () => {
     initializeGitRepo()
     let starts = 0
@@ -2457,6 +2488,7 @@ describe('scanForNextTasks', () => {
     const specs = readdirSync(paths.tasksDir)
     expect(specs).toHaveLength(1)
     const fixId = (specs[0] as string).replace(/\.md$/, '')
+    expect(fixId).toContain('_fix-')
     expect(readFileSync(join(paths.queueDir, 'effort', fixId), 'utf8').trim()).toBe('high')
     expect(readFileSync(join(paths.tasksDir, `${fixId}.md`), 'utf8')).toContain('Stale async responses')
   })
@@ -2475,7 +2507,8 @@ describe('scanForNextTasks', () => {
     const fixId = (specs[0] as string).replace(/\.md$/, '')
     const descIndexes = readdirSync(join(paths.queueDir, 'desc-index'))
     expect(descIndexes).toHaveLength(4)
-    expect(descIndexes.every((name) => name.startsWith('auto-'))).toBe(true)
+    expect(fixId).toContain('_fix-')
+    expect(descIndexes.every((name) => name.startsWith('fix-'))).toBe(true)
     expect(descIndexes.map((name) =>
       readFileSync(join(paths.queueDir, 'desc-index', name), 'utf8').trim()))
       .toEqual([fixId, fixId, fixId, fixId])
@@ -2521,7 +2554,9 @@ describe('scanForNextTasks', () => {
     ].join('\n'))
     await loop.scanForNextTasks('20250101_000000_014_scan', 0)
 
-    expect(readdirSync(paths.tasksDir)).toHaveLength(3)
+    const taskIds = readdirSync(paths.tasksDir).map((name) => name.replace(/\.md$/, ''))
+    expect(taskIds).toHaveLength(3)
+    expect(taskIds.every((taskId) => taskId.includes('_auto-'))).toBe(true)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim().split('\n')).toHaveLength(3)
   })
 

@@ -8,7 +8,8 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
-  branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId,
+  branchName, finalMessageFile, isInspectionTaskId, isReviewFixTaskId, isReviewTaskId,
+  isScanTaskId,
   orchPaths, packageScriptCommand, statusFile, type OrchPaths,
 } from '../src/paths.ts'
 import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
@@ -253,6 +254,15 @@ describe('task id classes', () => {
   it('matches review ids', () => {
     expect(isReviewTaskId('20260808_093005_001_review-c2')).toBe(true)
     expect(isReviewTaskId('20260808_093005_001_auto-review-page')).toBe(false)
+  })
+
+  it('matches review-fix ids without classifying them as inspections', () => {
+    const id = '20260808_093005_001_fix-preserve-zero'
+    expect(isReviewFixTaskId(id)).toBe(true)
+    expect(isReviewFixTaskId('20260808_093005_001_auto-preserve-zero')).toBe(false)
+    expect(isReviewTaskId(id)).toBe(false)
+    expect(isScanTaskId(id)).toBe(false)
+    expect(isInspectionTaskId(paths, id)).toBe(false)
   })
 
   it('treats a delegated task with the inspect marker as inspection', () => {
