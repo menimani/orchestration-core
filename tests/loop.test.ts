@@ -326,7 +326,7 @@ describe('forge poll budget', () => {
     })
     loop.initializeSessionStateForBranch()
     recordIssueForTask(paths, completedTask, 17)
-    fakeForge.ensureLabel = vi.fn().mockRejectedValue(new Error('forge unavailable'))
+    fakeForge.listLabels = vi.fn().mockRejectedValue(new Error('forge unavailable'))
 
     expect(await loop.poll()).toBe('continue')
 
@@ -348,7 +348,7 @@ describe('forge poll budget', () => {
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
     loop.initializeSessionStateForBranch()
-    fakeForge.ensureLabel = vi.fn().mockRejectedValue(new Error('forge unavailable'))
+    fakeForge.listLabels = vi.fn().mockRejectedValue(new Error('forge unavailable'))
 
     expect(await loop.poll()).toBe('continue')
 

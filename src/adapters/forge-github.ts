@@ -404,13 +404,17 @@ export function createGithubForge(
       return parseGhJson(args, stdout, currentUserSchema).login
     },
 
-    async ensureLabel(name: string, description: string): Promise<void> {
-      // --force updates an existing label instead of failing on it.
+    async listLabels(): Promise<string[]> {
       const repository = await issueQueueRepository()
-      await checkedGh(repoRoot, [
-        'label', 'create', name, '--repo', repository,
-        '--description', description, '--force',
-      ])
+      const args = ['label', 'list', '--repo', repository, '--limit', '1000', '--json', 'name']
+      return parseGhJson(args, await checkedGh(repoRoot, args), labelListSchema)
+        .map((label) => label.name)
+    },
+
+    async createLabel(name: string, description: string): Promise<void> {
+      const repository = await issueQueueRepository()
+      await checkedGh(repoRoot, ['label', 'create', name, '--repo', repository,
+        '--description', description])
     },
 
     async createIssue(options: CreateIssueOptions): Promise<number> {

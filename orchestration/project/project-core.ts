@@ -15,6 +15,15 @@ const SUITE = 'npm test -- --pool=threads --poolOptions.threads.singleThread'
 export const coreProject: ProjectAdapter = {
   name: 'core',
 
+  preCommitChecks: [
+    {
+      label: 'TypeScript typecheck',
+      cwd: '',
+      command: 'npm run typecheck',
+      appliesTo: (files) => files.some((file) => file.endsWith('.ts')),
+    },
+  ],
+
   pullRequest: {
     categories: [
       { label: 'Features', title: { singular: 'feature', plural: 'features' } },

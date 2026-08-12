@@ -26,6 +26,17 @@ export const LABEL_IN_PROGRESS = 'loop:in-progress'
 export const LABEL_MERGE_READY = 'loop:merge-ready'
 export const LABEL_MERGE_FAILED = 'loop:merge-failed'
 export const LABEL_UNTRUSTED_AUTHOR = 'loop:untrusted-author'
+export const QUEUE_LABELS = [
+  { name: LABEL_FINDING, description: 'Filed by the improvement loop from a scan or review finding' },
+  { name: LABEL_READY, description: 'Unclaimed loop work: a worker may claim it by self-assigning' },
+  { name: LABEL_IN_PROGRESS, description: 'Claimed loop work; the assignee holds the lease' },
+  { name: LABEL_MERGE_READY, description: 'Completed worker branch waiting for the merger' },
+  { name: LABEL_MERGE_FAILED, description: 'Worker branch that the merger could not adopt' },
+  {
+    name: LABEL_UNTRUSTED_AUTHOR,
+    description: 'Finding authored by an account without repository write access; inspect manually',
+  },
+] as const
 const LIFECYCLE_LABELS = [
   LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
 ] as const
@@ -1092,15 +1103,15 @@ export async function reapStaleLeases(
   return reaped
 }
 
-/** The labels the queue relies on; called once at loop startup in issue mode. */
-export async function ensureQueueLabels(forge: Forge): Promise<void> {
-  await forge.ensureLabel(LABEL_FINDING, 'Filed by the improvement loop from a scan or review finding')
-  await forge.ensureLabel(LABEL_READY, 'Unclaimed loop work: a worker may claim it by self-assigning')
-  await forge.ensureLabel(LABEL_IN_PROGRESS, 'Claimed loop work; the assignee holds the lease')
-  await forge.ensureLabel(LABEL_MERGE_READY, 'Completed worker branch waiting for the merger')
-  await forge.ensureLabel(LABEL_MERGE_FAILED, 'Worker branch that the merger could not adopt')
-  await forge.ensureLabel(
-    LABEL_UNTRUSTED_AUTHOR,
-    'Finding authored by an account without repository write access; inspect manually',
-  )
+/** Create only missing queue labels; existing repository-owned metadata is untouched. */
+export async function ensureQueueLabels(forge: Forge): Promise<string[]> {
+  const existing = new Set(await forge.listLabels())
+  const created: string[] = []
+  for (const label of QUEUE_LABELS) {
+    if (existing.has(label.name)) continue
+    await forge.createLabel(label.name, label.description)
+    existing.add(label.name)
+    created.push(label.name)
+  }
+  return created
 }

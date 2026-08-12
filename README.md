@@ -71,12 +71,13 @@ With neither variable set, the core uses the single `project-*.ts` file in
 to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explicit path;
 it overrides the conventional path selected by `PROJECT`.
 
-A project adapter answers a few questions: which commands gate a merge, which tests a
-changed path implies, which suites run once per cycle, how commits are grouped in the
-generated pull request, which changed paths signal risk, and how a deployment is
-verified. The core supplies commit subjects, changed and deleted paths, and an on-demand
-diff reader; the adapter supplies the repository vocabulary and path rules. If the
-repository intentionally has no PR checks, it may explicitly declare
+A project adapter answers a few questions: which staged-path checks run before a commit,
+which commands gate a merge, which tests a changed path implies, which suites run once per
+cycle, how commits are grouped in the generated pull request, which changed paths signal
+risk, and how a deployment is verified. The core supplies commit subjects, changed and
+deleted paths, and an on-demand diff reader; the adapter supplies the repository
+vocabulary and path rules. If the repository intentionally has no PR checks, it may
+explicitly declare
 `ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
 
 ## Using it
@@ -85,7 +86,19 @@ repository intentionally has no PR checks, it may explicitly declare
 git subtree add --prefix=orchestration/ts \
   https://github.com/menimani/orchestration-core.git main --squash
 npm ci --prefix orchestration/ts
+node orchestration/ts/src/cli.ts init <project-name>
 ```
+
+The subtree command is intentionally manual: it makes the imported commit visible. After
+that one deliberate import, `init` is the supported setup and repair path. It generates a
+contract-valid adapter, project templates, points `core.hooksPath` at the core-owned
+hooks, and creates missing `loop:*` labels. It is safe to repeat: existing project files
+and a deliberately different hooks setting are reported and never overwritten.
+
+Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
+the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,
+adapter suite, real adapter discovery, referenced paths, pushable branch upstream, hooks
+setting, and labels separately; skipped checks retain their reason.
 
 Then start a run on a topic branch — never on your default branch, because the loop
 commits and merges on its own. On POSIX shells:
@@ -104,10 +117,11 @@ $env:AUTO_REVIEW = 'true'
 node orchestration/ts/src/cli.ts loop --daemon
 ```
 
-`node orchestration/ts/src/cli.ts` with no arguments lists every command: `delegate` hands
-a decision from your own head to the loop, `loop-status` says what is in flight, `ci-wait`
-waits on a pull request's checks without believing a partial rollup, `deploy` dispatches a
-deployment workflow and verifies the revision that actually came up.
+`node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
+the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
+head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's
+checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
+and verifies the revision that actually came up.
 
 Automatic pulls are enabled by default. To pull later improvements manually, or when
 `CORE_AUTO_UPDATE=false` pins the consumed version, use:

@@ -1,6 +1,7 @@
 import type { ProjectAdapter } from '../../src/adapters/project.ts'
 
 export const loaderFixtureProject: ProjectAdapter = {
+  preCommitChecks: [],
   name: 'shiora',
   pullRequest: {
     categories: [{ label: 'Changes' }],

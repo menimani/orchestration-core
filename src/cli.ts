@@ -11,6 +11,7 @@ import { cleanupTask } from './cleanup.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
 import { createLoop, formatEventLine } from './loop.ts'
+import { initializeRepository } from './initialize.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
@@ -22,10 +23,12 @@ import {
   isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
 } from './paths.ts'
 import { pruneTasks } from './prune.ts'
+import { runPreCommitChecks } from './preCommit.ts'
 import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
+import { verifyRepositorySetup } from './setup.ts'
 import {
   liveTaskProcesses, orphanedWorktreeDirectories, terminateLiveTaskProcesses,
   worktreeHolderHint, type TaskProcessTermination,
@@ -79,6 +82,36 @@ function reportTaskProcessTermination(
     report(formatEventLine('Stopped', 'tasks', 'no live process trees'))
   }
   return result.failures.length === 0
+}
+
+const cmdInit: Command = async (paths, args) => {
+  if (args.length > 1) {
+    console.error('Usage: init [project-name]')
+    return 1
+  }
+  const config = loadConfig()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  const result = await initializeRepository(paths, forge, args[0])
+  return result.ok ? 0 : 1
+}
+
+const cmdPreCommit: Command = async (paths, args) => {
+  if (args.length !== 0) {
+    console.error('Usage: pre-commit')
+    return 1
+  }
+  const project = await loadProject(paths.root)
+  return runPreCommitChecks(paths.repoRoot, project) ? 0 : 1
+}
+
+const cmdVerifySetup: Command = async (paths, args) => {
+  if (args.length !== 0) {
+    console.error('Usage: verify-setup')
+    return 1
+  }
+  const config = loadConfig()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  return await verifyRepositorySetup(paths, forge) ? 0 : 1
 }
 
 const cmdNew: Command = async (paths, args) => {
@@ -740,6 +773,9 @@ const cmdShipped: Command = async (paths, args) => {
 }
 
 const commands: Record<string, Command> = {
+  'init': cmdInit,
+  'pre-commit': cmdPreCommit,
+  'verify-setup': cmdVerifySetup,
   'new': cmdNew,
   'enqueue': cmdEnqueue,
   'delegate': cmdDelegate,
