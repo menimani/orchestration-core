@@ -19,3 +19,7 @@ orchestration/logs/
 orchestration/worktrees/
 orchestration/tasks/
 orchestration/status/
+
+# Test-run output: created by a coverage run in any checkout, including task worktrees,
+# where the merge guard reads it as work the runner forgot to commit.
+coverage/
