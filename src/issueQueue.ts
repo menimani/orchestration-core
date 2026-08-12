@@ -12,7 +12,7 @@ import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
 } from './tasks.ts'
-import { frameUntrustedText } from './templates.ts'
+import { frameVerifiedRequirement } from './templates.ts'
 
 // The issue queue: scan findings become forge issues, workers claim them, and the
 // merge that lands a fix closes its issue through the promotion PR. This is the
@@ -976,7 +976,7 @@ export async function claimIssue(
       if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', parsed.requirement, taskId)
       if (!existsSync(specFile(paths, taskId))) {
         newTaskSpec(paths, taskId)
-        appendRequirements(taskId, frameUntrustedText(parsed.requirement))
+        appendRequirements(taskId, frameVerifiedRequirement(parsed.requirement))
       }
       if (parsed.effort !== undefined && ['minimal', 'low', 'medium', 'high'].includes(parsed.effort)) {
         mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
