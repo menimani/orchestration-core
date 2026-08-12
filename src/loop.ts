@@ -1359,8 +1359,7 @@ export function createLoop(deps: LoopDeps) {
       'Status', 'PR body',
       'still reflects history and must be rewritten as a final summary.',
     )
-    const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
-    event('Completed', 'Loop', prNumber === undefined ? '' : `PR #${prNumber}`)
+    event('Completed', 'Loop', `PR ${prUrl}`)
     previousGateFailures.delete('pr-status-before-promotion')
     previousGateFailures.delete('pr-promotion')
     previousGateFailures.delete('pr-status-after-promotion')
@@ -1557,8 +1556,7 @@ export function createLoop(deps: LoopDeps) {
           }
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
           log(`CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
-          const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
-          event('Completed', 'Cycle', prNumber === undefined ? '' : `PR #${prNumber}`)
+          event('Completed', 'Cycle', prUrl === '' ? '' : `PR ${prUrl}`)
           writeFileSync(completeFlag, '')
         }
 
