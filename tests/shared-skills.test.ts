@@ -105,45 +105,53 @@ describe('shared skill sync', () => {
   })
 
   it('removes hash-matching legacy copies and their one-time migration state', () => {
+    const legacyRoot = join(repoRoot, '.former-runner', 'skills')
     const legacyRunner: Runner = {
       ...runner,
       sharedSkills: {
         ...runner.sharedSkills,
-        destinationRoot: (root) => join(root, '.claude', 'skills'),
+        destinationRoot: () => legacyRoot,
       },
     }
     syncSharedSkills(repoRoot, packageRoot, legacyRunner)
-    const localSkill = join(repoRoot, '.claude', 'skills', 'verify-changes', 'SKILL.md')
+    runner = {
+      ...runner,
+      sharedSkills: { ...runner.sharedSkills, legacyRoots: () => [legacyRoot] },
+    }
+    const localSkill = join(legacyRoot, 'verify-changes', 'SKILL.md')
     mkdirSync(dirname(localSkill), { recursive: true })
     writeFileSync(localSkill, 'repository gates\n')
 
     const result = syncSharedSkills(repoRoot, packageRoot, runner)
 
     expect(result.migrationConflicts).toEqual([])
-    expect(existsSync(join(repoRoot, '.claude', 'skills', 'git-commit'))).toBe(false)
-    expect(existsSync(join(repoRoot, '.claude', 'skills', 'loop-start'))).toBe(false)
-    expect(existsSync(join(
-      repoRoot, '.claude', 'skills', '.orchestration-core-sync.json',
-    ))).toBe(false)
+    expect(existsSync(join(legacyRoot, 'git-commit'))).toBe(false)
+    expect(existsSync(join(legacyRoot, 'loop-start'))).toBe(false)
+    expect(existsSync(join(legacyRoot, '.orchestration-core-sync.json'))).toBe(false)
     expect(readFileSync(localSkill, 'utf8')).toBe('repository gates\n')
   })
 
   it('preserves and reports a divergent legacy copy only once', () => {
+    const legacyRoot = join(repoRoot, '.former-runner', 'skills')
     const legacyRunner: Runner = {
       ...runner,
       sharedSkills: {
         ...runner.sharedSkills,
-        destinationRoot: (root) => join(root, '.claude', 'skills'),
+        destinationRoot: () => legacyRoot,
       },
     }
     syncSharedSkills(repoRoot, packageRoot, legacyRunner)
-    const divergent = join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md')
+    runner = {
+      ...runner,
+      sharedSkills: { ...runner.sharedSkills, legacyRoots: () => [legacyRoot] },
+    }
+    const divergent = join(legacyRoot, 'loop-start', 'SKILL.md')
     writeFileSync(divergent, 'consumer version\n')
 
     const first = syncSharedSkills(repoRoot, packageRoot, runner)
     const second = syncSharedSkills(repoRoot, packageRoot, runner)
 
-    expect(first.migrationConflicts).toEqual([join(repoRoot, '.claude', 'skills', 'loop-start')])
+    expect(first.migrationConflicts).toEqual([join(legacyRoot, 'loop-start')])
     expect(second.migrationConflicts).toEqual([])
     expect(readFileSync(divergent, 'utf8')).toBe('consumer version\n')
   })

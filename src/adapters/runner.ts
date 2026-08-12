@@ -30,6 +30,8 @@ export interface RunnerSharedSkillRenderOptions {
 export interface RunnerSharedSkills {
   /** Absolute directory where this runner discovers repository-scoped skills. */
   destinationRoot(repoRoot: string): string
+  /** Absolute former discovery directories whose generated skills may be migrated. */
+  legacyRoots?(repoRoot: string): string[]
   /** Render a canonical shared-skill file into the runner's on-disk format. */
   renderFile(contents: Buffer, options: RunnerSharedSkillRenderOptions): Buffer
 }

@@ -63,6 +63,8 @@ describe('createCodexRunner', () => {
 
     expect(sharedSkills.destinationRoot(repoRoot))
       .toBe(join(repoRoot, '.agents', 'skills'))
+    expect(sharedSkills.legacyRoots?.(repoRoot))
+      .toEqual([join(repoRoot, '.claude', 'skills')])
     expect(sharedSkills.renderFile(
       Buffer.from('{{COMMAND_PREFIX}} loop\n'),
       { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
