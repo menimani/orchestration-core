@@ -20,6 +20,7 @@ const EVENT_NAMES = [
   'Mode',
   'Updated',
   'Restarting',
+  'Restarted',
   'ERROR',
   'WARN',
   'Recovered',

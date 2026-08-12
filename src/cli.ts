@@ -39,6 +39,7 @@ import {
 } from './tasks.ts'
 import { observeNextPoll } from './wake.ts'
 import { runWorkerCommand } from './worker.ts'
+import { signalLoopRestartReady, startLoopReplacement } from './restart.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -499,7 +500,7 @@ const cmdLoop: Command = async (paths, args) => {
     const child = spawn(process.execPath, [
       packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
     ], {
-      cwd: paths.repoRoot,
+      cwd: packageFile(),
       detached: true,
       stdio: ['ignore', fd, fd],
       windowsHide: true,
@@ -700,6 +701,7 @@ async function runLoopDaemon(
     await loop.initializeIssueQueue()
 
     loop.initializeSessionStateForBranch()
+    signalLoopRestartReady()
 
     for (;;) {
       // Observe first: delegation may append after poll() returns but before this
@@ -719,16 +721,32 @@ async function runLoopDaemon(
         if (outcome === 'stopped' && !stopOwnedTaskProcesses(true)) return 1
         if (outcome === 'restart') {
           if (!stopOwnedTaskProcesses(false)) return 1
-          // Node has no portable exec(2). Release ownership first, then replace this
-          // daemon with the same command, environment, working tree, and stdio.
+          // Node has no portable exec(2). Release ownership so the replacement can
+          // claim it, but do not report success until that daemon finishes startup.
           releaseDaemonState()
-          const replacement = spawn(process.execPath, process.argv.slice(1), {
-            cwd: paths.repoRoot,
-            env: process.env,
-            stdio: 'inherit',
-            windowsHide: true,
-          })
-          replacement.unref()
+          const readyFile = join(
+            paths.queueDir,
+            `loop.restart-${process.pid}-${Date.now()}.ready`,
+          )
+          const replacement = await startLoopReplacement(readyFile)
+          if (!replacement.ok) {
+            const childOwner = replacement.pid === undefined ? '' : `${replacement.pid}`
+            try {
+              if (existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() === childOwner) {
+                rmSync(pidFile, { force: true })
+              }
+              writeFileSync(pidFile, `${process.pid}\n`, { flag: 'wx' })
+              writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+            } catch (error) {
+              const detail = error instanceof Error ? error.message : String(error)
+              log(formatEventLine('ERROR', 'restart state', detail))
+            }
+            log(formatEventLine(
+              'ERROR', 'restart', `replacement could not start: ${replacement.error ?? 'unknown error'}`,
+            ))
+            return 1
+          }
+          log(formatEventLine('Restarted', 'core', `replacement PID ${replacement.pid}`))
         }
         return 0
       }
