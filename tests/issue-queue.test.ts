@@ -1061,6 +1061,68 @@ describe('reapStaleLeases', () => {
     expect(liveAfter.labels).toContain(LABEL_IN_PROGRESS)
   })
 
+  it('immediately retries when adding ready fails after unassignment', async () => {
+    const now = new Date('2026-08-08T12:00:00Z')
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'partial reap', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    forge.clock = () => now
+    const addLabel = forge.addLabel.bind(forge)
+    let failReady = true
+    forge.addLabel = async (number, label) => {
+      if (label === LABEL_READY && failReady) {
+        failReady = false
+        throw new Error('addLabel failed')
+      }
+      await addLabel(number, label)
+    }
+
+    await expect(reapStaleLeases(forge, paths, 3, now)).rejects.toThrow('addLabel failed')
+    const partial = await forge.getIssue(issueNumber)
+    expect(partial.assignees).toEqual([])
+    expect(partial.labels).not.toContain(LABEL_READY)
+    expect(partial.labels).toContain(LABEL_IN_PROGRESS)
+    expect(partial.updatedAt).toBe(now.toISOString())
+
+    expect(await reapStaleLeases(forge, paths, 3, now)).toEqual([issueNumber])
+    const recovered = await forge.getIssue(issueNumber)
+    expect(recovered.labels).toContain(LABEL_READY)
+    expect(recovered.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('immediately retries when removing in-progress fails after adding ready', async () => {
+    const now = new Date('2026-08-08T12:00:00Z')
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'partial reap', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    forge.clock = () => now
+    const removeLabel = forge.removeLabel.bind(forge)
+    let failInProgress = true
+    forge.removeLabel = async (number, label) => {
+      if (label === LABEL_IN_PROGRESS && failInProgress) {
+        failInProgress = false
+        throw new Error('removeLabel failed')
+      }
+      await removeLabel(number, label)
+    }
+
+    await expect(reapStaleLeases(forge, paths, 3, now)).rejects.toThrow('removeLabel failed')
+    const partial = await forge.getIssue(issueNumber)
+    expect(partial.assignees).toEqual([])
+    expect(partial.labels).toContain(LABEL_READY)
+    expect(partial.labels).toContain(LABEL_IN_PROGRESS)
+    expect(partial.updatedAt).toBe(now.toISOString())
+
+    expect(await reapStaleLeases(forge, paths, 3, now)).toEqual([issueNumber])
+    const recovered = await forge.getIssue(issueNumber)
+    expect(recovered.labels).toContain(LABEL_READY)
+    expect(recovered.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
   it('revalidates a stale listing after a concurrent heartbeat before reaping', async () => {
     const now = new Date('2026-08-08T12:00:00Z')
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
