@@ -150,9 +150,10 @@ from or equivalent to `orchestration/tests/*.sh`.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot
-    remains an external source whose state is unknown, so the gate waits. Every continuing
-    status names its wait target, such as an unfinished task, an unfinished scan, worker
-    capacity, an open finding, or finding status that could not be read.
+    remains an external source whose state is unknown, so the gate waits. An idle continuing
+    status names its wait target, such as an open finding or finding status that could not
+    be read; a status with a non-zero scan, running, or queue counter omits `Waiting=` because
+    the counters already explain why the poll continues.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
@@ -372,8 +373,9 @@ so authorship and verified ancestry must both hold.
     on its issue, and
     swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection with no
     commits comments and closes its issue instead. Its poll status uses the shared
-    `Status     Running=<n>  Queue=<n>` event; because workers never scan, their loop-log
-    prefix carries cycle zero rather than a worker-specific replacement for the cycle.
+    `Status     Running=<n>  Queue=<n>` event while work is active and appends
+    `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
+    carries cycle zero rather than a worker-specific replacement for the cycle.
 36. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts `loop:merge-ready`
     issues from that poll's shared finding snapshot: it reads the reported branch and head, fetches that branch

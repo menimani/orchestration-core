@@ -1851,12 +1851,8 @@ export function createLoop(deps: LoopDeps) {
         ? [`Running=${runningTasks}`, `Queue=${queue}`]
         : []),
     ]
-    const waitingFor = [
-      ...(scans > 0 ? ['unfinished scan'] : []),
-      ...(runningTasks > 0 ? ['unfinished task'] : []),
-      ...(queue > 0 ? ['worker capacity'] : []),
-    ]
-    if (waitingFor.length === 0) {
+    const waitingFor: string[] = []
+    if (scans === 0 && runningTasks === 0 && queue === 0) {
       if (gateWaitTarget !== undefined) waitingFor.push(gateWaitTarget)
       else if (config.workerMode) waitingFor.push('open finding')
       else if (config.issueQueueEnabled && openFindings === null) waitingFor.push('finding status')
