@@ -65,7 +65,8 @@ function windowsOperatingSystem(remove: (path: string, options: {
   recursive: true
 }) => void): OperatingSystem {
   return createWindowsOperatingSystem({
-    spawn: () => {}, probeProcess: () => {}, remove, now: Date.now, sleep: () => {},
+    spawn: () => {}, listProcesses: () => [], probeProcess: () => {}, remove,
+    now: Date.now, sleep: () => {},
   })
 }
 

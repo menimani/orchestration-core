@@ -76,6 +76,7 @@ function windowsOperatingSystem(
 ): OperatingSystem {
   return createWindowsOperatingSystem({
     spawn: () => {},
+    listProcesses: () => [{ pid: 12345, parentPid: 0 }],
     probeProcess: () => { throw gone() },
     remove: () => {},
     now: Date.now,

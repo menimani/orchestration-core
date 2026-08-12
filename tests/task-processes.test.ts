@@ -50,6 +50,7 @@ describe('terminateLiveTaskProcesses', () => {
     })
     const os = createWindowsOperatingSystem({
       spawn,
+      listProcesses: () => [...alive].map((pid) => ({ pid, parentPid: 0 })),
       probeProcess: (pid) => {
         if (!alive.has(pid)) throw gone()
       },
@@ -130,6 +131,7 @@ describe('process-group liveness', () => {
   it('selects the Windows implementation when group state must not be consulted', () => {
     const runtime: WindowsOperatingSystemRuntime = {
       spawn: () => {},
+      listProcesses: () => [{ pid: 4321, parentPid: 0 }],
       probeProcess: () => {},
       remove: () => {},
       now: Date.now,
@@ -137,5 +139,44 @@ describe('process-group liveness', () => {
     }
 
     expect(createWindowsOperatingSystem(runtime).processTreeIsAlive(4321)).toBe(true)
+  })
+
+  it('reports a Windows tree as alive while an orphaned descendant remains', () => {
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn: () => {},
+      listProcesses: () => [
+        { pid: 4322, parentPid: 4321 },
+        { pid: 4323, parentPid: 4322 },
+      ],
+      probeProcess: (pid) => {
+        if (pid !== 4323) throw gone()
+      },
+      remove: () => {},
+      now: Date.now,
+      sleep: () => {},
+    }
+
+    expect(createWindowsOperatingSystem(runtime).processTreeIsAlive(4321)).toBe(true)
+  })
+
+  it('verifies captured Windows descendants after taskkill stops the parent', () => {
+    const alive = new Set([4321, 4322])
+    let now = 0
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn: () => { alive.delete(4321) },
+      listProcesses: () => [
+        { pid: 4321, parentPid: 1 },
+        { pid: 4322, parentPid: 4321 },
+      ],
+      probeProcess: (pid) => {
+        if (!alive.has(pid)) throw gone()
+      },
+      remove: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+    }
+
+    expect(() => createWindowsOperatingSystem(runtime).terminateProcessTree(4321))
+      .toThrow('Could not stop process tree 4321.')
   })
 })
