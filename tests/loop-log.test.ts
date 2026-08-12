@@ -134,6 +134,8 @@ describe('loopLogLines', () => {
       .toBe('2026-08-10 01:02:03 [loop 04/12] Updated    core        12345678..abcdef01')
     expect(loopLogLines('Restarting core        for cycle 5', context)[0])
       .toBe('2026-08-10 01:02:03 [loop 04/12] Restarting core        for cycle 5')
+    expect(loopLogLines('Restarted core        replacement PID 123', context)[0])
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Restarted  core        replacement PID 123')
   })
 
   it('aligns subjects for verbs of different lengths', () => {

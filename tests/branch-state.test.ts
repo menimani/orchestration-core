@@ -36,7 +36,7 @@ function makeLoop(overrides: Partial<LoopConfig> = {}): Loop {
 }
 
 const cycleFileNames = [
-  'cycle-complete-4', 'cycle-resume-4', 'ci-fix-emitted-4', 'review-round-4',
+  'cycle-complete-4', 'cycle-suite-tip-4', 'cycle-resume-4', 'ci-fix-emitted-4', 'review-round-4',
   'review-id-4', 'decisions.txt', 'failed-4', 'scan-yield-4', 'pr-url.txt',
   'empty-scan-count.txt', 'merge-failure-count.txt',
 ]
@@ -109,6 +109,24 @@ describe('initializeSessionStateForBranch', () => {
       expect(readFileSync(join(paths.queueDir, name), 'utf8').trim()).toBe('cycle state')
     }
     assertPersistentState()
+  })
+})
+
+describe('validatePushTarget', () => {
+  it('stops startup when an auto-PR branch has no push target', () => {
+    expect(makeLoop({ autoPr: true }).validatePushTarget()).toBe(false)
+
+    expect(logged).toContain(
+      'ERROR current branch cannot be pushed: repository has no configured remote',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('does not require a push target when the run will not publish a PR', () => {
+    expect(makeLoop({ autoPr: false, workerMode: false }).validatePushTarget()).toBe(true)
+
+    expect(logged).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 })
 

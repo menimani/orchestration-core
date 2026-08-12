@@ -10,6 +10,7 @@ let repoRoot: string
 const baseRef = 'origin/trunk'
 
 const project: ProjectAdapter = {
+  preCommitChecks: [],
   name: 'fixture',
   mergeChecks: () => [],
   cycleSuite: () => [],

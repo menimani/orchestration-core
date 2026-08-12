@@ -9,6 +9,7 @@ const ORCHESTRATION_MANIFEST = 'orchestration/ts/package.json'
 
 export const consumerProject: ProjectAdapter = {
   name: 'consumer',
+  preCommitChecks: [],
   scanWorktreeSetup: [
     {
       label: 'Consumer environment',

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { platform } from 'node:os'
 import { basename, isAbsolute, join, relative, sep } from 'node:path'
-import type { Forge } from './adapters/forge.ts'
+import type { CreateIssueInRepositoryOptions, Forge } from './adapters/forge.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 
 interface PackageMetadata {
@@ -17,6 +17,8 @@ export interface ReportUpstreamRuntime {
   packageRoot?: string
   git(repoRoot: string, args: string[]): string
 }
+
+export type UpstreamReport = CreateIssueInRepositoryOptions
 
 const defaultRuntime: ReportUpstreamRuntime = {
   env: process.env,
@@ -102,12 +104,15 @@ function subtreeCommit(
   }
 }
 
-export async function reportUpstream(
+export function prepareUpstreamReport(
   paths: OrchPaths,
   description: string,
-  forge: Forge,
   runtime: ReportUpstreamRuntime = defaultRuntime,
-): Promise<string> {
+): UpstreamReport {
+  const trimmedDescription = description.trim()
+  if (trimmedDescription === '') {
+    throw new Error('The report description must not be empty or whitespace only.')
+  }
   const packageRoot = runtime.packageRoot ?? PACKAGE_ROOT
   const packageFile = join(packageRoot, 'package.json')
   const metadata = JSON.parse(readFileSync(packageFile, 'utf8')) as PackageMetadata
@@ -127,9 +132,9 @@ export async function reportUpstream(
   }
   const repository = reportingRepository(paths, runtime)
   const body = [
-    '## Description',
+    '## Requirement',
     '',
-    description.trim(),
+    trimmedDescription,
     '',
     '## Reporter',
     '',
@@ -139,10 +144,26 @@ export async function reportUpstream(
     `- Node version: \`${runtime.nodeVersion}\``,
   ].join('\n')
 
-  return forge.createIssueInRepository({
+  return {
     repository: upstreamRepository,
     title: `Core defect reported by ${repository}`,
     body,
     optionalLabels: ['upstream:report'],
-  })
+  }
+}
+
+export async function submitUpstreamReport(
+  report: UpstreamReport,
+  forge: Forge,
+): Promise<string> {
+  return forge.createIssueInRepository(report)
+}
+
+export async function reportUpstream(
+  paths: OrchPaths,
+  description: string,
+  forge: Forge,
+  runtime: ReportUpstreamRuntime = defaultRuntime,
+): Promise<string> {
+  return submitUpstreamReport(prepareUpstreamReport(paths, description, runtime), forge)
 }

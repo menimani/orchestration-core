@@ -17,6 +17,7 @@ export interface FakeForge extends Forge {
   issueCommentAuthors: Map<number, Array<{ login: string; hasWriteAccess: boolean }>>
   repositoryIssues: Array<CreateIssueInRepositoryOptions & { labels: string[]; url: string }>
   repositoryLabels: Map<string, Set<string>>
+  labels: Set<string>
   listOpenIssuesCalls: string[]
   listIssueCommentsCalls: number[]
   user: string
@@ -35,6 +36,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     issueCommentAuthors: new Map(),
     repositoryIssues: [],
     repositoryLabels: new Map(),
+    labels: new Set(),
     listOpenIssuesCalls: [],
     listIssueCommentsCalls: [],
     user,
@@ -69,7 +71,12 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     async currentUser(): Promise<string> {
       return fake.user
     },
-    async ensureLabel(): Promise<void> {},
+    async listLabels(): Promise<string[]> {
+      return [...fake.labels]
+    },
+    async createLabel(name: string): Promise<void> {
+      fake.labels.add(name)
+    },
     async createIssue(options: CreateIssueOptions): Promise<number> {
       const issueNumber = nextIssueNumber++
       fake.issues.set(issueNumber, {

@@ -36,11 +36,21 @@ review is enabled, by stopping for a person if that review will not converge.
 Immediately before each cycle starts, the daemon fetches the configured shared-core
 upstream and compares it with the last import of this package's subtree. If the subtree
 is behind, it runs `git subtree pull --squash`; when package files change, it replaces
-itself so the new cycle uses the pulled code while retaining the environment and run
-branch. This happens only after the prior gate has closed and while no task is running.
+itself from the package's absolute CLI path so the new cycle uses the pulled code while
+retaining the arguments, environment, and run branch. The parent reports success only
+after the replacement daemon finishes startup. This happens only after the prior gate
+has closed and while no task is running.
 A daemon otherwise runs the code it started with. A dirty working tree or conflicting
 pull is left for the consumer to resolve: the daemon warns and starts the cycle on the
 old code instead of merging local divergence.
+
+That same boundary syncs the skills declared in `skills/manifest.json` into the
+repository root at `.claude/skills/`. Loop commands are rendered for the installed
+package location (`npm run` here, `npm run -C orchestration/ts` in the layout below).
+The sync tracks the exact content it generated: a consumer edit, deletion, or added
+support file is reported and retained, while repository skills absent from the manifest
+are never touched. Canonical skills live outside a nested `.claude/skills/` directory,
+so importing the package does not expose a second qualified copy of each shared skill.
 
 Nothing here decides that shipping is safe. Deployment stays a human action.
 
@@ -71,12 +81,13 @@ With neither variable set, the core uses the single `project-*.ts` file in
 to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explicit path;
 it overrides the conventional path selected by `PROJECT`.
 
-A project adapter answers a few questions: which commands gate a merge, which tests a
-changed path implies, which suites run once per cycle, how commits are grouped in the
-generated pull request, which changed paths signal risk, and how a deployment is
-verified. The core supplies commit subjects, changed and deleted paths, and an on-demand
-diff reader; the adapter supplies the repository vocabulary and path rules. If the
-repository intentionally has no PR checks, it may explicitly declare
+A project adapter answers a few questions: which staged-path checks run before a commit,
+which commands gate a merge, which tests a changed path implies, which suites run once per
+cycle, how commits are grouped in the generated pull request, which changed paths signal
+risk, and how a deployment is verified. The core supplies commit subjects, changed and
+deleted paths, and an on-demand diff reader; the adapter supplies the repository
+vocabulary and path rules. If the repository intentionally has no PR checks, it may
+explicitly declare
 `ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
 
 ## Using it
@@ -85,7 +96,19 @@ repository intentionally has no PR checks, it may explicitly declare
 git subtree add --prefix=orchestration/ts \
   https://github.com/menimani/orchestration-core.git main --squash
 npm ci --prefix orchestration/ts
+node orchestration/ts/src/cli.ts init <project-name>
 ```
+
+The subtree command is intentionally manual: it makes the imported commit visible. After
+that one deliberate import, `init` is the supported setup and repair path. It generates a
+contract-valid adapter, project templates, points `core.hooksPath` at the core-owned
+hooks, and creates missing `loop:*` labels. It is safe to repeat: existing project files
+and a deliberately different hooks setting are reported and never overwritten.
+
+Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
+the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,
+adapter suite, real adapter discovery, referenced paths, pushable branch upstream, hooks
+setting, and labels separately; skipped checks retain their reason.
 
 Then start a run on a topic branch — never on your default branch, because the loop
 commits and merges on its own. On POSIX shells:
@@ -104,10 +127,11 @@ $env:AUTO_REVIEW = 'true'
 node orchestration/ts/src/cli.ts loop --daemon
 ```
 
-`node orchestration/ts/src/cli.ts` with no arguments lists every command: `delegate` hands
-a decision from your own head to the loop, `loop-status` says what is in flight, `ci-wait`
-waits on a pull request's checks without believing a partial rollup, `deploy` dispatches a
-deployment workflow and verifies the revision that actually came up.
+`node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
+the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
+head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's
+checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
+and verifies the revision that actually came up.
 
 Automatic pulls are enabled by default. To pull later improvements manually, or when
 `CORE_AUTO_UPDATE=false` pins the consumed version, use:

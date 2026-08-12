@@ -2,7 +2,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import {
   appendFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadProject } from './adapters/project.ts'
@@ -11,6 +11,7 @@ import { cleanupTask } from './cleanup.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
 import { createLoop, formatEventLine } from './loop.ts'
+import { initializeRepository } from './initialize.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
@@ -22,16 +23,23 @@ import {
   isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
 } from './paths.ts'
 import { pruneTasks } from './prune.ts'
-import { reportUpstream } from './reportUpstream.ts'
+import { runPreCommitChecks } from './preCommit.ts'
+import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
+import { verifyRepositorySetup } from './setup.ts'
+import {
+  liveTaskProcesses, orphanedWorktreeDirectories, terminateLiveTaskProcesses,
+  worktreeHolderHint, type TaskProcessTermination,
+} from './taskProcesses.ts'
 import {
   delegateTaskVisible, enqueueTask, isLoopRunning, newTaskSpec, removeIssueModeMarker,
   writeIssueModeMarker,
 } from './tasks.ts'
 import { observeNextPoll } from './wake.ts'
 import { runWorkerCommand } from './worker.ts'
+import { signalLoopRestartReady, startLoopReplacement } from './restart.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -55,6 +63,56 @@ function isPidAlive(pid: number): boolean {
   } catch {
     return false
   }
+}
+
+function reportTaskProcessTermination(
+  result: TaskProcessTermination,
+  report: (line: string) => void,
+  announceEmpty: boolean,
+): boolean {
+  for (const task of result.terminated) {
+    report(formatEventLine('Stopped', task.taskId, `process tree PID ${task.pid}`))
+  }
+  for (const failure of result.failures) {
+    report(formatEventLine(
+      'ERROR', failure.taskId,
+      `could not stop process tree PID ${failure.pid}: ${failure.error}`,
+    ))
+  }
+  if (announceEmpty && result.terminated.length === 0 && result.failures.length === 0) {
+    report(formatEventLine('Stopped', 'tasks', 'no live process trees'))
+  }
+  return result.failures.length === 0
+}
+
+const cmdInit: Command = async (paths, args) => {
+  if (args.length > 1) {
+    console.error('Usage: init [project-name]')
+    return 1
+  }
+  const config = loadConfig()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  const result = await initializeRepository(paths, forge, args[0])
+  return result.ok ? 0 : 1
+}
+
+const cmdPreCommit: Command = async (paths, args) => {
+  if (args.length !== 0) {
+    console.error('Usage: pre-commit')
+    return 1
+  }
+  const project = await loadProject(paths.root)
+  return runPreCommitChecks(paths.repoRoot, project) ? 0 : 1
+}
+
+const cmdVerifySetup: Command = async (paths, args) => {
+  if (args.length !== 0) {
+    console.error('Usage: verify-setup')
+    return 1
+  }
+  const config = loadConfig()
+  const forge = await loadForge(config.forge, paths.repoRoot)
+  return await verifyRepositorySetup(paths, forge) ? 0 : 1
 }
 
 const cmdNew: Command = async (paths, args) => {
@@ -146,15 +204,24 @@ const cmdDelegate: Command = async (paths, args) => {
 }
 
 const cmdReportUpstream: Command = async (paths, args) => {
-  const description = args[0]
-  if (description === undefined || description.trim() === '' || args.length !== 1) {
-    console.error('Usage: report-upstream "<description>"')
-    return 1
-  }
-  const config = loadConfig()
-  const forge = await loadForge(config.forge, paths.repoRoot)
-  console.log(await reportUpstream(paths, description, forge))
-  return 0
+  return runReportUpstreamCommand(paths, args, {
+    stdinIsTerminal: process.stdin.isTTY === true,
+    output: (message) => console.log(message),
+    error: (message) => console.error(message),
+    confirm: async () => {
+      const rl = createInterface({ input: process.stdin, output: process.stdout })
+      try {
+        const answer = await rl.question('File this issue? [y/N] ')
+        return answer === 'y' || answer === 'Y'
+      } finally {
+        rl.close()
+      }
+    },
+    loadForge: async () => {
+      const config = loadConfig()
+      return loadForge(config.forge, paths.repoRoot)
+    },
+  })
 }
 
 const cmdStart: Command = async (paths, args) => {
@@ -411,8 +478,10 @@ const cmdLoopStatus: Command = async (paths) => {
 
 const cmdStop: Command = async (paths) => {
   writeFileSync(join(paths.queueDir, 'stop'), '')
+  const stopped = terminateLiveTaskProcesses(paths)
+  const success = reportTaskProcessTermination(stopped, console.log, true)
   console.log('Created the stop file. The loop will exit on the next poll.')
-  return 0
+  return success ? 0 : 1
 }
 
 const cmdLoop: Command = async (paths, args) => {
@@ -431,7 +500,7 @@ const cmdLoop: Command = async (paths, args) => {
     const child = spawn(process.execPath, [
       packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
     ], {
-      cwd: paths.repoRoot,
+      cwd: packageFile(),
       detached: true,
       stdio: ['ignore', fd, fd],
       windowsHide: true,
@@ -511,6 +580,7 @@ async function runLoopDaemon(
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
   const recoveryLock = `${pidFile}.recovery`
+  let ownsTaskLifecycle = false
 
   // PID lock: one loop per repository.
   for (;;) {
@@ -559,11 +629,54 @@ async function runLoopDaemon(
       // nothing to release
     }
   }
+  const stopOwnedTaskProcesses = (announceEmpty: boolean): boolean => {
+    if (!ownsTaskLifecycle) return true
+    return reportTaskProcessTermination(
+      terminateLiveTaskProcesses(paths),
+      log,
+      announceEmpty,
+    )
+  }
   process.on('exit', releaseDaemonState)
-  process.on('SIGINT', () => process.exit(0))
-  process.on('SIGTERM', () => process.exit(0))
+  const stopOnSignal = (): void => {
+    process.exit(stopOwnedTaskProcesses(true) ? 0 : 1)
+  }
+  process.on('SIGINT', stopOnSignal)
+  process.on('SIGTERM', stopOnSignal)
 
   try {
+    const foreignTasks = liveTaskProcesses(paths)
+    const orphanedWorktrees = orphanedWorktreeDirectories(paths)
+    if (foreignTasks.length > 0 || orphanedWorktrees.length > 0) {
+      for (const task of foreignTasks) {
+        log(formatEventLine(
+          'ERROR', 'task', task.taskId,
+        ))
+        log(formatEventLine(
+          'ERROR', 'process', `foreign live process tree PID ${task.pid}`,
+        ))
+        log(formatEventLine(
+          'ERROR', 'startup',
+          'terminate or adopt the foreign task before starting',
+        ))
+      }
+      for (const worktree of orphanedWorktrees) {
+        const displayedWorktree = relative(paths.repoRoot, worktree)
+        log(formatEventLine(
+          'ERROR', 'orphan', displayedWorktree,
+        ))
+        log(formatEventLine(
+          'ERROR', 'worktree', 'has no task status; something may still hold it',
+        ))
+        log(formatEventLine(
+          'ERROR', 'diagnose',
+          worktreeHolderHint(displayedWorktree),
+        ))
+      }
+      return 1
+    }
+    ownsTaskLifecycle = true
+
     writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
     log(formatEventLine(
       'Mode', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
@@ -584,9 +697,11 @@ async function runLoopDaemon(
     const project = await loadProject(paths.root)
     const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
 
+    if (!loop.validatePushTarget()) return 1
     await loop.initializeIssueQueue()
 
     loop.initializeSessionStateForBranch()
+    signalLoopRestartReady()
 
     for (;;) {
       // Observe first: delegation may append after poll() returns but before this
@@ -599,25 +714,47 @@ async function runLoopDaemon(
         wake.cancel()
         throw error
       }
+      if (outcome === 'continue' && existsSync(stopFile)) outcome = 'stopped'
       if (outcome !== 'continue') {
         wake.cancel()
         await wake.outcome
+        if (outcome === 'stopped' && !stopOwnedTaskProcesses(true)) return 1
         if (outcome === 'restart') {
-          // Node has no portable exec(2). Release ownership first, then replace this
-          // daemon with the same command, environment, working tree, and stdio.
+          if (!stopOwnedTaskProcesses(false)) return 1
+          // Node has no portable exec(2). Release ownership so the replacement can
+          // claim it, but do not report success until that daemon finishes startup.
           releaseDaemonState()
-          const replacement = spawn(process.execPath, process.argv.slice(1), {
-            cwd: paths.repoRoot,
-            env: process.env,
-            stdio: 'inherit',
-            windowsHide: true,
-          })
-          replacement.unref()
+          const readyFile = join(
+            paths.queueDir,
+            `loop.restart-${process.pid}-${Date.now()}.ready`,
+          )
+          const replacement = await startLoopReplacement(readyFile)
+          if (!replacement.ok) {
+            const childOwner = replacement.pid === undefined ? '' : `${replacement.pid}`
+            try {
+              if (existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() === childOwner) {
+                rmSync(pidFile, { force: true })
+              }
+              writeFileSync(pidFile, `${process.pid}\n`, { flag: 'wx' })
+              writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+            } catch (error) {
+              const detail = error instanceof Error ? error.message : String(error)
+              log(formatEventLine('ERROR', 'restart state', detail))
+            }
+            log(formatEventLine(
+              'ERROR', 'restart', `replacement could not start: ${replacement.error ?? 'unknown error'}`,
+            ))
+            return 1
+          }
+          log(formatEventLine('Restarted', 'core', `replacement PID ${replacement.pid}`))
         }
         return 0
       }
       await wake.outcome
     }
+  } catch (error) {
+    stopOwnedTaskProcesses(false)
+    throw error
   } finally {
     releaseDaemonState()
   }
@@ -655,6 +792,9 @@ const cmdShipped: Command = async (paths, args) => {
 }
 
 const commands: Record<string, Command> = {
+  'init': cmdInit,
+  'pre-commit': cmdPreCommit,
+  'verify-setup': cmdVerifySetup,
   'new': cmdNew,
   'enqueue': cmdEnqueue,
   'delegate': cmdDelegate,

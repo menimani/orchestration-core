@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Forge } from '../src/adapters/forge.ts'
@@ -32,8 +32,11 @@ function createConsumerRepository(): string {
   repositories.push(repository)
 
   cpSync(fixtureRoot, repository, { recursive: true })
+  rmSync(join(repository, 'orchestration', 'project'), { recursive: true, force: true })
   const installedPackage = join(repository, 'orchestration', 'ts')
   cpSync(join(packageRoot, 'src'), join(installedPackage, 'src'), { recursive: true })
+  cpSync(join(packageRoot, 'scaffold'), join(installedPackage, 'scaffold'), { recursive: true })
+  cpSync(join(packageRoot, '.githooks'), join(installedPackage, '.githooks'), { recursive: true })
   copyFileSync(join(packageRoot, 'package.json'), join(installedPackage, 'package.json'))
   copyFileSync(join(packageRoot, 'package-lock.json'), join(installedPackage, 'package-lock.json'))
 
@@ -59,6 +62,7 @@ function referencedPaths(project: ProjectAdapter): string[] {
     if (step.installWhenMissing !== undefined) paths.push(step.installWhenMissing.path)
     if (step.repairWhenMissing !== undefined) paths.push(step.repairWhenMissing.path)
   }
+  for (const step of project.preCommitChecks) record(step)
   for (const step of project.scanWorktreeSetup ?? []) record(step)
   for (const step of project.mergeChecks('full')) record(step)
   for (const step of project.cycleSuite()) record(step)
@@ -66,6 +70,31 @@ function referencedPaths(project: ProjectAdapter): string[] {
 }
 
 describe('consumer startup', () => {
+  it('resolves a restart from the installed package while operating on its parent repository', async () => {
+    const repository = createConsumerRepository()
+    const installedPackage = join(repository, 'orchestration', 'ts')
+    const restartModule = await import(pathToFileURL(
+      join(installedPackage, 'src', 'restart.ts'),
+    ).href) as typeof import('../src/restart.ts')
+    const markerLog = join(repository, 'orchestration', 'logs', 'loop-markers.log')
+    const invocation = [
+      process.execPath,
+      join('orchestration', 'ts', 'src', 'cli.ts'),
+      'loop',
+      '--marker-output',
+      markerLog,
+    ]
+
+    const command = restartModule.loopRestartCommand(invocation)
+
+    expect(command.cwd).toBe(installedPackage)
+    expect(command.args).toEqual([
+      join(installedPackage, 'src', 'cli.ts'),
+      ...invocation.slice(2),
+    ])
+    expect(isAbsolute(command.args[0]!)).toBe(true)
+  })
+
   it('discovers a consumer adapter and reaches the first poll', async () => {
     const repository = createConsumerRepository()
     expect(git(repository, ['branch', '--show-current'])).toBe('consumer-smoke')
@@ -85,10 +114,21 @@ describe('consumer startup', () => {
       join(installedPackage, 'src', 'loop.ts'),
     ).href) as typeof import('../src/loop.ts')
 
+    const initializeModule = await import(pathToFileURL(
+      join(installedPackage, 'src', 'initialize.ts'),
+    ).href) as typeof import('../src/initialize.ts')
+    const initialized = await initializeModule.initializeRepository(
+      pathsModule.orchPaths(repository),
+      makeFakeForge(),
+      'consumer',
+      { packageRoot: installedPackage, report: () => {} },
+    )
+    expect(initialized.ok).toBe(true)
+
     const project = await projectModule.loadProject(join(repository, 'orchestration'), {})
     expect(project.name).toBe('consumer')
     const fixturePaths = referencedPaths(project)
-    expect(fixturePaths).toContain('orchestration/project/scripts/ensure-environment.ts')
+    expect(fixturePaths).toEqual([])
     for (const fixturePath of fixturePaths) {
       expect(existsSync(join(repository, fixturePath)), fixturePath).toBe(true)
     }

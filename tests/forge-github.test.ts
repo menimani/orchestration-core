@@ -3,6 +3,7 @@ import {
   createGithubForge, workflowRunForDispatch, type GithubCommand, type GithubWorkflowRun,
 } from '../src/adapters/forge-github.ts'
 import { ForgeRateLimitError, type Forge } from '../src/adapters/forge.ts'
+import { ensureQueueLabels, QUEUE_LABELS } from '../src/issueQueue.ts'
 
 const workflowRunFixture = {
   databaseId: 71,
@@ -180,12 +181,34 @@ describe('GitHub upstream issue creation', () => {
 })
 
 describe('GitHub issue queue repository targeting', () => {
+  it('lists labels once and creates only the missing loop labels', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'consumer/project' })
+      if (args[0] === 'label' && args[1] === 'list') {
+        return JSON.stringify([{ name: 'loop:finding' }])
+      }
+      return ''
+    }
+
+    const created = await ensureQueueLabels(createGithubForge('repo-root', command))
+
+    expect(created).toEqual(QUEUE_LABELS.slice(1).map((label) => label.name))
+    expect(calls.filter((args) => args[0] === 'label' && args[1] === 'list')).toHaveLength(1)
+    const creates = calls.filter((args) => args[0] === 'label' && args[1] === 'create')
+    expect(creates).toHaveLength(QUEUE_LABELS.length - 1)
+    expect(creates.flat()).not.toContain('--force')
+    expect(creates.flat()).not.toContain('loop:finding')
+  })
+
   it('resolves the repository once and passes it on every queue call', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
       if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'consumer/project' })
       if (args[0] === 'api') return JSON.stringify({ permission: 'write' })
+      if (args[0] === 'label' && args[1] === 'list') return '[]'
       if (args[0] === 'issue' && args[1] === 'create') {
         return 'https://github.com/consumer/project/issues/42\n'
       }
@@ -206,7 +229,8 @@ describe('GitHub issue queue repository targeting', () => {
     }
     const forge = createGithubForge('repo-root', command)
 
-    await forge.ensureLabel('loop:finding', 'Finding')
+    await forge.listLabels()
+    await forge.createLabel('loop:finding', 'Finding')
     await forge.createIssue({ title: 'Finding', body: 'Body', labels: ['loop:finding'] })
     await forge.getIssue(42)
     await forge.commentIssue(42, 'Comment')

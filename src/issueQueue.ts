@@ -26,6 +26,17 @@ export const LABEL_IN_PROGRESS = 'loop:in-progress'
 export const LABEL_MERGE_READY = 'loop:merge-ready'
 export const LABEL_MERGE_FAILED = 'loop:merge-failed'
 export const LABEL_UNTRUSTED_AUTHOR = 'loop:untrusted-author'
+export const QUEUE_LABELS = [
+  { name: LABEL_FINDING, description: 'Filed by the improvement loop from a scan or review finding' },
+  { name: LABEL_READY, description: 'Unclaimed loop work: a worker may claim it by self-assigning' },
+  { name: LABEL_IN_PROGRESS, description: 'Claimed loop work; the assignee holds the lease' },
+  { name: LABEL_MERGE_READY, description: 'Completed worker branch waiting for the merger' },
+  { name: LABEL_MERGE_FAILED, description: 'Worker branch that the merger could not adopt' },
+  {
+    name: LABEL_UNTRUSTED_AUTHOR,
+    description: 'Finding authored by an account without repository write access; inspect manually',
+  },
+] as const
 const LIFECYCLE_LABELS = [
   LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
 ] as const
@@ -199,23 +210,41 @@ export interface ParsedIssue {
   requirement: string
 }
 
-export function parseIssueBody(body: string): ParsedIssue | undefined {
+type IssueBodyParseResult
+  = { parsed: ParsedIssue; problem?: never }
+    | { parsed?: never; problem: string }
+
+function inspectIssueBody(body: string, issueNumber: number): IssueBodyParseResult {
   const lines = body.split(/\r?\n/)
   const fingerprints = lines.filter((line) => line.startsWith('Fingerprint: '))
     .map((line) => line.slice('Fingerprint: '.length))
-  const fingerprint = fingerprints[0]
+  if (fingerprints.length === 0) fingerprints.push(`issue:${issueNumber}`)
+  const fingerprint = fingerprints[0]!
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const inspect = lines.includes('Inspect: true')
   const depthText = lines.find((line) => line.startsWith('Depth: '))?.slice('Depth: '.length)
   const depth = depthText !== undefined && /^\d+$/.test(depthText) ? Number(depthText) : undefined
   const requirementStart = lines.indexOf('## Requirement')
-  if (fingerprint === undefined || requirementStart === -1) return undefined
-  const requirementLines = lines.slice(requirementStart + 1)
+  if (requirementStart === -1) {
+    return { problem: 'missing `## Requirement` heading' }
+  }
+  const nextHeading = lines.findIndex((line, index) =>
+    index > requirementStart && line.startsWith('## '))
+  const requirementLines = lines.slice(
+    requirementStart + 1,
+    nextHeading === -1 ? undefined : nextHeading,
+  )
   while (requirementLines.at(-1)?.trim() === '') requirementLines.pop()
   if (requirementLines.at(-1)?.startsWith('Heartbeat: ') === true) requirementLines.pop()
   const requirement = requirementLines.join('\n').trim()
-  if (requirement === '') return undefined
-  return { fingerprint, fingerprints, effort, inspect, depth, requirement }
+  if (requirement === '') return { problem: 'empty requirement' }
+  return {
+    parsed: { fingerprint, fingerprints, effort, inspect, depth, requirement },
+  }
+}
+
+export function parseIssueBody(body: string, issueNumber: number): ParsedIssue | undefined {
+  return inspectIssueBody(body, issueNumber).parsed
 }
 
 export type PublishResult
@@ -258,7 +287,7 @@ function recordFingerprint(paths: OrchPaths, fingerprint: string, issueNumber: n
 }
 
 function issueFingerprints(issue: ForgeIssue): string[] {
-  const parsed = parseIssueBody(issue.body)
+  const parsed = parseIssueBody(issue.body, issue.number)
   if (parsed === undefined) return []
   const requirementLines = parsed.requirement.split(/\r?\n/)
     .map((line) => line.replace(/^\s*\d+[.)]\s*/, ''))
@@ -285,7 +314,7 @@ function issueFingerprints(issue: ForgeIssue): string[] {
 }
 
 function migrateFingerprintLedgerForIssue(paths: OrchPaths, issue: ForgeIssue): void {
-  const stored = parseIssueBody(issue.body)?.fingerprints ?? []
+  const stored = parseIssueBody(issue.body, issue.number)?.fingerprints ?? []
   const effective = issueFingerprints(issue)
   const replacements = stored.flatMap((fingerprint, index) => {
     const replacement = effective[index]
@@ -953,17 +982,18 @@ export async function claimIssue(
       return { outcome: 'lost-race', issueNumber: issue.number }
     }
 
-    const parsed = parseIssueBody(claimed.body)
-    if (parsed === undefined) {
+    const bodyParse = inspectIssueBody(claimed.body, claimed.number)
+    if (bodyParse.parsed === undefined) {
       // Quarantine a finding whose body lost its structure. Merge-failed is the existing
       // terminal queue state: unlike in-progress it is not a lease that stale reaping
       // may return to the claim path. Keep the assignment and body for inspection.
-      const reason = `Issue #${issue.number} has no parseable requirement. Restore its generated body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`
+      const reason = `Issue #${issue.number} cannot be materialized: ${bodyParse.problem}. Fix the issue body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`
       await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
       await forge.commentIssue(issue.number, reason)
       await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
       return { outcome: 'unparseable', issueNumber: issue.number, reason }
     }
+    const parsed = bodyParse.parsed
 
     try {
       const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)
@@ -1073,15 +1103,15 @@ export async function reapStaleLeases(
   return reaped
 }
 
-/** The labels the queue relies on; called once at loop startup in issue mode. */
-export async function ensureQueueLabels(forge: Forge): Promise<void> {
-  await forge.ensureLabel(LABEL_FINDING, 'Filed by the improvement loop from a scan or review finding')
-  await forge.ensureLabel(LABEL_READY, 'Unclaimed loop work: a worker may claim it by self-assigning')
-  await forge.ensureLabel(LABEL_IN_PROGRESS, 'Claimed loop work; the assignee holds the lease')
-  await forge.ensureLabel(LABEL_MERGE_READY, 'Completed worker branch waiting for the merger')
-  await forge.ensureLabel(LABEL_MERGE_FAILED, 'Worker branch that the merger could not adopt')
-  await forge.ensureLabel(
-    LABEL_UNTRUSTED_AUTHOR,
-    'Finding authored by an account without repository write access; inspect manually',
-  )
+/** Create only missing queue labels; existing repository-owned metadata is untouched. */
+export async function ensureQueueLabels(forge: Forge): Promise<string[]> {
+  const existing = new Set(await forge.listLabels())
+  const created: string[] = []
+  for (const label of QUEUE_LABELS) {
+    if (existing.has(label.name)) continue
+    await forge.createLabel(label.name, label.description)
+    existing.add(label.name)
+    created.push(label.name)
+  }
+  return created
 }

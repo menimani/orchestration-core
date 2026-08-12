@@ -37,6 +37,7 @@ export const fixtureProject = {
     workflow: '${workflow}',
     revisionUrl: 'https://example.com/fixture-revision',
   },
+  preCommitChecks: [],
   mergeChecks: () => [],
   cycleSuite: () => [],
 }
@@ -163,6 +164,7 @@ describe('project adapter loading', () => {
     writeFileSync(adapterPath, `
 export const fixtureProject = {
   name: 'fixture',
+  preCommitChecks: [],
   mergeChecks: () => [],
   cycleSuite: () => [],
 }
@@ -170,6 +172,30 @@ export const fixtureProject = {
 
     await expect(loadProject(orchestrationRoot, {})).rejects.toThrow(
       `Project adapter '${adapterPath}' exports project 'fixture' but is missing required member 'pullRequest'`,
+    )
+  })
+
+  it('requires the pre-commit declaration used by the core-owned hook', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    const adapterPath = join(orchestrationRoot, 'project', 'project-fixture.ts')
+    mkdirSync(dirname(adapterPath), { recursive: true })
+    writeFileSync(adapterPath, `
+export const fixtureProject = {
+  name: 'fixture',
+  mergeChecks: () => [],
+  cycleSuite: () => [],
+  pullRequest: {
+    categories: [],
+    titleFallback: '',
+    classifyCommit: () => ({ category: 'Changes' }),
+    detectRisks: () => [],
+  },
+}
+`)
+
+    await expect(loadProject(orchestrationRoot, {})).rejects.toThrow(
+      `Project adapter '${adapterPath}' exports project 'fixture' but is missing required member 'preCommitChecks'`,
     )
   })
 })

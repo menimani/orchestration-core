@@ -1,0 +1,4 @@
+interface:
+  display_name: "Loop Setup"
+  short_description: "Adopt and verify the shared orchestration core"
+  default_prompt: "Use $loop-setup to adopt the shared orchestration core in this repository."

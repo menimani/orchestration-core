@@ -42,6 +42,10 @@ from or equivalent to `orchestration/tests/*.sh`.
   marker as an exact standalone line, while a background loop writes that exact line to
   `logs/loop-markers.log`. Their copies in `loop.log` still receive the timestamp and
   cycle prefix, and retain the marker name rather than being rewritten as display events.
+- `report-upstream` requires one explicit, non-blank description. `--help` prints its
+  usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
+  the exact title and body without filing. An interactive invocation prints that same
+  preview and requires confirmation; a declined confirmation never contacts the forge.
 
 ## Task lifecycle
 
@@ -115,10 +119,20 @@ from or equivalent to `orchestration/tests/*.sh`.
     this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
     A package-file change logs aligned `Updated    core        <old8>..<new8>` and
     `Restarting core        for cycle <n>` events, releases daemon ownership, and starts
-    the same command with the same environment, working tree, and run branch. A daemon
-    otherwise runs the code it started with. The check never runs mid-cycle. A dirty
+    the package's absolute CLI entry point from the package directory, retaining the
+    remaining arguments, environment, and run branch. The parent waits for the replacement
+    to finish daemon initialization and logs `Restarted`; a failed replacement restores
+    ownership, logs `ERROR`, and makes the parent exit nonzero. A daemon otherwise runs the
+    code it started with. The check never runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
+    At the same boundary, the package manifest's shared skills are rendered into the
+    repository root `.claude/skills/`, using `npm run` as the command prefix in the
+    owning repository and `npm run -C <package-path>` in a subtree consumer. The sync
+    replaces only a tree whose content matches its recorded last output; consumer
+    divergence is warned and retained, and skills absent from the manifest are untouched.
+    Shared canonical sources do not live below `.claude/skills/`, so a subtree exposes
+    no nested duplicate of a shared skill.
 
 ## The cycle gate
 
@@ -128,7 +142,10 @@ from or equivalent to `orchestration/tests/*.sh`.
     sink and a formatted copy to `loop.log`, then the CI gate,
     then review. Remote work defers the gate with a `Waiting remote` event when its
     pending issue set changes and every ten minutes while unchanged. A light-gate cycle
-    suite logs its `Started Suite` event before invoking the blocking commands.
+    suite logs its `Started Suite` event before invoking the blocking commands. Its
+    passing verdict is retained for that commit while PR setup retries, and is discarded
+    as soon as the branch tip changes. Repeated gate failures remain visible with a
+    count; a repeated push failure logs `ERROR`, writes the stop file, and stops retrying.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
@@ -174,10 +191,15 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 24. A PID lock (`queue/loop.pid`) keeps the loop single-instance per repository; a stale
     stop file is cleared on startup, after the PID lock is taken (never before — it may
-    be another instance's signal).
-25. The stop file (`queue/stop`) is checked at the top of every poll; stopping does not
-    kill running runner processes — they finish in their worktrees with nobody left to
-    merge them, and `loop-status` says so.
+    be another instance's signal). Before task or issue work begins, startup refuses any
+    live PID left in task status by an earlier daemon. A worktree with no corresponding
+    task status also blocks startup and is reported with an OS-specific handle diagnostic.
+    A run which publishes work also refuses to start when its branch has no unambiguous
+    push target, logging `ERROR` and writing the stop file before task or issue work.
+25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
+    outcomes, and daemon termination signals stop every live task process tree (`taskkill
+    /T /F` on Windows and the detached process group on POSIX), retain task state for
+    recovery, and report each terminated task or that no live task processes were found.
 26. The daemon holds the code it started with; the wrapper prints where the log lives
     and how to stop.
 27. `prune --days N` deletes logs/status/generated specs/queue markers of tasks finished
@@ -205,8 +227,9 @@ from or equivalent to `orchestration/tests/*.sh`.
     `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags inside the adapter. Any runner honoring the contract
     is substitutable.
-31. Everything the orchestration knows about the repository it runs in — which commands
-    verify a merge, which paths make each check relevant, which suites prove a cycle's
+31. Everything the orchestration knows about the repository it runs in — which staged
+    paths select fast pre-commit checks, which commands verify a merge, which paths make
+    each check relevant, which suites prove a cycle's
     tip, which toolchain breakage a reinstall repairs, and how commits and changed paths
     become pull-request sections, area labels, and risk bullets — lives in the project
     adapter (`adapters/project.ts`; with neither selection variable set, the single
@@ -215,7 +238,20 @@ from or equivalent to `orchestration/tests/*.sh`.
     core executes the declarations and owns the generic behavior: Git history and diff
     collection, pull-request formatting, output capture, failure attribution, and stop
     decisions. Porting the orchestration to another repository means writing a project
-    adapter and nothing else.
+    adapter and nothing else. The core owns the commit-message hook and default-branch
+    guard; its pre-commit hook loads the adapter's `preCommitChecks` instead of embedding
+    a repository gate in shell.
+
+    A consumer imports the core with one deliberate `git subtree add`, then uses `init`
+    as the single setup and repair command. Init generates its adapter from the same
+    required-member description the real loader validates, scaffolds project templates,
+    points the repository-local `core.hooksPath` at the core's hooks, and creates only
+    missing `loop:*` labels. Re-running it never overwrites a project-owned file or a
+    different hooks setting; divergence is reported. The `loop-setup` skill gathers the
+    repository decisions, fills a newly generated adapter, and runs `verify-setup`. That
+    verifier reports separately the core typecheck, adapter suite, real loader discovery
+    by name, referenced paths, pushable upstream, hooks setting, and labels. A skipped
+    check retains its reason and is never reported as a pass.
 
 ## The issue queue (new in the rewrite, opt-in)
 
