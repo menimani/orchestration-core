@@ -47,6 +47,24 @@ from or equivalent to `orchestration/tests/*.sh`.
   the exact title and body without filing. An interactive invocation prints that same
   preview and requires confirmation; a declined confirmation never contacts the forge.
 
+### Retained runtime configuration
+
+`loadConfig` keeps the environment-variable surface from the pre-rewrite launcher.
+Missing and empty values use the defaults below. A Boolean is enabled only by the exact
+lowercase value `true`; every other non-empty value disables it. Numeric values must be
+non-negative integers, with the narrower bounds stated below.
+
+| Variable | Default | Contract |
+|----------|---------|----------|
+| `AUTO_MERGE` | `true` | Merge completed local task worktrees automatically. `false` leaves them completed and eligible for an explicit or later merge. |
+| `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
+| `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
+| `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
+| `MAX_PARALLEL` | `3` | Limit concurrently running queued-task processes and shared-issue claim capacity. It must be at least 1; scan fan-out is controlled separately by `SCAN_PARALLEL`. |
+| `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
+| `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
+| `SKIP_AUTO_TEST` | `false` | When `true` and no `TEST_CMD` or `--test-cmd` is set, skip the project adapter's automatic merge checks. It does not skip the explicit test command. |
+
 ## Task lifecycle
 
 1. A task is `completed` once `TASK_COMPLETE` appears on its own line in the task's
