@@ -118,6 +118,25 @@ describe('ready finding groups', () => {
     expect(groupReadyFindings([first, second]).map((group) =>
       group.map((issue) => issue.number))).toEqual([[first.number], [second.number]])
   })
+
+  it('keeps scan and review findings for the same file in separate tasks', async () => {
+    const scan = await forge.createIssue({
+      title: '[BUG] `src/shared.ts` scan finding',
+      body: buildIssueBody('[BUG] `src/shared.ts` scan finding', '20260808_000000_001_scan'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const review = await forge.createIssue({
+      title: '[TEST] `src/shared.ts` review finding',
+      body: buildIssueBody(
+        '[TEST] `src/shared.ts` review finding', '20260808_000000_002_review-c1',
+      ),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(groupReadyFindings([
+      await forge.getIssue(scan), await forge.getIssue(review),
+    ]).map((group) => group.map((issue) => issue.number))).toEqual([[scan], [review]])
+  })
 })
 
 describe('closed issue lifecycle labels', () => {
@@ -174,6 +193,7 @@ describe('issue body round-trip', () => {
     )
     const parsed = parseIssueBody(body, 42)
     expect(parsed?.fingerprint).toBe(fingerprintOf('[BUG] `src/x/y.ts` does the wrong thing'))
+    expect(parsed?.parentTaskId).toBe('parent-task')
     expect(parsed?.effort).toBe('high')
     expect(parsed?.inspect).toBe(false)
     expect(parsed?.depth).toBe(2)
@@ -689,6 +709,21 @@ describe('claimIssue', () => {
     expect(readFileSync(join(paths.queueDir, 'effort', result.taskId), 'utf8').trim()).toBe('high')
     expect(issueNumberForTask(paths, result.taskId)).toBe(issueNumber)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(result.taskId)
+  })
+
+  it.each([
+    ['review', '20260808_000000_001_review-c1', '_fix-'],
+    ['scan', '20260808_000000_002_scan', '_auto-'],
+  ])('carries a %s parent into the materialized task id', async (_kind, parent, idKind) => {
+    const description = `[BUG] \`src/a/b.ts\` preserves the ${_kind} origin`
+    const published = await publishFinding(forge, paths, description, parent)
+
+    const result = await claimIssue(
+      forge, paths, await forge.getIssue(published.issueNumber), 'worker-a', appendRequirement,
+    )
+    if (result.outcome !== 'claimed') throw new Error(`expected a claim, got ${result.outcome}`)
+
+    expect(result.taskId).toContain(idKind)
   })
 
   it('materializes a hand-written issue without a fingerprint', async () => {

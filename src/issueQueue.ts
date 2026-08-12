@@ -7,7 +7,7 @@ import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import {
   descSlug, existingTaskIdForDesc, forgetTaskId, newTaskId, recordTaskIdForDesc, taskIdForDesc,
 } from './ids.ts'
-import { finalMessageFile, type OrchPaths } from './paths.ts'
+import { finalMessageFile, isReviewTaskId, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
@@ -139,10 +139,13 @@ export function groupReadyFindings(
       groups.push([issue])
       continue
     }
-    let group = byFile.get(file)
+    // A grouped task has one identifier, so keep scan and review origins separate even
+    // when their findings name the same file.
+    const key = `${findingTaskOrigin(parseIssueBody(issue.body, issue.number)?.parentTaskId)}:${file}`
+    let group = byFile.get(key)
     if (group === undefined || group.length >= limit) {
       group = []
-      byFile.set(file, group)
+      byFile.set(key, group)
       groups.push(group)
     }
     group.push(issue)
@@ -239,6 +242,7 @@ export function buildIssueBody(
 export interface ParsedIssue {
   fingerprint: string
   fingerprints: string[]
+  parentTaskId: string | undefined
   effort: string | undefined
   inspect: boolean
   depth: number | undefined
@@ -255,6 +259,8 @@ function inspectIssueBody(body: string, issueNumber: number): IssueBodyParseResu
     .map((line) => line.slice('Fingerprint: '.length))
   if (fingerprints.length === 0) fingerprints.push(`issue:${issueNumber}`)
   const fingerprint = fingerprints[0]!
+  const parentTaskId = lines.find((line) => line.startsWith('Parent: '))
+    ?.slice('Parent: '.length)
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const inspect = lines.includes('Inspect: true')
   const depthText = lines.find((line) => line.startsWith('Depth: '))?.slice('Depth: '.length)
@@ -274,12 +280,16 @@ function inspectIssueBody(body: string, issueNumber: number): IssueBodyParseResu
   const requirement = requirementLines.join('\n').trim()
   if (requirement === '') return { problem: 'empty requirement' }
   return {
-    parsed: { fingerprint, fingerprints, effort, inspect, depth, requirement },
+    parsed: { fingerprint, fingerprints, parentTaskId, effort, inspect, depth, requirement },
   }
 }
 
 export function parseIssueBody(body: string, issueNumber: number): ParsedIssue | undefined {
   return inspectIssueBody(body, issueNumber).parsed
+}
+
+function findingTaskOrigin(parentTaskId: string | undefined): 'auto' | 'fix' {
+  return parentTaskId !== undefined && isReviewTaskId(parentTaskId) ? 'fix' : 'auto'
 }
 
 export type PublishResult
@@ -1221,15 +1231,17 @@ export async function claimIssueGroup(
     const description = requirements.map(({ requirement }) => requirement).join('\n\n')
     let createdTaskId: string | undefined
     try {
-      const existing = existingTaskIdForDesc(paths, 'auto', description)
+      const origin = claimedIssues.some(({ parsed }) =>
+        findingTaskOrigin(parsed.parentTaskId) === 'fix') ? 'fix' : 'auto'
+      const existing = existingTaskIdForDesc(paths, origin, description)
       const needsFreshTask = existing !== undefined
         && readStatus(paths, existing)?.status === 'merged'
         && !requirements.every(({ requirement }) =>
           fingerprintOf(requirement).startsWith('advisory:'))
       const taskId = needsFreshTask
-        ? newTaskId(paths, `auto-${descSlug(description)}`)
-        : taskIdForDesc(paths, 'auto', description)
-      if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', description, taskId)
+        ? newTaskId(paths, `${origin}-${descSlug(description)}`)
+        : taskIdForDesc(paths, origin, description)
+      if (needsFreshTask) recordTaskIdForDesc(paths, origin, description, taskId)
       if (!existsSync(specFile(paths, taskId))) {
         // taskIdForDesc records the description index before the specification is
         // materialized. Remember ownership before the first write so any failure,

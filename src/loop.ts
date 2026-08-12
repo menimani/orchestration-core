@@ -667,6 +667,11 @@ export function createLoop(deps: LoopDeps) {
     const destinations: string[] = []
     if (findings.length === 0) return { findings, destinations, reconciled: true }
     const isReview = isReviewTaskId(taskId)
+    const findingOrigin = isReview ? 'fix' : 'auto'
+    const otherFindingOrigin = isReview ? 'auto' : 'fix'
+    const existingFindingTask = (description: string): string | undefined =>
+      existingTaskIdForDesc(paths, findingOrigin, description)
+        ?? existingTaskIdForDesc(paths, otherFindingOrigin, description)
 
     const newDepth = depth + 1
     if (newDepth > config.maxGrowthDepth) {
@@ -715,7 +720,7 @@ export function createLoop(deps: LoopDeps) {
 
     const pendingFindings = isReview
       ? [...new Set(findings)].filter((finding) => {
-        const existing = existingTaskIdForDesc(paths, 'auto', finding)
+        const existing = existingFindingTask(finding)
         if (existing !== undefined) {
           // A failed task is retryable by design — enqueueTask re-admits it — so only
           // queued, active or landed work suppresses the finding. Suppressing on the
@@ -742,14 +747,14 @@ export function createLoop(deps: LoopDeps) {
     let reconciled = true
     for (const desc of descriptions) {
       if (!hasTaskCapacity(taskId)) continue
-      const existing = existingTaskIdForDesc(paths, 'auto', desc)
+      const existing = existingFindingTask(desc)
       const needsFreshTask = existing !== undefined
         && readStatus(paths, existing)?.status === 'merged'
         && !fingerprintOf(desc).startsWith('advisory:')
       const newId = needsFreshTask
-        ? newTaskId(paths, `auto-${descSlug(desc)}`)
-        : taskIdForDesc(paths, 'auto', desc)
-      if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', desc, newId)
+        ? newTaskId(paths, `${findingOrigin}-${descSlug(desc)}`)
+        : existing ?? taskIdForDesc(paths, findingOrigin, desc)
+      if (needsFreshTask) recordTaskIdForDesc(paths, findingOrigin, desc, newId)
       destinations.push(shortTaskId(newId))
       if (!existsSync(specFile(paths, newId))) {
         // The template carries the Commit and TASK_COMPLETE instructions — a spec
@@ -770,7 +775,7 @@ export function createLoop(deps: LoopDeps) {
       }
       if (combinesReviewFindings) {
         for (const finding of pendingFindings) {
-          recordTaskIdForDesc(paths, 'auto', finding, newId)
+          recordTaskIdForDesc(paths, findingOrigin, finding, newId)
         }
       }
       // A fix born from a review is repairing something subtle enough to have escaped
