@@ -32,8 +32,11 @@ function createConsumerRepository(): string {
   repositories.push(repository)
 
   cpSync(fixtureRoot, repository, { recursive: true })
+  rmSync(join(repository, 'orchestration', 'project'), { recursive: true, force: true })
   const installedPackage = join(repository, 'orchestration', 'ts')
   cpSync(join(packageRoot, 'src'), join(installedPackage, 'src'), { recursive: true })
+  cpSync(join(packageRoot, 'scaffold'), join(installedPackage, 'scaffold'), { recursive: true })
+  cpSync(join(packageRoot, '.githooks'), join(installedPackage, '.githooks'), { recursive: true })
   copyFileSync(join(packageRoot, 'package.json'), join(installedPackage, 'package.json'))
   copyFileSync(join(packageRoot, 'package-lock.json'), join(installedPackage, 'package-lock.json'))
 
@@ -59,6 +62,7 @@ function referencedPaths(project: ProjectAdapter): string[] {
     if (step.installWhenMissing !== undefined) paths.push(step.installWhenMissing.path)
     if (step.repairWhenMissing !== undefined) paths.push(step.repairWhenMissing.path)
   }
+  for (const step of project.preCommitChecks) record(step)
   for (const step of project.scanWorktreeSetup ?? []) record(step)
   for (const step of project.mergeChecks('full')) record(step)
   for (const step of project.cycleSuite()) record(step)
@@ -85,10 +89,21 @@ describe('consumer startup', () => {
       join(installedPackage, 'src', 'loop.ts'),
     ).href) as typeof import('../src/loop.ts')
 
+    const initializeModule = await import(pathToFileURL(
+      join(installedPackage, 'src', 'initialize.ts'),
+    ).href) as typeof import('../src/initialize.ts')
+    const initialized = await initializeModule.initializeRepository(
+      pathsModule.orchPaths(repository),
+      makeFakeForge(),
+      'consumer',
+      { packageRoot: installedPackage, report: () => {} },
+    )
+    expect(initialized.ok).toBe(true)
+
     const project = await projectModule.loadProject(join(repository, 'orchestration'), {})
     expect(project.name).toBe('consumer')
     const fixturePaths = referencedPaths(project)
-    expect(fixturePaths).toContain('orchestration/project/scripts/ensure-environment.ts')
+    expect(fixturePaths).toEqual([])
     for (const fixturePath of fixturePaths) {
       expect(existsSync(join(repository, fixturePath)), fixturePath).toBe(true)
     }

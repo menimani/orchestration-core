@@ -10,6 +10,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "init": "node src/cli.ts init",
+    "verify-setup": "node src/cli.ts verify-setup",
     "loop": "node src/cli.ts loop",
     "worker": "node src/cli.ts worker",
     "loop-status": "node src/cli.ts loop-status",

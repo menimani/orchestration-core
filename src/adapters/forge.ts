@@ -123,11 +123,10 @@ export interface Forge {
   findWorkflowRun(workflow: string, ref: string, dispatchToken: string): Promise<WorkflowRun | undefined>
   getWorkflowRun(runId: number): Promise<WorkflowRun>
 
-  // Issue-queue operations. Labels passed anywhere here must already exist —
-  // call ensureLabel first; creating them lazily inside every call would cost a
-  // round-trip per operation.
+  // Issue-queue operations. Labels passed anywhere here must already exist.
   currentUser(): Promise<string>
-  ensureLabel(name: string, description: string): Promise<void>
+  listLabels(): Promise<string[]>
+  createLabel(name: string, description: string): Promise<void>
   createIssue(options: CreateIssueOptions): Promise<number>
   /** Create an issue outside the current repository and return its URL. */
   createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string>

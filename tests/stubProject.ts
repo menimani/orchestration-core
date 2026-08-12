@@ -1,6 +1,7 @@
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 
 export const stubProject: ProjectAdapter = {
+  preCommitChecks: [],
   name: 'test',
   pullRequest: {
     categories: [

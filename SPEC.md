@@ -212,8 +212,9 @@ from or equivalent to `orchestration/tests/*.sh`.
     `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags inside the adapter. Any runner honoring the contract
     is substitutable.
-31. Everything the orchestration knows about the repository it runs in — which commands
-    verify a merge, which paths make each check relevant, which suites prove a cycle's
+31. Everything the orchestration knows about the repository it runs in — which staged
+    paths select fast pre-commit checks, which commands verify a merge, which paths make
+    each check relevant, which suites prove a cycle's
     tip, which toolchain breakage a reinstall repairs, and how commits and changed paths
     become pull-request sections, area labels, and risk bullets — lives in the project
     adapter (`adapters/project.ts`; with neither selection variable set, the single
@@ -222,7 +223,20 @@ from or equivalent to `orchestration/tests/*.sh`.
     core executes the declarations and owns the generic behavior: Git history and diff
     collection, pull-request formatting, output capture, failure attribution, and stop
     decisions. Porting the orchestration to another repository means writing a project
-    adapter and nothing else.
+    adapter and nothing else. The core owns the commit-message hook and default-branch
+    guard; its pre-commit hook loads the adapter's `preCommitChecks` instead of embedding
+    a repository gate in shell.
+
+    A consumer imports the core with one deliberate `git subtree add`, then uses `init`
+    as the single setup and repair command. Init generates its adapter from the same
+    required-member description the real loader validates, scaffolds project templates,
+    points the repository-local `core.hooksPath` at the core's hooks, and creates only
+    missing `loop:*` labels. Re-running it never overwrites a project-owned file or a
+    different hooks setting; divergence is reported. The `loop-setup` skill gathers the
+    repository decisions, fills a newly generated adapter, and runs `verify-setup`. That
+    verifier reports separately the core typecheck, adapter suite, real loader discovery
+    by name, referenced paths, pushable upstream, hooks setting, and labels. A skipped
+    check retains its reason and is never reported as a pass.
 
 ## The issue queue (new in the rewrite, opt-in)
 

@@ -85,6 +85,8 @@ describe('command registry', () => {
     expect(result.stderr).toContain('deploy')
     expect(result.stderr).toContain('ci-wait')
     expect(result.stderr).toContain('report-upstream')
+    expect(result.stderr).toContain('init')
+    expect(result.stderr).toContain('verify-setup')
   })
 
   it('refuses to start a worker without a base ref', () => {
@@ -594,6 +596,7 @@ describe('loop daemon ownership', () => {
       env: {
         ...CORE_ENV,
         AUTO_PR: 'false',
+        AUTO_REVIEW: 'false',
         CORE_AUTO_UPDATE: 'false',
         ISSUE_QUEUE_ENABLED: 'false',
         MAX_SCAN_CYCLES: '0',
