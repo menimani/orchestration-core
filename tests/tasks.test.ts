@@ -133,7 +133,8 @@ describe('delegateTask', () => {
     const issue = await forge.getIssue(1)
     expect(issue.labels).toEqual([LABEL_FINDING, LABEL_READY])
     expect(issue.assignees).toEqual([])
-    expect(parseIssueBody(issue.body)).toMatchObject({ effort: 'high', inspect: true })
+    expect(parseIssueBody(issue.body, issue.number))
+      .toMatchObject({ effort: 'high', inspect: true })
     // The publication never touches the backlog, so the daemon's watcher needs this
     // nudge — without it the issue waits out the full poll interval.
     expect(existsSync(join(paths.queueDir, 'wake'))).toBe(true)

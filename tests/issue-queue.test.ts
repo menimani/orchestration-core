@@ -135,7 +135,7 @@ describe('issue body round-trip', () => {
     const body = buildIssueBody(
       '[BUG] `src/x/y.ts` does the wrong thing', 'parent-task', 'high', undefined, false, 2,
     )
-    const parsed = parseIssueBody(body)
+    const parsed = parseIssueBody(body, 42)
     expect(parsed?.fingerprint).toBe(fingerprintOf('[BUG] `src/x/y.ts` does the wrong thing'))
     expect(parsed?.effort).toBe('high')
     expect(parsed?.inspect).toBe(false)
@@ -143,8 +143,40 @@ describe('issue body round-trip', () => {
     expect(parsed?.requirement).toBe('[BUG] `src/x/y.ts` does the wrong thing')
   })
 
-  it('refuses a body without structure', () => {
-    expect(parseIssueBody('just prose, no fields')).toBeUndefined()
+  it('derives an issue-specific fingerprint for a hand-written body', () => {
+    expect(parseIssueBody('## Requirement\n\nFix the hand-written issue.\n', 42))
+      .toMatchObject({ fingerprint: 'issue:42', fingerprints: ['issue:42'] })
+    expect(parseIssueBody('## Requirement\n\nFix the hand-written issue.\n', 43)?.fingerprint)
+      .toBe('issue:43')
+  })
+
+  it('keeps explicit fingerprints instead of deriving one', () => {
+    expect(parseIssueBody([
+      'Fingerprint: first',
+      'Fingerprint: second',
+      '',
+      '## Requirement',
+      '',
+      'Fix the scan finding.',
+    ].join('\n'), 42)?.fingerprints).toEqual(['first', 'second'])
+  })
+
+  it('ends the requirement at the next second-level heading and trims a heartbeat', () => {
+    expect(parseIssueBody([
+      '## Requirement',
+      '',
+      'Fix the issue.',
+      '',
+      'Heartbeat: 2026-08-12T00:00:00Z',
+      '',
+      '## Reporter',
+      '',
+      'Context for people.',
+    ].join('\n'), 42)?.requirement).toBe('Fix the issue.')
+  })
+
+  it('refuses a body without a requirement heading', () => {
+    expect(parseIssueBody('just prose, no fields', 42)).toBeUndefined()
   })
 })
 
@@ -502,6 +534,31 @@ describe('claimIssue', () => {
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(result.taskId)
   })
 
+  it('materializes a hand-written issue without a fingerprint', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'hand-written',
+      body: [
+        '## Requirement',
+        '',
+        'Fix the hand-written issue.',
+        '',
+        '## Reporter context',
+        '',
+        'This section is not part of the task.',
+      ].join('\n'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    const result = await claimIssue(
+      forge, paths, await forge.getIssue(issueNumber), 'worker-a', appendRequirement,
+    )
+    if (result.outcome !== 'claimed') throw new Error(`expected a claim, got ${result.outcome}`)
+
+    const spec = readFileSync(join(paths.tasksDir, `${result.taskId}.md`), 'utf8')
+    expect(spec).toContain('Fix the hand-written issue.')
+    expect(spec).not.toContain('This section is not part of the task.')
+  })
+
   it('labels an outsider-authored issue without claiming or materializing it', async () => {
     const issueNumber = await readyIssue('[BUG] `src/a/b.ts` asks for a change')
     const stored = forge.issues.get(issueNumber)
@@ -638,13 +695,31 @@ describe('claimIssue', () => {
     expect(result).toEqual({
       outcome: 'unparseable',
       issueNumber,
-      reason: `Issue #${issueNumber} has no parseable requirement. Restore its generated body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`,
+      reason: `Issue #${issueNumber} cannot be materialized: missing \`## Requirement\` heading. Fix the issue body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`,
     })
     const after = await forge.getIssue(issueNumber)
     expect(after.assignees).toEqual(['worker-a'])
     expect(after.labels).toContain(LABEL_MERGE_FAILED)
     expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
     expect(forge.issueComments.get(issueNumber)).toEqual([result.reason])
+  })
+
+  it('names an empty requirement when quarantining an issue', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'empty',
+      body: '## Requirement\n\n## Reporter\n\nContext only.',
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    const result = await claimIssue(
+      forge, paths, await forge.getIssue(issueNumber), 'worker-a', appendRequirement,
+    )
+
+    expect(result).toMatchObject({
+      outcome: 'unparseable',
+      issueNumber,
+      reason: expect.stringContaining('empty requirement'),
+    })
   })
 
   it('serializes a claim with duplicate reconciliation and does not materialize a closed issue', async () => {

@@ -132,7 +132,7 @@ export function prepareUpstreamReport(
   }
   const repository = reportingRepository(paths, runtime)
   const body = [
-    '## Description',
+    '## Requirement',
     '',
     trimmedDescription,
     '',

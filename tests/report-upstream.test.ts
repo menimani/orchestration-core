@@ -2,8 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { parseIssueBody } from '../src/issueQueue.ts'
 import { orchPaths } from '../src/paths.ts'
-import { reportUpstream, type ReportUpstreamRuntime } from '../src/reportUpstream.ts'
+import {
+  prepareUpstreamReport, reportUpstream, type ReportUpstreamRuntime,
+} from '../src/reportUpstream.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
 let repoRoot: string
@@ -59,7 +62,7 @@ describe('upstream defect reports', () => {
       labels: ['upstream:report'],
     })
     expect(forge.repositoryIssues[0]?.body).toBe([
-      '## Description',
+      '## Requirement',
       '',
       'The queue loses a finding.',
       '',
@@ -71,6 +74,19 @@ describe('upstream defect reports', () => {
       '- Node version: `v24.7.0`',
     ].join('\n'))
     expect(forge.repositoryIssues[0]?.body).not.toContain(repoRoot)
+  })
+
+  it('generates a body that the issue queue can materialize', () => {
+    writePackage({ upstreamRepo: 'configured/core', version: '2.4.1' })
+
+    const report = prepareUpstreamReport(
+      orchPaths(repoRoot), 'The queue loses a finding.', runtime(),
+    )
+
+    expect(parseIssueBody(report.body, 41)).toMatchObject({
+      fingerprint: 'issue:41',
+      requirement: 'The queue loses a finding.',
+    })
   })
 
   it('honours UPSTREAM_REPO over package configuration and falls back to package version', async () => {
