@@ -116,6 +116,7 @@ export function createLoop(deps: LoopDeps) {
   }>()
   const reconciledCycleGates = new Set<number>()
   let issueQueueInitialized = !config.issueQueueEnabled
+  let previousGateFailure: { message: string; count: number } | undefined
 
   function event(name: string, subject = '', detail = ''): void {
     if (name === 'WARN') {
@@ -239,6 +240,20 @@ export function createLoop(deps: LoopDeps) {
   function errorSummary(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error)
     return message.trim() || 'unknown error'
+  }
+
+  function reportGateFailure(message: string, stopWhenRepeated = false): void {
+    const count = previousGateFailure?.message === message
+      ? previousGateFailure.count + 1
+      : 1
+    previousGateFailure = { message, count }
+    const detail = count === 1 ? message : `${message} (repeated ${count} times)`
+    if (stopWhenRepeated && count > 1) {
+      event('ERROR', detail)
+      writeFileSync(stopFile, '')
+    } else {
+      log(formatEventLine('WARN', detail))
+    }
   }
 
   function readCount(file: string): number {
@@ -948,7 +963,7 @@ export function createLoop(deps: LoopDeps) {
 
   function cleanupSessionState(preserveTaskMarkers = false): void {
     for (const name of readdirSync(paths.queueDir)) {
-      if (/^(cycle-complete-|cycle-resume-|ci-fix-emitted-|review-round-|review-id-|failed-|scan-yield-)/.test(name)
+      if (/^(cycle-complete-|cycle-suite-tip-|cycle-resume-|ci-fix-emitted-|review-round-|review-id-|failed-|scan-yield-)/.test(name)
         || name === 'decisions.txt' || name === 'pr-url.txt'
         || name === 'empty-scan-count.txt' || name === 'merge-failure-count.txt') {
         rmSync(join(paths.queueDir, name), { force: true })
@@ -980,6 +995,19 @@ export function createLoop(deps: LoopDeps) {
     writeFileSync(runBranchFile, `${currentBranch}\n`)
   }
 
+  /** Fail startup before work begins when this run can never publish its branch. */
+  function validatePushTarget(): boolean {
+    if (!config.autoPr && !config.workerMode) return true
+    try {
+      currentBranchRemote(paths.repoRoot)
+      return true
+    } catch (error) {
+      event('ERROR', `current branch cannot be pushed: ${errorSummary(error)}`)
+      writeFileSync(stopFile, '')
+      return false
+    }
+  }
+
   function readDecisions(): string[] {
     if (!existsSync(decisionsFile)) return []
     return readFileSync(decisionsFile, 'utf8').split(/\r?\n/).filter((line) => line !== '')
@@ -989,7 +1017,7 @@ export function createLoop(deps: LoopDeps) {
   async function ensureDraftPr(mode: 'cycle' | 'final'): Promise<boolean> {
     const branch = git(['branch', '--show-current']).trim()
     if (branch === '') {
-      event('WARN', 'could not get branch name; PR skipped')
+      reportGateFailure('could not get branch name; PR skipped')
       return false
     }
     let remote: string
@@ -1001,7 +1029,7 @@ export function createLoop(deps: LoopDeps) {
         windowsHide: true,
       })
     } catch (error) {
-      event('WARN', `could not push branch: ${errorSummary(error)}`)
+      reportGateFailure(`could not push branch: ${errorSummary(error)}`, true)
       return false
     }
 
@@ -1009,7 +1037,7 @@ export function createLoop(deps: LoopDeps) {
       'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
     ]).trim()
     if (!baseRef.startsWith(`${remote}/`)) {
-      event('WARN', `could not get ${remote} default branch; PR skipped`)
+      reportGateFailure(`could not get ${remote} default branch; PR skipped`)
       return false
     }
     const baseBranch = baseRef.slice(remote.length + 1)
@@ -1027,7 +1055,7 @@ export function createLoop(deps: LoopDeps) {
         body = await forge.prBody(branch)
       } catch (error) {
         if (!(error instanceof ForgeRateLimitError)) {
-          event('WARN', `could not read PR body: ${errorSummary(error)}`)
+          reportGateFailure(`could not read PR body: ${errorSummary(error)}`)
         }
         return false
       }
@@ -1039,12 +1067,13 @@ export function createLoop(deps: LoopDeps) {
           })
         } catch (error) {
           if (!(error instanceof ForgeRateLimitError)) {
-            event('WARN', `could not update PR body: ${errorSummary(error)}`)
+            reportGateFailure(`could not update PR body: ${errorSummary(error)}`)
           }
           return false
         }
       }
       writeFileSync(prUrlFile, `${status.url}\n`)
+      previousGateFailure = undefined
       return true
     }
 
@@ -1057,10 +1086,11 @@ export function createLoop(deps: LoopDeps) {
         draft: true,
       })
       writeFileSync(prUrlFile, `${url}\n`)
+      previousGateFailure = undefined
       return true
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
-        event('WARN', `could not create PR: ${errorSummary(error)}`)
+        reportGateFailure(`could not create PR: ${errorSummary(error)}`)
       }
       return false
     }
@@ -1265,6 +1295,7 @@ export function createLoop(deps: LoopDeps) {
     if (currentScans > 0 && (config.autoPr || config.reviewEnabled)) {
       const resumeFlag = join(paths.queueDir, `cycle-resume-${currentScans}`)
       const completeFlag = join(paths.queueDir, `cycle-complete-${currentScans}`)
+      const suiteTipFile = join(paths.queueDir, `cycle-suite-tip-${currentScans}`)
       const ciFixFlag = join(paths.queueDir, `ci-fix-emitted-${currentScans}`)
 
       if (!existsSync(resumeFlag)) {
@@ -1294,7 +1325,17 @@ export function createLoop(deps: LoopDeps) {
             }
           }
 
-          if (!runCycleSuite(currentScans)) return 'continue'
+          const currentTip = git(['rev-parse', 'HEAD']).trim()
+          const suitePassedForTip = config.taskGate === 'light'
+            && currentTip !== ''
+            && existsSync(suiteTipFile)
+            && readFileSync(suiteTipFile, 'utf8').trim() === currentTip
+          if (!suitePassedForTip) {
+            if (!runCycleSuite(currentScans)) return 'continue'
+            if (config.taskGate === 'light' && currentTip !== '') {
+              writeFileSync(suiteTipFile, `${currentTip}\n`)
+            }
+          }
 
           if (config.autoPr && !(await ensureDraftPr('cycle'))) return 'continue'
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
@@ -1791,6 +1832,7 @@ export function createLoop(deps: LoopDeps) {
     // exported for the daemon
     poll: guardedPoll,
     initializeIssueQueue,
+    validatePushTarget,
     initializeSessionStateForBranch,
     cleanupSessionState,
     // exported for tests
