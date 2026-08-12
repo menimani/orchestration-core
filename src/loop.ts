@@ -914,21 +914,37 @@ export function createLoop(deps: LoopDeps) {
     }
   }
 
+  function completeScanYields(cycle: number): string[] | undefined {
+    const expectedFile = join(paths.queueDir, `scan-expected-${cycle}`)
+    const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
+    if (!existsSync(expectedFile) || !existsSync(yieldFile)) return undefined
+    const expected = readCount(expectedFile)
+    const yields = readFileSync(yieldFile, 'utf8').split(/\r?\n/).filter((line) => line !== '')
+    if (expected === 0 || yields.length !== expected
+      || yields.some((yieldValue) => yieldValue !== 'found' && yieldValue !== 'empty')) {
+      return undefined
+    }
+    return yields
+  }
+
   /**
    * Fold the finished cycle's scan records into the empty-scan counter: reset on any
-   * finding, increment exactly once when every scan came back empty, untouched when no
-   * record exists (no scan finished).
+   * finding, increment exactly once when every expected scan came back empty, and leave
+   * it untouched when any scan failed or did not finish.
    */
   function foldScanYields(cycle: number): void {
+    const yields = completeScanYields(cycle)
+    if (yields === undefined) return
+    const expectedFile = join(paths.queueDir, `scan-expected-${cycle}`)
     const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
-    if (!existsSync(yieldFile)) return
-    if (readFileSync(yieldFile, 'utf8').includes('found')) {
+    if (yields.includes('found')) {
       writeFileSync(emptyScanFile, '0\n')
     } else {
       const total = readCount(emptyScanFile) + 1
       writeFileSync(emptyScanFile, `${total}\n`)
     }
     rmSync(yieldFile, { force: true })
+    rmSync(expectedFile, { force: true })
   }
 
   function renderTemplate(templateName: string, replacements: Record<string, string>): string {
@@ -1002,8 +1018,8 @@ export function createLoop(deps: LoopDeps) {
    */
   function cycleIsFinal(cycle: number): boolean {
     if (cycle >= config.maxScanCycles) return true
-    const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
-    if (existsSync(yieldFile) && !readFileSync(yieldFile, 'utf8').includes('found')) {
+    const yields = completeScanYields(cycle)
+    if (yields !== undefined && !yields.includes('found')) {
       return readCount(emptyScanFile) + 1 >= config.maxEmptyScans
     }
     return false
@@ -1077,7 +1093,7 @@ export function createLoop(deps: LoopDeps) {
 
   function cleanupSessionState(preserveTaskMarkers = false): void {
     for (const name of readdirSync(paths.queueDir)) {
-      if (/^(cycle-complete-|cycle-suite-tip-|cycle-resume-|ci-fix-emitted-|review-round-|review-id-|failed-|scan-yield-)/.test(name)
+      if (/^(cycle-complete-|cycle-suite-tip-|cycle-resume-|ci-fix-emitted-|review-round-|review-id-|failed-|scan-yield-|scan-expected-)/.test(name)
         || name === 'decisions.txt' || name === 'pr-url.txt'
         || name === 'empty-scan-count.txt' || name === 'merge-failure-count.txt') {
         rmSync(join(paths.queueDir, name), { force: true })
@@ -1607,8 +1623,9 @@ export function createLoop(deps: LoopDeps) {
     // This is the only safe restart boundary: the previous gate is closed, no task is
     // running, and the next cycle has not yet consumed its number or started a scan.
     if (await updateCore(nextCycle) === 'restart') return 'restart'
-    writeFileSync(scanCountFile, `${nextCycle}\n`)
     const nScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
+    writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
+    writeFileSync(scanCountFile, `${nextCycle}\n`)
 
     // Disjoint groups of the checklist's eight sections, balanced so the deep reads
     // (bugs, tests) do not share a scan at higher parallelism.

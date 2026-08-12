@@ -113,8 +113,9 @@ from or equivalent to `orchestration/tests/*.sh`.
 12. Scans start on idle (nothing queued or running), `SCAN_PARALLEL` (1-4) at a time
     over disjoint groups of the checklist's sections. A cycle counts as empty only when
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
-    run early. Scan yield is recorded per cycle (`queue/scan-yield-<n>`) and folded into
-    the empty counter once, at the gate.
+    run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
+    (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
+    counter once, at the gate, only when every expected scan completed successfully.
 13. `cycle_is_final` is true when the cycle number reaches `MAX_SCAN_CYCLES`, or when
     the cycle's scans all came back empty and one more empty cycle reaches
     `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
