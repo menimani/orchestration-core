@@ -163,32 +163,31 @@ function writeState(file: string, state: SharedSkillsState): void {
 }
 
 function migrateLegacySkills(
-  repoRoot: string,
+  legacyRoots: readonly string[],
   destinationRoot: string,
   os: OperatingSystem,
 ): Pick<SharedSkillsSyncResult, 'migrationConflicts' | 'changedPaths'> {
-  const legacyRoot = join(repoRoot, '.claude', 'skills')
-  const legacyStateFile = join(legacyRoot, STATE_FILE)
   const migrationConflicts: string[] = []
   const changedPaths: string[] = []
-  if (relative(legacyRoot, destinationRoot) === '' || !existsSync(legacyStateFile)) {
-    return { migrationConflicts, changedPaths }
-  }
+  for (const legacyRoot of legacyRoots) {
+    const legacyStateFile = join(legacyRoot, STATE_FILE)
+    if (relative(legacyRoot, destinationRoot) === '' || !existsSync(legacyStateFile)) continue
 
-  const legacyState = readState(legacyStateFile)
-  for (const [skill, previousHash] of Object.entries(legacyState.skills)) {
-    const legacySkill = join(legacyRoot, skill)
-    if (!existsSync(legacySkill)) continue
-    if (!lstatSync(legacySkill).isDirectory()
-      || hashFiles(filesIn(legacySkill)) !== previousHash) {
-      migrationConflicts.push(legacySkill)
-      continue
+    const legacyState = readState(legacyStateFile)
+    for (const [skill, previousHash] of Object.entries(legacyState.skills)) {
+      const legacySkill = join(legacyRoot, skill)
+      if (!existsSync(legacySkill)) continue
+      if (!lstatSync(legacySkill).isDirectory()
+        || hashFiles(filesIn(legacySkill)) !== previousHash) {
+        migrationConflicts.push(legacySkill)
+        continue
+      }
+      os.removeDirectory(legacySkill)
+      changedPaths.push(legacySkill)
     }
-    os.removeDirectory(legacySkill)
-    changedPaths.push(legacySkill)
+    rmSync(legacyStateFile)
+    changedPaths.push(legacyStateFile)
   }
-  rmSync(legacyStateFile)
-  changedPaths.push(legacyStateFile)
   return { migrationConflicts, changedPaths }
 }
 
@@ -211,7 +210,8 @@ export function syncSharedSkills(
     throw new Error(`shared skill destination escaped the repository: ${destinationRoot}`)
   }
   const stateFile = join(destinationRoot, STATE_FILE)
-  const migration = migrateLegacySkills(repoRoot, destinationRoot, os)
+  const legacyRoots = runner.sharedSkills.legacyRoots?.(repoRoot) ?? []
+  const migration = migrateLegacySkills(legacyRoots, destinationRoot, os)
   mkdirSync(destinationRoot, { recursive: true })
   const state = readState(stateFile)
   const nextState: SharedSkillsState = { version: 1, skills: { ...state.skills } }

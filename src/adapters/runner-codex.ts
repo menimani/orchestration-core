@@ -88,6 +88,7 @@ export function createCodexRunner(): Runner {
   return {
     sharedSkills: {
       destinationRoot: (repoRoot) => join(repoRoot, '.agents', 'skills'),
+      legacyRoots: (repoRoot) => [join(repoRoot, '.claude', 'skills')],
       renderFile: renderSharedSkillFile,
     },
     start(options: RunnerStartOptions): Promise<number> {
