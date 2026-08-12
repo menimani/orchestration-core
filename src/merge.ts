@@ -5,6 +5,7 @@ import {
 } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
+import { operatingSystem } from './adapters/os.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
 import {
@@ -186,8 +187,7 @@ interface MergeIo {
 }
 
 const worktreeRemovalRuntime: WorktreeRemovalRuntime = {
-  platform: process.platform,
-  remove: rmSync,
+  os: operatingSystem,
   git,
 }
 
@@ -203,10 +203,7 @@ export function removeMergedWorktree(
     log(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
     return
   }
-  const fallback = result.fallback === 'windows-long-path'
-    ? 'Windows long-path fallback'
-    : 'direct-removal fallback'
-  log(`Worktree removal needed the ${fallback}: ${worktree} (${result.gitFailure})`)
+  log(`Worktree removal needed the ${result.fallback}: ${worktree} (${result.gitFailure})`)
 }
 
 function git(cwd: string, args: string[]): string {

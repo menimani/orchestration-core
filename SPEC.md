@@ -252,6 +252,10 @@ from or equivalent to `orchestration/tests/*.sh`.
     verifier reports separately the core typecheck, adapter suite, real loader discovery
     by name, referenced paths, pushable upstream, hooks setting, and labels. A skipped
     check retains its reason and is never reported as a pass.
+32. Operating-system behavior is detected once from the running process and exposed
+    through `adapters/os.ts`. Callers receive intent-level process-tree, directory, and
+    worktree-path operations from either `os-windows.ts` or `os-posix.ts`; there is no
+    OS selector or platform field in the contract.
 
 ## The issue queue (new in the rewrite, opt-in)
 

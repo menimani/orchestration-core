@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
+import type { OperatingSystem } from '../src/adapters/os.ts'
+import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
+import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
   MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
 } from '../src/merge.ts'
@@ -39,6 +42,26 @@ const noCheckProject: ProjectAdapter = {
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' })
+}
+
+function windowsOperatingSystem(remove: (path: string, options: {
+  force: true
+  maxRetries?: 3
+  recursive: true
+}) => void): OperatingSystem {
+  return createWindowsOperatingSystem({
+    spawn: () => {}, probeProcess: () => {}, remove, now: Date.now, sleep: () => {},
+  })
+}
+
+function posixOperatingSystem(remove: (path: string, options: {
+  force: true
+  recursive: true
+}) => void): OperatingSystem {
+  return createPosixOperatingSystem({
+    signalProcessGroup: () => {}, probeProcess: () => {}, remove,
+    now: Date.now, sleep: () => {}, groupHasRunningMember: () => undefined,
+  })
 }
 
 async function makeCompletedTask(taskId: string, options: { commit?: boolean; dirty?: boolean } = {}): Promise<string> {
@@ -83,7 +106,7 @@ describe('removeMergedWorktree', () => {
     })
 
     removeMergedWorktree(paths, worktree, vi.fn(), {
-      platform: 'win32', remove, git: gitRuntime,
+      os: windowsOperatingSystem(remove), git: gitRuntime,
     })
 
     expect(remove).toHaveBeenCalledWith(
@@ -106,7 +129,7 @@ describe('removeMergedWorktree', () => {
     const log = vi.fn()
 
     removeMergedWorktree(paths, worktree, log, {
-      platform: 'win32', remove, git: gitRuntime,
+      os: windowsOperatingSystem(remove), git: gitRuntime,
     })
 
     expect(remove).toHaveBeenCalledWith(
@@ -133,7 +156,7 @@ describe('removeMergedWorktree', () => {
     const log = vi.fn()
 
     removeMergedWorktree(paths, worktree, log, {
-      platform: 'linux', remove, git: gitRuntime,
+      os: posixOperatingSystem(remove), git: gitRuntime,
     })
 
     expect(remove).toHaveBeenCalledWith(worktree, { recursive: true, force: true })
@@ -159,8 +182,7 @@ describe('removeMergedWorktree', () => {
     const log = vi.fn()
 
     removeMergedWorktree(paths, worktree, log, {
-      platform: 'win32',
-      remove: () => { throw new Error('Filename too long') },
+      os: windowsOperatingSystem(() => { throw new Error('Filename too long') }),
       git: gitRuntime,
     })
 

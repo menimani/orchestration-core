@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import { loadProject, type ProjectAdapter, type SuiteStep } from './adapters/project.ts'
 import { QUEUE_LABELS } from './issueQueue.ts'
@@ -68,7 +68,7 @@ function safeRepositoryPath(repoRoot: string, referencedPath: string): string | 
   if (isAbsolute(referencedPath)) return undefined
   const target = resolve(repoRoot, referencedPath)
   const outside = relative(repoRoot, target)
-  return outside === '..' || outside.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)
+  return outside === '..' || outside.startsWith(`..${sep}`)
     ? undefined
     : target
 }
