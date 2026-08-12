@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
+import {
+  appendFileSync, copyFileSync, cpSync, existsSync, mkdtempSync, rmSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -32,7 +34,10 @@ function createConsumerRepository(): string {
   repositories.push(repository)
 
   cpSync(fixtureRoot, repository, { recursive: true })
-  rmSync(join(repository, 'orchestration', 'project'), { recursive: true, force: true })
+  rmSync(
+    join(repository, 'orchestration', 'project', 'project-consumer.ts'),
+    { force: true },
+  )
   const installedPackage = join(repository, 'orchestration', 'ts')
   cpSync(join(packageRoot, 'src'), join(installedPackage, 'src'), { recursive: true })
   cpSync(join(packageRoot, 'scaffold'), join(installedPackage, 'scaffold'), { recursive: true })
@@ -124,11 +129,21 @@ describe('consumer startup', () => {
       { packageRoot: installedPackage, report: () => {} },
     )
     expect(initialized.ok).toBe(true)
+    appendFileSync(initialized.adapterPath, `
+import { consumerFixture } from './consumer-fixture.ts'
+project.scanWorktreeSetup = consumerFixture.scanWorktreeSetup
+project.mergeChecks = () => consumerFixture.mergeChecks
+project.cycleSuite = () => consumerFixture.cycleSuite
+`)
 
     const project = await projectModule.loadProject(join(repository, 'orchestration'), {})
     expect(project.name).toBe('consumer')
     const fixturePaths = referencedPaths(project)
-    expect(fixturePaths).toEqual([])
+    expect(fixturePaths).toEqual([
+      'orchestration/project/scripts/ensure-environment.ts',
+      'orchestration/ts',
+      'orchestration/ts/package.json',
+    ])
     for (const fixturePath of fixturePaths) {
       expect(existsSync(join(repository, fixturePath)), fixturePath).toBe(true)
     }

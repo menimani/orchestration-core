@@ -105,8 +105,9 @@ node orchestration/ts/src/cli.ts init <project-name>
 The subtree command is intentionally manual: it makes the imported commit visible. After
 that one deliberate import, `init` is the supported setup and repair path. It generates a
 contract-valid adapter, project templates, points `core.hooksPath` at the core-owned
-hooks, and creates missing `loop:*` labels. It is safe to repeat: existing project files
-and a deliberately different hooks setting are reported and never overwritten.
+hooks, and creates missing `loop:*` labels. It is safe to repeat: missing required adapter
+members are added with marked scaffold defaults, while declared members, other existing
+project files, and a deliberately different hooks setting are reported and never overwritten.
 
 Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
 the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,
