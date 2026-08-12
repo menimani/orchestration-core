@@ -21,7 +21,10 @@ export function packageFile(...segments: string[]): string {
 
 export function packageCommandPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT): string {
   const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
-  return packageDirectory === '' ? 'npm run' : `npm run -C ${packageDirectory}`
+  const packageArgument = packageDirectory.includes(' ')
+    ? `"${packageDirectory}"`
+    : packageDirectory
+  return packageDirectory === '' ? 'npm run' : `npm run -C ${packageArgument}`
 }
 
 export function packageScriptCommand(
