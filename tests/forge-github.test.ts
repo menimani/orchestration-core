@@ -80,6 +80,20 @@ describe('GitHub issue promotion', () => {
   })
 })
 
+describe('GitHub Git remotes', () => {
+  it('expands GitHub repository shorthand at the forge boundary', () => {
+    const forge = createGithubForge('repo-root')
+
+    expect(forge.resolveGitRemote('example/shared-core'))
+      .toBe('https://github.com/example/shared-core.git')
+    expect(forge.resolveGitRemote('example/shared-core.git'))
+      .toBe('https://github.com/example/shared-core.git')
+    expect(forge.resolveGitRemote('upstream')).toBe('upstream')
+    expect(forge.resolveGitRemote('https://example.test/shared-core.git'))
+      .toBe('https://example.test/shared-core.git')
+  })
+})
+
 describe('GitHub pull request bodies', () => {
   it('fences issue-number-like references when creating a pull request', async () => {
     const calls: string[][] = []

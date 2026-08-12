@@ -42,6 +42,10 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     user,
     clock: () => new Date(),
 
+    resolveGitRemote(remote: string): string {
+      return remote
+    },
+
     issueClosingCommitMessage(message: string): string {
       return message
     },

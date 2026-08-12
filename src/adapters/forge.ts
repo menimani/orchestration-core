@@ -104,6 +104,9 @@ export class ForgeRateLimitError extends Error {
 }
 
 export interface Forge {
+  /** Resolve forge-specific repository shorthand into a Git remote or URL. */
+  resolveGitRemote(remote: string): string
+
   /** Decorate a merge commit message so promotion closes the linked issue. */
   issueClosingCommitMessage(message: string, issueNumber: number): string
 
