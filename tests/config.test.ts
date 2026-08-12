@@ -62,6 +62,23 @@ describe('loadConfig', () => {
     expect(config.upstreamBranch).toBe('stable')
   })
 
+  it.each([
+    'ISSUE_QUEUE_ENABLED',
+    'WORKER_MODE',
+    'AUTO_MERGE',
+    'SKIP_AUTO_TEST',
+    'SCAN_ENABLED',
+    'AUTO_PR',
+    'REVIEW_ENABLED',
+    'CI_GATE_ENABLED',
+    'AUTO_REVIEW',
+    'CORE_AUTO_UPDATE',
+  ])('rejects an invalid %s boolean value', (name) => {
+    expect(() => loadConfig({ [name]: 'tru' })).toThrow(
+      `${name} must be 'true' or 'false', got 'tru'`,
+    )
+  })
+
   it('clamps SCAN_PARALLEL to the four defined checklist groups', () => {
     expect(loadConfig({ SCAN_PARALLEL: '9' }).scanParallel).toBe(4)
   })
