@@ -1,0 +1,30 @@
+# Line endings are decided here rather than by each checkout's core.autocrlf, so that a
+# file copied out of a working tree — mounted into a container, installed by `init` —
+# behaves the same as one Git checked out. A shell script with CRLF fails on Linux with
+# `$'\r': command not found`, and this package ships hooks that consumers execute.
+* text=auto eol=lf
+
+# Source and configuration — always LF
+*.ts text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Executed as shell scripts, on whichever platform — always LF
+*.sh text eol=lf
+.githooks/* text eol=lf
+
+# Interpreted by cmd.exe, which requires CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# No conversion
+*.png binary
+*.ico binary
+*.woff2 binary
