@@ -1,6 +1,7 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync,
+  writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -504,6 +505,53 @@ describe('loop daemon ownership', () => {
         if (child.exitCode === null) child.kill()
       }
     }
+  })
+
+  it('reclaims an aged ownerless recovery directory', () => {
+    const paths = orchPaths(repoRoot)
+    const recovery = `${daemonFile('loop.pid')}.recovery`
+    writeFileSync(daemonFile('loop.pid'), '999999999\n')
+    mkdirSync(recovery)
+    const past = (Date.now() - 60_000) / 1000
+    utimesSync(recovery, past, past)
+    mkdirSync(join(paths.worktreesDir, 'orphan-after-recovery'))
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('Removing stale PID file')
+    expect(existsSync(recovery)).toBe(false)
+  })
+
+  it('reclaims a recovery lock whose recorded owner has exited', () => {
+    const paths = orchPaths(repoRoot)
+    const recovery = `${daemonFile('loop.pid')}.recovery`
+    writeFileSync(daemonFile('loop.pid'), '999999999\n')
+    mkdirSync(recovery)
+    writeFileSync(join(recovery, 'owner.json'), JSON.stringify({
+      pid: 999999999,
+      acquiredAt: new Date().toISOString(),
+      token: 'abandoned-owner',
+    }))
+    mkdirSync(join(paths.worktreesDir, 'orphan-after-owner-recovery'))
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('Removing stale PID file')
+    expect(existsSync(recovery)).toBe(false)
   })
 
   it('prints a failed-task contract marker as an exact standalone line', async () => {

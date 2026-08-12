@@ -70,6 +70,22 @@ describe('backlog process lock', () => {
       .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
   })
 
+  it('recovers an aged recovery mutex abandoned beside a stale lock', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    const recoveryDir = `${lockDir}.recovery`
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'owner'), `999999999 ${Date.now() - 31_000}\n`)
+    mkdirSync(recoveryDir)
+    const old = new Date(Date.now() - 31_000)
+    utimesSync(recoveryDir, old, old)
+    vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out')
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    expect(existsSync(lockDir)).toBe(false)
+    expect(existsSync(recoveryDir)).toBe(false)
+  })
+
   it('serializes simultaneous recovery of one stale lock', async () => {
     const backlog = join(paths.queueDir, 'backlog.txt')
     const lockDir = `${backlog}.lock`

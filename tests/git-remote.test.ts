@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -18,6 +18,11 @@ function git(args: string[]): string {
 beforeEach(() => {
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-git-remote-'))
   git(['init', '--initial-branch=main'])
+  git(['config', 'user.email', 'test@example.com'])
+  git(['config', 'user.name', 'Test'])
+  writeFileSync(join(repoRoot, 'README.md'), '# test\n')
+  git(['add', 'README.md'])
+  git(['commit', '-qm', 'chore: initial commit'])
   git(['remote', 'add', 'origin', join(repoRoot, 'origin.git')])
 })
 
@@ -35,6 +40,24 @@ describe('current branch remote', () => {
     git(['config', 'remote.pushDefault', 'upstream'])
 
     expect(currentBranchRemote(repoRoot)).toBe('upstream')
+  })
+
+  it('prefers the branch push remote over its tracking remote', () => {
+    git(['remote', 'add', 'upstream', join(repoRoot, 'upstream.git')])
+    git(['config', 'branch.main.remote', 'upstream'])
+    git(['config', 'branch.main.merge', 'refs/heads/main'])
+    git(['config', 'branch.main.pushRemote', 'origin'])
+
+    expect(currentBranchRemote(repoRoot)).toBe('origin')
+  })
+
+  it('prefers the default push remote over the branch tracking remote', () => {
+    git(['remote', 'add', 'upstream', join(repoRoot, 'upstream.git')])
+    git(['config', 'branch.main.remote', 'upstream'])
+    git(['config', 'branch.main.merge', 'refs/heads/main'])
+    git(['config', 'remote.pushDefault', 'origin'])
+
+    expect(currentBranchRemote(repoRoot)).toBe('origin')
   })
 
   it('rejects an ambiguous repository when no branch or push remote is configured', () => {

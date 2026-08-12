@@ -271,7 +271,7 @@ describe('GitHub issue queue repository targeting', () => {
 })
 
 describe('GitHub author permissions', () => {
-  it('trusts actual write-level permission, not author association, and caches each login', async () => {
+  it('trusts actual write-level permission and deduplicates authors within one listing', async () => {
     const calls: string[][] = []
     const issues = [
       { ...openIssueFixture, number: 1, author: { login: 'read-member' }, authorAssociation: 'MEMBER' },
@@ -296,6 +296,22 @@ describe('GitHub author permissions', () => {
     expect(normalized.map((issue) => issue.author.hasWriteAccess))
       .toEqual([false, false, true, true])
     expect(calls.filter((args) => args[0] === 'api')).toHaveLength(3)
+  })
+
+  it('observes permission revocation on the fresh issue read used by a claim', async () => {
+    let permission = 'write'
+    const command: GithubCommand = async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'issue') {
+        return JSON.stringify(args[1] === 'list' ? [openIssueFixture] : openIssueFixture)
+      }
+      return JSON.stringify({ permission })
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    expect((await forge.listOpenIssues('loop:ready'))[0]?.author.hasWriteAccess).toBe(true)
+    permission = 'read'
+    expect((await forge.getIssue(1)).author.hasWriteAccess).toBe(false)
   })
 })
 

@@ -281,9 +281,12 @@ lookup that fails for any reason other than a rate limit answers "no write acces
 missing collaborator and an unreachable forge both resolve to untrusted rather than to a
 guess.
 
-Authorship is checked when a ready issue is claimed, not while findings are listed. An
-untrusted issue remains unassigned and ready, receives `loop:untrusted-author`, and emits
-a warning naming its author so a maintainer can inspect it and re-file genuine work.
+Authorship is checked both when a ready issue is claimed and when fingerprint ownership
+is reconciled. An untrusted issue remains unassigned and ready, receives
+`loop:untrusted-author`, and emits a warning naming its author so a maintainer can inspect
+it and re-file genuine work. An issue whose author lacks write access, or which already
+carries that label, never suppresses or closes a trusted finding and is never recorded in
+the local fingerprint ledger.
 
 A task materialized from a trusted issue frames the requirement as the specification it
 is, because the claim gate has already established that its author may change this

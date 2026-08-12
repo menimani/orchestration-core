@@ -245,12 +245,14 @@ export function createGithubForge(
     return issueQueueRepositoryPromise
   }
 
-  const authorPermissionCache = new Map<string, Promise<boolean>>()
-  const normalizeAuthor = async (author: { login: string } | null): Promise<ForgeAuthor> => {
+  const normalizeAuthor = async (
+    author: { login: string } | null,
+    permissionCache = new Map<string, Promise<boolean>>(),
+  ): Promise<ForgeAuthor> => {
     if (author === null) return { login: '(unknown)', hasWriteAccess: false }
     const repository = await issueQueueRepository()
-    const cacheKey = `${repository.toLowerCase()}\0${author.login.toLowerCase()}`
-    let permissionPromise = authorPermissionCache.get(cacheKey)
+    const cacheKey = author.login.toLowerCase()
+    let permissionPromise = permissionCache.get(cacheKey)
     if (permissionPromise === undefined) {
       permissionPromise = (async () => {
         const encodedRepository = repository.split('/').map(encodeURIComponent).join('/')
@@ -274,22 +276,22 @@ export function createGithubForge(
           return false
         }
       })()
-      authorPermissionCache.set(cacheKey, permissionPromise)
+      // Collapse duplicate authors inside this forge response only. A later get/list
+      // call must revalidate permission, especially the locked getIssue used by claim.
+      permissionCache.set(cacheKey, permissionPromise)
     }
-    try {
-      return { login: author.login, hasWriteAccess: await permissionPromise }
-    } catch (error) {
-      authorPermissionCache.delete(cacheKey)
-      throw error
-    }
+    return { login: author.login, hasWriteAccess: await permissionPromise }
   }
 
-  const normalizeIssue = async (issue: GithubIssue): Promise<ForgeIssue> => ({
+  const normalizeIssue = async (
+    issue: GithubIssue,
+    permissionCache?: Map<string, Promise<boolean>>,
+  ): Promise<ForgeIssue> => ({
     number: issue.number,
     state: issue.state === 'OPEN' ? 'open' : 'closed',
     title: issue.title,
     body: issue.body,
-    author: await normalizeAuthor(issue.author),
+    author: await normalizeAuthor(issue.author, permissionCache),
     labels: issue.labels.map((label) => label.name),
     assignees: issue.assignees.map((assignee) => assignee.login),
     updatedAt: issue.updatedAt,
@@ -482,9 +484,10 @@ export function createGithubForge(
       ]
       const stdout = await checkedGh(repoRoot, args)
       const data = parseGhJson(args, stdout, issueCommentsSchema)
+      const permissionCache = new Map<string, Promise<boolean>>()
       return Promise.all(data.comments.map(async (comment) => ({
         body: comment.body,
-        author: await normalizeAuthor(comment.author),
+        author: await normalizeAuthor(comment.author, permissionCache),
       })))
     },
 
@@ -495,7 +498,9 @@ export function createGithubForge(
         '--label', label, '--limit', '200',
         '--json', 'number,state,title,body,author,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
-      return Promise.all(parseGhJson(args, stdout, openGithubIssueListSchema).map(normalizeIssue))
+      const permissionCache = new Map<string, Promise<boolean>>()
+      return Promise.all(parseGhJson(args, stdout, openGithubIssueListSchema)
+        .map((issue) => normalizeIssue(issue, permissionCache)))
     },
 
     async listClosedIssues(label: string): Promise<ForgeIssue[]> {
@@ -505,7 +510,9 @@ export function createGithubForge(
         '--label', label, '--limit', '200',
         '--json', 'number,state,title,body,author,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
-      return Promise.all(parseGhJson(args, stdout, closedGithubIssueListSchema).map(normalizeIssue))
+      const permissionCache = new Map<string, Promise<boolean>>()
+      return Promise.all(parseGhJson(args, stdout, closedGithubIssueListSchema)
+        .map((issue) => normalizeIssue(issue, permissionCache)))
     },
 
     async assignIssue(issueNumber: number, user: string): Promise<void> {
