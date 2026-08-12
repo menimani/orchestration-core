@@ -19,14 +19,17 @@ export function packageFile(...segments: string[]): string {
   return join(PACKAGE_ROOT, ...segments)
 }
 
+export function packageCommandPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT): string {
+  const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
+  return packageDirectory === '' ? 'npm run' : `npm run -C ${packageDirectory}`
+}
+
 export function packageScriptCommand(
   repoRoot: string,
   script: string,
   packageRoot = PACKAGE_ROOT,
 ): string {
-  const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
-  const prefix = packageDirectory === '' ? 'npm run' : `npm run -C ${packageDirectory}`
-  return `${prefix} ${script}`
+  return `${packageCommandPrefix(repoRoot, packageRoot)} ${script}`
 }
 
 export interface OrchPaths {

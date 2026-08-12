@@ -123,6 +123,13 @@ from or equivalent to `orchestration/tests/*.sh`.
     otherwise runs the code it started with. The check never runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
+    At the same boundary, the package manifest's shared skills are rendered into the
+    repository root `.claude/skills/`, using `npm run` as the command prefix in the
+    owning repository and `npm run -C <package-path>` in a subtree consumer. The sync
+    replaces only a tree whose content matches its recorded last output; consumer
+    divergence is warned and retained, and skills absent from the manifest are untouched.
+    Shared canonical sources do not live below `.claude/skills/`, so a subtree exposes
+    no nested duplicate of a shared skill.
 
 ## The cycle gate
 
