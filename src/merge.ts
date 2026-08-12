@@ -1,7 +1,7 @@
 import { execFileSync, execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync,
 } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
@@ -295,17 +295,12 @@ function runMergeChecks(
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
 }
 
-function removeTemporaryWorktree(paths: OrchPaths, worktree: string): void {
-  try {
-    git(paths.repoRoot, ['worktree', 'remove', worktree, '--force'])
-  } catch {
-    try {
-      rmSync(worktree, { recursive: true, force: true })
-      git(paths.repoRoot, ['worktree', 'prune'])
-    } catch {
-      // cleanup is best effort; the merge verdict is already known
-    }
-  }
+export function removeTemporaryWorktree(
+  paths: OrchPaths,
+  worktree: string,
+  runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
+): void {
+  removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
 }
 
 /**

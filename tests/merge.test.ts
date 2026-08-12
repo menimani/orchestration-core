@@ -10,7 +10,7 @@ import type { OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
+  MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
 } from '../src/merge.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
@@ -196,6 +196,29 @@ describe('removeMergedWorktree', () => {
     expect(log).toHaveBeenCalledOnce()
     expect(log).toHaveBeenCalledWith(
       `WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (error: failed to delete: Filename too long)`,
+    )
+    expect(gitRuntime).toHaveBeenNthCalledWith(
+      2, paths.repoRoot, ['worktree', 'prune'],
+    )
+  })
+})
+
+describe('removeTemporaryWorktree', () => {
+  it('uses the Windows long-path fallback and prunes after git removal fails', () => {
+    const worktree = join(paths.worktreesDir, '.merge-long-path')
+    const remove = vi.fn()
+    const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Removal failed')
+      return ''
+    })
+
+    removeTemporaryWorktree(paths, worktree, {
+      os: windowsOperatingSystem(remove), git: gitRuntime,
+    })
+
+    expect(remove).toHaveBeenCalledWith(
+      `\\\\?\\${worktree.replaceAll('/', '\\')}`,
+      { recursive: true, force: true, maxRetries: 3 },
     )
     expect(gitRuntime).toHaveBeenNthCalledWith(
       2, paths.repoRoot, ['worktree', 'prune'],
