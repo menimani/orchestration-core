@@ -18,6 +18,7 @@ import {
 import { existingTaskIdForDesc } from '../src/ids.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
 
 let repoRoot: string
@@ -1161,7 +1162,10 @@ describe('loop integration in issue mode', () => {
         maxParallel: 1,
       },
       forge,
-      runner: { start: async (options) => { started.push(options.specFile); return process.pid } },
+      runner: {
+        sharedSkills: fakeRunnerSharedSkills,
+        start: async (options) => { started.push(options.specFile); return process.pid },
+      },
       project: stubProject,
       log: (line) => logged.push(line),
       now: () => new Date('2026-08-08T12:00:00Z'),
@@ -1224,7 +1228,7 @@ describe('loop integration in issue mode', () => {
         autoMerge: false, maxParallel: 1,
       },
       forge,
-      runner: { start: async () => process.pid },
+      runner: { sharedSkills: fakeRunnerSharedSkills, start: async () => process.pid },
       project: stubProject,
       log: () => {},
       now: () => new Date('2026-08-08T12:00:00Z'),
@@ -1260,7 +1264,7 @@ describe('loop integration in issue mode', () => {
       paths,
       config: { ...loadConfig({}), issueQueueEnabled: true, scanEnabled: false, autoMerge: false },
       forge,
-      runner: { start: async () => process.pid },
+      runner: { sharedSkills: fakeRunnerSharedSkills, start: async () => process.pid },
       project: stubProject,
       log: (line) => logged.push(line),
       now: () => new Date('2026-08-08T12:00:00Z'),

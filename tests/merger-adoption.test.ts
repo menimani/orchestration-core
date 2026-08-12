@@ -13,6 +13,7 @@ import {
 import { createLoop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
 
 let tempRoot: string
@@ -28,6 +29,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 const runner: Runner = {
+  sharedSkills: fakeRunnerSharedSkills,
   start: async () => process.pid,
 }
 

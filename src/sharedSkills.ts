@@ -3,9 +3,9 @@ import {
   existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
-import { packageCommandPrefix } from './paths.ts'
+import type { Runner } from './adapters/runner.ts'
 
 const STATE_FILE = '.orchestration-core-sync.json'
 
@@ -86,7 +86,8 @@ function renderedSkill(
   packageRoot: string,
   skill: string,
   placeholder: string,
-  commandPrefix: string,
+  repoRoot: string,
+  runner: Runner,
 ): RenderedFile[] {
   const source = join(packageRoot, 'skills', skill)
   if (!existsSync(join(source, 'SKILL.md'))) {
@@ -94,7 +95,11 @@ function renderedSkill(
   }
   return filesIn(source).map((file) => ({
     ...file,
-    contents: Buffer.from(file.contents.toString('utf8').replaceAll(placeholder, commandPrefix)),
+    contents: runner.sharedSkills.renderFile(file.contents, {
+      repoRoot,
+      packageRoot,
+      commandPrefixPlaceholder: placeholder,
+    }),
   }))
 }
 
@@ -162,10 +167,16 @@ function writeState(file: string, state: SharedSkillsState): void {
 export function syncSharedSkills(
   repoRoot: string,
   packageRoot: string,
+  runner: Runner,
   os: OperatingSystem = operatingSystem,
 ): SharedSkillsSyncResult {
   const manifest = readManifest(packageRoot)
-  const destinationRoot = join(repoRoot, '.claude', 'skills')
+  const destinationRoot = runner.sharedSkills.destinationRoot(repoRoot)
+  const repositoryPath = relative(repoRoot, destinationRoot)
+  if (repositoryPath === '' || repositoryPath === '..'
+    || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
+    throw new Error(`shared skill destination escaped the repository: ${destinationRoot}`)
+  }
   const stateFile = join(destinationRoot, STATE_FILE)
   mkdirSync(destinationRoot, { recursive: true })
   const state = readState(stateFile)
@@ -175,12 +186,11 @@ export function syncSharedSkills(
   const conflicts: string[] = []
   const changedPaths: string[] = []
   const managedPaths: string[] = []
-  const commandPrefix = packageCommandPrefix(repoRoot, packageRoot)
 
   for (const skill of manifest.skills) {
     const destination = join(destinationRoot, skill)
     const desiredFiles = renderedSkill(
-      packageRoot, skill, manifest.commandPrefixPlaceholder, commandPrefix,
+      packageRoot, skill, manifest.commandPrefixPlaceholder, repoRoot, runner,
     )
     const desiredHash = hashFiles(desiredFiles)
     const previousHash = state.skills[skill]

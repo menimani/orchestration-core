@@ -1,6 +1,10 @@
 import { spawn } from 'node:child_process'
 import { closeSync, openSync, readFileSync } from 'node:fs'
-import type { Runner, RunnerStartOptions } from './runner.ts'
+import { join } from 'node:path'
+import { packageCommandPrefix } from '../paths.ts'
+import type {
+  Runner, RunnerSharedSkillRenderOptions, RunnerStartOptions,
+} from './runner.ts'
 
 // The spec content is the prompt, passed as one
 // argument; the final message lands in --output-last-message, which is the only
@@ -20,8 +24,23 @@ function buildArgs(options: RunnerStartOptions, specContent: string): string[] {
   return args
 }
 
+function renderSharedSkillFile(
+  contents: Buffer,
+  options: RunnerSharedSkillRenderOptions,
+): Buffer {
+  const commandPrefix = packageCommandPrefix(options.repoRoot, options.packageRoot)
+  return Buffer.from(contents.toString('utf8').replaceAll(
+    options.commandPrefixPlaceholder,
+    commandPrefix,
+  ))
+}
+
 export function createCodexRunner(): Runner {
   return {
+    sharedSkills: {
+      destinationRoot: (repoRoot) => join(repoRoot, '.agents', 'skills'),
+      renderFile: renderSharedSkillFile,
+    },
     start(options: RunnerStartOptions): Promise<number> {
       const specContent = readFileSync(options.specFile, 'utf8')
       const args = buildArgs(options, specContent)

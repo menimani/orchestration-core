@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { isAbsolute, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
+import type { Runner } from './adapters/runner.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 import { syncSharedSkills } from './sharedSkills.ts'
 
@@ -64,13 +65,14 @@ function warn(event: CoreUpdateEvent, message: string): void {
 function syncSkills(
   repoRoot: string,
   packageRoot: string,
+  runner: Runner,
   isConsumer: boolean,
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime,
 ): void {
   let result: ReturnType<typeof syncSharedSkills>
   try {
-    result = syncSharedSkills(repoRoot, packageRoot)
+    result = syncSharedSkills(repoRoot, packageRoot, runner)
   } catch (error) {
     event('WARN', `shared skill sync failed: ${summary(error)}`)
     return
@@ -126,6 +128,7 @@ function syncSkills(
 export async function updateCoreBeforeCycle(
   paths: OrchPaths,
   config: Pick<LoopConfig, 'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch'>,
+  runner: Runner,
   cycle: number,
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime = defaultRuntime,
@@ -138,12 +141,12 @@ export async function updateCoreBeforeCycle(
   // consumers. Only the owning repository receives local, ignored generated copies.
   if (prefix === undefined) {
     if (relative(paths.repoRoot, packageRoot) === '') {
-      syncSkills(paths.repoRoot, packageRoot, false, event, runtime)
+      syncSkills(paths.repoRoot, packageRoot, runner, false, event, runtime)
     }
     return 'continue'
   }
   const finish = (outcome: CoreUpdateOutcome): CoreUpdateOutcome => {
-    syncSkills(paths.repoRoot, packageRoot, true, event, runtime)
+    syncSkills(paths.repoRoot, packageRoot, runner, true, event, runtime)
     return outcome
   }
   if (config.upstreamRemote.trim() === '') {
@@ -209,7 +212,7 @@ export async function updateCoreBeforeCycle(
     return finish('continue')
   }
 
-  syncSkills(paths.repoRoot, packageRoot, true, event, runtime)
+  syncSkills(paths.repoRoot, packageRoot, runner, true, event, runtime)
   const newHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   const changed = runtime.git(paths.repoRoot, [
     'diff', '--name-only', oldHead, newHead, '--', prefix,

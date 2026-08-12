@@ -10,6 +10,7 @@ import {
 import { startTask, worktreeAddArgs } from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -56,7 +57,9 @@ describe('startTask', () => {
     }))
     const start = vi.fn(async () => process.pid)
 
-    await expect(startTask(paths, { start }, taskId, { effort: 'medium' }))
+    await expect(startTask(
+      paths, { sharedSkills: fakeRunnerSharedSkills, start }, taskId, { effort: 'medium' },
+    ))
       .rejects.toThrow('then run cleanup explicitly')
 
     expect(start).not.toHaveBeenCalled()
@@ -76,7 +79,9 @@ describe('startTask', () => {
     }))
     const start = vi.fn(async () => process.pid)
 
-    await expect(startTask(paths, { start }, taskId, { effort: 'medium' }))
+    await expect(startTask(
+      paths, { sharedSkills: fakeRunnerSharedSkills, start }, taskId, { effort: 'medium' },
+    ))
       .resolves.toEqual({ outcome: 'already-running' })
 
     expect(start).not.toHaveBeenCalled()
@@ -87,7 +92,7 @@ describe('startTask', () => {
     const taskId = '20260809_000000_001_scan'
     writeFileSync(specFile(paths, taskId), '# scan\n')
     const start = vi.fn(async () => process.pid)
-    const runner: Runner = { start }
+    const runner: Runner = { sharedSkills: fakeRunnerSharedSkills, start }
     const previousError = process.env['ORCH_TEST_SETUP_ERROR']
     process.env['ORCH_TEST_SETUP_ERROR'] = 'setup exploded'
 
