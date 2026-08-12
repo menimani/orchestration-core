@@ -614,6 +614,21 @@ describe('checkPrCiStatus', () => {
     forgeStatus = { ...forgeStatus, state: 'merged' }
     expect(await loop.checkPrCiStatus()).toBe('success')
   })
+
+  it('reports repeated status errors and stops the loop', async () => {
+    const loop = makeLoop()
+    fakeForge.prStatus = async () => { throw new Error('checks unavailable') }
+
+    expect(await loop.checkPrCiStatus()).toBe('unknown')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(await loop.checkPrCiStatus()).toBe('unknown')
+
+    expect(logText()).toContain('WARN could not check PR CI status: checks unavailable')
+    expect(logText()).toContain(
+      'ERROR could not check PR CI status: checks unavailable (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
 })
 
 describe('scan yield', () => {
@@ -1799,7 +1814,7 @@ describe('completion marker output', () => {
     expect(logged.indexOf(reminder)).toBeLessThan(logged.indexOf('Completed Loop        PR #1'))
   })
 
-  it('does not emit LOOP_DONE when draft promotion fails', async () => {
+  it('reports repeated draft promotion errors and stops without emitting LOOP_DONE', async () => {
     initializeGitRepo()
     const remote = join(repoRoot, 'remote.git')
     execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
@@ -1812,9 +1827,72 @@ describe('completion marker output', () => {
     }
 
     expect(await loop.postLoopPr()).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(await loop.postLoopPr()).toBe(false)
 
+    expect(logText()).toContain('WARN could not promote PR: promotion failed')
+    expect(logText()).toContain(
+      'ERROR could not promote PR: promotion failed (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
     expect(logged).not.toContain('Completed Loop        PR #1')
+  })
+
+  it('reports repeated pre-promotion status errors and stops the loop', async () => {
+    initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    const loop = makeLoop()
+    let calls = 0
+    fakeForge.prStatus = async () => {
+      calls += 1
+      if (calls % 2 === 0) throw new Error('status unavailable')
+      return forgeStatus
+    }
+
+    expect(await loop.postLoopPr()).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(await loop.postLoopPr()).toBe(false)
+
+    expect(logText()).toContain(
+      'WARN could not check PR status before promotion: status unavailable',
+    )
+    expect(logText()).toContain(
+      'ERROR could not check PR status before promotion: status unavailable (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('reports repeated post-promotion status errors and stops the loop', async () => {
+    initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    const loop = makeLoop()
+    let calls = 0
+    fakeForge.prStatus = async () => {
+      calls += 1
+      if (calls % 3 === 0) throw new Error('confirmation unavailable')
+      return forgeStatus
+    }
+
+    expect(await loop.postLoopPr()).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(await loop.postLoopPr()).toBe(false)
+
+    expect(logText()).toContain(
+      'WARN could not confirm PR status after promotion: confirmation unavailable',
+    )
+    expect(logText()).toContain(
+      'ERROR could not confirm PR status after promotion: confirmation unavailable (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
   it('does not emit LOOP_DONE until the forge confirms the PR is ready', async () => {

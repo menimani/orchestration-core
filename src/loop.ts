@@ -116,7 +116,7 @@ export function createLoop(deps: LoopDeps) {
   }>()
   const reconciledCycleGates = new Set<number>()
   let issueQueueInitialized = !config.issueQueueEnabled
-  let previousGateFailure: { message: string; count: number } | undefined
+  const previousGateFailures = new Map<string, { message: string; count: number }>()
   let gateWaitTarget: string | undefined
 
   function event(name: string, subject = '', detail = ''): void {
@@ -244,11 +244,16 @@ export function createLoop(deps: LoopDeps) {
     return message.trim() || 'unknown error'
   }
 
-  function reportGateFailure(message: string, stopWhenRepeated = false): void {
-    const count = previousGateFailure?.message === message
-      ? previousGateFailure.count + 1
+  function reportGateFailure(
+    message: string,
+    stopWhenRepeated = false,
+    gate = 'draft-pr',
+  ): void {
+    const previous = previousGateFailures.get(gate)
+    const count = previous?.message === message
+      ? previous.count + 1
       : 1
-    previousGateFailure = { message, count }
+    previousGateFailures.set(gate, { message, count })
     const detail = count === 1 ? message : `${message} (repeated ${count} times)`
     if (stopWhenRepeated && count > 1) {
       event('ERROR', detail)
@@ -1080,7 +1085,7 @@ export function createLoop(deps: LoopDeps) {
         }
       }
       writeFileSync(prUrlFile, `${status.url}\n`)
-      previousGateFailure = undefined
+      previousGateFailures.delete('draft-pr')
       return true
     }
 
@@ -1093,7 +1098,7 @@ export function createLoop(deps: LoopDeps) {
         draft: true,
       })
       writeFileSync(prUrlFile, `${url}\n`)
-      previousGateFailure = undefined
+      previousGateFailures.delete('draft-pr')
       return true
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
@@ -1110,9 +1115,17 @@ export function createLoop(deps: LoopDeps) {
     let status
     try {
       status = await forge.prStatus({ kind: 'url', value: prUrl })
-    } catch {
+    } catch (error) {
+      if (!(error instanceof ForgeRateLimitError)) {
+        reportGateFailure(
+          `could not check PR CI status: ${errorSummary(error)}`,
+          true,
+          'ci-status',
+        )
+      }
       return 'unknown'
     }
+    previousGateFailures.delete('ci-status')
     if (status.state === 'none') return 'unknown'
     if (status.state === 'merged') return 'success'
     if (status.checks.length === 0) {
@@ -1145,12 +1158,45 @@ export function createLoop(deps: LoopDeps) {
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     if (prUrl === '') return false
     const branch = git(['branch', '--show-current']).trim()
-    let status = await forge.prStatus({ kind: 'branch', value: branch })
+    let status
+    try {
+      status = await forge.prStatus({ kind: 'branch', value: branch })
+      previousGateFailures.delete('pr-status-before-promotion')
+    } catch (error) {
+      if (!(error instanceof ForgeRateLimitError)) {
+        reportGateFailure(
+          `could not check PR status before promotion: ${errorSummary(error)}`,
+          true,
+          'pr-status-before-promotion',
+        )
+      }
+      return false
+    }
     if (status.isDraft) {
       try {
         await forge.markPrReady(branch)
+        previousGateFailures.delete('pr-promotion')
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          reportGateFailure(
+            `could not promote PR: ${errorSummary(error)}`,
+            true,
+            'pr-promotion',
+          )
+        }
+        return false
+      }
+      try {
         status = await forge.prStatus({ kind: 'branch', value: branch })
-      } catch {
+        previousGateFailures.delete('pr-status-after-promotion')
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          reportGateFailure(
+            `could not confirm PR status after promotion: ${errorSummary(error)}`,
+            true,
+            'pr-status-after-promotion',
+          )
+        }
         return false
       }
     }
@@ -1164,6 +1210,9 @@ export function createLoop(deps: LoopDeps) {
     )
     const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
     event('Completed', 'Loop', prNumber === undefined ? '' : `PR #${prNumber}`)
+    previousGateFailures.delete('pr-status-before-promotion')
+    previousGateFailures.delete('pr-promotion')
+    previousGateFailures.delete('pr-status-after-promotion')
     return true
   }
 
