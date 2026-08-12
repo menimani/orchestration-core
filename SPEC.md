@@ -119,8 +119,11 @@ from or equivalent to `orchestration/tests/*.sh`.
     this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
     A package-file change logs aligned `Updated    core        <old8>..<new8>` and
     `Restarting core        for cycle <n>` events, releases daemon ownership, and starts
-    the same command with the same environment, working tree, and run branch. A daemon
-    otherwise runs the code it started with. The check never runs mid-cycle. A dirty
+    the package's absolute CLI entry point from the package directory, retaining the
+    remaining arguments, environment, and run branch. The parent waits for the replacement
+    to finish daemon initialization and logs `Restarted`; a failed replacement restores
+    ownership, logs `ERROR`, and makes the parent exit nonzero. A daemon otherwise runs the
+    code it started with. The check never runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
     At the same boundary, the package manifest's shared skills are rendered into the

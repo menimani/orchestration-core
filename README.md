@@ -36,8 +36,10 @@ review is enabled, by stopping for a person if that review will not converge.
 Immediately before each cycle starts, the daemon fetches the configured shared-core
 upstream and compares it with the last import of this package's subtree. If the subtree
 is behind, it runs `git subtree pull --squash`; when package files change, it replaces
-itself so the new cycle uses the pulled code while retaining the environment and run
-branch. This happens only after the prior gate has closed and while no task is running.
+itself from the package's absolute CLI path so the new cycle uses the pulled code while
+retaining the arguments, environment, and run branch. The parent reports success only
+after the replacement daemon finishes startup. This happens only after the prior gate
+has closed and while no task is running.
 A daemon otherwise runs the code it started with. A dirty working tree or conflicting
 pull is left for the consumer to resolve: the daemon warns and starts the cycle on the
 old code instead of merging local divergence.

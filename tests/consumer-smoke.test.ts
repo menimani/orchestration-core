@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Forge } from '../src/adapters/forge.ts'
@@ -70,6 +70,31 @@ function referencedPaths(project: ProjectAdapter): string[] {
 }
 
 describe('consumer startup', () => {
+  it('resolves a restart from the installed package while operating on its parent repository', async () => {
+    const repository = createConsumerRepository()
+    const installedPackage = join(repository, 'orchestration', 'ts')
+    const restartModule = await import(pathToFileURL(
+      join(installedPackage, 'src', 'restart.ts'),
+    ).href) as typeof import('../src/restart.ts')
+    const markerLog = join(repository, 'orchestration', 'logs', 'loop-markers.log')
+    const invocation = [
+      process.execPath,
+      join('orchestration', 'ts', 'src', 'cli.ts'),
+      'loop',
+      '--marker-output',
+      markerLog,
+    ]
+
+    const command = restartModule.loopRestartCommand(invocation)
+
+    expect(command.cwd).toBe(installedPackage)
+    expect(command.args).toEqual([
+      join(installedPackage, 'src', 'cli.ts'),
+      ...invocation.slice(2),
+    ])
+    expect(isAbsolute(command.args[0]!)).toBe(true)
+  })
+
   it('discovers a consumer adapter and reaches the first poll', async () => {
     const repository = createConsumerRepository()
     expect(git(repository, ['branch', '--show-current'])).toBe('consumer-smoke')
