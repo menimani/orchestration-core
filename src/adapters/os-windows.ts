@@ -8,6 +8,7 @@ const PROCESS_EXIT_POLL_MS = 50
 
 export interface WindowsOperatingSystemRuntime {
   spawn(command: string, args: readonly string[]): void
+  listProcesses(): readonly WindowsProcess[]
   probeProcess(pid: number): void
   remove(path: string, options: {
     force: true
@@ -18,11 +19,35 @@ export interface WindowsOperatingSystemRuntime {
   sleep(milliseconds: number): void
 }
 
+export interface WindowsProcess {
+  pid: number
+  parentPid: number
+}
+
 const systemRuntime: WindowsOperatingSystemRuntime = {
   spawn: (command, args) => {
     spawnSync(command, [...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+    })
+  },
+  listProcesses: () => {
+    const result = spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "Get-CimInstance Win32_Process | ForEach-Object { '{0},{1}' -f $_.ProcessId,$_.ParentProcessId }",
+    ], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    if (result.error !== undefined) throw result.error
+    if (result.status !== 0) throw new Error('Could not inspect the Windows process tree.')
+    return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+      const match = /^(\d+),(\d+)$/.exec(line)
+      if (match === null) throw new Error('Could not parse the Windows process tree.')
+      return { pid: Number(match[1]), parentPid: Number(match[2]) }
     })
   },
   probeProcess: (pid) => {
@@ -52,18 +77,60 @@ function isAlive(runtime: WindowsOperatingSystemRuntime, pid: number): boolean {
   }
 }
 
+function processTreePids(
+  runtime: WindowsOperatingSystemRuntime,
+  rootPid: number,
+): ReadonlySet<number> | undefined {
+  let processes: readonly WindowsProcess[]
+  try {
+    processes = runtime.listProcesses()
+  } catch {
+    // An inspection failure does not prove that the tree has stopped.
+    return undefined
+  }
+
+  const runningPids = new Set(processes.map(({ pid }) => pid))
+  const childrenByParent = new Map<number, number[]>()
+  for (const { pid, parentPid } of processes) {
+    const children = childrenByParent.get(parentPid) ?? []
+    children.push(pid)
+    childrenByParent.set(parentPid, children)
+  }
+
+  const treePids = new Set<number>()
+  const visited = new Set<number>()
+  const pending = [rootPid]
+  while (pending.length > 0) {
+    const pid = pending.pop()!
+    if (visited.has(pid)) continue
+    visited.add(pid)
+    if (runningPids.has(pid)) treePids.add(pid)
+    pending.push(...(childrenByParent.get(pid) ?? []))
+  }
+  return treePids
+}
+
+function anyProcessIsAlive(
+  runtime: WindowsOperatingSystemRuntime,
+  pids: ReadonlySet<number> | undefined,
+): boolean {
+  if (pids === undefined) return true
+  return [...pids].some((pid) => isAlive(runtime, pid))
+}
+
 export function createOperatingSystem(
   runtime: WindowsOperatingSystemRuntime = systemRuntime,
 ): OperatingSystem {
-  const processTreeIsAlive = (pid: number): boolean => isAlive(runtime, pid)
+  const processTreeIsAlive = (pid: number): boolean => (
+    anyProcessIsAlive(runtime, processTreePids(runtime, pid))
+  )
 
   return {
-    // Windows has no process groups, so a tree is reached from the identifier itself and
-    // the two questions have the same answer here.
     processIsAlive: (pid) => isAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree(pid): boolean {
-      if (!processTreeIsAlive(pid)) return false
+      const trackedPids = processTreePids(runtime, pid)
+      if (!anyProcessIsAlive(runtime, trackedPids)) return false
 
       try {
         runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
@@ -72,10 +139,12 @@ export function createOperatingSystem(
       }
 
       const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
-      while (processTreeIsAlive(pid) && runtime.now() < deadline) {
+      while (anyProcessIsAlive(runtime, trackedPids) && runtime.now() < deadline) {
         runtime.sleep(PROCESS_EXIT_POLL_MS)
       }
-      if (processTreeIsAlive(pid)) throw new Error(`Could not stop process tree ${pid}.`)
+      if (anyProcessIsAlive(runtime, trackedPids)) {
+        throw new Error(`Could not stop process tree ${pid}.`)
+      }
       return true
     },
     removeDirectory(path): void {
