@@ -63,7 +63,7 @@ async function removeFixture(root: string): Promise<void> {
 }
 
 it('launches the real CLI daemon in the detached console-sharing mode', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'orch-runner-survival-'))
+  const root = mkdtempSync(join(tmpdir(), 'orch runner-survival-'))
   const probeFile = join(root, 'spawn-probe.jsonl')
   const preload = join(root, 'spawn-probe.cjs')
   const stopFile = join(root, 'orchestration', 'queue', 'stop')
@@ -102,7 +102,7 @@ it('launches the real CLI daemon in the detached console-sharing mode', async ()
         AUTO_PR: 'false',
         CORE_AUTO_UPDATE: 'false',
         ISSUE_QUEUE_ENABLED: 'false',
-        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require="${preload.replaceAll('\\', '\\\\')}"`.trim(),
         ORCH_TEST_SPAWN_PROBE: probeFile,
         POLL_INTERVAL: '1',
         PROJECT: 'fixture',
