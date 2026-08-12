@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
-  currentBranchPushRemote, currentBranchTrackingRemote,
+  currentBranchPushRemote, currentBranchTrackingRemote, currentRemoteDefaultBranch,
 } from '../src/gitRemote.ts'
 
 let repoRoot: string
@@ -69,5 +69,12 @@ describe('current branch remote', () => {
 
     expect(() => currentBranchPushRemote(repoRoot)).toThrow('repository has multiple remotes')
     expect(() => currentBranchTrackingRemote(repoRoot)).toThrow('repository has multiple remotes')
+  })
+
+  it('reads the remote advertised default branch when no local HEAD ref is cached', () => {
+    git(['init', '--bare', '--initial-branch=trunk', join(repoRoot, 'origin.git')])
+    git(['push', '--quiet', 'origin', 'HEAD:refs/heads/trunk'])
+
+    expect(currentRemoteDefaultBranch(repoRoot)).toEqual({ branch: 'trunk', remote: 'origin' })
   })
 })

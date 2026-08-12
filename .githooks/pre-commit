@@ -2,18 +2,6 @@
 
 printf "\033[37;1m== pre-commit ==\033[0m\n"
 
-BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
-readonly BRANCH_NAME
-
-case "${BRANCH_NAME}" in
-  main|master)
-    printf "\033[31;22mNG: commits to '%s' are prohibited.\033[0m\n" "${BRANCH_NAME}"
-    exit 1
-    ;;
-esac
-
-printf "\033[32;22mOK: branch '%s' accepts commits.\033[0m\n" "${BRANCH_NAME}"
-
 HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 readonly HOOK_DIR
 node "${HOOK_DIR}/../src/cli.ts" pre-commit

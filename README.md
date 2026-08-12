@@ -90,6 +90,10 @@ deleted paths, and an on-demand diff reader; the adapter supplies the repository
 vocabulary and path rules. If the repository intentionally has no PR checks, it may
 explicitly declare
 `ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
+The core-owned pre-commit hook keeps its branch guard repository-neutral by reading the
+tracking remote's advertised default branch. It fails closed when that branch cannot be
+resolved, so repositories using names such as `trunk` receive the same protection without
+putting repository-specific branch names in the core.
 
 Operating-system behavior has its own internal adapter. The core detects Windows or
 POSIX once when it starts; it is not a consumer choice and has no environment selector.

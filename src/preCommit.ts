@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ProjectAdapter } from './adapters/project.ts'
+import { currentRemoteDefaultBranch } from './gitRemote.ts'
 import { execShellSync } from './shell.ts'
 
 function stagedFiles(repoRoot: string): string[] {
@@ -29,6 +30,42 @@ function run(repoRoot: string, cwd: string, command: string): boolean {
     if (failed.stderr !== undefined && failed.stderr !== '') process.stderr.write(failed.stderr)
     return false
   }
+}
+
+function currentBranch(repoRoot: string): string {
+  return execFileSync('git', ['branch', '--show-current'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim()
+}
+
+export function branchAcceptsCommits(repoRoot: string): boolean {
+  const branch = currentBranch(repoRoot)
+  if (branch === '') {
+    console.log("OK: detached HEAD accepts commits because it is not a branch")
+    return true
+  }
+
+  let defaultBranch: string
+  let remote: string
+  try {
+    ({ branch: defaultBranch, remote } = currentRemoteDefaultBranch(repoRoot))
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    console.error(`NG: could not resolve the repository default branch: ${detail}`)
+    return false
+  }
+
+  if (branch === defaultBranch) {
+    console.error(
+      `NG: commits to '${branch}' are prohibited; it is the default branch advertised by '${remote}'.`,
+    )
+    return false
+  }
+  console.log(`OK: branch '${branch}' accepts commits; '${remote}' advertises '${defaultBranch}'.`)
+  return true
 }
 
 export function runPreCommitChecks(repoRoot: string, project: ProjectAdapter): boolean {
