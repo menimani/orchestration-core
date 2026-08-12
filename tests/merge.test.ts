@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -42,6 +44,11 @@ const noCheckProject: ProjectAdapter = {
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' })
+}
+
+function expectNoTemporaryWorktree(prefix: '.merge-' | '.adopt-'): void {
+  expect(readdirSync(paths.worktreesDir).filter((name) => name.startsWith(prefix))).toEqual([])
+  expect(git(repoRoot, ['worktree', 'list', '--porcelain'])).not.toContain(prefix)
 }
 
 function windowsOperatingSystem(remove: (path: string, options: {
@@ -294,6 +301,34 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
+  it('aborts a conflicting merge without changing the run branch or task state', async () => {
+    const taskId = '20260808_000000_016_user-conflicting-change'
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, 'README.md'), '# task version\n')
+    git(worktree, ['add', 'README.md'])
+    git(worktree, ['commit', '-qm', 'feat: change README in task'])
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+
+    writeFileSync(join(repoRoot, 'README.md'), '# run version\n')
+    git(repoRoot, ['add', 'README.md'])
+    git(repoRoot, ['commit', '-qm', 'feat: change README on run branch'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const runStatus = git(repoRoot, ['status', '--porcelain'])
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    })).rejects.toThrow('A merge conflict occurred. Rebase the worktree, then retry the merge.')
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe(runStatus)
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toBe('# run version\n')
+    expect(existsSync(worktree)).toBe(true)
+    expect(git(worktree, ['rev-parse', 'HEAD']).trim()).toBe(taskHead)
+    expect(git(worktree, ['status', '--porcelain'])).toBe('')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expectNoTemporaryWorktree('.merge-')
+  })
+
   it('throws MergeError instances so callers can count merge failures', async () => {
     const taskId = '20260808_000000_007_user-error-type'
     await makeCompletedTask(taskId)
@@ -464,5 +499,37 @@ describe('mergeRemoteTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(existsSync(join(repoRoot, 'run.txt'))).toBe(true)
     expect(existsSync(join(repoRoot, 'task.txt'))).toBe(false)
+  })
+
+  it('aborts a conflicting adoption without changing the run branch or remote state', async () => {
+    const branch = 'task/remote-conflicting-change'
+    const remoteRef = `refs/remotes/origin/${branch}`
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'README.md'), '# remote version\n')
+    git(repoRoot, ['add', 'README.md'])
+    git(repoRoot, ['commit', '-qm', 'feat: change README remotely'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', remoteRef, expectedHead])
+    git(repoRoot, ['branch', '-D', branch])
+
+    writeFileSync(join(repoRoot, 'README.md'), '# run version\n')
+    git(repoRoot, ['add', 'README.md'])
+    git(repoRoot, ['commit', '-qm', 'feat: change README on run branch'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const runStatus = git(repoRoot, ['status', '--porcelain'])
+
+    await expect(mergeRemoteTask(paths, 221, 'origin', branch, expectedHead, {
+      taskGate: 'light',
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(`A merge conflict occurred while adopting ${branch}.`)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe(runStatus)
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toBe('# run version\n')
+    expect(git(repoRoot, ['rev-parse', remoteRef]).trim()).toBe(expectedHead)
+    expect(git(repoRoot, ['show', `${remoteRef}:README.md`])).toBe('# remote version\n')
+    expectNoTemporaryWorktree('.adopt-')
   })
 })
