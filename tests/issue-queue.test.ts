@@ -768,6 +768,27 @@ describe('claimIssue', () => {
     expect(forge.issueComments.get(issueNumber)).toEqual([result.reason])
   })
 
+  it('releases an unparseable issue when its quarantine comment fails after applying', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'hand-written', body: 'no structure here', labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const commentIssue = forge.commentIssue.bind(forge)
+    forge.commentIssue = async (number, comment) => {
+      await commentIssue(number, comment)
+      throw new Error('commentIssue failed after applying')
+    }
+
+    await expect(claimIssue(
+      forge, paths, await forge.getIssue(issueNumber), 'worker-a', appendRequirement,
+    )).rejects.toThrow('commentIssue failed after applying')
+
+    const after = await forge.getIssue(issueNumber)
+    expect(after.assignees).toEqual([])
+    expect(after.labels).toContain(LABEL_READY)
+    expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(after.labels).not.toContain(LABEL_MERGE_FAILED)
+  })
+
   it('names an empty requirement when quarantining an issue', async () => {
     const issueNumber = await forge.createIssue({
       title: 'empty',
