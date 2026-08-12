@@ -2778,6 +2778,47 @@ describe('scanForNextTasks', () => {
     expect(logged.filter((line) => line.startsWith('Completed 017_scan'))).toHaveLength(1)
   })
 
+  it('retries an unscanned review completion after a forge lookup outage and warns once', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoMerge: false,
+      maxParallel: 0,
+      maxConsecutiveMergeFailures: 10,
+    })
+    loop.initializeSessionStateForBranch()
+    const taskId = '20250101_000000_019_review-c1'
+    writeFinal(taskId, [
+      'NEXT_TASK: [BUG] retain a review finding across a forge outage',
+      'TASK_COMPLETE',
+    ].join('\n'))
+    writeRawStatus(taskId, 'completed')
+    const scannedFlag = join(paths.queueDir, 'scanned', taskId)
+    const listOpenIssues = fakeForge.listOpenIssues.bind(fakeForge)
+    fakeForge.listOpenIssues = async () => {
+      throw new Error('temporary review lookup failure')
+    }
+
+    await expect(loop.poll()).resolves.toBe('continue')
+    await expect(loop.poll()).resolves.toBe('continue')
+
+    expect(existsSync(scannedFlag)).toBe(false)
+    expect(fakeForge.issues.size).toBe(0)
+    expect(logged.filter((line) =>
+      line.includes('WARN could not check review findings from 019_review')))
+      .toHaveLength(1)
+
+    fakeForge.listOpenIssues = listOpenIssues
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(true)
+    expect(fakeForge.issues.size).toBe(1)
+    expect(logText()).toContain(
+      'Recovered checking review findings from 019_review after 0 minutes',
+    )
+  })
+
   it('leaves a local finding unreconciled when enqueue fails so a later scan retries it', async () => {
     initializeGitRepo()
     let attempts = 0

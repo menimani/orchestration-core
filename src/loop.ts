@@ -710,7 +710,20 @@ export function createLoop(deps: LoopDeps) {
     if (config.issueQueueEnabled) {
       let pendingFindings = findings
       if (isReview) {
-        const filtered = await unresolvedFindings(forge, paths, findings)
+        let filtered: Awaited<ReturnType<typeof unresolvedFindings>>
+        try {
+          filtered = await unresolvedFindings(forge, paths, findings)
+          warningLog.recovered(`unresolved-findings-${taskId}`)
+        } catch (error) {
+          if (!(error instanceof ForgeRateLimitError)) {
+            warning(
+              `unresolved-findings-${taskId}`,
+              `checking review findings from ${shortTaskId(taskId)}`,
+              `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
+            )
+          }
+          return { findings, destinations, reconciled: false }
+        }
         pendingFindings = filtered.unresolved
         for (const duplicate of filtered.duplicates) {
           destinations.push(`#${duplicate.issueNumber}`)
