@@ -246,9 +246,11 @@ from or equivalent to `orchestration/tests/*.sh`.
     as the single setup and repair command. Init generates its adapter from the same
     required-member description the real loader validates, scaffolds project templates,
     points the repository-local `core.hooksPath` at the core's hooks, and creates only
-    missing `loop:*` labels. Re-running it never overwrites a project-owned file or a
-    different hooks setting; divergence is reported. The `loop-setup` skill gathers the
-    repository decisions, fills a newly generated adapter, and runs `verify-setup`. That
+    missing `loop:*` labels. Re-running it adds and reports marked scaffold defaults for
+    missing required adapter members, but never overwrites a declared member, another
+    project-owned file, or a different hooks setting; divergence is reported. The
+    `loop-setup` skill gathers the repository decisions, fills a newly generated adapter,
+    and runs `verify-setup`. That
     verifier reports separately the core typecheck, adapter suite, real loader discovery
     by name, referenced paths, pushable upstream, hooks setting, and labels. A skipped
     check retains its reason and is never reported as a pass.

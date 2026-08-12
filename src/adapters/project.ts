@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import ts from 'typescript'
 
 // The project adapter carries everything the orchestration knows about the repository
 // it runs in: which checks verify a merge, which suites prove a cycle's tip, and which
@@ -201,13 +202,8 @@ function requiredMemberProblem(
 }
 
 export function renderProjectAdapter(projectName: string, typeImport: string): string {
-  const renderMember = (member: RequiredMember, indent: string): string => {
-    if (member.children === undefined) {
-      return `${indent}${member.name}: ${member.scaffoldValue},`
-    }
-    const children = member.children.map((child) => renderMember(child, `${indent}  `)).join('\n')
-    return `${indent}${member.name}: {\n${children}\n${indent}},`
-  }
+  const renderMember = (member: RequiredMember, indent: string): string =>
+    renderScaffoldMember(member, indent, '\n')
   const members = PROJECT_ADAPTER_CONTRACT.map((member) => renderMember(member, '  ')).join('\n\n')
   return `import type { ProjectAdapter } from '${typeImport}'
 
@@ -217,6 +213,194 @@ export const project: ProjectAdapter = {
 ${members}
 }
 `
+}
+
+export interface ProjectAdapterRepair {
+  source: string
+  addedMembers: string[]
+  problem?: string
+}
+
+interface SourceInsertion {
+  position: number
+  text: string
+}
+
+function renderScaffoldMember(member: RequiredMember, indent: string, newline: string): string {
+  if (member.children === undefined) {
+    return `${indent}${member.name}: ${member.scaffoldValue},`
+  }
+  const children = member.children
+    .map((child) => renderScaffoldMember(child, `${indent}  `, newline))
+    .join(newline)
+  return `${indent}${member.name}: {${newline}${children}${newline}${indent}},`
+}
+
+function declaredPropertyName(property: ts.ObjectLiteralElementLike): string | undefined {
+  if (ts.isSpreadAssignment(property)) return undefined
+  const name = property.name
+  if (name === undefined) return undefined
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+    return name.text
+  }
+  if (ts.isComputedPropertyName(name) && ts.isStringLiteral(name.expression)) {
+    return name.expression.text
+  }
+  return undefined
+}
+
+function propertyInitializer(
+  property: ts.ObjectLiteralElementLike,
+): ts.Expression | undefined {
+  if (ts.isPropertyAssignment(property)) return property.initializer
+  return undefined
+}
+
+function lineIndent(source: string, position: number): string {
+  const lineStart = Math.max(source.lastIndexOf('\n', position - 1) + 1, 0)
+  return source.slice(lineStart, position).match(/^\s*/)?.[0] ?? ''
+}
+
+function propertyIndent(
+  source: string,
+  sourceFile: ts.SourceFile,
+  object: ts.ObjectLiteralExpression,
+): string {
+  const first = object.properties[0]
+  if (first !== undefined) {
+    const indent = lineIndent(source, first.getStart(sourceFile))
+    if (indent !== '') return indent
+  }
+  return `${lineIndent(source, object.getStart(sourceFile))}  `
+}
+
+function hasProjectAdapterType(declaration: ts.VariableDeclaration): boolean {
+  const type = declaration.type
+  return type !== undefined && ts.isTypeReferenceNode(type)
+    && ts.isIdentifier(type.typeName) && type.typeName.text === 'ProjectAdapter'
+}
+
+function stringProperty(
+  object: ts.ObjectLiteralExpression,
+  name: string,
+): string | undefined {
+  const property = object.properties.find((candidate) => declaredPropertyName(candidate) === name)
+  const initializer = property === undefined ? undefined : propertyInitializer(property)
+  return initializer !== undefined && ts.isStringLiteral(initializer) ? initializer.text : undefined
+}
+
+function findProjectObject(
+  sourceFile: ts.SourceFile,
+  projectName: string,
+): ts.ObjectLiteralExpression | undefined {
+  const typed: ts.ObjectLiteralExpression[] = []
+  const named: ts.ObjectLiteralExpression[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node)) {
+      const initializer = node.initializer
+      if (initializer !== undefined && ts.isObjectLiteralExpression(initializer)) {
+        if (hasProjectAdapterType(node)) typed.push(initializer)
+        if (stringProperty(initializer, 'name') === projectName) named.push(initializer)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return named.length === 1 ? named[0] : typed.length === 1 ? typed[0] : undefined
+}
+
+function collectRepairInsertions(
+  source: string,
+  sourceFile: ts.SourceFile,
+  object: ts.ObjectLiteralExpression,
+  members: RequiredMember[],
+  path: string,
+  newline: string,
+  insertions: SourceInsertion[],
+  addedMembers: string[],
+): string | undefined {
+  const hasSpread = object.properties.some(ts.isSpreadAssignment)
+  const missing: RequiredMember[] = []
+  for (const member of members) {
+    const property = object.properties.find(
+      (candidate) => declaredPropertyName(candidate) === member.name,
+    )
+    const memberPath = path === '' ? member.name : `${path}.${member.name}`
+    if (property === undefined) {
+      missing.push(member)
+      addedMembers.push(memberPath)
+      continue
+    }
+    if (member.children === undefined) continue
+    const initializer = propertyInitializer(property)
+    if (initializer === undefined || !ts.isObjectLiteralExpression(initializer)) {
+      return `cannot safely repair '${memberPath}' because it is not an inline object literal`
+    }
+    const problem = collectRepairInsertions(
+      source, sourceFile, initializer, member.children, memberPath, newline,
+      insertions, addedMembers,
+    )
+    if (problem !== undefined) return problem
+  }
+
+  if (missing.length === 0) return undefined
+  if (hasSpread) {
+    return `cannot safely repair '${path || 'project'}' because it contains a spread assignment`
+  }
+  const indent = propertyIndent(source, sourceFile, object)
+  const closingPosition = object.getEnd() - 1
+  const closingIndent = lineIndent(source, closingPosition)
+  const closingLineStart = Math.max(source.lastIndexOf('\n', closingPosition - 1) + 1, 0)
+  const closingOnOwnLine = /^\s*$/.test(source.slice(closingLineStart, closingPosition))
+  const rendered = missing.map((member) => [
+    `${indent}// GENERATED by init: replace with this project's real values.`,
+    renderScaffoldMember(member, indent, newline),
+  ].join(newline)).join(newline)
+  if (object.properties.length > 0 && !object.properties.hasTrailingComma) {
+    insertions.push({ position: object.properties.at(-1)!.getEnd(), text: ',' })
+  }
+  const firstLine = closingOnOwnLine && rendered.startsWith(closingIndent)
+    ? rendered.slice(closingIndent.length)
+    : `${newline}${rendered}`
+  insertions.push({
+    position: closingPosition,
+    text: `${firstLine}${newline}${closingIndent}`,
+  })
+  return undefined
+}
+
+/** Add scaffold defaults for absent required members without reprinting existing source. */
+export function repairProjectAdapterSource(
+  source: string,
+  projectName: string,
+): ProjectAdapterRepair {
+  const sourceFile = ts.createSourceFile(
+    'project-adapter.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS,
+  )
+  const object = findProjectObject(sourceFile, projectName)
+  if (object === undefined) {
+    return {
+      source,
+      addedMembers: [],
+      problem: `could not find one inline ProjectAdapter declaration for project '${projectName}'`,
+    }
+  }
+
+  const newline = source.includes('\r\n') ? '\r\n' : '\n'
+  const insertions: SourceInsertion[] = []
+  const addedMembers: string[] = []
+  const problem = collectRepairInsertions(
+    source, sourceFile, object, PROJECT_ADAPTER_CONTRACT, '', newline,
+    insertions, addedMembers,
+  )
+  if (problem !== undefined) return { source, addedMembers: [], problem }
+
+  let repaired = source
+  for (const insertion of insertions.sort((left, right) => right.position - left.position)) {
+    repaired = repaired.slice(0, insertion.position) + insertion.text
+      + repaired.slice(insertion.position)
+  }
+  return { source: repaired, addedMembers }
 }
 
 function validateProjectAdapter(value: unknown, name?: string): ProjectAdapterValidation {
