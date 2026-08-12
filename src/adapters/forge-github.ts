@@ -348,7 +348,6 @@ export function createGithubForge(
       const args = [
         'pr', 'create',
         '--base', options.base,
-        '--head', options.branch,
         '--title', options.title,
         '--body', githubPrBody(options.body),
       ]

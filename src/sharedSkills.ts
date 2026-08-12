@@ -28,6 +28,8 @@ export interface SharedSkillsSyncResult {
   installed: string[]
   updated: string[]
   conflicts: string[]
+  migrationConflicts: string[]
+  removedPaths: string[]
   changedPaths: string[]
   managedPaths: string[]
 }
@@ -59,6 +61,7 @@ function readState(file: string): SharedSkillsState {
   const parsed = object(JSON.parse(readFileSync(file, 'utf8')))
   const skills = object(parsed?.skills)
   if (parsed?.version !== 1 || skills === undefined
+    || Object.keys(skills).some((skill) => !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(skill))
     || Object.values(skills).some((hash) => typeof hash !== 'string'
       || !/^[0-9a-f]{64}$/.test(hash))) {
     throw new Error(`invalid shared skills sync state: ${file}`)
@@ -159,6 +162,36 @@ function writeState(file: string, state: SharedSkillsState): void {
   }
 }
 
+function migrateLegacySkills(
+  repoRoot: string,
+  destinationRoot: string,
+  os: OperatingSystem,
+): Pick<SharedSkillsSyncResult, 'migrationConflicts' | 'changedPaths'> {
+  const legacyRoot = join(repoRoot, '.claude', 'skills')
+  const legacyStateFile = join(legacyRoot, STATE_FILE)
+  const migrationConflicts: string[] = []
+  const changedPaths: string[] = []
+  if (relative(legacyRoot, destinationRoot) === '' || !existsSync(legacyStateFile)) {
+    return { migrationConflicts, changedPaths }
+  }
+
+  const legacyState = readState(legacyStateFile)
+  for (const [skill, previousHash] of Object.entries(legacyState.skills)) {
+    const legacySkill = join(legacyRoot, skill)
+    if (!existsSync(legacySkill)) continue
+    if (!lstatSync(legacySkill).isDirectory()
+      || hashFiles(filesIn(legacySkill)) !== previousHash) {
+      migrationConflicts.push(legacySkill)
+      continue
+    }
+    os.removeDirectory(legacySkill)
+    changedPaths.push(legacySkill)
+  }
+  rmSync(legacyStateFile)
+  changedPaths.push(legacyStateFile)
+  return { migrationConflicts, changedPaths }
+}
+
 /**
  * Materialize the package's declared shared skills at the repository root. The state
  * records the exact rendered tree last written, so later syncs never mistake a person's
@@ -178,13 +211,14 @@ export function syncSharedSkills(
     throw new Error(`shared skill destination escaped the repository: ${destinationRoot}`)
   }
   const stateFile = join(destinationRoot, STATE_FILE)
+  const migration = migrateLegacySkills(repoRoot, destinationRoot, os)
   mkdirSync(destinationRoot, { recursive: true })
   const state = readState(stateFile)
   const nextState: SharedSkillsState = { version: 1, skills: { ...state.skills } }
   const installed: string[] = []
   const updated: string[] = []
   const conflicts: string[] = []
-  const changedPaths: string[] = []
+  const changedPaths: string[] = [...migration.changedPaths]
   const managedPaths: string[] = []
 
   for (const skill of manifest.skills) {
@@ -231,5 +265,13 @@ export function syncSharedSkills(
     changedPaths.push(stateFile)
   }
   if (Object.keys(nextState.skills).length > 0) managedPaths.push(stateFile)
-  return { installed, updated, conflicts, changedPaths, managedPaths }
+  return {
+    installed,
+    updated,
+    conflicts,
+    migrationConflicts: migration.migrationConflicts,
+    removedPaths: migration.changedPaths,
+    changedPaths,
+    managedPaths,
+  }
 }

@@ -112,6 +112,8 @@ describe('GitHub pull request bodies', () => {
     })
 
     expect(calls[0]).toContain('Decision `#12` remains open')
+    expect(calls[0]).not.toContain('--head')
+    expect(calls[0]).not.toContain('task/branch')
   })
 
   it('fences issue-number-like references when updating a pull request', async () => {

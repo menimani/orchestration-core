@@ -73,8 +73,12 @@ function syncSkills(
   for (const skill of result.conflicts) {
     event('WARN', `shared skill ${skill} differs from the last synced copy; left unchanged`)
   }
+  for (const path of result.migrationConflicts) {
+    event('WARN',
+      `legacy shared skill ${relative(repoRoot, path).replaceAll('\\', '/')} differs from the last synced copy; left unchanged`)
+  }
   if (isConsumer) {
-    const managed = result.managedPaths.map((path) => {
+    const repositoryPaths = (paths: string[]): string[] => paths.map((path) => {
       const repositoryPath = relative(repoRoot, path)
       if (repositoryPath === '' || repositoryPath === '..'
         || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
@@ -82,24 +86,37 @@ function syncSkills(
       }
       return repositoryPath.replaceAll('\\', '/')
     })
+    const managed = repositoryPaths(result.managedPaths)
+    const removed = repositoryPaths(result.removedPaths)
     try {
-      if (managed.length > 0) {
+      const scope = [...managed, ...removed]
+      if (scope.length > 0) {
         const alreadyStaged = runtime.git(repoRoot, [
-          'diff', '--cached', '--name-only', '--', ...managed,
+          'diff', '--cached', '--name-only', '--', ...scope,
         ]).trim()
         if (alreadyStaged !== '') {
           event('WARN',
             `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
           return
         }
-        runtime.git(repoRoot, ['add', '-f', '--', ...managed])
-        const staged = runtime.git(repoRoot, [
-          'diff', '--cached', '--name-only', '--', ...managed,
-        ]).trim()
-        if (staged !== '') {
-          runtime.git(repoRoot, [
-            'commit', '-m', 'chore: sync shared orchestration skills', '--', ...managed,
-          ])
+        if (managed.length > 0) runtime.git(repoRoot, ['add', '-f', '--', ...managed])
+        const trackedRemoved = removed.length === 0
+          ? []
+          : runtime.git(repoRoot, ['ls-files', '--deleted', '--', ...removed])
+            .split(/\r?\n/).filter((path) => path !== '')
+        if (trackedRemoved.length > 0) {
+          runtime.git(repoRoot, ['add', '-u', '--', ...trackedRemoved])
+        }
+        const commitPaths = [...managed, ...trackedRemoved]
+        if (commitPaths.length > 0) {
+          const staged = runtime.git(repoRoot, [
+            'diff', '--cached', '--name-only', '--', ...commitPaths,
+          ]).trim()
+          if (staged !== '') {
+            runtime.git(repoRoot, [
+              'commit', '-m', 'chore: sync shared orchestration skills', '--', ...commitPaths,
+            ])
+          }
         }
       }
     } catch (error) {

@@ -55,8 +55,8 @@ from or equivalent to `orchestration/tests/*.sh`.
    process is alive and becomes `failed` when the process is gone. Markers in the
    transcript log are ignored — only the final-message file is authoritative.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
-   `scan` for scans and start with `ci-fix`, `auto-`, or `user-` for CI fixes, scan
-   findings, and delegated work. Listings sort chronologically.
+   `scan` for scans and start with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes,
+   scan findings, review-origin fixes, and delegated work. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its task id: the same finding reported twice
    or the same decision delegated twice resolves to the one existing task.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch

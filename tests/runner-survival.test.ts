@@ -1,22 +1,22 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 
-const RUNNER_MODULE = pathToFileURL(join(
-  import.meta.dirname, '..', 'src', 'adapters', 'runner-codex.ts',
-)).href
+const HERE = dirname(fileURLToPath(import.meta.url))
+const CLI = join(HERE, '..', 'src', 'cli.ts')
+const PROJECT_ADAPTER = join(HERE, 'fixtures', 'project-loader-fixture.ts')
 
-type WindowsHideMode = 'absent' | 'true'
-
-interface WindowsConsoleProbe {
-  visibility: 'visible' | 'hidden' | 'none'
-  consoleProcessCount: number
+interface SpawnProbe {
+  command: string
+  args: string[]
+  detached: boolean
+  hasWindowsHide: boolean
 }
 
 function processIsAlive(pid: number): boolean {
@@ -62,159 +62,74 @@ async function removeFixture(root: string): Promise<void> {
   }
 }
 
-async function runSurvivalScenario(
-  windowsHideMode: WindowsHideMode,
-): Promise<WindowsConsoleProbe | undefined> {
+it('launches the real CLI daemon in the detached console-sharing mode', async () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-runner-survival-'))
-  const bin = join(root, 'bin')
-  const codex = join(bin, 'codex')
-  const consoleProbe = join(root, 'console-probe.ps1')
-  const daemonPidFile = join(root, 'daemon.pid')
-  const runnerPidFile = join(root, 'runner.pid')
-  const childPidFile = join(root, 'child.pid')
-  const visibilityFile = join(root, 'visibility.txt')
-  const logFile = join(root, 'runner.log')
-  const finalMessageFile = join(root, 'final-message.txt')
-  const specFile = join(root, 'task.md')
+  const probeFile = join(root, 'spawn-probe.jsonl')
+  const preload = join(root, 'spawn-probe.cjs')
+  const stopFile = join(root, 'orchestration', 'queue', 'stop')
   let daemonPid = 0
-  let runnerPid = 0
-  let childPid = 0
-  let daemonOutput = ''
 
   try {
-    mkdirSync(bin)
-    writeFileSync(consoleProbe, [
-      "Add-Type -TypeDefinition @'",
-      'using System;',
-      'using System.Runtime.InteropServices;',
-      'public static class ConsoleVisibilityProbe {',
-      '  [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();',
-      '  [DllImport("kernel32.dll", SetLastError = true)]',
-      '  public static extern uint GetConsoleProcessList(uint[] processList, uint processCount);',
-      '  [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]',
-      '  public static extern bool IsWindowVisible(IntPtr window);',
+    const init = spawnSync('git', ['init', '--initial-branch=main'], {
+      cwd: root,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+    expect(init.status).toBe(0)
+    writeFileSync(preload, [
+      "const childProcess = require('node:child_process')",
+      "const { appendFileSync } = require('node:fs')",
+      "const { syncBuiltinESMExports } = require('node:module')",
+      'const originalSpawn = childProcess.spawn',
+      'childProcess.spawn = function (command, args, options) {',
+      '  appendFileSync(process.env.ORCH_TEST_SPAWN_PROBE, `${JSON.stringify({',
+      '    command,',
+      '    args,',
+      '    detached: options?.detached === true,',
+      "    hasWindowsHide: Object.hasOwn(options ?? {}, 'windowsHide'),",
+      '  })}\\n`)',
+      '  return originalSpawn.apply(this, arguments)',
       '}',
-      "'@",
-      '$window = [ConsoleVisibilityProbe]::GetConsoleWindow()',
-      '$visibility = if ($window -eq [IntPtr]::Zero) {',
-      "  'none'",
-      '} elseif ([ConsoleVisibilityProbe]::IsWindowVisible($window)) {',
-      "  'visible'",
-      '} else {',
-      "  'hidden'",
-      '}',
-      '$processList = New-Object uint32[] 64',
-      '$processCount = [ConsoleVisibilityProbe]::GetConsoleProcessList($processList, $processList.Length)',
-      "$result = @{ visibility = $visibility; consoleProcessCount = $processCount } | ConvertTo-Json -Compress",
-      '[IO.File]::WriteAllText($env:ORCH_TEST_VISIBILITY_FILE, $result)',
-      'while ($true) { Start-Sleep -Seconds 1 }',
+      'syncBuiltinESMExports()',
       '',
     ].join('\n'))
-    writeFileSync(codex, [
-      '#!/usr/bin/env node',
-      "const { spawn } = require('node:child_process')",
-      "const { writeFileSync } = require('node:fs')",
-      "const isWindows = process.platform === 'win32'",
-      "const command = isWindows ? 'powershell.exe' : process.execPath",
-      'const args = isWindows',
-      "  ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', process.env.ORCH_TEST_CONSOLE_PROBE]",
-      "  : ['-e', 'setInterval(() => {}, 1000)']",
-      "const child = spawn(command, args, { stdio: 'ignore' })",
-      "writeFileSync(process.env.ORCH_TEST_CHILD_PID_FILE, String(child.pid))",
-      'setInterval(() => {}, 1000)',
-      '',
-    ].join('\n'))
-    chmodSync(codex, 0o755)
-    writeFileSync(specFile, 'test runner survival')
 
-    const daemonSource = [
-      "const { writeFileSync } = await import('node:fs')",
-      'const { createCodexRunner } = await import(process.env.ORCH_TEST_RUNNER_MODULE)',
-      "writeFileSync(process.env.ORCH_TEST_DAEMON_PID_FILE, String(process.pid))",
-      "const runnerOptions = process.env.ORCH_TEST_WINDOWS_HIDE_MODE === 'true'",
-      '  ? { windowsHide: true }',
-      '  : {}',
-      'const pid = await createCodexRunner(runnerOptions).start({',
-      "  effort: 'low',",
-      '  finalMessageFile: process.env.ORCH_TEST_FINAL_MESSAGE_FILE,',
-      '  logFile: process.env.ORCH_TEST_LOG_FILE,',
-      '  specFile: process.env.ORCH_TEST_SPEC_FILE,',
-      '  worktree: process.env.ORCH_TEST_ROOT,',
-      '})',
-      'writeFileSync(process.env.ORCH_TEST_RUNNER_PID_FILE, String(pid))',
-    ].join('\n')
-    const daemon = spawn(process.execPath, ['--input-type=module', '--eval', daemonSource], {
-      detached: true,
+    const launcher = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+      cwd: root,
+      encoding: 'utf8',
       env: {
         ...process.env,
-        ORCH_TEST_CHILD_PID_FILE: childPidFile,
-        ORCH_TEST_CONSOLE_PROBE: consoleProbe,
-        ORCH_TEST_DAEMON_PID_FILE: daemonPidFile,
-        ORCH_TEST_FINAL_MESSAGE_FILE: finalMessageFile,
-        ORCH_TEST_LOG_FILE: logFile,
-        ORCH_TEST_ROOT: root,
-        ORCH_TEST_RUNNER_MODULE: RUNNER_MODULE,
-        ORCH_TEST_RUNNER_PID_FILE: runnerPidFile,
-        ORCH_TEST_SPEC_FILE: specFile,
-        ORCH_TEST_VISIBILITY_FILE: visibilityFile,
-        ORCH_TEST_WINDOWS_HIDE_MODE: windowsHideMode,
-        PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
+        AUTO_PR: 'false',
+        CORE_AUTO_UPDATE: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
+        ORCH_TEST_SPAWN_PROBE: probeFile,
+        POLL_INTERVAL: '1',
+        PROJECT: 'fixture',
+        PROJECT_ADAPTER,
+        REVIEW_ENABLED: 'false',
+        SCAN_ENABLED: 'false',
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10_000,
+      windowsHide: true,
     })
-    daemon.stdout?.on('data', (chunk: Buffer) => { daemonOutput += chunk.toString() })
-    daemon.stderr?.on('data', (chunk: Buffer) => { daemonOutput += chunk.toString() })
-    daemonPid = daemon.pid ?? 0
-    expect(daemonPid).toBeGreaterThan(0)
-    daemon.unref()
+    expect(launcher.status, launcher.stderr).toBe(0)
+    const match = /Started the loop in the background \(PID=(\d+)\)/.exec(launcher.stdout)
+    expect(match).not.toBeNull()
+    daemonPid = Number(match?.[1])
 
-    try {
-      await waitUntil(
-        () => existsSync(runnerPidFile) && existsSync(childPidFile)
-          && (process.platform !== 'win32' || existsSync(visibilityFile)),
-        'runner tree did not publish its probe results',
-      )
-    } catch (error) {
-      const outputs = [
-        daemonOutput.trim(),
-        existsSync(logFile) ? readFileSync(logFile, 'utf8').trim() : '',
-      ].filter((output) => output !== '').join(': ')
-      throw new Error(`${(error as Error).message}${outputs === '' ? '' : `: ${outputs}`}`)
-    }
-    daemonPid = Number(readFileSync(daemonPidFile, 'utf8'))
-    runnerPid = Number(readFileSync(runnerPidFile, 'utf8'))
-    childPid = Number(readFileSync(childPidFile, 'utf8'))
-    await waitUntil(() => !processIsAlive(daemonPid), 'daemon did not exit')
+    await waitUntil(() => processIsAlive(daemonPid), 'CLI daemon did not survive its launcher')
+    const probes = readFileSync(probeFile, 'utf8').trim().split(/\r?\n/)
+      .map((line) => JSON.parse(line) as SpawnProbe)
+    const daemonSpawn = probes.find((probe) => probe.command === process.execPath
+      && probe.args.includes('--marker-output'))
+    expect(daemonSpawn).toMatchObject({ detached: true, hasWindowsHide: false })
 
-    expect(processIsAlive(runnerPid)).toBe(true)
-    expect(processIsAlive(childPid)).toBe(true)
-    const visibility = process.platform === 'win32'
-      ? JSON.parse(readFileSync(visibilityFile, 'utf8')) as WindowsConsoleProbe
-      : undefined
-
-    terminateProcessTree(runnerPid)
-    await waitUntil(
-      () => !processIsAlive(runnerPid) && !processIsAlive(childPid),
-      'runner process tree did not stop',
-    )
-    return visibility
+    mkdirSync(dirname(stopFile), { recursive: true })
+    writeFileSync(stopFile, '')
+    await waitUntil(() => !processIsAlive(daemonPid), 'CLI daemon did not stop')
   } finally {
-    terminateProcessTree(runnerPid)
     terminateProcessTree(daemonPid)
-    if (childPid > 0 && processIsAlive(childPid)) {
-      try { process.kill(childPid, 'SIGKILL') } catch { /* already gone */ }
-    }
     await removeFixture(root)
   }
-}
-
-it('keeps the production runner tree hidden, surviving, and terminable', async () => {
-  const productionVisibility = await runSurvivalScenario('absent')
-  if (process.platform !== 'win32') return
-
-  const windowsHideVisibility = await runSurvivalScenario('true')
-  expect(productionVisibility?.visibility).toBe('hidden')
-  expect(windowsHideVisibility?.visibility).toBe('hidden')
-  expect(productionVisibility?.consoleProcessCount).toBeGreaterThan(1)
-  expect(windowsHideVisibility?.consoleProcessCount).toBeGreaterThan(1)
 })
