@@ -52,6 +52,12 @@ single-threaded. Reproduce a stubborn failure with
 flake. Do not run builds or installs while a loop is running — they lock files its
 workers need.
 
+Before pushing a change that touches a platform branch, commit or stash all other
+changes and run `npm run test:linux` from Windows. It exports the committed tree into a
+Node 24 Linux container, then installs, typechecks, and runs the single-threaded suite
+there. The container never mounts the checkout, so its Linux dependencies cannot
+replace the Windows binaries in the working tree's `node_modules`.
+
 ## English everywhere
 
 Code, comments, tests, commit messages, pull request titles and bodies, and

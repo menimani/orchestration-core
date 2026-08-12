@@ -9,6 +9,7 @@
   },
   "scripts": {
     "test": "vitest run",
+    "test:linux": "node scripts/test-linux.mjs",
     "typecheck": "tsc --noEmit",
     "init": "node src/cli.ts init",
     "verify-setup": "node src/cli.ts verify-setup",
