@@ -1,6 +1,18 @@
-import { watch, writeFileSync, type FSWatcher } from 'node:fs'
+import { realpathSync, watch, writeFileSync, type FSWatcher } from 'node:fs'
 import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
+
+// Watch the canonical spelling of the directory. On Windows a path can arrive here in
+// 8.3 short form (RUNNER~1 for runneradmin on the CI runner), and libuv aborts the
+// whole process — not an error event, an assertion in fs-event.c — when a change
+// notification's long-form path fails to match the short-form directory it watches.
+function canonicalDirectory(directory: string): string {
+  try {
+    return realpathSync.native(directory)
+  } catch {
+    return directory
+  }
+}
 
 /** Nudge a sleeping daemon: any observer of the queue directory wakes on this file. */
 export function signalWake(paths: OrchPaths): void {
@@ -44,7 +56,7 @@ export function observeNextPoll(paths: OrchPaths, seconds: number): NextPollObse
     }
 
     try {
-      watcher = watch(paths.queueDir, (_eventType, filename) => {
+      watcher = watch(canonicalDirectory(paths.queueDir), (_eventType, filename) => {
         // backlog.txt covers local enqueues; the wake file covers work that reaches
         // the daemon another way — an issue-mode delegation publishes to the forge
         // without touching the backlog, and would otherwise wait out the full poll.
