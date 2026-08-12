@@ -1681,6 +1681,31 @@ describe('completion marker output', () => {
     expect(updatePr).toHaveBeenCalledOnce()
   })
 
+  it('waits for the default branch fetch before completing the cycle', async () => {
+    configureLocalRemote()
+    git(['switch', '-c', 'feature/fetch-retry'])
+    const remote = join(repoRoot, 'remote.git')
+    git(['remote', 'set-url', '--push', 'origin', remote])
+    git(['remote', 'set-url', 'origin', join(repoRoot, 'missing-remote.git')])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ autoPr: true, reviewEnabled: true, autoReview: false })
+    const updatePr = vi.fn(async () => {})
+    fakeForge.prBody = async () => GENERATED_BODY_MARKER
+    fakeForge.updatePr = updatePr
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(logText()).toContain('WARN could not fetch origin/main:')
+    expect(prStatusCalls).toBe(0)
+    expect(updatePr).not.toHaveBeenCalled()
+
+    git(['remote', 'set-url', 'origin', remote])
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(updatePr).toHaveBeenCalledOnce()
+  })
+
   it('returns failure when the generated PR body cannot be updated', async () => {
     configureLocalRemote()
     const loop = makeLoop()

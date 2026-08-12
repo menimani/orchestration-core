@@ -1043,7 +1043,12 @@ export function createLoop(deps: LoopDeps) {
       return false
     }
     const baseBranch = baseRef.slice(remote.length + 1)
-    git(['fetch', remote, baseBranch, '--quiet'])
+    try {
+      gitIn(paths.repoRoot, ['fetch', remote, baseBranch, '--quiet'])
+    } catch (error) {
+      reportGateFailure(`could not fetch ${baseRef}: ${errorSummary(error)}`)
+      return false
+    }
     const cycle = readCount(scanCountFile)
     const title = prTitle(project, paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
       { cycle, maxCycles: config.maxScanCycles })
