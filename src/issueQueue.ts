@@ -950,6 +950,20 @@ async function releasePartialClaim(forge: Forge, issueNumber: number, me: string
   }
 }
 
+async function releasePartialQuarantine(
+  forge: Forge,
+  issueNumber: number,
+  me: string,
+): Promise<void> {
+  // Remove the quarantine marker first. If compensation is interrupted after this
+  // point, the remaining in-progress claim is still eligible for stale-lease reaping.
+  const current = await forge.getIssue(issueNumber)
+  if (current.state === 'open' && current.labels.includes(LABEL_MERGE_FAILED)) {
+    await forge.removeLabel(issueNumber, LABEL_MERGE_FAILED)
+  }
+  await releasePartialClaim(forge, issueNumber, me)
+}
+
 /**
  * Claim one ready issue and materialize it as a local task. Assignment is the
  * exclusivity primitive; because a forge allows several assignees, a simultaneous
@@ -1024,9 +1038,21 @@ export async function claimIssue(
       // terminal queue state: unlike in-progress it is not a lease that stale reaping
       // may return to the claim path. Keep the assignment and body for inspection.
       const reason = `Issue #${issue.number} cannot be materialized: ${bodyParse.problem}. Fix the issue body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`
-      await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
-      await forge.commentIssue(issue.number, reason)
-      await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
+      try {
+        await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
+        await forge.commentIssue(issue.number, reason)
+        await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
+      } catch (error) {
+        try {
+          await releasePartialQuarantine(forge, issue.number, me)
+        } catch (releaseError) {
+          throw new AggregateError(
+            [error, releaseError],
+            `Issue quarantine and compensation both failed for issue #${issue.number}`,
+          )
+        }
+        throw error
+      }
       return { outcome: 'unparseable', issueNumber: issue.number, reason }
     }
     const parsed = bodyParse.parsed
