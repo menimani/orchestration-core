@@ -969,7 +969,8 @@ describe('cycle gate', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(runnerStarts).toHaveLength(1)
-    expect(logText()).toContain('Status Scan=1  Waiting=unfinished scan')
+    expect(logText()).toContain('Status Scan=1')
+    expect(logText()).not.toContain('Waiting=')
     expect(logText()).not.toContain('LOOP_DONE:')
   })
 
@@ -1396,7 +1397,7 @@ describe('collectDecisions', () => {
 })
 
 describe('failure announcement and burst stop (via poll)', () => {
-  it('reports only execution counters when scans are not running', async () => {
+  it('reports an idle poll with its wait target', async () => {
     const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6 })
 
     expect(await loop.poll()).toBe('continue')
@@ -1405,12 +1406,13 @@ describe('failure announcement and burst stop (via poll)', () => {
     )
   })
 
-  it('reports only scan counters while scans run', async () => {
+  it('omits Waiting while a scan is in flight', async () => {
     const loop = makeLoop({ scanEnabled: false })
     writeRawStatus('20260809_000000_001_scan', 'running', process.pid)
 
     expect(await loop.poll()).toBe('continue')
-    expect(logged).toContain('Status Scan=1  Waiting=unfinished scan')
+    expect(logged).toContain('Status Scan=1')
+    expect(logged).not.toContain('Waiting=')
   })
 
   it('reports both phase groups when scans and tasks run together', async () => {
@@ -1419,9 +1421,8 @@ describe('failure announcement and burst stop (via poll)', () => {
     writeRawStatus('20260809_000001_002_auto-fix', 'running', process.pid)
 
     expect(await loop.poll()).toBe('continue')
-    expect(logged).toContain(
-      'Status Scan=1  Running=1  Queue=0  Waiting=unfinished scan, unfinished task',
-    )
+    expect(logged).toContain('Status Scan=1  Running=1  Queue=0')
+    expect(logged).not.toContain('Waiting=')
   })
 
   it('announces a failure once, records it for the cycle, and stops on a burst', async () => {
