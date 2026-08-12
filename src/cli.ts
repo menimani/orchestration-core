@@ -1,12 +1,15 @@
 import { spawn, execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync,
+  statSync, writeFileSync,
 } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadProject } from './adapters/project.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
+import { operatingSystem } from './adapters/os.ts'
 import { cleanupTask } from './cleanup.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
@@ -56,12 +59,90 @@ function repoRoot(): string {
   }).trim()
 }
 
-function isPidAlive(pid: number): boolean {
+interface RecoveryLockOwner {
+  pid: number
+  acquiredAt: string
+  token: string
+}
+
+const RECOVERY_LOCK_STALE_MS = 10_000
+const RECOVERY_LOCK_TIMEOUT_MS = 10_000
+const RECOVERY_LOCK_POLL_MS = 10
+
+function recoveryLockOwner(recoveryLock: string): RecoveryLockOwner | undefined {
   try {
-    process.kill(pid, 0)
+    const parsed = JSON.parse(readFileSync(join(recoveryLock, 'owner.json'), 'utf8')) as unknown
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const owner = parsed as Partial<RecoveryLockOwner>
+    if (!Number.isSafeInteger(owner.pid) || (owner.pid ?? 0) <= 0
+      || typeof owner.acquiredAt !== 'string' || typeof owner.token !== 'string'
+      || owner.token === '') return undefined
+    return owner as RecoveryLockOwner
+  } catch {
+    return undefined
+  }
+}
+
+function reclaimRecoveryLock(recoveryLock: string): boolean {
+  const owner = recoveryLockOwner(recoveryLock)
+  if (owner !== undefined && operatingSystem.processIsAlive(owner.pid)) return false
+  if (owner === undefined) {
+    try {
+      if (Date.now() - statSync(recoveryLock).mtimeMs < RECOVERY_LOCK_STALE_MS) return false
+    } catch {
+      return false
+    }
+  }
+  try {
+    // Once the owner file is removed, the empty-directory removal either wins or a
+    // successor publishes its non-empty candidate. It never removes that successor.
+    rmSync(toNamespacedPath(join(recoveryLock, 'owner.json')), { force: true })
+    rmdirSync(toNamespacedPath(recoveryLock))
     return true
   } catch {
     return false
+  }
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+async function acquireRecoveryLock(recoveryLock: string): Promise<() => void> {
+  const owner: RecoveryLockOwner = {
+    pid: process.pid,
+    acquiredAt: new Date().toISOString(),
+    token: randomUUID(),
+  }
+  const candidate = `${recoveryLock}.candidate-${process.pid}-${owner.token}`
+  const deadline = Date.now() + RECOVERY_LOCK_TIMEOUT_MS
+  for (;;) {
+    try {
+      // Metadata exists before the atomic publish, so an observer cannot mistake the
+      // acquisition window for a crashed ownerless lock.
+      mkdirSync(candidate)
+      writeFileSync(join(candidate, 'owner.json'), `${JSON.stringify(owner)}\n`, { flag: 'wx' })
+      renameSync(candidate, recoveryLock)
+      return () => {
+        if (recoveryLockOwner(recoveryLock)?.token !== owner.token) return
+        try {
+          rmSync(toNamespacedPath(join(recoveryLock, 'owner.json')), { force: true })
+          rmdirSync(toNamespacedPath(recoveryLock))
+        } catch {
+          // Ownership has already ended or a successor won the publication race.
+        }
+      }
+    } catch (error) {
+      operatingSystem.removeDirectory(candidate)
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'EEXIST' && code !== 'ENOTEMPTY' && code !== 'EPERM') throw error
+    }
+
+    if (reclaimRecoveryLock(recoveryLock)) continue
+    if (Date.now() >= deadline) {
+      throw new Error('Timed out waiting for stale loop PID recovery lock')
+    }
+    await sleep(RECOVERY_LOCK_POLL_MS)
   }
 }
 
@@ -112,7 +193,7 @@ const cmdVerifySetup: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const forge = await loadForge(config.forge, paths.repoRoot)
-  return await verifyRepositorySetup(paths, forge) ? 0 : 1
+  return await verifyRepositorySetup(paths, forge, { env: process.env }) ? 0 : 1
 }
 
 const cmdNew: Command = async (paths, args) => {
@@ -450,7 +531,7 @@ const cmdLoopStatus: Command = async (paths) => {
   // is safe to embed in a skill preamble.
   const pidFile = join(paths.queueDir, 'loop.pid')
   const pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8').trim() : ''
-  if (/^\d+$/.test(pid) && isPidAlive(Number(pid))) {
+  if (/^\d+$/.test(pid) && operatingSystem.processIsAlive(Number(pid))) {
     console.log(`loop: running (PID=${pid})`)
   } else {
     console.log('loop: not running')
@@ -591,12 +672,7 @@ async function runLoopDaemon(
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
 
-    try {
-      mkdirSync(recoveryLock)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
-      throw error
-    }
+    const releaseRecoveryLock = await acquireRecoveryLock(recoveryLock)
     try {
       let existing: string
       try {
@@ -605,14 +681,14 @@ async function runLoopDaemon(
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
         throw error
       }
-      if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
+      if (/^\d+$/.test(existing) && operatingSystem.processIsAlive(Number(existing))) {
         log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
         return 1
       }
       log('WARN: Removing stale PID file')
       rmSync(pidFile, { force: true })
     } finally {
-      rmSync(recoveryLock, { recursive: true, force: true })
+      releaseRecoveryLock()
     }
   }
   const releaseDaemonState = (): void => {

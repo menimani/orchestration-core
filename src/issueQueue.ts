@@ -314,6 +314,7 @@ function issueFingerprints(issue: ForgeIssue): string[] {
 }
 
 function migrateFingerprintLedgerForIssue(paths: OrchPaths, issue: ForgeIssue): void {
+  if (!isTrustedFingerprintOwner(issue)) return
   const stored = parseIssueBody(issue.body, issue.number)?.fingerprints ?? []
   const effective = issueFingerprints(issue)
   const replacements = stored.flatMap((fingerprint, index) => {
@@ -390,8 +391,13 @@ function isClaimed(issue: ForgeIssue): boolean {
   return issue.assignees.length > 0 || issue.labels.includes(LABEL_IN_PROGRESS)
 }
 
+function isTrustedFingerprintOwner(issue: ForgeIssue): boolean {
+  return issue.author.hasWriteAccess && !issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)
+}
+
 function isReadyToClose(issue: ForgeIssue, fingerprints: string[]): boolean {
   return issue.state === 'open'
+    && isTrustedFingerprintOwner(issue)
     && hasExactFingerprints(issue, fingerprints)
     && issue.assignees.length === 0
     && issue.labels.includes(LABEL_READY)
@@ -416,14 +422,17 @@ async function reconcileOpenFindings(
   onMutation?: (issueNumber: number) => void,
 ): Promise<number | undefined> {
   const issues = new Map((knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING))
-    .filter((issue) => hasExactFingerprints(issue, fingerprints)
+    .filter((issue) => isTrustedFingerprintOwner(issue)
+      && hasExactFingerprints(issue, fingerprints)
       && fingerprints.every((fingerprint) =>
         issueSuppressesFingerprint(paths, issue, fingerprint)))
     .map((issue) => [issue.number, issue]))
   if (createdIssueNumber !== undefined && !issues.has(createdIssueNumber)) {
     try {
       const created = await forge.getIssue(createdIssueNumber)
-      if (created.state === 'open' && hasExactFingerprints(created, fingerprints)) {
+      if (created.state === 'open'
+        && isTrustedFingerprintOwner(created)
+        && hasExactFingerprints(created, fingerprints)) {
         issues.set(created.number, created)
       }
     } catch {
@@ -478,6 +487,15 @@ export async function reconcileFindingFingerprints(
   knownOpenFindings?: readonly ForgeIssue[],
 ): Promise<void> {
   let openFindings = [...(knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING))]
+  const excludedIssueNumbers = new Set(openFindings
+    .filter((issue) => !isTrustedFingerprintOwner(issue))
+    .map((issue) => issue.number))
+  if (excludedIssueNumbers.size > 0) {
+    const ledger = fingerprintLedger(paths)
+    const retained = ledger.filter((entry) => !excludedIssueNumbers.has(entry.issueNumber))
+    if (retained.length !== ledger.length) writeFingerprintLedger(paths, retained)
+  }
+  openFindings = openFindings.filter(isTrustedFingerprintOwner)
   const closedIssueNumbers = new Set<number>()
   for (const issue of openFindings) migrateFingerprintLedgerForIssue(paths, issue)
   const byFingerprintSet = new Map<string, { fingerprints: string[]; issues: ForgeIssue[] }>()
@@ -504,7 +522,7 @@ export async function reconcileFindingFingerprints(
   // close a ready issue only when every one of its constituents is already covered.
   // Partially overlapping issues stay open so their unmatched findings are not lost.
   openFindings = knownOpenFindings === undefined
-    ? await forge.listOpenIssues(LABEL_FINDING)
+    ? (await forge.listOpenIssues(LABEL_FINDING)).filter(isTrustedFingerprintOwner)
     : openFindings.filter((issue) => !closedIssueNumbers.has(issue.number))
   const ordered = openFindings
     .filter((issue) => issueFingerprints(issue).length > 0)
@@ -561,6 +579,7 @@ async function findExistingFinding(
       // A missing issue is stale in the same way as a closed one.
     }
     if (recordedIssue?.state === 'open'
+      && isTrustedFingerprintOwner(recordedIssue)
       && recordedIssue.labels.includes(LABEL_FINDING)
       && hasIssueFingerprint(recordedIssue, fingerprint)
       // An issue whose fix already merged must not suppress a newly observed finding.
@@ -577,7 +596,8 @@ async function findExistingFinding(
     writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
   }
   const matching = (await forge.listOpenIssues(LABEL_FINDING))
-    .filter((issue) => hasIssueFingerprint(issue, fingerprint)
+    .filter((issue) => isTrustedFingerprintOwner(issue)
+      && hasIssueFingerprint(issue, fingerprint)
       && issueSuppressesFingerprint(paths, issue, fingerprint))
     .sort((a, b) => Number(isClaimed(b)) - Number(isClaimed(a)) || a.number - b.number)
   const existing = matching[0]

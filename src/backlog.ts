@@ -1,19 +1,21 @@
+import { randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync,
+  writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, toNamespacedPath } from 'node:path'
+import { operatingSystem } from './adapters/os.ts'
 
 const LOCK_RETRY_MS = 10
 const OWNER_GRACE_MS = 30_000
 const MAX_LOCK_RETRIES = Math.ceil(OWNER_GRACE_MS / LOCK_RETRY_MS)
 const sleepBuffer = new SharedArrayBuffer(4)
 
-function processIsAlive(pid: number): boolean {
+function ownerText(lockDir: string): string {
   try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
+    return readFileSync(join(lockDir, 'owner'), 'utf8').trim()
+  } catch {
+    return ''
   }
 }
 
@@ -25,14 +27,9 @@ function lockOwnerIsStale(lockDir: string): boolean {
       return false
     }
   }
-  const ownerFile = join(lockDir, 'owner')
-  let owner = ''
-  try {
-    owner = readFileSync(ownerFile, 'utf8').trim()
-  } catch {
-    // The creator may still be between mkdir and publishing its owner metadata.
-  }
-  const [pidRaw, createdRaw, ...extra] = owner.split(/\s+/)
+  // The creator may still be between mkdir and publishing its owner metadata. The
+  // token is optional so locks created by an older installed core remain readable.
+  const [pidRaw, createdRaw, _token, ...extra] = ownerText(lockDir).split(/\s+/)
   const pid = Number(pidRaw)
   const created = Number(createdRaw)
   if (
@@ -44,63 +41,112 @@ function lockOwnerIsStale(lockDir: string): boolean {
   ) {
     return lockIsAged()
   }
-  if (processIsAlive(pid)) return false
+  if (operatingSystem.processIsAlive(pid)) return false
   return Date.now() - created >= OWNER_GRACE_MS
 }
 
-function recoverStaleLock(lockDir: string): boolean {
-  const recoveryDir = `${lockDir}.recovery`
+function ownedLock(lockDir: string): string {
+  const token = randomUUID()
+  mkdirSync(lockDir)
   try {
-    mkdirSync(recoveryDir)
+    writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()} ${token}\n`)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    operatingSystem.removeDirectory(lockDir)
+    throw error
+  }
+  return token
+}
+
+function releaseOwnedLock(lockDir: string, token: string): void {
+  if (ownerText(lockDir).split(/\s+/)[2] !== token) return
+  try {
+    // Empty-directory removal cannot erase a successor: if one publishes after the
+    // owner file disappears, its metadata makes this operation fail instead.
+    rmSync(toNamespacedPath(join(lockDir, 'owner')), { force: true })
+    rmdirSync(toNamespacedPath(lockDir))
+  } catch {
+    // Ownership has already ended or a successor won the publication race.
+  }
+}
+
+/** Reclaim an abandoned recovery mutex without deleting a successor's owner token. */
+function recoverStaleMutex(mutexDir: string): boolean {
+  if (!lockOwnerIsStale(mutexDir)) return false
+  const observedOwner = ownerText(mutexDir)
+  const displaced = `${mutexDir}.${process.pid}-${randomUUID()}`
+  try {
+    renameSync(mutexDir, displaced)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'EPERM') return false
     throw error
   }
 
+  // Only remove the exact stale owner observed before the rename. If the snapshot was
+  // replaced, restore it when no successor has already acquired the mutex.
+  if (ownerText(displaced) !== observedOwner || !lockOwnerIsStale(displaced)) {
+    if (!existsSync(mutexDir)) renameSync(displaced, mutexDir)
+    return false
+  }
+  operatingSystem.removeDirectory(displaced)
+  return true
+}
+
+function tryAcquireRecoveryMutex(lockDir: string): string | undefined {
+  const mutexDir = `${lockDir}.recovery`
   try {
-    // Another waiter may have replaced the stale lock while this process waited for
-    // the recovery mutex. Only the current owner snapshot may be reclaimed.
-    if (!lockOwnerIsStale(lockDir)) return false
+    return ownedLock(mutexDir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    recoverStaleMutex(mutexDir)
+    return undefined
+  }
+}
+
+/** Revalidate and remove a stale main lock while every new acquisition is serialized. */
+function recoverStaleLock(lockDir: string): boolean {
+  if (!lockOwnerIsStale(lockDir)) return false
+  operatingSystem.removeDirectory(lockDir)
+  return true
+}
+
+function tryAcquireBacklogLock(lockDir: string): string | undefined {
+  const recoveryToken = tryAcquireRecoveryMutex(lockDir)
+  if (recoveryToken === undefined) return undefined
+  try {
+    if (existsSync(lockDir) && !recoverStaleLock(lockDir)) return undefined
     try {
-      rmSync(lockDir, { recursive: true })
-      return true
+      return ownedLock(lockDir)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      // A process running an older core can still race by acquiring without the mutex.
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined
       throw error
     }
   } finally {
-    rmSync(recoveryDir, { recursive: true, force: true })
+    releaseOwnedLock(`${lockDir}.recovery`, recoveryToken)
   }
 }
 
 /** Serialize backlog read-modify-write operations across loop and CLI processes. */
 export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
   const lockDir = `${backlog}.lock`
+  let lockToken: string
   for (let attempts = 0; ; attempts++) {
-    try {
-      mkdirSync(lockDir)
-      try {
-        writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()}\n`)
-      } catch (error) {
-        rmSync(lockDir, { recursive: true, force: true })
-        throw error
-      }
+    const acquired = tryAcquireBacklogLock(lockDir)
+    if (acquired !== undefined) {
+      lockToken = acquired
       break
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'EEXIST') throw error
-      if (lockOwnerIsStale(lockDir) && recoverStaleLock(lockDir)) continue
-      if (attempts >= MAX_LOCK_RETRIES) {
-        throw new Error(`Timed out waiting for the backlog lock: ${backlog}`)
-      }
-      Atomics.wait(new Int32Array(sleepBuffer), 0, 0, LOCK_RETRY_MS)
     }
+    if (attempts >= MAX_LOCK_RETRIES) {
+      throw new Error(`Timed out waiting for the backlog lock: ${backlog}`)
+    }
+    Atomics.wait(new Int32Array(sleepBuffer), 0, 0, LOCK_RETRY_MS)
   }
 
   try {
     return mutation()
   } finally {
-    rmSync(lockDir, { recursive: true, force: true })
+    releaseOwnedLock(lockDir, lockToken)
   }
 }
 

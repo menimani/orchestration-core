@@ -195,6 +195,63 @@ describe('publishFinding', () => {
     expect(forge.issues.size).toBe(1)
   })
 
+  it.each([
+    ['an outsider author', false, []],
+    ['the untrusted-author label', true, [LABEL_UNTRUSTED_AUTHOR]],
+  ])('does not let an issue marked by %s own a fingerprint', async (
+    _description, hasWriteAccess, extraLabels,
+  ) => {
+    const finding = '[BUG] `src/a/b.ts` breaks'
+    const fingerprint = fingerprintOf(finding)
+    const untrusted = await forge.createIssue({
+      title: finding,
+      body: buildIssueBody(finding, 'outside'),
+      labels: [LABEL_FINDING, LABEL_READY, ...extraLabels],
+    })
+    const stored = forge.issues.get(untrusted)
+    if (stored === undefined) throw new Error('expected untrusted issue')
+    stored.author = { login: 'outside-user', hasWriteAccess }
+    writeFileSync(join(paths.queueDir, 'issue-fingerprints'), `${fingerprint} ${untrusted}\n`)
+
+    const result = await publishFinding(forge, paths, finding, 'trusted-scan')
+
+    expect(result).toEqual({ outcome: 'created', issueNumber: 2 })
+    expect((await forge.getIssue(untrusted)).state).toBe('open')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprint} 2\n`)
+  })
+
+  it.each([
+    ['an outsider-authored issue', false, []],
+    ['an issue with the untrusted-author label', true, [LABEL_UNTRUSTED_AUTHOR]],
+  ])('excludes %s from reconciliation and the fingerprint ledger', async (
+    _description, hasWriteAccess, extraLabels,
+  ) => {
+    const finding = '[BUG] `src/a/b.ts` breaks'
+    const fingerprint = fingerprintOf(finding)
+    const untrusted = await forge.createIssue({
+      title: finding,
+      body: buildIssueBody(finding, 'outside'),
+      labels: [LABEL_FINDING, LABEL_READY, ...extraLabels],
+    })
+    const stored = forge.issues.get(untrusted)
+    if (stored === undefined) throw new Error('expected untrusted issue')
+    stored.author = { login: 'outside-user', hasWriteAccess }
+    const trusted = await forge.createIssue({
+      title: finding,
+      body: buildIssueBody(finding, 'trusted-scan'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    writeFileSync(join(paths.queueDir, 'issue-fingerprints'), `${fingerprint} ${untrusted}\n`)
+
+    await reconcileFindingFingerprints(forge, paths)
+
+    expect((await forge.getIssue(untrusted)).state).toBe('open')
+    expect((await forge.getIssue(trusted)).state).toBe('open')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprint} ${trusted}\n`)
+  })
+
   it('files different requirements with the same tag and path as separate issues', async () => {
     const closeButtons = '[LAYOUT] Remove close buttons from `src/frontend/src/pages/CalendarPage.tsx`'
     const addButtons = '[LAYOUT] Collapse add buttons in `src/frontend/src/pages/CalendarPage.tsx`'

@@ -1121,11 +1121,13 @@ export function createLoop(deps: LoopDeps) {
 
   function generateCiFixTask(cycle: number, prUrl: string, failSummary: string): void {
     const fixId = newTaskId(paths, `ci-fix-c${cycle}`, now())
-    const text = renderTemplate('ci-fix-template.md', {
+    const text = repositoryInspectionPreamble() + renderTemplate('ci-fix-template.md', {
       FIX_ID: fixId,
       CYCLE: String(cycle),
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
-      FAIL_SUMMARY: failSummary === '' ? '(check the PR checks for details)' : failSummary,
+      FAIL_SUMMARY: frameUntrustedText(
+        failSummary === '' ? '(check the PR checks for details)' : failSummary,
+      ),
     })
     writeFileSync(specFile(paths, fixId), text)
     enqueueTaskImpl(paths, fixId, 0)

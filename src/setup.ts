@@ -9,6 +9,7 @@ import { execShellSync } from './shell.ts'
 
 interface VerifyOptions {
   packageRoot?: string
+  env?: NodeJS.ProcessEnv
   report?: (line: string) => void
   git?: (args: string[]) => string
   run?: (cwd: string, command: string) => boolean
@@ -46,15 +47,9 @@ function adapterPaths(project: ProjectAdapter): string[] {
   const record = (step: {
     cwd: string
     requires?: string
-    unless?: string
-    installWhenMissing?: { path: string }
-    repairWhenMissing?: { path: string }
   }): void => {
     if (step.cwd !== '') paths.push(step.cwd)
     if (step.requires !== undefined) paths.push(step.requires)
-    if (step.unless !== undefined) paths.push(step.unless)
-    if (step.installWhenMissing !== undefined) paths.push(step.installWhenMissing.path)
-    if (step.repairWhenMissing !== undefined) paths.push(step.repairWhenMissing.path)
   }
   for (const step of project.preCommitChecks) record(step)
   for (const step of project.scanWorktreeSetup ?? []) record(step)
@@ -112,9 +107,18 @@ export async function verifyRepositorySetup(
 
   let project: ProjectAdapter | undefined
   try {
-    const discovered = await loadProject(paths.root, {})
-    project = await loadProject(paths.root, { PROJECT: discovered.name })
-    report(`PASS: loadProject discovered adapter '${project.name}' by name`)
+    const env = options.env ?? process.env
+    if (env['PROJECT_ADAPTER'] !== undefined && env['PROJECT_ADAPTER'] !== '') {
+      project = await loadProject(paths.root, env)
+      report(`PASS: loadProject selected adapter '${project.name}' with PROJECT_ADAPTER`)
+    } else if (env['PROJECT'] !== undefined && env['PROJECT'] !== '') {
+      project = await loadProject(paths.root, env)
+      report(`PASS: loadProject selected adapter '${project.name}' with PROJECT`)
+    } else {
+      const discovered = await loadProject(paths.root, {})
+      project = await loadProject(paths.root, { PROJECT: discovered.name })
+      report(`PASS: loadProject discovered adapter '${project.name}' by name`)
+    }
   } catch (error) {
     report(`FAIL: loadProject adapter discovery; ${(error as Error).message}`)
     ok = false
