@@ -1324,8 +1324,12 @@ export async function reapStaleLeases(
     candidate.labels.includes(LABEL_IN_PROGRESS)
       && !candidate.labels.includes(LABEL_MERGE_FAILED))) {
     if (locallyRunningIssues.has(issue.number)) continue
+    // An interrupted reap has already removed every assignee. Its last mutation
+    // refreshed updatedAt, but no worker remains to heartbeat it, so finish that
+    // transition without making the orphan wait through another lease window.
+    const partiallyReaped = issue.assignees.length === 0
     const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
-    if (ageMs < leaseHours * 3600 * 1000) continue
+    if (!partiallyReaped && ageMs < leaseHours * 3600 * 1000) continue
     const promotion = issuePromotionForIssue(paths, issue.number)
     if (promotion !== undefined) {
       if (promotion.commentConfirmed !== true) {
@@ -1344,11 +1348,12 @@ export async function reapStaleLeases(
     // assignment may land while promotion metadata and comments are checked, so
     // re-read every part of the lease immediately before changing it.
     const current = await forge.getIssue(issue.number)
+    const currentlyPartiallyReaped = current.assignees.length === 0
     const currentAgeMs = now.getTime() - new Date(current.updatedAt).getTime()
     if (current.state !== 'open'
       || !current.labels.includes(LABEL_IN_PROGRESS)
       || current.labels.includes(LABEL_MERGE_FAILED)
-      || currentAgeMs < leaseHours * 3600 * 1000
+      || (!currentlyPartiallyReaped && currentAgeMs < leaseHours * 3600 * 1000)
       || current.assignees.length !== issue.assignees.length
       || current.assignees.some((assignee) => !issue.assignees.includes(assignee))) {
       continue
@@ -1356,7 +1361,7 @@ export async function reapStaleLeases(
     for (const assignee of current.assignees) {
       await forge.unassignIssue(issue.number, assignee)
     }
-    await forge.addLabel(issue.number, LABEL_READY)
+    if (!current.labels.includes(LABEL_READY)) await forge.addLabel(issue.number, LABEL_READY)
     await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
     reaped.push(issue.number)
   }
