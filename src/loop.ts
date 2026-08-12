@@ -1094,13 +1094,17 @@ export function createLoop(deps: LoopDeps) {
     const effortDir = join(paths.queueDir, 'effort')
     mkdirSync(effortDir, { recursive: true })
     writeFileSync(join(effortDir, reviewId), `${config.reviewEffort}\n`)
+    try {
+      enqueueTaskImpl(paths, reviewId, 0)
+    } catch (error) {
+      event('WARN', `could not enqueue review: ${errorSummary(error)}`)
+      return false
+    }
+    // The round and id are the durable receipt for a dispatched review. Publishing
+    // them before the backlog mutation succeeds consumes a round without any worker
+    // being able to perform it, so keep them behind the enqueue boundary.
     writeFileSync(roundFile, `${rounds + 1}\n`)
     writeFileSync(idFile, `${reviewId}\n`)
-    try {
-      enqueueTask(paths, reviewId, 0)
-    } catch {
-      // enqueue of a just-written spec cannot fail for a missing spec
-    }
     return false
   }
 

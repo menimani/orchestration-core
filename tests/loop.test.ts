@@ -867,6 +867,30 @@ describe('runAutoReview', () => {
     expect(loop.runAutoReview(7, false)).toBe(true)
   })
 
+  it('preserves the review round and id when enqueue fails, then retries', () => {
+    const enqueue = vi.fn<typeof enqueueTask>()
+      .mockImplementationOnce(() => { throw new Error('queue unavailable') })
+      .mockImplementation((enqueuePaths, taskId, depth) =>
+        enqueueTask(enqueuePaths, taskId, depth))
+    const loop = makeLoop({}, stubProject, undefined, undefined, undefined, enqueue)
+    const roundFile = join(paths.queueDir, 'review-round-7')
+    const idFile = join(paths.queueDir, 'review-id-7')
+
+    expect(loop.runAutoReview(7, false)).toBe(false)
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(existsSync(roundFile)).toBe(false)
+    expect(existsSync(idFile)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).toContain('WARN could not enqueue review: queue unavailable')
+
+    expect(loop.runAutoReview(7, false)).toBe(false)
+    expect(enqueue).toHaveBeenCalledTimes(2)
+    expect(readFileSync(roundFile, 'utf8')).toBe('1\n')
+    const reviewId = readFileSync(idFile, 'utf8').trim()
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(reviewId)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
   it('resolves the advertised remote default branch when the local HEAD ref is missing', () => {
     git(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
     git(['branch', '-m', 'main', 'trunk'])
