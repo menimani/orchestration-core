@@ -929,6 +929,47 @@ describe('cycle gate', () => {
     expect(await loop.triggerScanIfIdle()).toBe('done')
   })
 
+  it('completes and promotes when no source can produce more work', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: true,
+      reviewEnabled: false,
+    })
+    loop.initializeSessionStateForBranch()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(logged).toContain('CYCLE_COMPLETE: 1/3 PR:https://example.test/pull/1')
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('keeps running while scanning can still produce work', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const loop = makeLoop({
+      scanEnabled: true,
+      scanParallel: 1,
+      autoPr: false,
+      reviewEnabled: false,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(1)
+    expect(logText()).toContain('Status Scan=1  Waiting=unfinished scan')
+    expect(logText()).not.toContain('LOOP_DONE:')
+  })
+
   function prepareFailedCiGate(): { attemptFile: string; completeFlag: string } {
     const attemptFile = join(paths.queueDir, 'ci-fix-emitted-1')
     const completeFlag = join(paths.queueDir, 'cycle-complete-1')
@@ -1095,6 +1136,24 @@ describe('remote issue queue idle detection', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
     expect(logText()).toBe('Waiting remote  issues #1')
+  })
+
+  it('names an open finding as the reason an idle poll keeps waiting', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+    })
+    loop.initializeSessionStateForBranch()
+    await fakeForge.createIssue({
+      title: 'worker still running', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged).toContain('Waiting remote  issues #1')
+    expect(logged).toContain('Status Running=0  Queue=0  Waiting=open finding')
   })
 
   it('defers the cycle gate and review while a merge-failed issue is open', async () => {
@@ -1308,7 +1367,9 @@ describe('failure announcement and burst stop (via poll)', () => {
     const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6 })
 
     expect(await loop.poll()).toBe('continue')
-    expect(logText()).toMatch(/^Status Running=\d+  Queue=\d+$/m)
+    expect(logText()).toMatch(
+      /^Status Running=\d+  Queue=\d+  Waiting=pull request promotion$/m,
+    )
   })
 
   it('reports only scan counters while scans run', async () => {
@@ -1316,7 +1377,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     writeRawStatus('20260809_000000_001_scan', 'running', process.pid)
 
     expect(await loop.poll()).toBe('continue')
-    expect(logged).toContain('Status Scan=1')
+    expect(logged).toContain('Status Scan=1  Waiting=unfinished scan')
   })
 
   it('reports both phase groups when scans and tasks run together', async () => {
@@ -1325,7 +1386,9 @@ describe('failure announcement and burst stop (via poll)', () => {
     writeRawStatus('20260809_000001_002_auto-fix', 'running', process.pid)
 
     expect(await loop.poll()).toBe('continue')
-    expect(logged).toContain('Status Scan=1  Running=1  Queue=0')
+    expect(logged).toContain(
+      'Status Scan=1  Running=1  Queue=0  Waiting=unfinished scan, unfinished task',
+    )
   })
 
   it('announces a failure once, records it for the cycle, and stops on a burst', async () => {

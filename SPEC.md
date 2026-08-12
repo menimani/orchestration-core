@@ -146,6 +146,12 @@ from or equivalent to `orchestration/tests/*.sh`.
     passing verdict is retained for that commit while PR setup retries, and is discarded
     as soon as the branch tip changes. Repeated gate failures remain visible with a
     count; a repeated push failure logs `ERROR`, writes the stop file, and stops retrying.
+    When scanning is disabled and the local backlog plus the known shared finding set are
+    empty, the gate is final because no source can produce more work; it promotes and
+    exits through the same path as the scan cap. An unavailable shared finding snapshot
+    remains an external source whose state is unknown, so the gate waits. Every continuing
+    status names its wait target, such as an unfinished task, an unfinished scan, worker
+    capacity, an open finding, or finding status that could not be read.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to

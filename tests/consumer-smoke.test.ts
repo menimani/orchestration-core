@@ -181,8 +181,8 @@ project.cycleSuite = () => consumerFixture.cycleSuite
     })
 
     loop.initializeSessionStateForBranch()
-    await expect(loop.poll()).resolves.toBe('continue')
-    expect(logs).toContain('Status Running=0  Queue=0')
+    await expect(loop.poll()).resolves.toBe('done')
+    expect(logs).not.toContain('Status Running=0  Queue=0')
     expect(runnerStart).not.toHaveBeenCalled()
     expect(forgeCalls).toEqual([])
   })
