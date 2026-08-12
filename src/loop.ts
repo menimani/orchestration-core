@@ -117,6 +117,7 @@ export function createLoop(deps: LoopDeps) {
   const reconciledCycleGates = new Set<number>()
   let issueQueueInitialized = !config.issueQueueEnabled
   let previousGateFailure: { message: string; count: number } | undefined
+  let gateWaitTarget: string | undefined
 
   function event(name: string, subject = '', detail = ''): void {
     if (name === 'WARN') {
@@ -1234,11 +1235,14 @@ export function createLoop(deps: LoopDeps) {
   async function triggerScanIfIdle(
     knownOpenFindings?: readonly ForgeIssue[] | null,
   ): Promise<'continue' | 'done' | 'restart'> {
-    if (!config.scanEnabled) return 'continue'
+    gateWaitTarget = undefined
     if (countRunning() > 0 || queueLength() > 0) return 'continue'
     if (isScanRunning()) return 'continue'
     if (config.issueQueueEnabled) {
-      if (knownOpenFindings === null) return 'continue'
+      if (knownOpenFindings === null) {
+        gateWaitTarget = 'finding status'
+        return 'continue'
+      }
       try {
         const openFindings = knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING)
         const openIssues = openFindings.filter((issue) =>
@@ -1267,6 +1271,7 @@ export function createLoop(deps: LoopDeps) {
         const remoteCount = pendingIssueNumbers.length
         warningLog.recovered('count-remote-issue-work')
         if (remoteCount > 0) {
+          gateWaitTarget = 'open finding'
           const pending = pendingIssueNumbers.join(' ')
           const currentTime = now().getTime()
           if (remoteWaitState?.pending !== pending
@@ -1286,6 +1291,7 @@ export function createLoop(deps: LoopDeps) {
           warning('count-remote-issue-work', 'counting remote issue work',
             `could not count remote issue work: ${errorSummary(error)}`)
         }
+        gateWaitTarget = 'finding status'
         return 'continue'
       }
     }
@@ -1337,7 +1343,10 @@ export function createLoop(deps: LoopDeps) {
             }
           }
 
-          if (config.autoPr && !(await ensureDraftPr('cycle'))) return 'continue'
+          if (config.autoPr && !(await ensureDraftPr('cycle'))) {
+            gateWaitTarget = 'pull request update'
+            return 'continue'
+          }
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
           log(`CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
           const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
@@ -1347,6 +1356,7 @@ export function createLoop(deps: LoopDeps) {
 
         const ciStatus = config.ciGateEnabled ? await checkPrCiStatus() : 'success'
         if (ciStatus === 'pending' || ciStatus === 'unknown') {
+          gateWaitTarget = 'CI checks'
           return 'continue'
         }
         if (ciStatus === 'failure') {
@@ -1390,15 +1400,34 @@ export function createLoop(deps: LoopDeps) {
 
     foldScanYields(currentScans)
 
+    // Reaching this point proves that local work is empty and, in issue mode, that the
+    // shared finding snapshot is both available and exhausted. If scanning cannot
+    // produce another cycle, no source of work remains: close this cycle through the
+    // same promotion and cleanup path as an exhausted scan cap.
+    if (!config.scanEnabled) {
+      if (config.autoPr && !(await postLoopPr())) {
+        gateWaitTarget = 'pull request promotion'
+        return 'continue'
+      }
+      cleanupSessionState()
+      return 'done'
+    }
+
     if (currentScans >= config.maxScanCycles) {
-      if (config.autoPr && !(await postLoopPr())) return 'continue'
+      if (config.autoPr && !(await postLoopPr())) {
+        gateWaitTarget = 'pull request promotion'
+        return 'continue'
+      }
       cleanupSessionState()
       return 'done'
     }
 
     const emptyScans = readCount(emptyScanFile)
     if (emptyScans >= config.maxEmptyScans) {
-      if (config.autoPr && !(await postLoopPr())) return 'continue'
+      if (config.autoPr && !(await postLoopPr())) {
+        gateWaitTarget = 'pull request promotion'
+        return 'continue'
+      }
       cleanupSessionState()
       return 'done'
     }
@@ -1441,6 +1470,7 @@ export function createLoop(deps: LoopDeps) {
 
   /** One poll iteration. Returns 'stopped' | 'done' | 'continue' | 'restart'. */
   async function poll(): Promise<'stopped' | 'done' | 'continue' | 'restart'> {
+    gateWaitTarget = undefined
     const currentBranch = git(['branch', '--show-current']).trim()
     const recordedBranch = existsSync(runBranchFile)
       ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
@@ -1813,7 +1843,24 @@ export function createLoop(deps: LoopDeps) {
         ? [`Running=${runningTasks}`, `Queue=${queue}`]
         : []),
     ]
-    event('Status', counters.join('  '))
+    const waitingFor = [
+      ...(scans > 0 ? ['unfinished scan'] : []),
+      ...(runningTasks > 0 ? ['unfinished task'] : []),
+      ...(queue > 0 ? ['worker capacity'] : []),
+    ]
+    if (waitingFor.length === 0) {
+      if (gateWaitTarget !== undefined) waitingFor.push(gateWaitTarget)
+      else if (config.workerMode) waitingFor.push('open finding')
+      else if (config.issueQueueEnabled && openFindings === null) waitingFor.push('finding status')
+      else if (config.issueQueueEnabled && (openFindings?.length ?? 0) > 0) {
+        waitingFor.push('open finding')
+      } else if (config.scanEnabled) waitingFor.push('next scan')
+      else if (config.autoPr) waitingFor.push('pull request promotion')
+    }
+    event('Status', [
+      ...counters,
+      ...(waitingFor.length > 0 ? [`Waiting=${waitingFor.join(', ')}`] : []),
+    ].join('  '))
     return 'continue'
   }
 
