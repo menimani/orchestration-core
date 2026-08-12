@@ -5,13 +5,15 @@ import type { RunnerStartOptions } from '../src/adapters/runner.ts'
 
 const mocks = vi.hoisted(() => ({
   closeSync: vi.fn(),
+  existsSync: vi.fn((_path: string) => false),
   openSync: vi.fn(() => 42),
-  readFileSync: vi.fn(() => 'task specification'),
+  readFileSync: vi.fn((_path: string, _encoding: string) => 'task specification'),
   spawn: vi.fn(),
 }))
 
 vi.mock('node:fs', () => ({
   closeSync: mocks.closeSync,
+  existsSync: mocks.existsSync,
   openSync: mocks.openSync,
   readFileSync: mocks.readFileSync,
 }))
@@ -43,6 +45,7 @@ function mockChild(pid: number | undefined = 1234): EventEmitter & {
 
 beforeEach(() => {
   mocks.closeSync.mockReset()
+  mocks.existsSync.mockReset().mockReturnValue(false)
   mocks.openSync.mockReset().mockReturnValue(42)
   mocks.readFileSync.mockReset().mockReturnValue('task specification')
   mocks.spawn.mockReset()
@@ -98,19 +101,60 @@ describe('createCodexRunner', () => {
       'description: Example.',
       '---',
       '',
-      'Skills live in `.agents/skills/<name>/SKILL.md`.',
-      'Read `AGENTS.md` before continuing.',
+      'Skills live in `.claude/skills/<name>/SKILL.md`.',
+      'Read `CLAUDE.md` before continuing.',
       '',
       'Run `gh pr view <pr-number> --json title` and use its output as context before continuing.',
       '',
-      'Run `$git-review`, then npm run -C orchestration/ts loop-status.',
+      'Run a direct review of the changes, then npm run -C orchestration/ts loop-status.',
       '',
     ].join('\n'))
   })
 
+  it('uses Codex guidance and skill references only when their files are available', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    mocks.existsSync.mockImplementation((path) => path === join(repoRoot, 'AGENTS.md')
+      || path === join(packageRoot, 'skills', 'git-review', 'SKILL.md'))
+    mocks.readFileSync.mockImplementation((path) => path === join(
+      packageRoot, 'skills', 'manifest.json',
+    ) ? JSON.stringify({ skills: ['git-review'] }) : 'task specification')
+
+    const rendered = createCodexRunner().sharedSkills.renderFile(
+      Buffer.from(
+        'Read `CLAUDE.md` and `.claude/skills/git-review/SKILL.md`, then run `/git-review` and `/verify-changes`.\n',
+      ),
+      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+    ).toString('utf8')
+
+    expect(rendered).toBe(
+      'Read `AGENTS.md` and `.agents/skills/git-review/SKILL.md`, then run `$git-review` and verification directly with the applicable repository commands.\n',
+    )
+  })
+
+  it('preserves explicit repository guidance and skill paths that already exist', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    const localSkill = join(repoRoot, '.claude', 'skills', 'verify-changes', 'SKILL.md')
+    mocks.existsSync.mockImplementation((path) => path === join(repoRoot, 'CLAUDE.md')
+      || path === localSkill)
+
+    const rendered = createCodexRunner().sharedSkills.renderFile(
+      Buffer.from('Read `CLAUDE.md` and `.claude/skills/verify-changes/SKILL.md`.\n'),
+      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+    ).toString('utf8')
+
+    expect(rendered)
+      .toBe('Read `CLAUDE.md` and `.claude/skills/verify-changes/SKILL.md`.\n')
+  })
+
   it('renders every complete shipped skill file for Codex', async () => {
     const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs')
+    mocks.existsSync.mockImplementation(actualFs.existsSync)
     const packageRoot = join(import.meta.dirname, '..')
+    mocks.readFileSync.mockImplementation((path) => path === join(
+      packageRoot, 'skills', 'manifest.json',
+    ) ? actualFs.readFileSync(path, 'utf8') : 'task specification')
     const manifest = JSON.parse(actualFs.readFileSync(
       join(packageRoot, 'skills', 'manifest.json'), 'utf8',
     )) as { commandPrefixPlaceholder: string; skills: string[] }

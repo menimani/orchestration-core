@@ -214,6 +214,56 @@ describe('pre-cycle core update', () => {
     expect(events).toContain('Updated skill refreshed loop-start')
   })
 
+  it('migrates and commits tracked legacy shared skill copies', async () => {
+    rmSync(join(repoRoot, '.agents'), { recursive: true })
+    commit(repoRoot, 'chore: remove current skill fixture')
+    syncSharedSkills(repoRoot, packageRoot, {
+      sharedSkills: {
+        ...fakeRunnerSharedSkills,
+        destinationRoot: (root) => join(root, '.claude', 'skills'),
+      },
+      start: async () => process.pid,
+    })
+    git(repoRoot, ['add', '-f', '--', '.claude/skills'])
+    commit(repoRoot, 'chore: install legacy skill fixture')
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('continue')
+    expect(existsSync(join(repoRoot, '.claude', 'skills', 'loop-start'))).toBe(false)
+    expect(existsSync(join(
+      repoRoot, '.claude', 'skills', '.orchestration-core-sync.json',
+    ))).toBe(false)
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe('version one: npm run -C orchestration/ts loop\n')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
+  })
+
+  it('preserves and reports a divergent tracked legacy shared skill', async () => {
+    syncSharedSkills(repoRoot, packageRoot, {
+      sharedSkills: {
+        ...fakeRunnerSharedSkills,
+        destinationRoot: (root) => join(root, '.claude', 'skills'),
+      },
+      start: async () => process.pid,
+    })
+    git(repoRoot, ['add', '-f', '--', '.claude/skills'])
+    commit(repoRoot, 'chore: install legacy skill fixture')
+    const legacySkill = join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md')
+    writeFileSync(legacySkill, 'consumer command\n')
+    commit(repoRoot, 'chore: customize legacy skill fixture')
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('continue')
+    expect(readFileSync(legacySkill, 'utf8').replaceAll('\r', '')).toBe('consumer command\n')
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
+    expect(events).toContain(
+      'WARN legacy shared skill .claude/skills/loop-start differs from the last synced copy; left unchanged',
+    )
+  })
+
   it('pulls core changes but preserves and reports a committed consumer skill divergence', async () => {
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     writeFileSync(installed, 'consumer command\n')

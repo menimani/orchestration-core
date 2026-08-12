@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { closeSync, openSync, readFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { packageCommandPrefix } from '../paths.ts'
 import type {
@@ -32,10 +32,36 @@ function renderSharedSkillFile(
   let text = contents.toString('utf8')
   const argumentHint = /^argument-hint:\s*["']?(.+?)["']?\s*$/m.exec(text)?.[1]
     ?? '<arguments from the request>'
+  let declaredSharedSkills: string[] = []
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(options.packageRoot, 'skills', 'manifest.json'), 'utf8'),
+    ) as { skills?: unknown }
+    if (Array.isArray(manifest.skills)) {
+      declaredSharedSkills = manifest.skills.filter((skill): skill is string =>
+        typeof skill === 'string')
+    }
+  } catch {
+    // A missing or invalid manifest means no package skill can be assumed installed.
+  }
+  const skillAvailable = (skill: string): boolean =>
+    existsSync(join(options.repoRoot, '.agents', 'skills', skill, 'SKILL.md'))
+      || (declaredSharedSkills.includes(skill)
+        && existsSync(join(options.packageRoot, 'skills', skill, 'SKILL.md')))
+  const guidanceFile = existsSync(join(options.repoRoot, 'CLAUDE.md'))
+    || !existsSync(join(options.repoRoot, 'AGENTS.md'))
+    ? 'CLAUDE.md'
+    : 'AGENTS.md'
   text = text
     .replaceAll(options.commandPrefixPlaceholder, commandPrefix)
-    .replaceAll('.claude/skills', '.agents/skills')
-    .replaceAll('CLAUDE.md', 'AGENTS.md')
+    .replaceAll('CLAUDE.md', guidanceFile)
+    .replace(
+      /\.claude\/skills\/([a-z][a-z0-9]*(?:-[a-z0-9]+)+)(\/SKILL\.md)?/g,
+      (reference, skill: string, suffix = '') => {
+        if (existsSync(join(options.repoRoot, ...reference.split('/')))) return reference
+        return skillAvailable(skill) ? `.agents/skills/${skill}${suffix}` : reference
+      },
+    )
     .replaceAll('$ARGUMENTS', argumentHint)
     .replace(/^(?:argument-hint|allowed-tools|disable-model-invocation):[^\r\n]*(?:\r?\n)/gm, '')
     .replace(
@@ -43,16 +69,22 @@ function renderSharedSkillFile(
       (_line, indentation: string, command: string) =>
         `${indentation}Run \`${command}\` and use its output as context before continuing.`,
     )
-    .replace(/(^|[\s(—`])\/([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\b/g, '$1$$$2')
+    .replace(
+      /(^|[\s(—])(`?)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\2(?=$|[\s.,;:)—])/gm,
+      (_invocation, prefix: string, quote: string, skill: string) => {
+        if (skillAvailable(skill)) return `${prefix}${quote}$${skill}${quote}`
+        const directInstruction = skill === 'verify-changes'
+          ? 'verification directly with the applicable repository commands'
+          : skill === 'git-review'
+            ? 'a direct review of the changes'
+            : `the ${skill} workflow directly`
+        return `${prefix}${directInstruction}`
+      },
+    )
   return Buffer.from(text)
 }
 
-export interface CodexRunnerOptions {
-  /** Test hook for comparing Windows process creation modes; production leaves it absent. */
-  windowsHide?: boolean
-}
-
-export function createCodexRunner(runnerOptions: CodexRunnerOptions = {}): Runner {
+export function createCodexRunner(): Runner {
   return {
     sharedSkills: {
       destinationRoot: (repoRoot) => join(repoRoot, '.agents', 'skills'),
@@ -91,9 +123,6 @@ export function createCodexRunner(runnerOptions: CodexRunnerOptions = {}): Runne
             cwd: options.worktree,
             detached: true,
             stdio: ['ignore', logFd, logFd],
-            ...(runnerOptions.windowsHide === undefined
-              ? {}
-              : { windowsHide: runnerOptions.windowsHide }),
           })
         } catch (error) {
           closeLogFd()
