@@ -6,6 +6,7 @@
     "git-pr",
     "git-review",
     "loop-delegate",
+    "loop-setup",
     "loop-start",
     "loop-stop",
     "skill-create"
