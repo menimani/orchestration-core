@@ -8,12 +8,12 @@ allowed-tools: Bash, Read
 
 Current state:
 
-!`npm run loop-status`
+!`{{ORCHESTRATION_COMMAND_PREFIX}} loop-status`
 
 ## Stopping
 
 ```bash
-npm run stop
+{{ORCHESTRATION_COMMAND_PREFIX}} stop
 ```
 
 This writes a stop file. The loop notices it on its next poll, so it exits within
@@ -28,14 +28,14 @@ position once the loop is gone.
 For each one, either wait for it and merge by hand:
 
 ```bash
-npm run logs -- <task-id>
-npm run merge -- <task-id> --yes
+{{ORCHESTRATION_COMMAND_PREFIX}} logs -- <task-id>
+{{ORCHESTRATION_COMMAND_PREFIX}} merge -- <task-id> --yes
 ```
 
 or abandon it:
 
 ```bash
-npm run cleanup -- <task-id>
+{{ORCHESTRATION_COMMAND_PREFIX}} cleanup -- <task-id>
 ```
 
 `cleanup` removes the worktree and its branch. Look at the log first — a task that

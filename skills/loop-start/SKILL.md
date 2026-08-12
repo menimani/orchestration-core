@@ -9,7 +9,7 @@ allowed-tools: Bash, Read
 
 Current state:
 
-!`npm run loop-status`
+!`{{ORCHESTRATION_COMMAND_PREFIX}} loop-status`
 
 ## Before starting
 
@@ -21,7 +21,7 @@ The loop commits and merges on its own, so start it on a topic branch, never on 
 ## Starting
 
 ```bash
-npm run loop -- --daemon
+{{ORCHESTRATION_COMMAND_PREFIX}} loop -- --daemon
 ```
 
 `--daemon` is what puts it in the background; without it the loop holds the terminal.
@@ -59,7 +59,7 @@ The daemon holds the code it started with. **Editing the loop source under `src`
 nothing until the loop is restarted**, and reporting that a fix took effect without
 restarting is how a fix gets credited that never ran.
 
-Follow it with `npm run queue`, or read
+Follow it with `{{ORCHESTRATION_COMMAND_PREFIX}} queue`, or read
 `orchestration/logs/loop.log`. Per-task output is in `orchestration/logs/<task-id>.log`,
 and merge output — including the tests run before each merge — in `<task-id>.merge.log`.
 

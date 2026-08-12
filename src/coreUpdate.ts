@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { isAbsolute, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
+import { syncSharedSkills } from './sharedSkills.ts'
 
 export type CoreUpdateOutcome = 'continue' | 'restart'
 
@@ -56,9 +57,65 @@ function fetchRemote(remote: string): string {
     : remote
 }
 
-function warn(event: CoreUpdateEvent, message: string): CoreUpdateOutcome {
+function warn(event: CoreUpdateEvent, message: string): void {
   event('WARN', message)
-  return 'continue'
+}
+
+function syncSkills(
+  repoRoot: string,
+  packageRoot: string,
+  isConsumer: boolean,
+  event: CoreUpdateEvent,
+  runtime: CoreUpdateRuntime,
+): void {
+  let result: ReturnType<typeof syncSharedSkills>
+  try {
+    result = syncSharedSkills(repoRoot, packageRoot)
+  } catch (error) {
+    event('WARN', `shared skill sync failed: ${summary(error)}`)
+    return
+  }
+  for (const skill of result.conflicts) {
+    event('WARN', `shared skill ${skill} differs from the last synced copy; left unchanged`)
+  }
+  if (isConsumer) {
+    const managed = result.managedPaths.map((path) => {
+      const repositoryPath = relative(repoRoot, path)
+      if (repositoryPath === '' || repositoryPath === '..'
+        || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
+        throw new Error(`shared skill output escaped the repository: ${path}`)
+      }
+      return repositoryPath.replaceAll('\\', '/')
+    })
+    try {
+      if (managed.length > 0) {
+        const alreadyStaged = runtime.git(repoRoot, [
+          'diff', '--cached', '--name-only', '--', ...managed,
+        ]).trim()
+        if (alreadyStaged !== '') {
+          event('WARN',
+            `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
+          return
+        }
+        runtime.git(repoRoot, ['add', '-f', '--', ...managed])
+        const staged = runtime.git(repoRoot, [
+          'diff', '--cached', '--name-only', '--', ...managed,
+        ]).trim()
+        if (staged !== '') {
+          runtime.git(repoRoot, [
+            'commit', '-m', 'chore: sync shared orchestration skills', '--', ...managed,
+          ])
+        }
+      }
+    } catch (error) {
+      event('WARN', `shared skill sync could not be committed: ${summary(error)}`)
+      return
+    }
+  }
+
+  if (result.changedPaths.length === 0) return
+  for (const skill of result.installed) event('Updated', 'skill', `installed ${skill}`)
+  for (const skill of result.updated) event('Updated', 'skill', `refreshed ${skill}`)
 }
 
 /**
@@ -75,12 +132,23 @@ export async function updateCoreBeforeCycle(
 ): Promise<CoreUpdateOutcome> {
   if (!config.coreAutoUpdate) return 'continue'
 
-  const prefix = subtreePrefix(paths.repoRoot, runtime.packageRoot ?? PACKAGE_ROOT)
+  const packageRoot = runtime.packageRoot ?? PACKAGE_ROOT
+  const prefix = subtreePrefix(paths.repoRoot, packageRoot)
   // The core repository itself and a CLI aimed at another checkout are not subtree
-  // consumers. There is no prefix to update in either case.
-  if (prefix === undefined) return 'continue'
+  // consumers. Only the owning repository receives local, ignored generated copies.
+  if (prefix === undefined) {
+    if (relative(paths.repoRoot, packageRoot) === '') {
+      syncSkills(paths.repoRoot, packageRoot, false, event, runtime)
+    }
+    return 'continue'
+  }
+  const finish = (outcome: CoreUpdateOutcome): CoreUpdateOutcome => {
+    syncSkills(paths.repoRoot, packageRoot, true, event, runtime)
+    return outcome
+  }
   if (config.upstreamRemote.trim() === '') {
-    return warn(event, 'core update skipped: UPSTREAM_REMOTE is not configured')
+    warn(event, 'core update skipped: UPSTREAM_REMOTE is not configured')
+    return finish('continue')
   }
 
   let imported: string | undefined
@@ -89,35 +157,41 @@ export async function updateCoreBeforeCycle(
       'log', '-1', '--format=%B', `--grep=git-subtree-dir: ${prefix}`, '--fixed-strings',
     ]), prefix)
   } catch (error) {
-    return warn(event, `core update check failed: ${summary(error)}`)
+    warn(event, `core update check failed: ${summary(error)}`)
+    return finish('continue')
   }
   if (imported === undefined) {
-    return warn(event, `core update skipped: ${prefix} has no git subtree import`)
+    warn(event, `core update skipped: ${prefix} has no git subtree import`)
+    return finish('continue')
   }
 
   const remote = fetchRemote(config.upstreamRemote.trim())
   try {
     runtime.git(paths.repoRoot, ['fetch', '--quiet', remote, config.upstreamBranch])
   } catch (error) {
-    return warn(event, `core update fetch failed: ${summary(error)}`)
+    warn(event, `core update fetch failed: ${summary(error)}`)
+    return finish('continue')
   }
 
   let upstream: string
   try {
     upstream = runtime.git(paths.repoRoot, ['rev-parse', 'FETCH_HEAD']).trim()
-    if (upstream === imported) return 'continue'
+    if (upstream === imported) return finish('continue')
     runtime.git(paths.repoRoot, ['merge-base', '--is-ancestor', imported, upstream])
   } catch {
-    return warn(event,
+    warn(event,
       `core update skipped: imported ${imported.slice(0, 8)} is not behind ${config.upstreamBranch}`)
+    return finish('continue')
   }
 
   try {
     if (runtime.git(paths.repoRoot, ['status', '--porcelain']).trim() !== '') {
-      return warn(event, 'core update skipped: working tree is dirty')
+      warn(event, 'core update skipped: working tree is dirty')
+      return finish('continue')
     }
   } catch (error) {
-    return warn(event, `core update status check failed: ${summary(error)}`)
+    warn(event, `core update status check failed: ${summary(error)}`)
+    return finish('continue')
   }
 
   const oldHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
@@ -131,9 +205,11 @@ export async function updateCoreBeforeCycle(
     } catch {
       // A subtree failure before merge creation has nothing to abort.
     }
-    return warn(event, `core update pull conflicted; continuing on old code: ${summary(error)}`)
+    warn(event, `core update pull conflicted; continuing on old code: ${summary(error)}`)
+    return finish('continue')
   }
 
+  syncSkills(paths.repoRoot, packageRoot, true, event, runtime)
   const newHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   const changed = runtime.git(paths.repoRoot, [
     'diff', '--name-only', oldHead, newHead, '--', prefix,

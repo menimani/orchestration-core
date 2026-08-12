@@ -1,5 +1,18 @@
 node_modules/
 
+# Shared skills are generated from skills/ for this repository too. Keeping the
+# generated root copies untracked prevents them becoming discoverable nested skills
+# when this package is imported as a subtree.
+/.claude/skills/.orchestration-core-sync.json
+/.claude/skills/git-commit/
+/.claude/skills/git-merge/
+/.claude/skills/git-pr/
+/.claude/skills/git-review/
+/.claude/skills/loop-delegate/
+/.claude/skills/loop-start/
+/.claude/skills/loop-stop/
+/.claude/skills/skill-create/
+
 # Loop state: queues, logs, worktrees and task files are per-checkout runtime data.
 orchestration/queue/
 orchestration/logs/
