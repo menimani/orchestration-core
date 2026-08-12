@@ -1882,6 +1882,29 @@ describe('completion marker output', () => {
     expect(updatePr).toHaveBeenCalledOnce()
   })
 
+  it('retries the cycle gate when the PR status cannot be read', async () => {
+    configureLocalRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ autoPr: true, reviewEnabled: true, autoReview: false })
+    let reads = 0
+    fakeForge.prStatus = async () => {
+      if (reads++ === 0) throw new Error('status read failed')
+      return forgeStatus
+    }
+    fakeForge.prBody = async () => GENERATED_BODY_MARKER
+    const updatePr = vi.fn(async () => {})
+    fakeForge.updatePr = updatePr
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(logText()).toContain('WARN could not check PR status: status read failed')
+    expect(updatePr).not.toHaveBeenCalled()
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(updatePr).toHaveBeenCalledOnce()
+  })
+
   it('waits for the default branch fetch before completing the cycle', async () => {
     configureLocalRemote()
     git(['switch', '-c', 'feature/fetch-retry'])
