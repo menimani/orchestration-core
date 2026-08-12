@@ -9,8 +9,9 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
-  buildIssueBody, issuePromotionForIssue, recordIssueForTask, recordIssuePromotion,
-  LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
+  buildIssueBody, issueNumbersForTask, issuePromotionForIssue, recordIssueForTask,
+  recordIssuePromotion, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
+  LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
@@ -263,6 +264,79 @@ describe('status file safety', () => {
 })
 
 describe('forge poll budget', () => {
+  it('claims ready findings for the same titled file as one task', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const requirements = [
+      '[BUG] `src/shared.ts` narrows the stored value incorrectly',
+      '[BUG] `src/shared.ts` emits the narrowed value incorrectly',
+    ]
+    const issueNumbers = await Promise.all(requirements.map((requirement) =>
+      fakeForge.createIssue({
+        title: requirement,
+        body: buildIssueBody(requirement, 'scan-task'),
+        labels: [LABEL_FINDING, LABEL_READY],
+      })))
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(1)
+    const taskId = runnerStarts[0]!.replace(/^.*[\\/]/, '').replace(/\.md$/, '')
+    expect(issueNumbersForTask(paths, taskId)).toEqual(issueNumbers)
+    const spec = readFileSync(join(paths.tasksDir, `${taskId}.md`), 'utf8')
+    expect(spec.indexOf(requirements[0]!)).toBeLessThan(spec.indexOf(requirements[1]!))
+    expect(spec).toContain(`REQUIREMENT_COMPLETE: #${issueNumbers[0]}`)
+    expect(spec).toContain(`REQUIREMENT_COMPLETE: #${issueNumbers[1]}`)
+    for (const issueNumber of issueNumbers) {
+      expect((await fakeForge.getIssue(issueNumber)).labels).toContain(LABEL_IN_PROGRESS)
+    }
+  })
+
+  it('returns every failed group member as singleton-ready work', async () => {
+    initializeGitRepo()
+    let starts = 0
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async () => {
+        if (starts++ > 0) throw new Error('do not restart during this test')
+        return process.pid
+      },
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1 },
+      stubProject, undefined, undefined, runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const requirements = [
+      '[BUG] `src/shared.ts` first grouped failure',
+      '[TEST] `src/shared.ts` second grouped failure',
+    ]
+    const issueNumbers = await Promise.all(requirements.map((requirement) =>
+      fakeForge.createIssue({
+        title: requirement,
+        body: buildIssueBody(requirement, 'scan-task'),
+        labels: [LABEL_FINDING, LABEL_READY],
+      })))
+
+    await loop.poll()
+    const failedTaskId = readdirSync(paths.statusDir)[0]!.replace(/\.json$/, '')
+    writeRawStatus(failedTaskId, 'failed')
+    await loop.poll()
+
+    for (const issueNumber of issueNumbers) {
+      const issue = await fakeForge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_GROUP_SINGLETON)
+      expect(issue.labels).toContain(LABEL_READY)
+      expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+      expect(issue.assignees).toEqual([])
+    }
+    expect(existsSync(join(paths.tasksDir, `${failedTaskId}.md`))).toBe(false)
+    expect(logText()).toContain('grouped task failed')
+  })
+
   it('warns with the outsider login and leaves an untrusted issue unclaimed', async () => {
     initializeGitRepo()
     const loop = makeLoop({

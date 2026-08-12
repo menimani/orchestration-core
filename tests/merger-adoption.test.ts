@@ -8,7 +8,8 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
 import {
-  issuePromotionForIssue, LABEL_FINDING, LABEL_MERGE_FAILED, LABEL_MERGE_READY,
+  issuePromotionForIssue, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_MERGE_FAILED,
+  LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { createLoop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
@@ -95,6 +96,92 @@ afterEach(() => {
 })
 
 describe('remote task adoption', () => {
+  it('adopts one grouped branch and links the merge to every reported issue', async () => {
+    const task = pushWorkerBranch('20260809_000000_002_auto-grouped-remote-fix')
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })))
+    const issueList = issueNumbers.map((number) => `#${number}`).join(' ')
+    await Promise.all(issueNumbers.map((issueNumber) => forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${task.branch}\nHead commit: ${task.head}\nIssues: ${issueList}`)))
+    forge.issueClosingCommitMessage = (message, issueNumber) => `${message} (closes #${issueNumber})`
+
+    expect(await makeLoop(stubProject).poll()).toBe('continue')
+
+    const mergeCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim())
+      .toContain(`(closes #${issueNumbers[0]}) (closes #${issueNumbers[1]})`)
+    for (const issueNumber of issueNumbers) {
+      expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({ mergeCommit })
+      expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+    }
+    expect(logged.filter((line) => line.startsWith('Merged '))).toHaveLength(1)
+  })
+
+  it('returns every member of an abandoned remote group as singleton-ready', async () => {
+    const branch = 'task/20260809_000000_099_auto-missing-group'
+    const head = 'a'.repeat(40)
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'failed grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+      assignees: ['worker-a'],
+    })))
+    const issueList = issueNumbers.map((number) => `#${number}`).join(' ')
+    await Promise.all(issueNumbers.map((issueNumber) => forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}\nIssues: ${issueList}`)))
+
+    await makeLoop(stubProject).poll()
+
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_READY)
+      expect(issue.labels).toContain(LABEL_GROUP_SINGLETON)
+      expect(issue.labels).not.toContain(LABEL_MERGE_READY)
+      expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+      expect(issue.assignees).toEqual([])
+    }
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('1')
+  })
+
+  it('retries a partial release until every member leaves grouped adoption', async () => {
+    const branch = 'task/20260809_000000_098_auto-partial-group'
+    const head = 'b'.repeat(40)
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'partially released grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+      assignees: ['worker-a'],
+    })))
+    const issueList = issueNumbers.map((number) => `#${number}`).join(' ')
+    await Promise.all(issueNumbers.map((issueNumber) => forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}\nIssues: ${issueList}`)))
+    const addLabel = forge.addLabel.bind(forge)
+    let failed = false
+    forge.addLabel = async (issueNumber, label) => {
+      if (!failed && issueNumber === issueNumbers[1] && label === LABEL_READY) {
+        failed = true
+        throw new Error('temporary release failure')
+      }
+      await addLabel(issueNumber, label)
+    }
+    const loop = makeLoop(stubProject)
+
+    await loop.poll()
+    expect((await forge.getIssue(issueNumbers[0]!)).labels).toContain(LABEL_READY)
+    expect((await forge.getIssue(issueNumbers[1]!)).labels).toContain(LABEL_MERGE_READY)
+
+    await loop.poll()
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_GROUP_SINGLETON)
+      expect(issue.labels).not.toContain(LABEL_MERGE_READY)
+      if (issue.labels.includes(LABEL_READY)) expect(issue.assignees).toEqual([])
+    }
+  })
+
   it('guarded-merges a worker branch and records a later failed adoption', async () => {
     git(repoRoot, ['remote', 'rename', 'origin', 'shared'])
     const task = pushWorkerBranch('20260809_000000_003_auto-remote-fix')

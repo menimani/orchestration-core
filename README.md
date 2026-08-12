@@ -165,7 +165,10 @@ git subtree pull --prefix=orchestration/ts \
 
 With `ISSUE_QUEUE_ENABLED=true` the backlog moves to forge issues: findings are filed once
 per fingerprint, workers claim by self-assignment, quiet claims are reaped after a lease,
-and the merge commit closes the issue. A second machine runs execution-only with
+and the merge commit closes the issue. Ready titles naming the same primary file are claimed
+in groups of up to four; no-path titles remain singletons, and failed groups retry as
+individual findings. Each grouped requirement needs its own completion marker before the
+branch can merge and close every linked issue. A second machine runs execution-only with
 `worker <base-ref>` — it claims and executes, pushes finished branches, and never scans,
 reviews, or merges. Exactly one ordinary daemon owns the branch and adopts those pushes.
 

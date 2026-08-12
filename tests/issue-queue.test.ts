@@ -8,11 +8,14 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ForgeIssue } from '../src/adapters/forge.ts'
 import {
-  buildIssueBody, claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
-  fingerprintOf, heartbeatIssueForTask, issueNumberForTask, parseIssueBody,
+  buildIssueBody, claimIssue, claimIssueGroup, closeIssueAndRemoveLifecycleLabels,
+  commentOnIssueMerge, fingerprintOf, groupReadyFindings, heartbeatIssueForTask,
+  issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  missingRequirementCompletionMarkers, parseIssueBody,
   publishDelegatedTask, publishFinding, reapStaleLeases,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints, recordIssueForTask,
-  recordIssuePromotion, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
+  recordIssuesForTask, recordIssuePromotion, recordIssuePromotions, LABEL_FINDING,
+  LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc } from '../src/ids.ts'
@@ -82,6 +85,38 @@ describe('fingerprintOf', () => {
     expect(a).toBe(b)
     expect(a).not.toBe(c)
     expect(a.startsWith('text:')).toBe(true)
+  })
+})
+
+describe('ready finding groups', () => {
+  async function finding(title: string): Promise<ForgeIssue> {
+    const number = await forge.createIssue({ title, body: '', labels: [LABEL_FINDING, LABEL_READY] })
+    return forge.getIssue(number)
+  }
+
+  it('groups matching primary files in capped batches and leaves no-file titles single', async () => {
+    const sameFile = await Promise.all(Array.from({ length: 6 }, (_, index) =>
+      finding(`[BUG] \`src/shared.ts\` finding ${index + 1}`)))
+    const noFile = await finding('[BUG] finding without a path')
+    const otherFile = await finding('[TEST] `src/other.ts` lacks coverage')
+
+    expect(groupReadyFindings([...sameFile, noFile, otherFile]).map((group) =>
+      group.map((issue) => issue.number))).toEqual([
+      sameFile.slice(0, 4).map((issue) => issue.number),
+      sameFile.slice(4).map((issue) => issue.number),
+      [noFile.number],
+      [otherFile.number],
+    ])
+  })
+
+  it('does not regroup same-file findings released from a failed group', async () => {
+    const first = await finding('[BUG] `src/shared.ts` first retry')
+    const second = await finding('[TEST] `src/shared.ts` second retry')
+    first.labels.push(LABEL_GROUP_SINGLETON)
+    second.labels.push(LABEL_GROUP_SINGLETON)
+
+    expect(groupReadyFindings([first, second]).map((group) =>
+      group.map((issue) => issue.number))).toEqual([[first.number], [second.number]])
   })
 })
 
@@ -566,6 +601,63 @@ describe('claimIssue', () => {
     writeFileSync(join(paths.tasksDir, `${taskId}.md`),
       readFileSync(join(paths.tasksDir, `${taskId}.md`), 'utf8') + `\n${requirement}\n`)
   }
+
+  it('claims same-file findings into one task while preserving each requirement', async () => {
+    const descriptions = [
+      '[BUG] `src/a/b.ts` rejects an empty value',
+      '[TEST] `src/a/b.ts` lacks the empty-value regression',
+    ]
+    const issueNumbers = await Promise.all(descriptions.map(readyIssue))
+    const result = await claimIssueGroup(
+      forge,
+      paths,
+      await Promise.all(issueNumbers.map((number) => forge.getIssue(number))),
+      'worker-a',
+      (taskId, requirements) => writeFileSync(specFile(paths, taskId),
+        `${requirements.map(({ issueNumber, requirement }) =>
+          `#${issueNumber}: ${requirement}`).join('\n')}\n`),
+    )
+    if (result.outcome !== 'claimed') throw new Error(`expected a claim, got ${result.outcome}`)
+
+    expect(result.issueNumbers).toEqual(issueNumbers)
+    expect(issueNumbersForTask(paths, result.taskId)).toEqual(issueNumbers)
+    expect(readFileSync(specFile(paths, result.taskId), 'utf8')).toBe(
+      `${issueNumbers.map((number, index) => `#${number}: ${descriptions[index]}`).join('\n')}\n`,
+    )
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+      expect(issue.assignees).toEqual(['worker-a'])
+    }
+
+    expect(missingRequirementCompletionMarkers(paths, result.taskId)).toEqual(issueNumbers)
+    writeFileSync(join(paths.logsDir, `${result.taskId}.final`),
+      `REQUIREMENT_COMPLETE: #${issueNumbers[0]}\nREQUIREMENT_COMPLETE: #${issueNumbers[1]}\n`)
+    expect(missingRequirementCompletionMarkers(paths, result.taskId)).toEqual([])
+  })
+
+  it('releases earlier members when a grouped claim loses a later issue', async () => {
+    const issueNumbers = await Promise.all([
+      readyIssue('[BUG] `src/a/b.ts` loses the first member'),
+      readyIssue('[TEST] `src/a/b.ts` is already being claimed'),
+    ])
+    await forge.assignIssue(issueNumbers[1]!, 'worker-b')
+
+    const result = await claimIssueGroup(
+      forge,
+      paths,
+      await Promise.all(issueNumbers.map((number) => forge.getIssue(number))),
+      'worker-a',
+      () => {},
+    )
+
+    expect(result).toEqual({ outcome: 'lost-race', issueNumber: issueNumbers[1] })
+    const released = await forge.getIssue(issueNumbers[0]!)
+    expect(released.labels).toContain(LABEL_READY)
+    expect(released.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(released.assignees).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
 
   it('claims a collaborator-authored issue and materializes its framed specification', async () => {
     const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks on empty input')
@@ -1069,6 +1161,27 @@ describe('reapStaleLeases', () => {
 
     expect(readdirSync(join(paths.queueDir, 'issue-promotion'))).toEqual([])
     expect(issueNumberForTask(paths, 'task-merged')).toBeUndefined()
+  })
+
+  it('keeps a grouped task map until every promoted issue has closed', async () => {
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `merged group ${index}`,
+      body: buildIssueBody(`[BUG] \`a/b.ts\` grouped ${index}`, 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
+    })))
+    recordIssuesForTask(paths, 'task-grouped', issueNumbers)
+    recordIssuePromotions(paths, 'task-grouped', 'abc123', 'feature/run-9')
+    await forge.closeIssue(issueNumbers[0]!, 'partially promoted')
+
+    await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
+
+    expect(issueNumbersForTask(paths, 'task-grouped')).toEqual(issueNumbers)
+    expect(issuePromotionForIssue(paths, issueNumbers[1]!)).toBeDefined()
+
+    await forge.closeIssue(issueNumbers[1]!, 'fully promoted')
+    await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
+    expect(issueNumbersForTask(paths, 'task-grouped')).toEqual([])
   })
 
   it('reaps a stale mapped lease when its local task is not merged', async () => {

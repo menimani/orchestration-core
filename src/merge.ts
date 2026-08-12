@@ -37,6 +37,8 @@ export interface MergeOptions {
    * closes the issue when the commit lands on the default branch.
    */
   closesIssue?: number | undefined
+  /** All issues resolved by a grouped task; takes precedence over closesIssue. */
+  closesIssues?: readonly number[] | undefined
   /** Required for a linked issue; the core does not know forge-specific closing syntax. */
   forge?: Pick<Forge, 'issueClosingCommitMessage'> | undefined
   /**
@@ -342,12 +344,16 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   }
 
   const baseMergeMessage = `Merge ${taskId} via orchestration`
-  if (options.closesIssue !== undefined && options.forge === undefined) {
+  const closingIssues = options.closesIssues ?? (options.closesIssue === undefined
+    ? []
+    : [options.closesIssue])
+  if (closingIssues.length > 0 && options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
-  const mergeMessage = options.closesIssue === undefined
-    ? baseMergeMessage
-    : options.forge!.issueClosingCommitMessage(baseMergeMessage, options.closesIssue)
+  const mergeMessage = closingIssues.reduce(
+    (message, issueNumber) => options.forge!.issueClosingCommitMessage(message, issueNumber),
+    baseMergeMessage,
+  )
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
@@ -458,7 +464,11 @@ export async function mergeRemoteTask(
   if (options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
-  const mergeMessage = options.forge.issueClosingCommitMessage(baseMergeMessage, issueNumber)
+  const closingIssues = options.closesIssues ?? [issueNumber]
+  const mergeMessage = closingIssues.reduce(
+    (message, closingIssue) => options.forge!.issueClosingCommitMessage(message, closingIssue),
+    baseMergeMessage,
+  )
   try {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     try {
