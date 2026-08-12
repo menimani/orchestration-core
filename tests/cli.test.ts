@@ -19,8 +19,23 @@ const CLI = join(HERE, '..', 'src', 'cli.ts')
 // before anyone thought to look at the process list. A bound turns it into a failed test.
 const CLI_TIMEOUT_MS = 120_000
 
+// The loop reads its settings from the environment, so inheriting the caller's is enough
+// to change what the CLI under test does. An operator running the suite in a checkout
+// where a loop is started with `CORE_AUTO_UPDATE=false` made a test asserting
+// `auto-update on` fail, which then blocked every merge in that repository until the
+// variable was noticed. Only the settings a test sets deliberately may reach the child.
+const INHERITED_ENV = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => !isLoopSetting(name)),
+)
+
+function isLoopSetting(name: string): boolean {
+  return name === 'PROJECT' || name === 'PROJECT_ADAPTER' || name === 'FORGE'
+    || name === 'RUNNER' || name === 'UPSTREAM_REMOTE' || name === 'UPSTREAM_BRANCH'
+    || /^(CORE_|MAX_|SCAN_|TASK_|REVIEW_|ISSUE_|CI_|AUTO_|POLL_)/.test(name)
+}
+
 const CORE_ENV = {
-  ...process.env,
+  ...INHERITED_ENV,
   PROJECT: 'shiora',
   PROJECT_ADAPTER: join(HERE, 'fixtures', 'project-loader-fixture.ts'),
 }
@@ -275,7 +290,7 @@ describe('manually promoted run ending', () => {
 
     const result = spawnSync(process.execPath, [CLI, 'shipped', '322'], {
       cwd: repoRoot,
-      env: { ...process.env, MAX_SCAN_CYCLES: '3' },
+      env: { ...INHERITED_ENV, MAX_SCAN_CYCLES: '3' },
       encoding: 'utf8',
       windowsHide: true,
       timeout: CLI_TIMEOUT_MS,
@@ -296,7 +311,7 @@ describe('manually promoted run ending', () => {
 
     const result = spawnSync(process.execPath, [CLI, 'shipped', '323'], {
       cwd: repoRoot,
-      env: { ...process.env, MAX_SCAN_CYCLES: '8' },
+      env: { ...INHERITED_ENV, MAX_SCAN_CYCLES: '8' },
       encoding: 'utf8',
       windowsHide: true,
       timeout: CLI_TIMEOUT_MS,

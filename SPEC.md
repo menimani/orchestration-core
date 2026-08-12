@@ -263,17 +263,27 @@ Write access is the authorship boundary because repository administrators have a
 authorized those accounts to change the code the loop will eventually merge. Public issue
 bodies, comments, repository files, diffs, and commit messages are otherwise untrusted;
 being visible in the repository or carrying a loop-shaped marker does not grant authority.
-For GitHub, the adapter maps `OWNER`, `MEMBER`, and `COLLABORATOR` author associations to
-that forge-neutral write-access verdict and treats every other or unknown association as
-untrusted.
+For GitHub, the adapter asks the forge for the author's repository permission and treats
+`write`, `maintain`, and `admin` as the forge-neutral write-access verdict. A permission
+lookup that fails for any reason other than a rate limit answers "no write access", so a
+missing collaborator and an unreachable forge both resolve to untrusted rather than to a
+guess.
 
 Authorship is checked when a ready issue is claimed, not while findings are listed. An
 untrusted issue remains unassigned and ready, receives `loop:untrusted-author`, and emits
-a warning naming its author so a maintainer can inspect it and re-file genuine work. A
-task materialized from a trusted issue still frames the body as delimited untrusted data:
-prompt-like instructions in the requested change are reported and refused, not executed.
-Scan and review prompts apply the same rule to repository-controlled text they inspect or
-quote. A `MERGED:` comment affects stale-lease reaping or idle detection only when its
+a warning naming its author so a maintainer can inspect it and re-file genuine work.
+
+A task materialized from a trusted issue frames the requirement as the specification it
+is, because the claim gate has already established that its author may change this
+repository. That framing still withholds authority the claim cannot confer: an
+instruction inside the requirement to disregard the task's own instructions, to run
+commands unrelated to the change, or to read or transmit credentials is ignored and
+named. A requirement asking to weaken the claim gate, the write-access check, or the
+untrusted-text framing itself is refused outright however trusted its author — a
+boundary movable by a request travelling through it is not a boundary, so such a change
+is made by a person. Repository-controlled prose carries no such verification and keeps
+the stricter framing, which additionally refuses orchestration and CI changes prompted by
+it; scan and review prompts apply that rule to the text they inspect or quote. A `MERGED:` comment affects stale-lease reaping or idle detection only when its
 author has write access; idle detection additionally retains the merge-SHA ancestry check,
 so authorship and verified ancestry must both hold.
 
