@@ -417,14 +417,14 @@ export function createLoop(deps: LoopDeps) {
         const runBranch = git(['branch', '--show-current']).trim()
         recordIssueForTask(paths, taskId, issue.number)
         recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
+        const cycle = readCount(scanCountFile)
+        if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
         try {
           await updateAdoptedIssue(issue, taskId, mergeCommit, runBranch)
         } catch (error) {
           if (error instanceof ForgeRateLimitError) return
           event('WARN', `could not update adopted issue #${issue.number}: ${errorSummary(error)}`)
         }
-        const cycle = readCount(scanCountFile)
-        if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
       } catch (error) {
         if (error instanceof ForgeRateLimitError) return
