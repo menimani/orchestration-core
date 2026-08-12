@@ -20,7 +20,10 @@ concurrency:
 jobs:
   check:
     name: Typecheck and tests
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     # A draft pull request is not headed for merge yet, so it is not what CI is for.
     # Absent on a push, the expression is null and the job runs.
     if: github.event.pull_request.draft != true

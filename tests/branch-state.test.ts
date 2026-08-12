@@ -72,6 +72,11 @@ function assertPersistentState(): void {
 beforeEach(() => {
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-branch-'))
   execFileSync('git', ['init', '-q', '-b', 'current-branch'], { cwd: repoRoot })
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoRoot })
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoRoot })
+  execFileSync('git', ['commit', '--allow-empty', '-qm', 'chore: initial commit'], {
+    cwd: repoRoot,
+  })
   paths = orchPaths(repoRoot)
   logged = []
   runnerStarts = []
