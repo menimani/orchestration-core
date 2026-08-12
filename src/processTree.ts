@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { readdirSync, readFileSync } from 'node:fs'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
@@ -9,6 +10,44 @@ export interface ProcessTreeRuntime {
   kill(pid: number, signal?: NodeJS.Signals | number): void
   now(): number
   sleep(milliseconds: number): void
+  /**
+   * Whether any process in the group is running rather than merely existing, or
+   * `undefined` where the platform cannot say.
+   */
+  groupHasRunningMember?(processGroupId: number): boolean | undefined
+}
+
+/**
+ * A signal-0 probe answers for a zombie exactly as it does for a running process, so a
+ * terminated leader waiting to be reaped reads as alive until its parent collects it —
+ * long enough to spend the whole exit timeout and report a failure that already
+ * succeeded. `/proc` is the only place that distinguishes the two.
+ */
+function linuxGroupHasRunningMember(processGroupId: number): boolean | undefined {
+  let entries: string[]
+  try {
+    entries = readdirSync('/proc')
+  } catch {
+    return undefined
+  }
+
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    let stat: string
+    try {
+      stat = readFileSync(`/proc/${entry}/stat`, 'utf8')
+    } catch {
+      // The process exited between listing and reading; it is not a running member.
+      continue
+    }
+    // `comm` is parenthesised and may contain spaces, so fields are counted from the
+    // last ')': state is the first after it, process group the third.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    const state = fields[0]
+    const group = Number(fields[2])
+    if (group === processGroupId && state !== 'Z') return true
+  }
+  return false
 }
 
 export const systemProcessTreeRuntime: ProcessTreeRuntime = {
@@ -26,6 +65,9 @@ export const systemProcessTreeRuntime: ProcessTreeRuntime = {
   sleep: (milliseconds) => {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
   },
+  groupHasRunningMember: (processGroupId) => (
+    process.platform === 'linux' ? linuxGroupHasRunningMember(processGroupId) : undefined
+  ),
 }
 
 function processTreeTarget(runtime: ProcessTreeRuntime, pid: number): number {
@@ -51,11 +93,15 @@ export function processTreeIsAlive(
 ): boolean {
   try {
     runtime.kill(processTreeTarget(runtime, pid), 0)
-    return true
   } catch (error) {
     // A permission or other probe failure does not prove that the process stopped.
     return (error as NodeJS.ErrnoException).code !== 'ESRCH'
   }
+
+  if (runtime.platform === 'win32') return true
+  // The probe cannot tell a running member from one waiting to be reaped. Where the
+  // platform can, believe it; where it cannot, keep the probe's answer.
+  return runtime.groupHasRunningMember?.(pid) ?? true
 }
 
 /** Terminate a detached runner and every process in its tree. */
