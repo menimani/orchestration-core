@@ -1327,7 +1327,7 @@ describe('remote issue queue idle detection', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(logged).toContain('Waiting remote  issues #1')
-    expect(logged).toContain('Status Running=0  Queue=0  Waiting=open finding')
+    expect(logged).toContain('Status Running=0  Queue=0  Idle=0s  Waiting=open finding')
   })
 
   it('defers the cycle gate and review while a merge-failed issue is open', async () => {
@@ -1542,7 +1542,53 @@ describe('failure announcement and burst stop (via poll)', () => {
 
     expect(await loop.poll()).toBe('continue')
     expect(logText()).toMatch(
-      /^Status Running=\d+  Queue=\d+  Waiting=pull request promotion$/m,
+      /^Status Running=\d+  Queue=\d+  Idle=0s  Waiting=pull request promotion$/m,
+    )
+  })
+
+  it('ages and backs off idle status lines, then resets when work appears', async () => {
+    let current = new Date('2026-08-08T03:00:00Z')
+    const loop = makeLoop(
+      { scanEnabled: false, maxScanCycles: 6 },
+      stubProject,
+      undefined,
+      () => current,
+    )
+    const idleLines: Array<{ at: number; line: string }> = []
+
+    for (let poll = 0; poll <= 60; poll += 1) {
+      current = new Date(Date.parse('2026-08-08T03:00:00Z') + poll * 30_000)
+      const before = logged.length
+      expect(await loop.poll()).toBe('continue')
+      const status = logged.slice(before).find((line) => line.startsWith('Status '))
+      if (status !== undefined) idleLines.push({ at: current.getTime(), line: status })
+    }
+
+    expect(idleLines).toHaveLength(10)
+    expect(idleLines.at(-1)?.line).toContain('Idle=30m')
+    for (let index = 1; index < idleLines.length; index += 1) {
+      expect(idleLines[index]!.at - idleLines[index - 1]!.at)
+        .toBeLessThanOrEqual(5 * 60_000)
+    }
+
+    const taskId = '20260808_033030_001_auto-new-work'
+    writeRawStatus(taskId, 'running', process.pid)
+    current = new Date('2026-08-08T03:30:30Z')
+    const activeStart = logged.length
+    await loop.poll()
+    current = new Date('2026-08-08T03:31:00Z')
+    await loop.poll()
+    expect(logged.slice(activeStart).filter((line) => line.startsWith('Status ')))
+      .toEqual([
+        'Status Running=1  Queue=0',
+        'Status Running=1  Queue=0',
+      ])
+
+    rmSync(statusFile(paths, taskId))
+    current = new Date('2026-08-08T03:31:30Z')
+    await loop.poll()
+    expect(logged.at(-1)).toBe(
+      'Status Running=0  Queue=0  Idle=0s  Waiting=pull request promotion',
     )
   })
 

@@ -152,8 +152,12 @@ from or equivalent to `orchestration/tests/*.sh`.
     exits through the same path as the scan cap. An unavailable shared finding snapshot
     remains an external source whose state is unknown, so the gate waits. An idle continuing
     status names its wait target, such as an open finding or finding status that could not
-    be read; a status with a non-zero scan, running, or queue counter omits `Waiting=` because
-    the counters already explain why the poll continues.
+    be read. A continuing status with no scan, running task, or queued item carries the
+    current idle stretch as `Idle=<duration>`; repeated idle statuses back off from the
+    early milestones to a five-minute maximum interval, and any active work resets the
+    stretch. A status with a non-zero scan, running, or queue counter omits `Waiting=`
+    because the counters already explain why the poll continues and remains visible on
+    every poll.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to

@@ -78,6 +78,30 @@ interface FindingDispatch {
   reconciled: boolean
 }
 
+const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
+
+function formatIdleDuration(milliseconds: number): string {
+  const totalSeconds = Math.floor(milliseconds / 1000)
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes < 60) return `${minutes}m${seconds === 0 ? '' : `${seconds}s`}`
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return `${hours}h${remainingMinutes === 0 ? '' : `${remainingMinutes}m`}`
+}
+
+function nextIdleLogAge(milliseconds: number): number {
+  if (milliseconds < 30_000) return 30_000
+  if (milliseconds < 60_000) return 60_000
+  if (milliseconds < 2 * 60_000) return 2 * 60_000
+  return Math.max(
+    IDLE_LOG_MAX_INTERVAL_MS,
+    (Math.floor(milliseconds / IDLE_LOG_MAX_INTERVAL_MS) + 1)
+      * IDLE_LOG_MAX_INTERVAL_MS,
+  )
+}
+
 export function formatEventLine(name: string, subject = '', detail = ''): string {
   if (subject === '') return name
   if (detail === '') return `${name} ${subject}`
@@ -119,6 +143,11 @@ export function createLoop(deps: LoopDeps) {
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, { message: string; count: number }>()
   let gateWaitTarget: string | undefined
+  let idleLogState: {
+    startedAt: number
+    nextLogAge: number
+    detail: string
+  } | undefined
 
   function event(name: string, subject = '', detail = ''): void {
     if (name === 'WARN') {
@@ -2039,10 +2068,37 @@ export function createLoop(deps: LoopDeps) {
       } else if (config.scanEnabled) waitingFor.push('next scan')
       else if (config.autoPr) waitingFor.push('pull request promotion')
     }
-    event('Status', [
+    const statusParts = [
       ...counters,
       ...(waitingFor.length > 0 ? [`Waiting=${waitingFor.join(', ')}`] : []),
-    ].join('  '))
+    ]
+    const idle = scans === 0 && runningTasks === 0 && queue === 0
+    if (!idle) {
+      idleLogState = undefined
+      event('Status', statusParts.join('  '))
+      return 'continue'
+    }
+
+    const currentTime = now().getTime()
+    if (idleLogState === undefined || currentTime < idleLogState.startedAt) {
+      idleLogState = {
+        startedAt: currentTime,
+        nextLogAge: nextIdleLogAge(0),
+        detail: statusParts.join('  '),
+      }
+      statusParts.splice(counters.length, 0, 'Idle=0s')
+      event('Status', statusParts.join('  '))
+      return 'continue'
+    }
+
+    const idleAge = currentTime - idleLogState.startedAt
+    const detail = statusParts.join('  ')
+    if (detail !== idleLogState.detail || idleAge >= idleLogState.nextLogAge) {
+      idleLogState.detail = detail
+      idleLogState.nextLogAge = nextIdleLogAge(idleAge)
+      statusParts.splice(counters.length, 0, `Idle=${formatIdleDuration(idleAge)}`)
+      event('Status', statusParts.join('  '))
+    }
     return 'continue'
   }
 
