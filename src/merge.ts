@@ -305,6 +305,17 @@ export function removeTemporaryWorktree(
   removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
 }
 
+function stopCompletedRunner(pid: number): void {
+  try {
+    operatingSystem.terminateProcessTree(pid)
+    if (operatingSystem.processTreeIsAlive(pid)) {
+      throw new Error(`Process tree ${pid} is still alive.`)
+    }
+  } catch {
+    throw new MergeError(`Could not stop completed runner ${pid}; task state was retained.`)
+  }
+}
+
 /**
  * Merge a completed task into the current branch.
  * Uncommitted changes or a missing deliverable stop the merge and keep the worktree,
@@ -322,6 +333,7 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   if (status.status !== 'completed') {
     throw new MergeError(`Task status is not 'completed' (current: ${status.status}).`)
   }
+  if (status.pid !== null) stopCompletedRunner(status.pid)
 
   const worktree = worktreeDir(paths, taskId)
   const branch = branchName(taskId)

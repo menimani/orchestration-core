@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
-import type { OperatingSystem } from '../src/adapters/os.ts'
+import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
@@ -243,6 +243,51 @@ describe('mergeTask', () => {
     expect(existsSync(worktree)).toBe(false)
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
     expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('stops and verifies a completed runner with a live PID before merging', async () => {
+    const taskId = '20260808_000000_017_user-runner-finishes-output-first'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    const runnerPid = runner.pid
+    if (runnerPid === undefined) throw new Error('Runner did not publish a PID.')
+    runner.unref()
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+
+    try {
+      await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
+
+      expect(operatingSystem.processTreeIsAlive(runnerPid)).toBe(false)
+      expect(existsSync(worktree)).toBe(false)
+      expect(readStatus(paths, taskId)?.status).toBe('merged')
+      expect(readStatus(paths, taskId)?.pid).toBeNull()
+    } finally {
+      if (operatingSystem.processTreeIsAlive(runnerPid)) {
+        operatingSystem.terminateProcessTree(runnerPid)
+      }
+    }
+  })
+
+  it('keeps completed task state when the runner cannot be verified stopped', async () => {
+    const taskId = '20260808_000000_018_user-runner-resists-stop'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runnerPid = 12345
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
+      .rejects.toThrow(`Could not stop completed runner ${runnerPid}; task state was retained.`)
+
+    expect(terminate).toHaveBeenCalledWith(runnerPid)
+    expect(existsSync(worktree)).toBe(true)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).not.toBe('')
+    expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
   })
 
   it('leaves linked-issue closing syntax to the forge adapter', async () => {
