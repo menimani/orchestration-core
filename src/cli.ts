@@ -27,7 +27,7 @@ import {
   isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
 } from './paths.ts'
 import { pruneTasks } from './prune.ts'
-import { runPreCommitChecks } from './preCommit.ts'
+import { branchAcceptsCommits, runPreCommitChecks } from './preCommit.ts'
 import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
@@ -184,7 +184,9 @@ const cmdPreCommit: Command = async (paths, args) => {
     return 1
   }
   const project = await loadProject(paths.root)
-  return runPreCommitChecks(paths.repoRoot, project) ? 0 : 1
+  const ok = branchAcceptsCommits(paths.repoRoot)
+    && runPreCommitChecks(paths.repoRoot, project)
+  return ok ? 0 : 1
 }
 
 const cmdVerifySetup: Command = async (paths, args) => {

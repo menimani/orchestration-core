@@ -253,9 +253,10 @@ from or equivalent to `orchestration/tests/*.sh`.
     core executes the declarations and owns the generic behavior: Git history and diff
     collection, pull-request formatting, output capture, failure attribution, and stop
     decisions. Porting the orchestration to another repository means writing a project
-    adapter and nothing else. The core owns the commit-message hook and default-branch
-    guard; its pre-commit hook loads the adapter's `preCommitChecks` instead of embedding
-    a repository gate in shell.
+    adapter and nothing else. The core owns the commit-message hook and resolves the
+    default-branch guard from the tracking remote's advertised HEAD, failing closed when
+    it cannot; its pre-commit hook loads the adapter's `preCommitChecks` instead of
+    embedding repository branch names or a repository gate in shell.
 
     A consumer imports the core with one deliberate `git subtree add`, then uses `init`
     as the single setup and repair command. Init generates its adapter from the same
