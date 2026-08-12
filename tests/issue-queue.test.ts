@@ -17,6 +17,7 @@ import {
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc } from '../src/ids.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
+import { specFile } from '../src/tasks.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
@@ -746,6 +747,36 @@ describe('claimIssue', () => {
       expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
     },
   )
+
+  it('discards a partial task and its description index when requirements fail to append', async () => {
+    const description = '[BUG] `src/a/b.ts` fails while appending requirements'
+    const issueNumber = await readyIssue(description)
+    const issue = await forge.getIssue(issueNumber)
+    let failedTaskId: string | undefined
+
+    await expect(claimIssue(forge, paths, issue, 'worker-a', (taskId) => {
+      failedTaskId = taskId
+      writeFileSync(specFile(paths, taskId), 'partial requirement')
+      throw new Error('append failed')
+    })).rejects.toThrow('append failed')
+
+    if (failedTaskId === undefined) throw new Error('expected append to be attempted')
+    const released = await forge.getIssue(issueNumber)
+    expect(released.assignees).toEqual([])
+    expect(released.labels).toContain(LABEL_READY)
+    expect(released.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(existsSync(specFile(paths, failedTaskId))).toBe(false)
+    expect(existingTaskIdForDesc(paths, 'auto', description)).toBeUndefined()
+    expect(readdirSync(join(paths.queueDir, 'desc-index'))).toEqual([])
+
+    const retry = await claimIssue(
+      forge, paths, await forge.getIssue(issueNumber), 'worker-a', appendRequirement,
+    )
+    if (retry.outcome !== 'claimed') throw new Error(`expected a claim, got ${retry.outcome}`)
+    expect(retry.taskId).not.toBe(failedTaskId)
+    expect(readFileSync(specFile(paths, retry.taskId), 'utf8')).toContain(description)
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(retry.taskId)
+  })
 
   it('quarantines an unparseable issue with an actionable reason', async () => {
     const issueNumber = await forge.createIssue({
