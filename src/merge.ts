@@ -50,6 +50,11 @@ export interface MergeOptions {
   onOrchestrationDepsEvent?: OrchestrationDepsEvent | undefined
 }
 
+export interface RemoteMergeOptions extends MergeOptions {
+  /** Persist adoption before post-merge work begins or this function returns. */
+  onMerged?: ((mergeCommit: string) => void) | undefined
+}
+
 export interface OrchestrationDepsRuntime {
   install: (cwd: string) => void
   /**
@@ -437,7 +442,7 @@ export async function mergeRemoteTask(
   remote: string,
   branch: string,
   expectedHead: string,
-  options: MergeOptions,
+  options: RemoteMergeOptions,
 ): Promise<string> {
   if (!/^task\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(branch)) {
     throw new MergeError(`Issue #${issueNumber} reported an invalid task branch: ${branch}`)
@@ -508,6 +513,7 @@ export async function mergeRemoteTask(
       throw new MergeError(`A merge conflict occurred while adopting ${branch}.`)
     }
     const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+    options.onMerged?.(mergeCommit)
     syncOrchestrationDepsAfterMerge(
       paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     )
