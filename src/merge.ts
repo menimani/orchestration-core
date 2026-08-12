@@ -404,14 +404,14 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   }
 
   const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  // Publish the merge identity before any post-merge work. If dependency synchronization
+  // or later cleanup is interrupted, startup can retry it without attempting to merge
+  // commits that are already on the run branch or counting a false merge failure.
+  await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
+
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
   )
-
-  // Publish the merge identity before cleanup. If the process exits before the loop
-  // records/comments on a linked issue, the next process can finish reconciliation
-  // without attempting to merge commits that are already on the run branch.
-  await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
 
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
   // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
