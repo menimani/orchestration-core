@@ -51,6 +51,14 @@ function expectNoTemporaryWorktree(prefix: '.merge-' | '.adopt-'): void {
   expect(git(repoRoot, ['worktree', 'list', '--porcelain'])).not.toContain(prefix)
 }
 
+function repositoryState(): { head: string; status: string; worktrees: string } {
+  return {
+    head: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    status: git(repoRoot, ['status', '--porcelain']),
+    worktrees: git(repoRoot, ['worktree', 'list', '--porcelain']),
+  }
+}
+
 function windowsOperatingSystem(remove: (path: string, options: {
   force: true
   maxRetries?: 3
@@ -520,6 +528,90 @@ describe('mergeTask', () => {
 })
 
 describe('mergeRemoteTask', () => {
+  it('rejects a malformed task branch without changing HEAD or worktree state', async () => {
+    const before = repositoryState()
+
+    await expect(mergeRemoteTask(
+      paths,
+      222,
+      'origin',
+      'task/../outside',
+      before.head,
+      {
+        taskGate: 'light',
+        project: noCheckProject,
+        forge: { issueClosingCommitMessage: (message) => message },
+      },
+    )).rejects.toThrow('Issue #222 reported an invalid task branch: task/../outside')
+
+    expect(repositoryState()).toEqual(before)
+  })
+
+  it('rejects a malformed reported head without changing HEAD or worktree state', async () => {
+    const before = repositoryState()
+
+    await expect(mergeRemoteTask(
+      paths,
+      223,
+      'origin',
+      'task/remote-malformed-head',
+      'not-a-commit',
+      {
+        taskGate: 'light',
+        project: noCheckProject,
+        forge: { issueClosingCommitMessage: (message) => message },
+      },
+    )).rejects.toThrow('Issue #223 reported an invalid head commit: not-a-commit')
+
+    expect(repositoryState()).toEqual(before)
+  })
+
+  it('rejects a mismatched reported head without changing HEAD or worktree state', async () => {
+    const branch = 'task/remote-mismatched-head'
+    const reportedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const fetchedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, fetchedHead])
+    git(repoRoot, ['branch', '-D', branch])
+    const before = repositoryState()
+
+    await expect(mergeRemoteTask(paths, 224, 'origin', branch, reportedHead, {
+      taskGate: 'light',
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(
+      `Remote branch ${branch} is at ${fetchedHead}, not the reported ${reportedHead}.`,
+    )
+
+    expect(repositoryState()).toEqual(before)
+  })
+
+  it('rejects an already-merged branch without changing HEAD or worktree state', async () => {
+    const branch = 'task/remote-already-merged'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['merge', '--ff-only', branch])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    git(repoRoot, ['branch', '-D', branch])
+    const before = repositoryState()
+
+    await expect(mergeRemoteTask(paths, 225, 'origin', branch, expectedHead, {
+      taskGate: 'light',
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(`${branch} has no new commits relative to main.`)
+
+    expect(repositoryState()).toEqual(before)
+  })
+
   it('leaves issue-closing syntax to the forge adapter', async () => {
     const branch = 'task/remote-runner-neutral-message'
     git(repoRoot, ['switch', '-qc', branch])
