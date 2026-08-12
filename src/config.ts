@@ -106,6 +106,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
   }
   // SCAN_PARALLEL: checklist groups are defined up to 4, so higher values clamp.
   const scanParallel = Math.min(num(env, 'SCAN_PARALLEL', 2), 4)
+  if (scanParallel < 1) {
+    throw new Error('SCAN_PARALLEL must be at least 1')
+  }
   const issueQueueEnabled = bool(env, 'ISSUE_QUEUE_ENABLED', false)
   const workerMode = bool(env, 'WORKER_MODE', false)
   if (workerMode && !issueQueueEnabled) {
