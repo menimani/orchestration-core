@@ -788,18 +788,27 @@ describe('scan yield', () => {
     expect(readFileSync(join(paths.queueDir, 'scan-yield-3'), 'utf8')).toContain('empty')
   })
 
-  it('folds: findings reset the counter, all-empty increments once, no record leaves it alone', () => {
+  it('folds only a complete set of successful scan yields', () => {
     const loop = makeLoop({ maxEmptyScans: 2 })
     const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
 
+    writeFileSync(join(paths.queueDir, 'scan-expected-3'), '2\n')
     writeFileSync(join(paths.queueDir, 'scan-yield-3'), 'found\nempty\n')
     writeFileSync(emptyScanFile, '1\n')
     loop.foldScanYields(3)
     expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('0')
     expect(existsSync(join(paths.queueDir, 'scan-yield-3'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-3'))).toBe(false)
+
+    writeFileSync(join(paths.queueDir, 'scan-expected-4'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-4'), 'empty\n')
+    writeFileSync(emptyScanFile, '1\n')
+    loop.foldScanYields(4)
+    expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('1')
+    expect(existsSync(join(paths.queueDir, 'scan-yield-4'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-4'))).toBe(true)
 
     writeFileSync(join(paths.queueDir, 'scan-yield-4'), 'empty\nempty\n')
-    writeFileSync(emptyScanFile, '1\n')
     loop.foldScanYields(4)
     expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('2')
 
@@ -1029,8 +1038,11 @@ describe('cycleIsFinal', () => {
     const loop = makeLoop({ maxScanCycles: 6, maxEmptyScans: 2 })
     expect(loop.cycleIsFinal(6)).toBe(true)
     expect(loop.cycleIsFinal(3)).toBe(false)
-    writeFileSync(join(paths.queueDir, 'scan-yield-3'), 'empty\nempty\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-3'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-3'), 'empty\n')
     writeFileSync(join(paths.queueDir, 'empty-scan-count.txt'), '1\n')
+    expect(loop.cycleIsFinal(3)).toBe(false)
+    writeFileSync(join(paths.queueDir, 'scan-yield-3'), 'empty\nempty\n')
     expect(loop.cycleIsFinal(3)).toBe(true)
   })
 })
@@ -1042,6 +1054,8 @@ describe('cycle gate', () => {
     const loop = makeLoop({ scanParallel, autoPr: false, reviewEnabled: false })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-1'), 'utf8'))
+      .toBe(`${scanParallel}\n`)
 
     const scopes = readdirSync(paths.tasksDir)
       .filter((name) => name.endsWith('_scan.md'))
