@@ -30,7 +30,6 @@ describe('loadConfig', () => {
       taskGate: 'full',
       forge: 'github',
       runner: 'codex',
-      project: '',
       workerMode: false,
       coreAutoUpdate: true,
       upstreamRemote: 'menimani/orchestration-core',
