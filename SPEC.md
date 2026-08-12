@@ -49,11 +49,11 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 ## Task lifecycle
 
-1. A task is `running` while its runner process is alive, `completed` once
-   `TASK_COMPLETE` appears on its own line in the task's `.final` file (written by the
-   runner through its last-message output), and `failed` when the process is gone without
-   that marker. Markers in the transcript log are ignored — only the final-message file
-   is authoritative.
+1. A task is `completed` once `TASK_COMPLETE` appears on its own line in the task's
+   `.final` file (written by the runner through its last-message output), even if its
+   runner process is still alive. Without that marker, it remains `running` while the
+   process is alive and becomes `failed` when the process is gone. Markers in the
+   transcript log are ignored — only the final-message file is authoritative.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
    `scan` for scans and start with `ci-fix`, `auto-`, or `user-` for CI fixes, scan
    findings, and delegated work. Listings sort chronologically.
