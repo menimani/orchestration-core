@@ -463,6 +463,7 @@ export function createLoop(deps: LoopDeps) {
           throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
 
+        const runBranch = git(['branch', '--show-current']).trim()
         const mergeCommit = await mergeRemoteTask(
           paths,
           issue.number,
@@ -479,14 +480,19 @@ export function createLoop(deps: LoopDeps) {
             orchestrationDepsRuntime,
             onOrchestrationDepsEvent: orchestrationDepsEvent,
             closesIssues: adoptionIssues.map((candidate) => candidate.number),
+            onMerged: (mergedCommit) => {
+              writeFileSync(mergeFailureFile, '0\n')
+              recordIssuesForTask(
+                paths, taskId, adoptionIssues.map((candidate) => candidate.number),
+              )
+              recordIssuePromotions(paths, taskId, mergedCommit, runBranch)
+              const cycle = readCount(scanCountFile)
+              if (cycle > 0) {
+                rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+              }
+            },
           },
         )
-        writeFileSync(mergeFailureFile, '0\n')
-        const runBranch = git(['branch', '--show-current']).trim()
-        recordIssuesForTask(paths, taskId, adoptionIssues.map((candidate) => candidate.number))
-        recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
-        const cycle = readCount(scanCountFile)
-        if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
         try {
           await Promise.all(adoptionIssues.map((candidate) =>
             updateAdoptedIssue(candidate, taskId, mergeCommit, runBranch)))

@@ -12,6 +12,7 @@ import {
   LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { createLoop } from '../src/loop.ts'
+import type { OrchestrationDepsRuntime } from '../src/merge.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -45,7 +46,7 @@ async function mergeReadyIssue(branch: string, head: string): Promise<number> {
   return issueNumber
 }
 
-function makeLoop(project: ProjectAdapter) {
+function makeLoop(project: ProjectAdapter, orchestrationDepsRuntime?: OrchestrationDepsRuntime) {
   const loop = createLoop({
     paths,
     config: loadConfig({ ISSUE_QUEUE_ENABLED: 'true', SCAN_ENABLED: 'false' }),
@@ -54,6 +55,7 @@ function makeLoop(project: ProjectAdapter) {
     project,
     log: (line) => logged.push(line),
     now: () => new Date('2026-08-09T12:00:00Z'),
+    orchestrationDepsRuntime,
   })
   loop.initializeSessionStateForBranch()
   return loop
@@ -274,6 +276,30 @@ describe('remote task adoption', () => {
     expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
       .toHaveLength(1)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
+  })
+
+  it('persists adoption before post-merge dependency synchronization begins', async () => {
+    const task = pushWorkerBranch('20260809_000000_007_auto-persisted-before-return')
+    writeFileSync(join(workerRoot, 'package.json'), '{"private":true}\n')
+    git(workerRoot, ['add', 'package.json'])
+    git(workerRoot, ['commit', '-qm', 'chore: add worker package manifest'])
+    git(workerRoot, ['push', '-q', 'origin', task.branch])
+    task.head = git(workerRoot, ['rev-parse', 'HEAD']).trim()
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    let promotionDuringSync: ReturnType<typeof issuePromotionForIssue>
+
+    await makeLoop(stubProject, {
+      packageRoot: repoRoot,
+      install: () => {
+        promotionDuringSync = issuePromotionForIssue(paths, issueNumber)
+      },
+    }).adoptRemoteTasks()
+
+    expect(promotionDuringSync).toMatchObject({
+      issueNumber,
+      mergeCommit: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+      runBranch: 'main',
+    })
   })
 
   it('invalidates the completed cycle when a post-merge forge update is rate-limited', async () => {
