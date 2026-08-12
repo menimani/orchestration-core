@@ -83,7 +83,9 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 8. A merge aborts and keeps the worktree when the worktree holds uncommitted changes or
    no new commits — an agent that forgot to commit must not silently lose its work.
-   Scan tasks and `--inspect` tasks are exempt (investigation produces no commits).
+   Scan tasks and `--inspect` tasks are exempt (investigation produces no commits). A
+   completed task that still records a runner PID has its process tree stopped and
+   verified gone before the merge can discard that PID or remove the worktree.
 9. Pre-merge tests are chosen from the paths the worktree touched. `TASK_GATE=full`
    asks the project adapter for its full merge checks; `TASK_GATE=light` asks it for
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
