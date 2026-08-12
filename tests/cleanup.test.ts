@@ -2,6 +2,15 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { OperatingSystem } from '../src/adapters/os.ts'
+import {
+  createOperatingSystem as createPosixOperatingSystem,
+  type PosixOperatingSystemRuntime,
+} from '../src/adapters/os-posix.ts'
+import {
+  createOperatingSystem as createWindowsOperatingSystem,
+  type WindowsOperatingSystemRuntime,
+} from '../src/adapters/os-windows.ts'
 import { cleanupTask, type CleanupRuntime } from '../src/cleanup.ts'
 import { finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths } from '../src/paths.ts'
 
@@ -20,9 +29,8 @@ function seedTask(pid: number | null): void {
   writeFileSync(join(paths.queueDir, 'scanned', `${taskId}.failed`), '')
 }
 
-// These fixtures declare win32 so the Windows removal path is exercised on every host,
-// and that path prefixes the extended-length marker — meaningless to a Linux filesystem,
-// where rmSync would then silently remove nothing. Strip it before touching real files.
+// The Windows implementation prefixes the extended-length marker, which is meaningless
+// to a POSIX filesystem. Strip it before a fixture touches real files.
 function plainPath(path: string): string {
   if (!path.startsWith('\\\\?\\')) return path
   const withoutMarker = path.slice(4)
@@ -33,14 +41,8 @@ function plainPath(path: string): string {
 function makeRuntime(overrides: Partial<CleanupRuntime> = {}): CleanupRuntime {
   let worktreeRegistered = true
   let branchPresent = true
-  return {
-    platform: 'win32',
-    spawn: () => {},
-    kill: () => {
-      const error = new Error('process is gone') as NodeJS.ErrnoException
-      error.code = 'ESRCH'
-      throw error
-    },
+  let runtime: CleanupRuntime
+  runtime = {
     execFile: (_command, args) => {
       if (args[0] === 'worktree' && args[1] === 'remove') {
         rmSync(worktree, { recursive: true, force: true })
@@ -59,11 +61,47 @@ function makeRuntime(overrides: Partial<CleanupRuntime> = {}): CleanupRuntime {
       return ''
     },
     exists: (path) => existsSync(plainPath(path)),
+    os: undefined as unknown as OperatingSystem,
     remove: (path, options) => { rmSync(plainPath(path), options) },
+    ...overrides,
+  }
+  runtime.os = overrides.os ?? windowsOperatingSystem({
+    remove: (path, options) => runtime.remove(path, options),
+  })
+  return runtime
+}
+
+function windowsOperatingSystem(
+  overrides: Partial<WindowsOperatingSystemRuntime> = {},
+): OperatingSystem {
+  return createWindowsOperatingSystem({
+    spawn: () => {},
+    probeProcess: () => { throw gone() },
+    remove: () => {},
     now: Date.now,
     sleep: () => {},
     ...overrides,
-  }
+  })
+}
+
+function posixOperatingSystem(
+  overrides: Partial<PosixOperatingSystemRuntime> = {},
+): OperatingSystem {
+  return createPosixOperatingSystem({
+    signalProcessGroup: () => {},
+    probeProcess: () => { throw gone() },
+    remove: () => {},
+    now: Date.now,
+    sleep: () => {},
+    groupHasRunningMember: () => undefined,
+    ...overrides,
+  })
+}
+
+function gone(): NodeJS.ErrnoException {
+  const error = new Error('process is gone') as NodeJS.ErrnoException
+  error.code = 'ESRCH'
+  return error
 }
 
 function expectTaskStateToExist(): void {
@@ -91,12 +129,12 @@ describe('cleanupTask', () => {
     let now = 0
     const spawn = vi.fn()
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const runtime = makeRuntime({
+    const runtime = makeRuntime({ os: windowsOperatingSystem({
       spawn,
-      kill: () => {},
+      probeProcess: () => {},
       now: () => now,
       sleep: (milliseconds) => { now += milliseconds },
-    })
+    }) })
 
     expect(() => cleanupTask(paths, taskId, runtime))
       .toThrow('Could not stop process 12345; task state was retained.')
@@ -110,43 +148,37 @@ describe('cleanupTask', () => {
   it('signals and verifies the detached process group on POSIX', () => {
     seedTask(12345)
     let groupAlive = true
-    const kill = vi.fn((target: number, signal?: NodeJS.Signals | number) => {
-      expect(target).toBe(-12345)
+    const signalProcessGroup = vi.fn((target: number, signal?: NodeJS.Signals | number) => {
+      expect(target).toBe(12345)
       if (signal !== 0) groupAlive = false
-      if (!groupAlive && signal === 0) {
-        const error = new Error('process group is gone') as NodeJS.ErrnoException
-        error.code = 'ESRCH'
-        throw error
-      }
+      if (!groupAlive && signal === 0) throw gone()
     })
-    const runtime = makeRuntime({ platform: 'linux', kill })
+    const runtime = makeRuntime({ os: posixOperatingSystem({ signalProcessGroup }) })
 
     cleanupTask(paths, taskId, runtime)
 
-    expect(kill).toHaveBeenCalledWith(-12345)
-    expect(kill).toHaveBeenCalledWith(-12345, 0)
+    expect(signalProcessGroup).toHaveBeenCalledWith(12345)
+    expect(signalProcessGroup).toHaveBeenCalledWith(12345, 0)
     expect(existsSync(statusFile(paths, taskId))).toBe(false)
   })
 
   it('retains task state while POSIX process-group descendants remain alive', () => {
     seedTask(12345)
     let now = 0
-    const kill = vi.fn((target: number) => {
-      expect(target).toBe(-12345)
+    const signalProcessGroup = vi.fn((target: number) => {
+      expect(target).toBe(12345)
     })
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const runtime = makeRuntime({
-      platform: 'linux',
-      kill,
+    const runtime = makeRuntime({ os: posixOperatingSystem({
+      signalProcessGroup,
       now: () => now,
       sleep: (milliseconds) => { now += milliseconds },
-    })
+    }) })
 
     expect(() => cleanupTask(paths, taskId, runtime))
       .toThrow('Could not stop process 12345; task state was retained.')
 
-    expect(kill).toHaveBeenCalledWith(-12345)
-    expect(kill).not.toHaveBeenCalledWith(12345, expect.anything())
+    expect(signalProcessGroup).toHaveBeenCalledWith(12345)
     expectTaskStateToExist()
     expect(existsSync(worktree)).toBe(true)
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
@@ -243,15 +275,13 @@ describe('cleanupTask', () => {
   it('clears task state only after process, worktree and branch removal are verified', () => {
     seedTask(12345)
     let processAlive = true
-    const runtime = makeRuntime({
+    const runtime = makeRuntime({ os: windowsOperatingSystem({
       spawn: () => { processAlive = false },
-      kill: () => {
+      probeProcess: () => {
         if (processAlive) return
-        const error = new Error('process is gone') as NodeJS.ErrnoException
-        error.code = 'ESRCH'
-        throw error
+        throw gone()
       },
-    })
+    }) })
     const execFile = vi.spyOn(runtime, 'execFile')
 
     cleanupTask(paths, taskId, runtime)

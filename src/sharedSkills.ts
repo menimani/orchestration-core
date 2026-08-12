@@ -3,7 +3,8 @@ import {
   existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative } from 'node:path'
+import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { packageCommandPrefix } from './paths.ts'
 
 const STATE_FILE = '.orchestration-core-sync.json'
@@ -108,23 +109,11 @@ function hashFiles(files: readonly RenderedFile[]): string {
   return hash.digest('hex')
 }
 
-function extendedLengthPath(path: string): string {
-  const absolute = resolve(path)
-  if (absolute.startsWith('\\\\?\\')) return absolute
-  if (absolute.startsWith('\\\\')) return `\\\\?\\UNC\\${absolute.slice(2)}`
-  return `\\\\?\\${absolute}`
-}
-
-function removeDirectory(path: string): void {
-  try {
-    rmSync(path, { recursive: true, force: true })
-  } catch (error) {
-    if (process.platform !== 'win32') throw error
-    rmSync(extendedLengthPath(path), { recursive: true, force: true })
-  }
-}
-
-function replaceDirectory(destination: string, files: readonly RenderedFile[]): void {
+function replaceDirectory(
+  destination: string,
+  files: readonly RenderedFile[],
+  os: OperatingSystem,
+): void {
   const parent = dirname(destination)
   const nonce = `${process.pid}-${randomUUID()}`
   const temporary = join(parent, `.${destination.split(/[\\/]/).at(-1)}.sync-${nonce}`)
@@ -144,14 +133,14 @@ function replaceDirectory(destination: string, files: readonly RenderedFile[]): 
       throw error
     }
     try {
-      removeDirectory(backup)
+      os.removeDirectory(backup)
     } catch (error) {
-      removeDirectory(destination)
+      os.removeDirectory(destination)
       renameSync(backup, destination)
       throw error
     }
   } finally {
-    removeDirectory(temporary)
+    os.removeDirectory(temporary)
   }
 }
 
@@ -170,7 +159,11 @@ function writeState(file: string, state: SharedSkillsState): void {
  * records the exact rendered tree last written, so later syncs never mistake a person's
  * edit (including an added support file or a deletion) for an old generated copy.
  */
-export function syncSharedSkills(repoRoot: string, packageRoot: string): SharedSkillsSyncResult {
+export function syncSharedSkills(
+  repoRoot: string,
+  packageRoot: string,
+  os: OperatingSystem = operatingSystem,
+): SharedSkillsSyncResult {
   const manifest = readManifest(packageRoot)
   const destinationRoot = join(repoRoot, '.claude', 'skills')
   const stateFile = join(destinationRoot, STATE_FILE)
@@ -205,7 +198,7 @@ export function syncSharedSkills(repoRoot: string, packageRoot: string): SharedS
         conflicts.push(skill)
         continue
       }
-      replaceDirectory(destination, desiredFiles)
+      replaceDirectory(destination, desiredFiles, os)
       nextState.skills[skill] = desiredHash
       updated.push(skill)
       changedPaths.push(destination)
@@ -216,7 +209,7 @@ export function syncSharedSkills(repoRoot: string, packageRoot: string): SharedS
       conflicts.push(skill)
       continue
     }
-    replaceDirectory(destination, desiredFiles)
+    replaceDirectory(destination, desiredFiles, os)
     nextState.skills[skill] = desiredHash
     installed.push(skill)
     changedPaths.push(destination)

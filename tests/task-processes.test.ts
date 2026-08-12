@@ -2,8 +2,16 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { OperatingSystem } from '../src/adapters/os.ts'
+import {
+  createOperatingSystem as createPosixOperatingSystem,
+  type PosixOperatingSystemRuntime,
+} from '../src/adapters/os-posix.ts'
+import {
+  createOperatingSystem as createWindowsOperatingSystem,
+  type WindowsOperatingSystemRuntime,
+} from '../src/adapters/os-windows.ts'
 import { orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
-import { processTreeIsAlive, type ProcessTreeRuntime } from '../src/processTree.ts'
 import {
   orphanedWorktreeDirectories, terminateLiveTaskProcesses, worktreeHolderHint,
 } from '../src/taskProcesses.ts'
@@ -40,17 +48,17 @@ describe('terminateLiveTaskProcesses', () => {
       const pid = Number(args[1])
       if (pid === 102) alive.delete(pid)
     })
-    const runtime: ProcessTreeRuntime = {
-      platform: 'win32',
+    const os = createWindowsOperatingSystem({
       spawn,
-      kill: (pid) => {
+      probeProcess: (pid) => {
         if (!alive.has(pid)) throw gone()
       },
+      remove: () => {},
       now: () => now,
       sleep: (milliseconds) => { now += milliseconds },
-    }
+    })
 
-    const result = terminateLiveTaskProcesses(paths, runtime)
+    const result = terminateLiveTaskProcesses(paths, os)
 
     expect(spawn).toHaveBeenNthCalledWith(1, 'taskkill', ['/PID', '101', '/T', '/F'])
     expect(spawn).toHaveBeenNthCalledWith(2, 'taskkill', ['/PID', '102', '/T', '/F'])
@@ -70,8 +78,8 @@ describe('orphanedWorktreeDirectories', () => {
     writeRunningTask('owned-task', 123)
 
     expect(orphanedWorktreeDirectories(paths)).toEqual([orphan])
-    expect(worktreeHolderHint(orphan, 'win32')).toContain('handle.exe')
-    expect(worktreeHolderHint("/tmp/orphan's worktree", 'linux'))
+    expect(worktreeHolderHint(orphan, createWindowsOperatingSystem())).toContain('handle.exe')
+    expect(worktreeHolderHint("/tmp/orphan's worktree", createPosixOperatingSystem()))
       .toBe("Find holder: lsof +D -- '/tmp/orphan'\\''s worktree'")
   })
 })
@@ -81,48 +89,53 @@ describe('process-group liveness', () => {
   // waiting to be reaped. Believing the probe made a successful termination look like a
   // failure: the exit wait ran to its five-second timeout and the stop reported an
   // error, on Linux only, where the leader stayed a zombie until its parent collected it.
-  function runtime(overrides: Partial<ProcessTreeRuntime> = {}): ProcessTreeRuntime {
-    return {
-      platform: 'linux',
-      spawn: () => {},
-      kill: () => {},
+  function os(overrides: Partial<PosixOperatingSystemRuntime> = {}): OperatingSystem {
+    return createPosixOperatingSystem({
+      signalProcessGroup: () => {},
+      probeProcess: () => {},
+      remove: () => {},
       now: Date.now,
       sleep: () => {},
+      groupHasRunningMember: () => undefined,
       ...overrides,
-    }
+    })
   }
 
   it('treats a group whose only member is a zombie as stopped', () => {
-    expect(processTreeIsAlive(4321, runtime({
+    expect(os({
       groupHasRunningMember: () => false,
-    }))).toBe(false)
+    }).processTreeIsAlive(4321)).toBe(false)
   })
 
   it('treats a group with a running member as alive', () => {
-    expect(processTreeIsAlive(4321, runtime({
+    expect(os({
       groupHasRunningMember: () => true,
-    }))).toBe(true)
+    }).processTreeIsAlive(4321)).toBe(true)
   })
 
   it('keeps the probe answer where the platform cannot tell', () => {
-    expect(processTreeIsAlive(4321, runtime({
+    expect(os({
       groupHasRunningMember: () => undefined,
-    }))).toBe(true)
-    expect(processTreeIsAlive(4321, runtime())).toBe(true)
-  })
-
-  it('does not consult the group state on Windows, where a killed tree disappears', () => {
-    const groupHasRunningMember = vi.fn(() => false)
-
-    expect(processTreeIsAlive(4321, runtime({ platform: 'win32', groupHasRunningMember })))
-      .toBe(true)
-    expect(groupHasRunningMember).not.toHaveBeenCalled()
+    }).processTreeIsAlive(4321)).toBe(true)
+    expect(os().processTreeIsAlive(4321)).toBe(true)
   })
 
   it('still reports a stopped process group as stopped', () => {
-    expect(processTreeIsAlive(4321, runtime({
-      kill: () => { throw gone() },
+    expect(os({
+      signalProcessGroup: () => { throw gone() },
       groupHasRunningMember: () => true,
-    }))).toBe(false)
+    }).processTreeIsAlive(4321)).toBe(false)
+  })
+
+  it('selects the Windows implementation when group state must not be consulted', () => {
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn: () => {},
+      probeProcess: () => {},
+      remove: () => {},
+      now: Date.now,
+      sleep: () => {},
+    }
+
+    expect(createWindowsOperatingSystem(runtime).processTreeIsAlive(4321)).toBe(true)
   })
 })

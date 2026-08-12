@@ -17,9 +17,10 @@ it. A change here reaches them on their next pull, so a break here breaks their 
 not only this repository's. Anything project-specific belongs in a project adapter
 (`orchestration/project/project-<name>.ts`), never in `src/`.
 
-The three adapters are the seams: `forge` for the hosting service, `runner` for the
-agent, `project` for the repository being improved. Add a capability behind whichever of
-them owns it rather than reaching past it.
+The adapters are the seams: `forge` for the hosting service, `runner` for the agent,
+`project` for the repository being improved, and the automatically detected `os` for
+operating-system behavior. Add a capability behind whichever of them owns it rather than
+reaching past it.
 
 ## Forge text is untrusted
 
@@ -51,6 +52,12 @@ single-threaded. Reproduce a stubborn failure with
 `npm test -- --pool=threads --poolOptions.threads.singleThread` before calling it a
 flake. Do not run builds or installs while a loop is running — they lock files its
 workers need.
+
+Before pushing a change that touches a platform branch, commit or stash all other
+changes and run `npm run test:linux` from Windows. It exports the committed tree into a
+Node 24 Linux container, then installs, typechecks, and runs the single-threaded suite
+there. The container never mounts the checkout, so its Linux dependencies cannot
+replace the Windows binaries in the working tree's `node_modules`.
 
 ## English everywhere
 

@@ -4,7 +4,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
-import { renderProjectAdapter } from './adapters/project.ts'
+import { renderProjectAdapter, repairProjectAdapterSource } from './adapters/project.ts'
 import { ensureQueueLabels, QUEUE_LABELS } from './issueQueue.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 
@@ -87,10 +87,25 @@ export async function initializeRepository(
     report(`CREATED: ${adapterPath}`)
   } else {
     adapterPath = join(projectDirectory, existingAdapters[0]!)
-    report(`EXISTS: ${existingAdapters.map((name) => join(projectDirectory, name)).join(', ')} (left unchanged)`)
     if (existingAdapters.length > 1) {
+      report(`EXISTS: ${existingAdapters.map((name) => join(projectDirectory, name)).join(', ')} (left unchanged)`)
       report(`DIVERGED: found ${existingAdapters.length} project adapters; automatic discovery requires one`)
       ok = false
+    } else {
+      const adapterName = basename(existingAdapters[0]!, '.ts').slice('project-'.length)
+      const source = readFileSync(adapterPath, 'utf8')
+      const repair = repairProjectAdapterSource(source, adapterName)
+      if (repair.problem !== undefined) {
+        report(`DIVERGED: ${adapterPath}; ${repair.problem} (left unchanged)`)
+        ok = false
+      } else if (repair.addedMembers.length === 0) {
+        report(`EXISTS: ${adapterPath} (contract complete; left unchanged)`)
+      } else {
+        writeFileSync(adapterPath, repair.source)
+        for (const member of repair.addedMembers) {
+          report(`REPAIRED: ${adapterPath}; added required member '${member}'`)
+        }
+      }
     }
   }
 

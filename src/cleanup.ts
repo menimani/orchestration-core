@@ -1,12 +1,10 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, rmSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
+import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { branchName, finalMessageFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
 import { removeWorktreeWithFallback } from './worktree.ts'
-import {
-  systemProcessTreeRuntime, terminateProcessTree, type ProcessTreeRuntime,
-} from './processTree.ts'
 
 interface CommandOptions {
   cwd?: string
@@ -19,18 +17,19 @@ interface RemoveOptions {
   recursive?: boolean
 }
 
-export interface CleanupRuntime extends ProcessTreeRuntime {
+export interface CleanupRuntime {
   execFile(command: string, args: readonly string[], options: CommandOptions): string
   exists(path: string): boolean
+  os: OperatingSystem
   remove(path: string, options: RemoveOptions): void
 }
 
 const systemRuntime: CleanupRuntime = {
-  ...systemProcessTreeRuntime,
   execFile: (command, args, options) => {
     return execFileSync(command, [...args], { ...options, encoding: 'utf8' })
   },
   exists: existsSync,
+  os: operatingSystem,
   remove: rmSync,
 }
 
@@ -42,11 +41,8 @@ function git(runtime: CleanupRuntime, paths: OrchPaths, args: readonly string[])
 }
 
 function samePath(runtime: CleanupRuntime, left: string, right: string): boolean {
-  const leftResolved = resolve(left)
-  const rightResolved = resolve(right)
-  return runtime.platform === 'win32'
-    ? leftResolved.toLowerCase() === rightResolved.toLowerCase()
-    : leftResolved === rightResolved
+  return runtime.os.worktreePathFor(left).comparisonKey
+    === runtime.os.worktreePathFor(right).comparisonKey
 }
 
 function worktreeIsRegistered(runtime: CleanupRuntime, paths: OrchPaths, worktree: string): boolean {
@@ -63,7 +59,7 @@ function branchExists(runtime: CleanupRuntime, paths: OrchPaths, branch: string)
 
 function stopProcess(runtime: CleanupRuntime, pid: number): void {
   try {
-    if (terminateProcessTree(pid, runtime)) console.log(`Stopping running process: pid=${pid}`)
+    if (runtime.os.terminateProcessTree(pid)) console.log(`Stopping running process: pid=${pid}`)
   } catch {
     throw new Error(`Could not stop process ${pid}; task state was retained.`)
   }
@@ -89,8 +85,7 @@ export function cleanupTask(
   const worktree = worktreeDir(paths, taskId)
   if (runtime.exists(worktree)) {
     removeWorktreeWithFallback(paths.repoRoot, worktree, {
-      platform: runtime.platform,
-      remove: runtime.remove,
+      os: runtime.os,
       git: (_cwd, args) => git(runtime, paths, args),
     })
   }

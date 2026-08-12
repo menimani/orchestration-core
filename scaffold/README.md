@@ -11,5 +11,6 @@ npm ci --prefix orchestration/ts
 node orchestration/ts/src/cli.ts init
 ```
 
-The init command is safe to repeat. It reports existing project-owned files and leaves
-them unchanged.
+The init command is safe to repeat. It adds marked scaffold defaults for missing required
+adapter members and reports each one; declared members and other project-owned files are
+left unchanged.

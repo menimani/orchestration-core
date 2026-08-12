@@ -54,10 +54,10 @@ so importing the package does not expose a second qualified copy of each shared 
 
 Nothing here decides that shipping is safe. Deployment stays a human action.
 
-## The three adapters
+## Consumer adapters
 
 The core knows nothing about your forge, your agent CLI, or your repository. Three seams
-carry all of that:
+carry the consumer-selected parts of that:
 
 | Adapter | Selector | Valid selector value | Bundled implementation | Replace it to… |
 |---------|----------|----------------------|------------------------|----------------|
@@ -90,6 +90,9 @@ vocabulary and path rules. If the repository intentionally has no PR checks, it 
 explicitly declare
 `ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
 
+Operating-system behavior has its own internal adapter. The core detects Windows or
+POSIX once when it starts; it is not a consumer choice and has no environment selector.
+
 ## Using it
 
 ```bash
@@ -102,8 +105,9 @@ node orchestration/ts/src/cli.ts init <project-name>
 The subtree command is intentionally manual: it makes the imported commit visible. After
 that one deliberate import, `init` is the supported setup and repair path. It generates a
 contract-valid adapter, project templates, points `core.hooksPath` at the core-owned
-hooks, and creates missing `loop:*` labels. It is safe to repeat: existing project files
-and a deliberately different hooks setting are reported and never overwritten.
+hooks, and creates missing `loop:*` labels. It is safe to repeat: missing required adapter
+members are added with marked scaffold defaults, while declared members, other existing
+project files, and a deliberately different hooks setting are reported and never overwritten.
 
 Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
 the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,

@@ -146,6 +146,12 @@ from or equivalent to `orchestration/tests/*.sh`.
     passing verdict is retained for that commit while PR setup retries, and is discarded
     as soon as the branch tip changes. Repeated gate failures remain visible with a
     count; a repeated push failure logs `ERROR`, writes the stop file, and stops retrying.
+    When scanning is disabled and the local backlog plus the known shared finding set are
+    empty, the gate is final because no source can produce more work; it promotes and
+    exits through the same path as the scan cap. An unavailable shared finding snapshot
+    remains an external source whose state is unknown, so the gate waits. Every continuing
+    status names its wait target, such as an unfinished task, an unfinished scan, worker
+    capacity, an open finding, or finding status that could not be read.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
@@ -246,12 +252,18 @@ from or equivalent to `orchestration/tests/*.sh`.
     as the single setup and repair command. Init generates its adapter from the same
     required-member description the real loader validates, scaffolds project templates,
     points the repository-local `core.hooksPath` at the core's hooks, and creates only
-    missing `loop:*` labels. Re-running it never overwrites a project-owned file or a
-    different hooks setting; divergence is reported. The `loop-setup` skill gathers the
-    repository decisions, fills a newly generated adapter, and runs `verify-setup`. That
+    missing `loop:*` labels. Re-running it adds and reports marked scaffold defaults for
+    missing required adapter members, but never overwrites a declared member, another
+    project-owned file, or a different hooks setting; divergence is reported. The
+    `loop-setup` skill gathers the repository decisions, fills a newly generated adapter,
+    and runs `verify-setup`. That
     verifier reports separately the core typecheck, adapter suite, real loader discovery
     by name, referenced paths, pushable upstream, hooks setting, and labels. A skipped
     check retains its reason and is never reported as a pass.
+32. Operating-system behavior is detected once from the running process and exposed
+    through `adapters/os.ts`. Callers receive intent-level process-tree, directory, and
+    worktree-path operations from either `os-windows.ts` or `os-posix.ts`; there is no
+    OS selector or platform field in the contract.
 
 ## The issue queue (new in the rewrite, opt-in)
 

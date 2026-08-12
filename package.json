@@ -9,6 +9,7 @@
   },
   "scripts": {
     "test": "vitest run",
+    "test:linux": "node scripts/test-linux.mjs",
     "typecheck": "tsc --noEmit",
     "init": "node src/cli.ts init",
     "verify-setup": "node src/cli.ts verify-setup",
@@ -34,10 +35,10 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^3.2.7",
-    "typescript": "^5.8.0",
     "vitest": "^3.0.0"
   },
   "dependencies": {
+    "typescript": "^5.8.0",
     "zod": "^4.4.3"
   }
 }
