@@ -741,12 +741,28 @@ export function issueNumberForTask(paths: OrchPaths, taskId: string): number | u
 
 /** Remove the local files that make a released issue resolve to the failed task id. */
 export function dropClaimedTaskMaterialization(paths: OrchPaths, taskId: string): void {
-  rmSync(specFile(paths, taskId), { force: true })
-  rmSync(issueMapFile(paths, taskId), { force: true })
-  rmSync(join(paths.queueDir, 'effort', taskId), { force: true })
-  rmSync(join(paths.queueDir, 'inspect', taskId), { force: true })
-  rmSync(join(paths.queueDir, 'heartbeat', taskId), { force: true })
-  forgetTaskId(paths, taskId)
+  const errors: unknown[] = []
+  for (const file of [
+    specFile(paths, taskId),
+    issueMapFile(paths, taskId),
+    join(paths.queueDir, 'effort', taskId),
+    join(paths.queueDir, 'inspect', taskId),
+    join(paths.queueDir, 'heartbeat', taskId),
+  ]) {
+    try {
+      rmSync(file, { force: true })
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  try {
+    forgetTaskId(paths, taskId)
+  } catch (error) {
+    errors.push(error)
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, `Could not remove materialization for task ${taskId}`)
+  }
 }
 
 /** Return a startup claim to the shared queue before another worker can be blocked by it. */
@@ -1015,6 +1031,7 @@ export async function claimIssue(
     }
     const parsed = bodyParse.parsed
 
+    let createdTaskId: string | undefined
     try {
       const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)
       const needsFreshTask = existing !== undefined
@@ -1025,6 +1042,11 @@ export async function claimIssue(
         : taskIdForDesc(paths, 'auto', parsed.requirement)
       if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', parsed.requirement, taskId)
       if (!existsSync(specFile(paths, taskId))) {
+        // taskIdForDesc records the description index before the specification is
+        // materialized. Remember ownership before the first write so any failure,
+        // including appendRequirements, can discard both pieces before the remote
+        // issue becomes claimable again.
+        createdTaskId = taskId
         newTaskSpec(paths, taskId)
         appendRequirements(taskId, frameVerifiedRequirement(parsed.requirement))
       }
@@ -1046,13 +1068,22 @@ export async function claimIssue(
         pendingMerge: enqueue.outcome === 'already-processed' && enqueue.status === 'completed',
       }
     } catch (error) {
+      const compensationErrors: unknown[] = [error]
+      if (createdTaskId !== undefined) {
+        try {
+          dropClaimedTaskMaterialization(paths, createdTaskId)
+        } catch (cleanupError) {
+          compensationErrors.push(cleanupError)
+        }
+      }
       try {
         await releasePartialClaim(forge, issue.number, me)
       } catch (releaseError) {
-        throw new AggregateError(
-          [error, releaseError],
-          `Claim materialization and compensation both failed for issue #${issue.number}`,
-        )
+        compensationErrors.push(releaseError)
+      }
+      if (compensationErrors.length > 1) {
+        throw new AggregateError(compensationErrors,
+          `Claim materialization and compensation both failed for issue #${issue.number}`)
       }
       throw error
     }
