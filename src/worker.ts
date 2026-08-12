@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { capturedSpawnOptions } from './childProcess.ts'
-import { currentBranchRemote, remoteForBaseRef } from './gitRemote.ts'
+import { currentBranchTrackingRemote, remoteForBaseRef } from './gitRemote.ts'
 import type { OrchPaths } from './paths.ts'
 
 /**
@@ -67,7 +67,7 @@ async function updateWorkerCheckout(
   baseRef: string,
 ): Promise<'current' | 'fast-forwarded'> {
   const remote = remoteForBaseRef(paths.repoRoot, baseRef)
-    ?? currentBranchRemote(paths.repoRoot)
+    ?? currentBranchTrackingRemote(paths.repoRoot)
   await git(paths, ['fetch', '--quiet', remote])
   await git(paths, ['rev-parse', '--verify', `${baseRef}^{commit}`])
 

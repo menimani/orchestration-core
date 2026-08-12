@@ -31,7 +31,7 @@ import {
   frameUntrustedText, readTemplate, repositoryInspectionPreamble,
 } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
-import { currentBranchRemote } from './gitRemote.ts'
+import { currentBranchPushRemote, currentBranchTrackingRemote } from './gitRemote.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import { execShellSync } from './shell.ts'
 import {
@@ -311,7 +311,7 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const branch = branchName(taskId)
-    const remote = currentBranchRemote(paths.repoRoot)
+    const remote = currentBranchPushRemote(paths.repoRoot)
     gitIn(worktree, ['push', '--quiet', '--set-upstream', remote, branch])
     const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
     await forge.commentIssue(issueNumber,
@@ -382,7 +382,7 @@ export function createLoop(deps: LoopDeps) {
       }
       let adoptionTaskId: string | undefined
       try {
-        const remote = currentBranchRemote(paths.repoRoot)
+        const remote = currentBranchPushRemote(paths.repoRoot)
         const report = workerBranchReport(await commentsForIssue(issue))
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
@@ -843,7 +843,7 @@ export function createLoop(deps: LoopDeps) {
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
     let remote: string
     try {
-      remote = currentBranchRemote(paths.repoRoot)
+      remote = currentBranchTrackingRemote(paths.repoRoot)
     } catch (error) {
       event('WARN', `could not resolve review base: ${errorSummary(error)}`)
       return false
@@ -1007,7 +1007,7 @@ export function createLoop(deps: LoopDeps) {
   function validatePushTarget(): boolean {
     if (!config.autoPr && !config.workerMode) return true
     try {
-      currentBranchRemote(paths.repoRoot)
+      currentBranchPushRemote(paths.repoRoot)
       return true
     } catch (error) {
       event('ERROR', `current branch cannot be pushed: ${errorSummary(error)}`)
@@ -1028,10 +1028,17 @@ export function createLoop(deps: LoopDeps) {
       reportGateFailure('could not get branch name; PR skipped')
       return false
     }
-    let remote: string
+    let pushRemote: string
+    let baseRemote: string
     try {
-      remote = currentBranchRemote(paths.repoRoot)
-      execFileSync('git', ['push', '--quiet', '--set-upstream', remote, branch], {
+      pushRemote = currentBranchPushRemote(paths.repoRoot)
+      baseRemote = currentBranchTrackingRemote(paths.repoRoot)
+      const hasUpstream = git([
+        'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}',
+      ]).trim() !== ''
+      execFileSync('git', [
+        'push', '--quiet', ...(hasUpstream ? [] : ['--set-upstream']), pushRemote, branch,
+      ], {
         cwd: paths.repoRoot,
         stdio: 'ignore',
         windowsHide: true,
@@ -1042,15 +1049,15 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const baseRef = git([
-      'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
+      'symbolic-ref', '--quiet', '--short', `refs/remotes/${baseRemote}/HEAD`,
     ]).trim()
-    if (!baseRef.startsWith(`${remote}/`)) {
-      reportGateFailure(`could not get ${remote} default branch; PR skipped`)
+    if (!baseRef.startsWith(`${baseRemote}/`)) {
+      reportGateFailure(`could not get ${baseRemote} default branch; PR skipped`)
       return false
     }
-    const baseBranch = baseRef.slice(remote.length + 1)
+    const baseBranch = baseRef.slice(baseRemote.length + 1)
     try {
-      gitIn(paths.repoRoot, ['fetch', remote, baseBranch, '--quiet'])
+      gitIn(paths.repoRoot, ['fetch', baseRemote, baseBranch, '--quiet'])
     } catch (error) {
       reportGateFailure(`could not fetch ${baseRef}: ${errorSummary(error)}`)
       return false

@@ -23,20 +23,15 @@ function repositoryRemotes(repoRoot: string): Set<string> {
   )
 }
 
-/** Return the push remote using Git's configured precedence, or the only remote. */
-export function currentBranchRemote(repoRoot: string): string {
+function resolveCurrentBranchRemote(
+  repoRoot: string,
+  configuredRemotes: (branch: string) => string[],
+): string {
   const branch = git(repoRoot, ['branch', '--show-current'])
   if (branch === '') throw new Error('the current checkout is not on a branch')
 
   const remotes = repositoryRemotes(repoRoot)
-  const configured = [
-    optionalGit(repoRoot, ['config', '--get', `branch.${branch}.pushRemote`]),
-    optionalGit(repoRoot, ['config', '--get', 'remote.pushDefault']),
-    optionalGit(repoRoot, [
-      'for-each-ref', '--format=%(upstream:remotename)', `refs/heads/${branch}`,
-    ]),
-    optionalGit(repoRoot, ['config', '--get', `branch.${branch}.remote`]),
-  ].find((remote) => remotes.has(remote))
+  const configured = configuredRemotes(branch).find((remote) => remotes.has(remote))
   if (configured !== undefined) return configured
 
   if (remotes.size === 1) return [...remotes][0]!
@@ -44,6 +39,30 @@ export function currentBranchRemote(repoRoot: string): string {
   throw new Error(
     `current branch '${branch}' has no upstream and the repository has multiple remotes`,
   )
+}
+
+/** Return the push remote using Git's configured precedence, or the only remote. */
+export function currentBranchPushRemote(repoRoot: string): string {
+  return resolveCurrentBranchRemote(repoRoot, (branch) => [
+    optionalGit(repoRoot, ['config', '--get', `branch.${branch}.pushRemote`]),
+    optionalGit(repoRoot, ['config', '--get', 'remote.pushDefault']),
+    optionalGit(repoRoot, [
+      'for-each-ref', '--format=%(upstream:remotename)', `refs/heads/${branch}`,
+    ]),
+    optionalGit(repoRoot, ['config', '--get', `branch.${branch}.remote`]),
+  ])
+}
+
+/** Return the tracking/base remote before considering a configured push target. */
+export function currentBranchTrackingRemote(repoRoot: string): string {
+  return resolveCurrentBranchRemote(repoRoot, (branch) => [
+    optionalGit(repoRoot, [
+      'for-each-ref', '--format=%(upstream:remotename)', `refs/heads/${branch}`,
+    ]),
+    optionalGit(repoRoot, ['config', '--get', `branch.${branch}.remote`]),
+    optionalGit(repoRoot, ['config', '--get', `branch.${branch}.pushRemote`]),
+    optionalGit(repoRoot, ['config', '--get', 'remote.pushDefault']),
+  ])
 }
 
 /** Return the repository remote explicitly named by a remote-tracking base ref. */

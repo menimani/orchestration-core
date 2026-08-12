@@ -767,6 +767,26 @@ describe('runAutoReview', () => {
     expect(spec).toContain('against origin/trunk')
   })
 
+  it('reviews a fork branch against its tracked upstream instead of its push remote', () => {
+    git(['remote', 'rename', 'origin', 'upstream'])
+    const fork = join(repoRoot, 'fork.git')
+    execFileSync('git', ['init', '--bare', fork], { windowsHide: true })
+    git(['remote', 'add', 'origin', fork])
+    git(['push', 'origin', 'main:fork-main'])
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/fork-main'], {
+      cwd: fork, windowsHide: true,
+    })
+    git(['fetch', 'origin'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/fork-main'])
+    git(['config', 'branch.main.pushRemote', 'origin'])
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+    expect(spec).toContain('against upstream/main')
+    expect(spec).not.toContain('against origin/fork-main')
+  })
+
   it('stops without dispatching a review when no valid default branch exists', () => {
     git(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
     execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/missing'], {
@@ -1773,6 +1793,39 @@ describe('completion marker output', () => {
       title: 'feat: autonomous scan loop — 1 feature',
       body: expect.stringContaining('- use the configured base'),
     }))
+  })
+
+  it('pushes a fork branch to origin while keeping the upstream repository as its PR base', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch('main', 'upstream')
+    const fork = join(repoRoot, 'fork.git')
+    execFileSync('git', ['init', '--bare', fork], { windowsHide: true })
+    git(['remote', 'add', 'origin', fork])
+    git(['push', 'origin', 'main:fork-main'])
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/fork-main'], {
+      cwd: fork, windowsHide: true,
+    })
+    git(['fetch', 'origin'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/fork-main'])
+    git(['switch', '-c', 'feature/fork-base'])
+    git(['branch', '--set-upstream-to', 'upstream/main'])
+    git(['config', 'branch.feature/fork-base.pushRemote', 'origin'])
+    writeFileSync(join(repoRoot, 'fork.txt'), 'fork work\n')
+    git(['add', 'fork.txt'])
+    git(['commit', '-m', 'feat: preserve the upstream base'])
+    forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const loop = makeLoop()
+    const createPr = vi.fn(async () => 'https://example.test/pull/1')
+    fakeForge.createPr = createPr
+
+    expect(await loop.ensureDraftPr('final')).toBe(true)
+
+    expect(createPr).toHaveBeenCalledWith(expect.objectContaining({ base: 'main' }))
+    expect(git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']))
+      .toBe('upstream/main')
+    expect(execFileSync('git', ['rev-parse', '--verify', 'refs/heads/feature/fork-base'], {
+      cwd: fork, encoding: 'utf8', windowsHide: true,
+    }).trim()).toMatch(/^[0-9a-f]{40}$/)
   })
 
   it('pushes a fresh topic branch through its only remote and establishes the upstream', async () => {

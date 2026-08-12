@@ -1,102 +1,63 @@
-# Dynamic context reference
+# Skill host reference
 
 ## Contents
 
-- Bang-backtick rules and why each one exists
-- Patterns that work, and the failures they replace
-- `$ARGUMENTS` handling
-- Frontmatter fields beyond `name` and `description`
+- Runtime context
+- User arguments and explicit invocation
+- Codex metadata
 
-## Dynamic Context (bang-backtick)
+## Runtime context
 
-The bang-backtick syntax (`!` followed by a backtick-wrapped command) injects live data into the skill prompt before Claude sees it. The command runs during skill expansion.
+Keep runtime context as ordinary instructions so the workflow works across hosts. Name
+the command, say when to run it, and say how its output affects the next step.
 
-### CRITICAL RULES
+### Preferred pattern
 
-| Rule | Reason |
-|------|--------|
-| Single command only | Compound commands (&&, \|\|, pipes) cause permission failures |
-| No 2>/dev/null | Part of a compound expression, gets blocked |
-| No pipe to head/tail/grep | Pipe = compound command |
-| No if/for/while | Shell control flow = compound command |
-| No find with pipes | Usually require pipes or redirects |
-| Command must succeed | Non-zero exit = skill expansion failure |
-
-### Safe Examples
-
-These patterns work correctly:
-
-```
-git status --short
-git branch --show-current
-git log main..HEAD --oneline
-gh pr view $ARGUMENTS --json number,title,state
-gh api user --jq .login
-ls orchestration/templates/
+```markdown
+Run `git status --short` and use its output to identify the changed files before staging.
 ```
 
-Wrap each command with the bang-backtick syntax: exclamation mark, then the command inside backticks.
+This makes failures visible to the agent and lets it choose the appropriate recovery.
+Do not use host-specific pre-execution expansion in a canonical shared skill; Codex
+treats that syntax as inert Markdown.
 
-### Unsafe Examples (WILL FAIL)
+## User arguments and explicit invocation
 
-These patterns will cause permission check failures:
+Codex receives arguments as part of the user's request; it does not expand an
+`$ARGUMENTS` variable in `SKILL.md`. Describe the expected value in the instruction,
+for example `Run \`gh pr view <pr-number> --json number,title,state\``.
 
-```
-git log --oneline | head -5                    # pipe
-gh pr checks $ARGUMENTS 2>/dev/null            # redirect
-cat file.json | jq .field                      # pipe
-[ -f "file" ] && echo "yes" || echo "no"       # logic operators
-find . -name "*.java" 2>/dev/null | wc -l      # pipe + redirect
-if [ -f "file" ]; then cat file; fi            # control flow
-```
+Mention a Codex skill explicitly as `$skill-name`. `/skills` opens the selector; a
+slash command named after the skill does not invoke it.
 
-### Alternative for Complex Data
-
-Instead of complex bang-backtick commands:
-- Use static text describing the project structure
-- Instruct Claude to run the command itself in the Instructions section
-- Use a wrapper script in the skill's `scripts/` directory
-
-## String Substitutions
-
-| Variable | Description |
-|----------|-------------|
-| `$ARGUMENTS` | All arguments passed to skill |
-| `$ARGUMENTS[N]` / `$N` | Nth argument (0-based) |
-| `${CLAUDE_SESSION_ID}` | Current session ID |
-
-## Frontmatter Reference
+## Frontmatter
 
 ```yaml
 ---
-name: kebab-case-name           # Required: becomes /slash-command
-description: >-                  # Recommended: helps Claude decide when to use
+name: kebab-case-name
+description: >-
   What this skill does and when.
   Be specific about triggers.
-argument-hint: "<arg>"           # Optional: shown in autocomplete
-disable-model-invocation: true   # Optional: user-only invocation
-user-invocable: false            # Optional: Claude-only invocation
-allowed-tools: Read, Grep, Glob  # Optional: tools without permission prompt
-context: fork                    # Optional: run in isolated subagent
-agent: Explore                   # Optional: agent type for context: fork
-model: sonnet                    # Optional: model override
 ---
 ```
 
-## Execution Context Details
+Only `name` and `description` belong in Codex `SKILL.md` frontmatter.
 
-| Context | When to use |
-|---------|-------------|
-| **inline** (default) | Needs conversation history, guidelines, conventions |
-| **context: fork** | Isolated task, heavy processing, or long output |
+## Codex metadata
 
-### Fork Agents
+Put Codex presentation and invocation policy in `agents/openai.yaml`:
 
-| Agent | Use case |
-|-------|----------|
-| `Explore` | Read-only codebase research |
-| `Plan` | Architecture and implementation planning |
-| `general-purpose` (default) | Full tool access |
+```yaml
+interface:
+  display_name: "Human-facing name"
+  short_description: "Short purpose"
+  default_prompt: "Use $skill-name to perform the workflow."
+policy:
+  allow_implicit_invocation: false
+```
+
+Omit `policy` when implicit invocation is appropriate. Keep tool dependencies in this
+file as well; do not put tool allowlists in `SKILL.md` frontmatter.
 
 ## Content Guidelines
 
@@ -112,8 +73,9 @@ model: sonnet                    # Optional: model override
 ```
 my-skill/
 ├── SKILL.md           # Main instructions (required, <500 lines)
-├── reference.md       # Detailed docs (loaded on demand)
-├── examples.md        # Usage examples
-├── templates/         # Templates Claude fills in
-└── scripts/           # Scripts Claude executes
+├── agents/
+│   └── openai.yaml    # Optional Codex metadata and invocation policy
+├── references/        # Detailed docs loaded on demand
+├── assets/            # Templates and output resources
+└── scripts/           # Deterministic executable helpers
 ```
