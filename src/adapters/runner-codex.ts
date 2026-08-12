@@ -68,11 +68,12 @@ export function createCodexRunner(): Runner {
 
         let child
         try {
+          // Keep windowsHide absent: a detached Windows runner then owns one hidden
+          // console that its whole subtree shares instead of leaving each tool to open one.
           child = spawn(command, commandArgs, {
             cwd: options.worktree,
             detached: true,
             stdio: ['ignore', logFd, logFd],
-            windowsHide: true,
           })
         } catch (error) {
           closeLogFd()

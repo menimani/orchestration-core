@@ -578,13 +578,13 @@ const cmdLoop: Command = async (paths, args) => {
     prepareLoopLog(paths, { runBranch })
     const fd = openSync(loopLog, 'a')
     const markerLog = join(paths.logsDir, 'loop-markers.log')
+    // Match runner launches: the detached Windows tree needs one shared hidden console.
     const child = spawn(process.execPath, [
       packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
     ], {
       cwd: packageFile(),
       detached: true,
       stdio: ['ignore', fd, fd],
-      windowsHide: true,
     })
     child.unref()
     console.log(`Started the loop in the background (PID=${child.pid})`)

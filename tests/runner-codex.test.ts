@@ -91,7 +91,6 @@ describe('createCodexRunner', () => {
       cwd: 'worktree',
       detached: true,
       stdio: ['ignore', 42, 42],
-      windowsHide: true,
     })
 
     child.emit('spawn')
@@ -116,7 +115,6 @@ describe('createCodexRunner', () => {
       cwd: 'worktree',
       detached: true,
       stdio: ['ignore', 42, 42],
-      windowsHide: true,
     })
 
     child.emit('spawn')
