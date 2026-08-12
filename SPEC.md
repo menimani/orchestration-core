@@ -97,6 +97,16 @@ from or equivalent to `orchestration/tests/*.sh`.
     "tests failed" misattributes an environment failure to the task's diff.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
+11a. After a local or remote task merge, a first-parent change to this package's
+    `package.json` or `package-lock.json` runs `npm ci --no-audit --no-fund` in the
+    package root. A successful install records the lockfile hash under `node_modules`.
+    At daemon startup, after ownership is acquired and before adapters are loaded, the
+    same install runs when that recorded hash does not match or a declared dependency is
+    missing. Startup synchronization is limited to the package copy inside the repository
+    being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
+    it is running from. Install output is captured; a failure logs a summarized `WARN`
+    but does not undo the merge or stop startup. Because failure does not update the
+    recorded hash or restore a missing dependency, the next daemon restart retries it.
 
 ## Scans and cycles
 
