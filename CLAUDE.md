@@ -17,9 +17,10 @@ it. A change here reaches them on their next pull, so a break here breaks their 
 not only this repository's. Anything project-specific belongs in a project adapter
 (`orchestration/project/project-<name>.ts`), never in `src/`.
 
-The three adapters are the seams: `forge` for the hosting service, `runner` for the
-agent, `project` for the repository being improved. Add a capability behind whichever of
-them owns it rather than reaching past it.
+The adapters are the seams: `forge` for the hosting service, `runner` for the agent,
+`project` for the repository being improved, and the automatically detected `os` for
+operating-system behavior. Add a capability behind whichever of them owns it rather than
+reaching past it.
 
 ## Forge text is untrusted
 

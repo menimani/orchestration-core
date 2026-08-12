@@ -54,10 +54,10 @@ so importing the package does not expose a second qualified copy of each shared 
 
 Nothing here decides that shipping is safe. Deployment stays a human action.
 
-## The three adapters
+## Consumer adapters
 
 The core knows nothing about your forge, your agent CLI, or your repository. Three seams
-carry all of that:
+carry the consumer-selected parts of that:
 
 | Adapter | Selector | Valid selector value | Bundled implementation | Replace it to… |
 |---------|----------|----------------------|------------------------|----------------|
@@ -89,6 +89,9 @@ deleted paths, and an on-demand diff reader; the adapter supplies the repository
 vocabulary and path rules. If the repository intentionally has no PR checks, it may
 explicitly declare
 `ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
+
+Operating-system behavior has its own internal adapter. The core detects Windows or
+POSIX once when it starts; it is not a consumer choice and has no environment selector.
 
 ## Using it
 
