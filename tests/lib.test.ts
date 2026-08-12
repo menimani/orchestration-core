@@ -145,6 +145,11 @@ describe('package script commands', () => {
     expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'ts')))
       .toBe('npm run -C orchestration/ts stop')
   })
+
+  it('quotes a subtree package directory containing spaces', () => {
+    expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'core package')))
+      .toBe('npm run -C "orchestration/core package" stop')
+  })
 })
 
 describe('task ids', () => {
