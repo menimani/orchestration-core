@@ -15,6 +15,13 @@ export interface WorktreePath {
 
 export interface OperatingSystem {
   terminateProcessTree(pid: number): boolean
+  /**
+   * Whether a process with this identifier is running. Detection asks about the process;
+   * termination asks about its tree. Using the tree question to detect a recorded PID
+   * answers "gone" for anything that is not a process-group leader, which on POSIX let a
+   * second daemon start alongside a live foreign task.
+   */
+  processIsAlive(pid: number): boolean
   processTreeIsAlive(pid: number): boolean
   removeDirectory(path: string): void
   worktreePathFor(path: string): WorktreePath

@@ -88,6 +88,7 @@ export function createOperatingSystem(
   const processTreeIsAlive = (pid: number): boolean => groupIsAlive(runtime, pid)
 
   return {
+    processIsAlive: (pid) => processIsAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree(pid): boolean {
       if (!processTreeIsAlive(pid)) {

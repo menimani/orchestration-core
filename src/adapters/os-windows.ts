@@ -58,6 +58,9 @@ export function createOperatingSystem(
   const processTreeIsAlive = (pid: number): boolean => isAlive(runtime, pid)
 
   return {
+    // Windows has no process groups, so a tree is reached from the identifier itself and
+    // the two questions have the same answer here.
+    processIsAlive: (pid) => isAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree(pid): boolean {
       if (!processTreeIsAlive(pid)) return false

@@ -23,7 +23,10 @@ export function liveTaskProcesses(
   for (const taskId of listTaskIds(paths)) {
     const pid = readStatus(paths, taskId)?.pid
     if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue
-    if (os.processTreeIsAlive(pid)) {
+    // Detection asks whether that process is running, not whether it leads a group. A
+    // recorded PID that is not a group leader answered "gone" on POSIX, so this waved
+    // through a daemon starting beside a live foreign task.
+    if (os.processIsAlive(pid)) {
       live.push({ taskId, pid })
     }
   }
