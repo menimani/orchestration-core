@@ -1188,7 +1188,15 @@ export function createLoop(deps: LoopDeps) {
     const title = prTitle(project, paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
       { cycle, maxCycles: config.maxScanCycles })
 
-    const status = await forge.prStatus({ kind: 'branch', value: branch })
+    let status
+    try {
+      status = await forge.prStatus({ kind: 'branch', value: branch })
+    } catch (error) {
+      if (!(error instanceof ForgeRateLimitError)) {
+        reportGateFailure(`could not check PR status: ${errorSummary(error)}`)
+      }
+      return false
+    }
     if (status.state === 'open') {
       // A body left as created stops at the first cycle's content, so it is rebuilt
       // every cycle — unless a person edited it, which removes the generated marker.
