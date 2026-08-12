@@ -324,8 +324,20 @@ so authorship and verified ancestry must both hold.
     merges because the same advisory recurs with different prose. Pre-granularity open
     issue bodies are interpreted from their requirement text, and their coarse local
     ledger entry is replaced when encountered, avoiding a one-time duplicate round.
-33. Worker daemons claim a ready issue by self-assignment. The forge login is the worker
-    identity, and every daemon that may claim concurrently must authenticate as a
+33. Before claiming, worker daemons group ready findings whose titles name the same first
+    path, using the same primary-path convention as fingerprinting. A group contains at
+    most four issues; another batch remains ready for the next claim. Titles without a
+    path stay singleton tasks. Every grouped requirement appears separately in the task
+    specification and requires an exact `REQUIREMENT_COMPLETE: #N` final-response marker.
+    The worker refuses to publish or merge the task until all linked issues have markers,
+    so partial implementation cannot close an unaddressed finding. A grouped task that
+    fails, cannot start, or reaches abandoned merge handling returns every member to ready,
+    unassigned, with `loop:group-singleton`; those findings are claimed individually on
+    retry rather than recreating the failed group. Fingerprints and their ledger remain per
+    finding.
+
+    Worker daemons claim a ready issue or group by self-assignment. The forge login is the
+    worker identity, and every daemon that may claim concurrently must authenticate as a
     distinct forge account. Under that invariant, a simultaneous claim is settled
     deterministically — the lexicographically first login wins, losers unassign
     themselves — and the winner relabels to `loop:in-progress` and materializes the
@@ -340,10 +352,11 @@ so authorship and verified ancestry must both hold.
     issue without heartbeats for `ISSUE_LEASE_HOURS` (default 3) is reaped back to
     ready, unassigned, so lease expiry identifies a worker that is no longer polling
     rather than a long-running task.
-34. The merge commit of an issue-born task carries `closes #N`, so the forge closes
-    the issue when the promotion PR lands the commit on the default branch. Immediately
-    after merging, the worker comments with the merge commit and run branch and states
-    that closure happens on promotion; this refreshes `updatedAt` across the ordinary
+34. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
+    the forge closes all of them when the promotion PR lands the commit on the default
+    branch. Immediately after merging, the worker comments on every linked issue with the
+    merge commit and run branch and states that closure happens on promotion; this refreshes
+    `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
     stale-lease reaping recognizes its linked locally merged task and repeats the merge
     comment instead of unassigning or relabeling the issue. That refreshes `updatedAt`
@@ -382,14 +395,16 @@ so authorship and verified ancestry must both hold.
     from the configured push remote, verifies the head and that it adds commits to the
     current branch, runs
     the project adapter's path-selected checks in a detached worktree, and merges with
-    `--no-ff` and `closes #N`. It persists a successful adoption before updating the
-    issue, so a later poll retries failed metadata updates without merging again. A
+    `--no-ff` and `closes #N` for every issue named by a grouped worker report. It persists
+    a successful adoption for every member before updating the issues, so a later poll
+    retries failed metadata updates without merging again. A
     successful adoption logs aligned `Merging` and `Merged` events keyed by the short
     task id, with the latter naming the first eight characters of the merge commit;
     promotion closes the issue. A failure logs the aligned `Failed` event with the short
     task id and merge-log name. It is
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
-    through the consecutive-merge-failure limit instead of returning work to ready.
+    through the consecutive-merge-failure limit instead of returning singleton work to
+    ready. A failed grouped adoption instead returns all members as singleton-ready work.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; inspections take the intentional
     `loop:in-progress` → closed shortcut.

@@ -28,7 +28,7 @@ import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
-  frameUntrustedText, readTemplate, repositoryInspectionPreamble,
+  frameUntrustedText, frameVerifiedRequirement, readTemplate, repositoryInspectionPreamble,
 } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { currentBranchRemote } from './gitRemote.ts'
@@ -38,14 +38,15 @@ import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
 import {
-  claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, confirmIssuePromotion,
-  dropClaimedTaskMaterialization,
-  heartbeatIssueForTask,
-  fingerprintOf, issueMergeComment,
-  issueNumberForTask, issuePromotionForIssue, publishFinding, reapStaleLeases,
-  recordIssueForTask, recordIssuePromotion, releaseIssueClaim,
+  claimIssueGroup, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
+  confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
+  heartbeatIssueForTask, fingerprintOf, issueMergeComment,
+  issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
+  recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
+  returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
-  unresolvedFindings,
+  unresolvedFindings, type ClaimedRequirement,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
   LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
@@ -290,7 +291,11 @@ export function createLoop(deps: LoopDeps) {
     })
   }
 
-  async function publishWorkerCompletion(taskId: string, issueNumber: number): Promise<void> {
+  async function publishWorkerCompletion(taskId: string, issueNumbers: number[]): Promise<void> {
+    const missingMarkers = missingRequirementCompletionMarkers(paths, taskId)
+    if (missingMarkers.length > 0) {
+      throw new Error(`missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}`)
+    }
     const worktree = worktreeDir(paths, taskId)
     // The comparison base is the checkout's HEAD SHA, not its branch name: a detached
     // worker checkout has an empty branch name, which read as zero commits and left
@@ -305,8 +310,9 @@ export function createLoop(deps: LoopDeps) {
       if (!isInspectionTaskId(paths, taskId)) {
         throw new Error(`${taskId} has no commits and is not an inspection task`)
       }
-      await closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
-        `Inspection task ${taskId} completed without commits.`)
+      await Promise.all(issueNumbers.map((issueNumber) =>
+        closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
+          `Inspection task ${taskId} completed without commits.`)))
       return
     }
 
@@ -314,20 +320,27 @@ export function createLoop(deps: LoopDeps) {
     const remote = currentBranchRemote(paths.repoRoot)
     gitIn(worktree, ['push', '--quiet', '--set-upstream', remote, branch])
     const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
-    await forge.commentIssue(issueNumber,
-      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}`)
-    await forge.addLabel(issueNumber, LABEL_MERGE_READY)
-    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+    const issueList = issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
+    await Promise.all(issueNumbers.map(async (issueNumber) => {
+      await forge.commentIssue(issueNumber,
+        `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}\nIssues: ${issueList}`)
+      await forge.addLabel(issueNumber, LABEL_MERGE_READY)
+      await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+    }))
   }
 
   function workerBranchReport(
     comments: ForgeIssueComment[],
-  ): { branch: string; head: string } | undefined {
+  ): { branch: string; head: string; issueNumbers?: number[] } | undefined {
     for (const comment of [...comments].reverse()) {
       if (!comment.author.hasWriteAccess) continue
       const branch = /^Branch: (task\/[A-Za-z0-9][A-Za-z0-9._-]*)$/m.exec(comment.body)?.[1]
       const head = /^Head commit: ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/m.exec(comment.body)?.[1]
-      if (branch !== undefined && head !== undefined) return { branch, head }
+      if (branch !== undefined && head !== undefined) {
+        const issueLine = /^Issues: ((?:#\d+\s*)+)$/m.exec(comment.body)?.[1]
+        const issueNumbers = issueLine?.match(/\d+/g)?.map(Number)
+        return { branch, head, ...(issueNumbers === undefined ? {} : { issueNumbers }) }
+      }
     }
     return undefined
   }
@@ -361,8 +374,10 @@ export function createLoop(deps: LoopDeps) {
       }
     }
     const issues = findings.filter((issue) => issue.labels.includes(LABEL_MERGE_READY))
+    const processedIssues = new Set<number>()
 
     for (const issue of issues) {
+      if (processedIssues.has(issue.number)) continue
       if (existsSync(stopFile)) return
       const mergeLog = join(paths.logsDir, `issue-${issue.number}.merge.log`)
       const adopted = issuePromotionForIssue(paths, issue.number)
@@ -381,12 +396,28 @@ export function createLoop(deps: LoopDeps) {
         continue
       }
       let adoptionTaskId: string | undefined
+      let adoptionIssues = [issue]
       try {
         const remote = currentBranchRemote(paths.repoRoot)
         const report = workerBranchReport(await commentsForIssue(issue))
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
         }
+        const requestedIssues = [...new Set(report.issueNumbers ?? [issue.number])]
+        adoptionIssues = requestedIssues.map((issueNumber) => {
+          const candidate = findings.find((finding) => finding.number === issueNumber)
+          if (candidate === undefined) {
+            throw new MergeError(`Worker branch report for issue #${issue.number} names unavailable issue #${issueNumber}.`)
+          }
+          return candidate
+        })
+        for (const candidate of adoptionIssues) {
+          const candidateReport = workerBranchReport(await commentsForIssue(candidate))
+          if (candidateReport?.branch !== report.branch || candidateReport.head !== report.head) {
+            throw new MergeError(`Grouped issue #${candidate.number} does not report the same worker branch.`)
+          }
+        }
+        adoptionIssues.forEach((candidate) => processedIssues.add(candidate.number))
         const taskId = report.branch.slice('task/'.length)
         adoptionTaskId = taskId
         event('Merging', shortTaskId(taskId))
@@ -418,16 +449,18 @@ export function createLoop(deps: LoopDeps) {
             outputFile: mergeLog,
             orchestrationDepsRuntime,
             onOrchestrationDepsEvent: orchestrationDepsEvent,
+            closesIssues: adoptionIssues.map((candidate) => candidate.number),
           },
         )
         writeFileSync(mergeFailureFile, '0\n')
         const runBranch = git(['branch', '--show-current']).trim()
-        recordIssueForTask(paths, taskId, issue.number)
-        recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
+        recordIssuesForTask(paths, taskId, adoptionIssues.map((candidate) => candidate.number))
+        recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
         const cycle = readCount(scanCountFile)
         if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
         try {
-          await updateAdoptedIssue(issue, taskId, mergeCommit, runBranch)
+          await Promise.all(adoptionIssues.map((candidate) =>
+            updateAdoptedIssue(candidate, taskId, mergeCommit, runBranch)))
         } catch (error) {
           if (error instanceof ForgeRateLimitError) return
           event('WARN', `could not update adopted issue #${issue.number}: ${errorSummary(error)}`)
@@ -443,15 +476,21 @@ export function createLoop(deps: LoopDeps) {
           event('Failed', shortTaskId(adoptionTaskId), `log ${shortTaskId(adoptionTaskId)}.merge.log`)
         }
         try {
-          await forge.commentIssue(issue.number, `Remote task adoption failed: ${message}`)
+          await Promise.all(adoptionIssues.map((candidate) =>
+            forge.commentIssue(candidate.number, `Remote task adoption failed: ${message}`)))
         } catch (commentError) {
           if (!(commentError instanceof ForgeRateLimitError)) {
             event('WARN', `could not comment on issue #${issue.number}: ${errorSummary(commentError)}`)
           }
         }
         try {
-          await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
-          await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+          if (adoptionIssues.length > 1) {
+            await Promise.all(adoptionIssues.map((candidate) =>
+              returnIssueToReady(forge, candidate.number, true)))
+          } else {
+            await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
+            await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+          }
         } catch (labelError) {
           if (!(labelError instanceof ForgeRateLimitError)) {
             event('WARN', `could not relabel issue #${issue.number}: ${errorSummary(labelError)}`)
@@ -585,6 +624,37 @@ export function createLoop(deps: LoopDeps) {
     const pitfalls = pitfallsFileForDesc(paths, desc)
     if (existsSync(pitfalls)) parts.push(`\n${readFileSync(pitfalls, 'utf8')}`)
     appendFileSync(specFile(paths, newId), parts.join(''))
+  }
+
+  function appendClaimedRequirements(
+    taskId: string,
+    requirements: ClaimedRequirement[],
+  ): void {
+    if (requirements.length === 1) {
+      const requirement = requirements[0]!
+      appendSharedRequirements(
+        taskId,
+        `issue-${requirement.issueNumber}`,
+        frameVerifiedRequirement(requirement.requirement),
+      )
+      return
+    }
+    const issueList = requirements.map(({ issueNumber }) => `#${issueNumber}`).join(', ')
+    const parts = [`\n## Auto-generated task (findings: ${issueList})\n`]
+    for (const [index, requirement] of requirements.entries()) {
+      parts.push(
+        `\n### Requirement ${index + 1} (issue #${requirement.issueNumber})\n\n`,
+        frameVerifiedRequirement(requirement.requirement),
+        `\n\nAfter addressing this requirement, include this exact standalone line in the final response:\n\nREQUIREMENT_COMPLETE: #${requirement.issueNumber}\n`,
+      )
+    }
+    parts.push(`\n${readTemplate(paths, 'task-requirements.md')}`)
+    const pitfallFiles = new Set(requirements.map(({ requirement }) =>
+      pitfallsFileForDesc(paths, requirement)))
+    for (const file of pitfallFiles) {
+      if (existsSync(file)) parts.push(`\n${readFileSync(file, 'utf8')}`)
+    }
+    appendFileSync(specFile(paths, taskId), parts.join(''))
   }
 
   /**
@@ -765,7 +835,7 @@ export function createLoop(deps: LoopDeps) {
    * completed and the gate that verifies it could not run. Any successful merge resets
    * the count, so one genuine test failure does not accumulate alongside unrelated ones.
    */
-  function noteMergeFailure(mergeLog: string): void {
+  function noteMergeFailure(mergeLog: string): boolean {
     const failures = readCount(mergeFailureFile) + 1
     writeFileSync(mergeFailureFile, `${failures}\n`)
 
@@ -784,7 +854,9 @@ export function createLoop(deps: LoopDeps) {
     if (failures >= config.maxConsecutiveMergeFailures) {
       event('ERROR', `${failures} consecutive merge failures; stopping the loop`)
       writeFileSync(stopFile, '')
+      return true
     }
+    return false
   }
 
   function isScanRunning(): boolean {
@@ -1554,34 +1626,39 @@ export function createLoop(deps: LoopDeps) {
     const locallyRunningIssues = new Set<number>()
     let issueReconciliationPending = false
 
-    const reconcileMergedIssue = async (
+    const reconcileMergedIssues = async (
       taskId: string,
-      linkedIssue: number,
+      linkedIssues: number[],
       mergeCommit: string,
       runBranch: string,
     ): Promise<boolean> => {
       try {
-        recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
-        const promotion = issuePromotionForIssue(paths, linkedIssue)
-        if (promotion === undefined) throw new Error('promotion record was not persisted')
-        if (!remoteOperationsAvailable || promotion.commentConfirmed === true) return true
+        recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
+        for (const linkedIssue of linkedIssues) {
+          const promotion = issuePromotionForIssue(paths, linkedIssue)
+          if (promotion === undefined) throw new Error('promotion record was not persisted')
+          if (!remoteOperationsAvailable || promotion.commentConfirmed === true) continue
 
-        const expectedComment = issueMergeComment(taskId, mergeCommit, runBranch)
-        let comments = await forge.listIssueComments(linkedIssue)
-        if (!comments.some((comment) =>
-          comment.author.hasWriteAccess && comment.body === expectedComment)) {
-          await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
-          comments = await forge.listIssueComments(linkedIssue)
+          const expectedComment = issueMergeComment(taskId, mergeCommit, runBranch)
+          let comments = await forge.listIssueComments(linkedIssue)
+          if (!comments.some((comment) =>
+            comment.author.hasWriteAccess && comment.body === expectedComment)) {
+            await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
+            comments = await forge.listIssueComments(linkedIssue)
+          }
+          if (!comments.some((comment) =>
+            comment.author.hasWriteAccess && comment.body === expectedComment)) {
+            throw new Error('merge comment is not visible after publishing it')
+          }
+          confirmIssuePromotion(paths, linkedIssue)
         }
-        if (!comments.some((comment) =>
-          comment.author.hasWriteAccess && comment.body === expectedComment)) {
-          throw new Error('merge comment is not visible after publishing it')
-        }
-        confirmIssuePromotion(paths, linkedIssue)
         return true
       } catch (error) {
         if (!(error instanceof ForgeRateLimitError)) {
-          event('WARN', `could not reconcile issue #${linkedIssue} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+          const subject = linkedIssues.length === 1
+            ? `issue #${linkedIssues[0]}`
+            : `issues ${linkedIssues.map((number) => `#${number}`).join(' ')}`
+          event('WARN', `could not reconcile ${subject} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`)
         }
         // The promotion record is the retry state. Keep this poll local-only so the
         // cycle gate cannot advance before a later poll confirms the forge marker.
@@ -1595,14 +1672,18 @@ export function createLoop(deps: LoopDeps) {
       mergeAttempts.add(taskId)
       event('Merging', shortTaskId(taskId))
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
-      const linkedIssue = issueNumberForTask(paths, taskId)
+      const linkedIssues = issueNumbersForTask(paths, taskId)
       try {
+        const missingMarkers = missingRequirementCompletionMarkers(paths, taskId)
+        if (missingMarkers.length > 0) {
+          throw new MergeError(`Grouped task is missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}.`)
+        }
         const mergeCommit = await mergeTask(paths, taskId, {
           taskGate: config.taskGate,
           testCmd: config.testCmd === '' ? undefined : config.testCmd,
           skipAutoTest: config.skipAutoTest,
           project,
-          closesIssue: linkedIssue,
+          closesIssues: linkedIssues,
           forge: rawForge,
           outputFile: mergeLog,
           orchestrationDepsRuntime,
@@ -1610,9 +1691,9 @@ export function createLoop(deps: LoopDeps) {
         })
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
         writeFileSync(mergeFailureFile, '0\n')
-        if (linkedIssue !== undefined) {
+        if (linkedIssues.length > 0) {
           const runBranch = git(['branch', '--show-current']).trim()
-          await reconcileMergedIssue(taskId, linkedIssue, mergeCommit, runBranch)
+          await reconcileMergedIssues(taskId, linkedIssues, mergeCommit, runBranch)
         }
         // A task delegated while the gate was waiting merges commits the gate has
         // already pushed past; clearing the flag makes the gate push and verify
@@ -1624,7 +1705,19 @@ export function createLoop(deps: LoopDeps) {
       } catch (error) {
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.merge.log`)
-        noteMergeFailure(mergeLog)
+        const abandoned = noteMergeFailure(mergeLog)
+        if (abandoned && linkedIssues.length > 1 && remoteOperationsAvailable) {
+          try {
+            await Promise.all(linkedIssues.map((issueNumber) =>
+              returnIssueToReady(forge, issueNumber, true)))
+            dropClaimedTaskMaterialization(paths, taskId)
+            event('Released', shortTaskId(taskId), 'grouped merge abandoned')
+          } catch (releaseError) {
+            if (!(releaseError instanceof ForgeRateLimitError)) {
+              event('WARN', `${shortTaskId(taskId)} grouped merge failed and its issues could not all be released: ${errorSummary(releaseError)}`)
+            }
+          }
+        }
       }
     }
 
@@ -1638,20 +1731,20 @@ export function createLoop(deps: LoopDeps) {
 
       if (status === 'merged' && config.issueQueueEnabled) {
         const mergedStatus = readStatus(paths, taskId)
-        const linkedIssue = issueNumberForTask(paths, taskId)
-        if (linkedIssue !== undefined
+        const linkedIssues = issueNumbersForTask(paths, taskId)
+        if (linkedIssues.length > 0
           && mergedStatus?.merge_commit !== undefined
           && mergedStatus.run_branch !== undefined) {
-          const reconciled = await reconcileMergedIssue(
-            taskId, linkedIssue, mergedStatus.merge_commit, mergedStatus.run_branch,
+          const reconciled = await reconcileMergedIssues(
+            taskId, linkedIssues, mergedStatus.merge_commit, mergedStatus.run_branch,
           )
           if (!reconciled) break
         }
       }
 
-      const linkedIssue = status === 'running' ? issueNumberForTask(paths, taskId) : undefined
-      if (linkedIssue !== undefined && remoteOperationsAvailable) {
-        locallyRunningIssues.add(linkedIssue)
+      const linkedIssues = status === 'running' ? issueNumbersForTask(paths, taskId) : []
+      if (linkedIssues.length > 0 && remoteOperationsAvailable) {
+        linkedIssues.forEach((issueNumber) => locallyRunningIssues.add(issueNumber))
         try {
           await heartbeatIssueForTask(forge, paths, taskId, now())
           warningLog.recovered(`heartbeat-${taskId}`)
@@ -1666,6 +1759,19 @@ export function createLoop(deps: LoopDeps) {
       // A task whose process is gone without the completion marker used to pass in
       // silence. Say so, once per task, and keep the count for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
+      const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
+      if (failedIssues.length > 1 && remoteOperationsAvailable) {
+        try {
+          await Promise.all(failedIssues.map((issueNumber) =>
+            returnIssueToReady(forge, issueNumber, true)))
+          dropClaimedTaskMaterialization(paths, taskId)
+          event('Released', shortTaskId(taskId), 'grouped task failed')
+        } catch (releaseError) {
+          if (!(releaseError instanceof ForgeRateLimitError)) {
+            event('WARN', `${shortTaskId(taskId)} failed and its grouped issues could not all be released: ${errorSummary(releaseError)}`)
+          }
+        }
+      }
       if (status === 'failed' && !existsSync(failedFlag)) {
         const cycleNow = readCount(scanCountFile)
         log(`FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
@@ -1689,13 +1795,13 @@ export function createLoop(deps: LoopDeps) {
 
         if (config.workerMode) {
           event('Completed', shortTaskId(taskId))
-          const linkedIssue = issueNumberForTask(paths, taskId)
-          if (linkedIssue === undefined) {
+          const linkedIssues = issueNumbersForTask(paths, taskId)
+          if (linkedIssues.length === 0) {
             event('WARN', `worker task ${shortTaskId(taskId)} has no linked issue`)
             continue
           }
           try {
-            await publishWorkerCompletion(taskId, linkedIssue)
+            await publishWorkerCompletion(taskId, linkedIssues)
             writeFileSync(scannedFlag, '')
           } catch (error) {
             if (!(error instanceof ForgeRateLimitError)) {
@@ -1780,23 +1886,28 @@ export function createLoop(deps: LoopDeps) {
           let capacity = config.maxParallel - running - queueLength()
           if (capacity > 0) {
             if (cachedUser === undefined) cachedUser = await forge.currentUser()
-            for (const issue of openFindings.filter((candidate) =>
+            const readyIssues = openFindings.filter((candidate) =>
               candidate.labels.includes(LABEL_READY)
-                && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR))) {
+                && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR)
+                && candidate.assignees.length === 0
+                && issuePromotionForIssue(paths, candidate.number) === undefined)
+            for (const issues of groupReadyFindings(readyIssues)) {
               if (capacity <= 0) break
-              if (issue.assignees.length > 0) continue
-              if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
-              const result = await claimIssue(forge, paths, issue, cachedUser,
-                (newTaskId_, requirement) => appendSharedRequirements(newTaskId_, `issue-${issue.number}`, requirement))
+              const result = await claimIssueGroup(
+                forge, paths, issues, cachedUser, appendClaimedRequirements,
+              )
               if (result.outcome === 'claimed') {
-                event('Claimed', shortTaskId(result.taskId), `#${issue.number}`)
+                event('Claimed', shortTaskId(result.taskId),
+                  result.issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' '))
                 if (result.pendingMerge) await mergeCompletedTask(result.taskId)
                 capacity -= 1
               } else if (result.outcome === 'untrusted-author') {
                 // The poll's shared listing predates the label mutation. Reflect it
                 // locally so this quarantined issue cannot hold today's idle gate open.
-                if (!issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
-                  issue.labels.push(LABEL_UNTRUSTED_AUTHOR)
+                const untrusted = issues.find((issue) => issue.number === result.issueNumber)
+                if (untrusted !== undefined
+                  && !untrusted.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
+                  untrusted.labels.push(LABEL_UNTRUSTED_AUTHOR)
                 }
                 event(
                   'WARN',
@@ -1847,18 +1958,23 @@ export function createLoop(deps: LoopDeps) {
           }
           running += 1
         } catch (error) {
-          const issueNumber = issueNumberForTask(paths, entry.taskId)
-          if (config.issueQueueEnabled && issueNumber !== undefined) {
+          const issueNumbers = issueNumbersForTask(paths, entry.taskId)
+          if (config.issueQueueEnabled && issueNumbers.length > 0) {
             let released = false
             if (remoteOperationsAvailable) {
               try {
                 if (cachedUser === undefined) cachedUser = await forge.currentUser()
-                await releaseIssueClaim(forge, issueNumber, cachedUser)
+                if (issueNumbers.length > 1) {
+                  await Promise.all(issueNumbers.map((issueNumber) =>
+                    returnIssueToReady(forge, issueNumber, true)))
+                } else {
+                  await releaseIssueClaim(forge, issueNumbers[0]!, cachedUser)
+                }
                 released = true
                 event('Released', shortTaskId(entry.taskId), 'startup failed')
               } catch (releaseError) {
                 if (!(releaseError instanceof ForgeRateLimitError)) {
-                  event('WARN', `${shortTaskId(entry.taskId)} startup failed and issue #${issueNumber} could not be released: ${errorSummary(releaseError)}`)
+                  event('WARN', `${shortTaskId(entry.taskId)} startup failed and issues ${issueNumbers.map((number) => `#${number}`).join(' ')} could not all be released: ${errorSummary(releaseError)}`)
                 }
               }
             }

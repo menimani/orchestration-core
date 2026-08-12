@@ -18,7 +18,8 @@ import { initializeRepository } from './initialize.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
-  commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
+  commentOnIssueMerge, issueNumbersForTask, missingRequirementCompletionMarkers,
+  recordIssuePromotions,
 } from './issueQueue.ts'
 import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
 import { deploy } from './deploy.ts'
@@ -432,8 +433,12 @@ const cmdMerge: Command = async (paths, args) => {
     }
   }
   try {
-    const linkedIssue = issueNumberForTask(paths, taskId)
-    const forge = linkedIssue === undefined
+    const linkedIssues = issueNumbersForTask(paths, taskId)
+    const missingMarkers = missingRequirementCompletionMarkers(paths, taskId)
+    if (missingMarkers.length > 0) {
+      throw new MergeError(`Grouped task is missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}.`)
+    }
+    const forge = linkedIssues.length === 0
       ? undefined
       : await loadForge(config.forge, paths.repoRoot)
     const mergeCommit = await mergeTask(paths, taskId, {
@@ -441,22 +446,24 @@ const cmdMerge: Command = async (paths, args) => {
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(paths.root),
-      closesIssue: linkedIssue,
+      closesIssues: linkedIssues,
       forge,
     })
-    if (linkedIssue !== undefined) {
+    if (linkedIssues.length > 0) {
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
         cwd: paths.repoRoot,
         encoding: 'utf8',
         windowsHide: true,
       }).trim()
-      recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
-      try {
-        await commentOnIssueMerge(forge!, linkedIssue, taskId, mergeCommit, runBranch)
-      } catch (error) {
-        console.error(
-          `WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`,
-        )
+      recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
+      for (const linkedIssue of linkedIssues) {
+        try {
+          await commentOnIssueMerge(forge!, linkedIssue, taskId, mergeCommit, runBranch)
+        } catch (error) {
+          console.error(
+            `WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`,
+          )
+        }
       }
     }
     return 0
