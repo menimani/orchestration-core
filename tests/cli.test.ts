@@ -1,5 +1,7 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -43,7 +45,10 @@ const CORE_ENV = {
 let repoRoot: string
 
 beforeEach(() => {
-  repoRoot = mkdtempSync(join(tmpdir(), 'orch-cli-'))
+  // The runner's temp path contains an 8.3 short name when the account name is long
+  // (RUNNER~1 for runneradmin), while paths the CLI reports are canonical. Compare like
+  // with like, or the assertions differ only in a place no developer machine reproduces.
+  repoRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'orch-cli-')))
   const init = spawnSync('git', ['init'], { cwd: repoRoot, windowsHide: true })
   expect(init.status).toBe(0)
 })

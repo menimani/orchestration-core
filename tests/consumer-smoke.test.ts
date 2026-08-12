@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import {
-  appendFileSync, copyFileSync, cpSync, existsSync, mkdtempSync, rmSync,
+  appendFileSync, copyFileSync, cpSync, existsSync, mkdtempSync, realpathSync, rmSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
@@ -30,7 +30,9 @@ function git(repository: string, args: string[]): string {
 }
 
 function createConsumerRepository(): string {
-  const repository = mkdtempSync(join(tmpdir(), 'orchestration-consumer-'))
+  // Canonical, because the runner's temp path carries an 8.3 short name when the
+  // account name is long and the paths the package reports do not.
+  const repository = realpathSync.native(mkdtempSync(join(tmpdir(), 'orchestration-consumer-')))
   repositories.push(repository)
 
   cpSync(fixtureRoot, repository, { recursive: true })
