@@ -2,7 +2,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import {
   appendFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadProject } from './adapters/project.ts'
@@ -26,6 +26,10 @@ import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
+import {
+  liveTaskProcesses, orphanedWorktreeDirectories, terminateLiveTaskProcesses,
+  worktreeHolderHint, type TaskProcessTermination,
+} from './taskProcesses.ts'
 import {
   delegateTaskVisible, enqueueTask, isLoopRunning, newTaskSpec, removeIssueModeMarker,
   writeIssueModeMarker,
@@ -55,6 +59,26 @@ function isPidAlive(pid: number): boolean {
   } catch {
     return false
   }
+}
+
+function reportTaskProcessTermination(
+  result: TaskProcessTermination,
+  report: (line: string) => void,
+  announceEmpty: boolean,
+): boolean {
+  for (const task of result.terminated) {
+    report(formatEventLine('Stopped', task.taskId, `process tree PID ${task.pid}`))
+  }
+  for (const failure of result.failures) {
+    report(formatEventLine(
+      'ERROR', failure.taskId,
+      `could not stop process tree PID ${failure.pid}: ${failure.error}`,
+    ))
+  }
+  if (announceEmpty && result.terminated.length === 0 && result.failures.length === 0) {
+    report(formatEventLine('Stopped', 'tasks', 'no live process trees'))
+  }
+  return result.failures.length === 0
 }
 
 const cmdNew: Command = async (paths, args) => {
@@ -420,8 +444,10 @@ const cmdLoopStatus: Command = async (paths) => {
 
 const cmdStop: Command = async (paths) => {
   writeFileSync(join(paths.queueDir, 'stop'), '')
+  const stopped = terminateLiveTaskProcesses(paths)
+  const success = reportTaskProcessTermination(stopped, console.log, true)
   console.log('Created the stop file. The loop will exit on the next poll.')
-  return 0
+  return success ? 0 : 1
 }
 
 const cmdLoop: Command = async (paths, args) => {
@@ -520,6 +546,7 @@ async function runLoopDaemon(
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
   const recoveryLock = `${pidFile}.recovery`
+  let ownsTaskLifecycle = false
 
   // PID lock: one loop per repository.
   for (;;) {
@@ -568,11 +595,54 @@ async function runLoopDaemon(
       // nothing to release
     }
   }
+  const stopOwnedTaskProcesses = (announceEmpty: boolean): boolean => {
+    if (!ownsTaskLifecycle) return true
+    return reportTaskProcessTermination(
+      terminateLiveTaskProcesses(paths),
+      log,
+      announceEmpty,
+    )
+  }
   process.on('exit', releaseDaemonState)
-  process.on('SIGINT', () => process.exit(0))
-  process.on('SIGTERM', () => process.exit(0))
+  const stopOnSignal = (): void => {
+    process.exit(stopOwnedTaskProcesses(true) ? 0 : 1)
+  }
+  process.on('SIGINT', stopOnSignal)
+  process.on('SIGTERM', stopOnSignal)
 
   try {
+    const foreignTasks = liveTaskProcesses(paths)
+    const orphanedWorktrees = orphanedWorktreeDirectories(paths)
+    if (foreignTasks.length > 0 || orphanedWorktrees.length > 0) {
+      for (const task of foreignTasks) {
+        log(formatEventLine(
+          'ERROR', 'task', task.taskId,
+        ))
+        log(formatEventLine(
+          'ERROR', 'process', `foreign live process tree PID ${task.pid}`,
+        ))
+        log(formatEventLine(
+          'ERROR', 'startup',
+          'terminate or adopt the foreign task before starting',
+        ))
+      }
+      for (const worktree of orphanedWorktrees) {
+        const displayedWorktree = relative(paths.repoRoot, worktree)
+        log(formatEventLine(
+          'ERROR', 'orphan', displayedWorktree,
+        ))
+        log(formatEventLine(
+          'ERROR', 'worktree', 'has no task status; something may still hold it',
+        ))
+        log(formatEventLine(
+          'ERROR', 'diagnose',
+          worktreeHolderHint(displayedWorktree),
+        ))
+      }
+      return 1
+    }
+    ownsTaskLifecycle = true
+
     writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
     log(formatEventLine(
       'Mode', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
@@ -608,10 +678,13 @@ async function runLoopDaemon(
         wake.cancel()
         throw error
       }
+      if (outcome === 'continue' && existsSync(stopFile)) outcome = 'stopped'
       if (outcome !== 'continue') {
         wake.cancel()
         await wake.outcome
+        if (outcome === 'stopped' && !stopOwnedTaskProcesses(true)) return 1
         if (outcome === 'restart') {
+          if (!stopOwnedTaskProcesses(false)) return 1
           // Node has no portable exec(2). Release ownership first, then replace this
           // daemon with the same command, environment, working tree, and stdio.
           releaseDaemonState()
@@ -627,6 +700,9 @@ async function runLoopDaemon(
       }
       await wake.outcome
     }
+  } catch (error) {
+    stopOwnedTaskProcesses(false)
+    throw error
   } finally {
     releaseDaemonState()
   }

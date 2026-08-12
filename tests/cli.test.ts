@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { recordIssueForTask } from '../src/issueQueue.ts'
-import { branchName, orchPaths, worktreeDir } from '../src/paths.ts'
+import { branchName, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { writeStatus } from '../src/status.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -60,6 +60,15 @@ async function waitUntil(predicate: () => boolean, message: string): Promise<voi
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(message)
     await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -311,6 +320,53 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('refuses startup while a task status names a foreign live PID', async () => {
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260812_010203_040_auto-foreign-task'
+    writeFileSync(statusFile(paths, taskId), JSON.stringify({
+      task_id: taskId,
+      status: 'running',
+      pid: process.pid,
+    }))
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain(taskId)
+    expect(result.stdout).toContain(`foreign live process tree PID ${process.pid}`)
+    expect(result.stdout).toContain('terminate or adopt the foreign task before starting')
+    expect(existsSync(daemonFile('loop.pid'))).toBe(false)
+    expect(existsSync(daemonFile('cycle-cap.txt'))).toBe(false)
+  })
+
+  it('refuses startup for a worktree with no task state and gives a holder diagnostic', () => {
+    const paths = orchPaths(repoRoot)
+    const orphan = join(paths.worktreesDir, 'orphan-without-status')
+    mkdirSync(orphan, { recursive: true })
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    const displayedOrphan = join('orchestration', 'worktrees', 'orphan-without-status')
+    expect(result.stdout).toContain(displayedOrphan)
+    expect(result.stdout).toContain('has no task status')
+    expect(result.stdout).toContain('something may still hold')
+    expect(result.stdout).toMatch(process.platform === 'win32' ? /handle\.exe/ : /lsof \+D/)
+    expect(existsSync(daemonFile('loop.pid'))).toBe(false)
+  })
+
   it('allows only one of concurrent starts to acquire the PID lock', async () => {
     const wrapper = join(repoRoot, 'start-loop.mjs')
     const cliUrl = pathToFileURL(CLI).href
@@ -541,6 +597,7 @@ describe('loop daemon ownership', () => {
         CORE_AUTO_UPDATE: 'false',
         ISSUE_QUEUE_ENABLED: 'false',
         MAX_SCAN_CYCLES: '0',
+        SCAN_ENABLED: 'true',
       },
       encoding: 'utf8',
       windowsHide: true,
@@ -549,5 +606,75 @@ describe('loop daemon ownership', () => {
 
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('Mode       core        auto-update off')
+  })
+})
+
+describe('stop', () => {
+  it('terminates a running task process tree and reports the task and PID', async () => {
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260812_010203_041_auto-stop-tree'
+    const childPidFile = join(repoRoot, 'child.pid')
+    const parent = spawn(process.execPath, ['-e', [
+      "const { spawn } = require('node:child_process')",
+      "const { writeFileSync } = require('node:fs')",
+      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+      `writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid))`,
+      'setInterval(() => {}, 1000)',
+    ].join(';')], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    const parentPid = parent.pid
+    expect(parentPid).toBeTypeOf('number')
+    parent.unref()
+
+    let childPid = 0
+    try {
+      await waitUntil(() => existsSync(childPidFile), 'task child did not publish its PID')
+      childPid = Number(readFileSync(childPidFile, 'utf8'))
+      expect(pidIsAlive(parentPid as number)).toBe(true)
+      expect(pidIsAlive(childPid)).toBe(true)
+      await writeStatus(paths, taskId, 'running', parentPid)
+
+      const result = spawnSync(process.execPath, [CLI, 'stop'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain(`Stopped ${taskId}`)
+      expect(result.stdout).toContain(`process tree PID ${parentPid}`)
+      await waitUntil(
+        () => !pidIsAlive(parentPid as number) && !pidIsAlive(childPid),
+        'stop left a task process or its child running',
+      )
+    } finally {
+      if (typeof parentPid === 'number' && pidIsAlive(parentPid)) {
+        if (process.platform === 'win32') {
+          spawnSync('taskkill', ['/PID', String(parentPid), '/T', '/F'], { windowsHide: true })
+        } else {
+          try { process.kill(-parentPid, 'SIGKILL') } catch { /* already gone */ }
+        }
+      }
+      if (childPid > 0 && pidIsAlive(childPid)) {
+        try { process.kill(childPid, 'SIGKILL') } catch { /* already gone */ }
+      }
+    }
+  })
+
+  it('reports when there are no live task process trees to terminate', () => {
+    const result = spawnSync(process.execPath, [CLI, 'stop'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('Stopped tasks')
+    expect(result.stdout).toContain('no live process trees')
   })
 })

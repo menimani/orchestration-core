@@ -178,10 +178,13 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 24. A PID lock (`queue/loop.pid`) keeps the loop single-instance per repository; a stale
     stop file is cleared on startup, after the PID lock is taken (never before — it may
-    be another instance's signal).
-25. The stop file (`queue/stop`) is checked at the top of every poll; stopping does not
-    kill running runner processes — they finish in their worktrees with nobody left to
-    merge them, and `loop-status` says so.
+    be another instance's signal). Before task or issue work begins, startup refuses any
+    live PID left in task status by an earlier daemon. A worktree with no corresponding
+    task status also blocks startup and is reported with an OS-specific handle diagnostic.
+25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
+    outcomes, and daemon termination signals stop every live task process tree (`taskkill
+    /T /F` on Windows and the detached process group on POSIX), retain task state for
+    recovery, and report each terminated task or that no live task processes were found.
 26. The daemon holds the code it started with; the wrapper prints where the log lives
     and how to stop.
 27. `prune --days N` deletes logs/status/generated specs/queue markers of tasks finished
