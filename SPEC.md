@@ -225,9 +225,12 @@ from or equivalent to `orchestration/tests/*.sh`.
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; gitea/gitlab implementations can be added without touching the
     core). The interface returns normalized values only: PR state plus `name:conclusion`
-    check lines; draft-vs-ready is a forge-neutral flag. Planned issue-queue operations
-    (create/list-ready/claim/close, fingerprint dedup, files-touched metadata,
-    stale-lease reaping) belong to this interface but ship after the parity cutover.
+    check lines; draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
+    likewise normalizes issues, comments, and author write-access verdicts. It exposes
+    current-user and label discovery/creation; issue creation, lookup, open/closed
+    listing, and comments; assignment and label mutation; direct closure; and merge
+    message decoration for forge-driven closure. Fingerprint deduplication, claim
+    arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`). The runner contract is the output markers — `TASK_COMPLETE`,
     `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
