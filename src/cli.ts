@@ -663,6 +663,7 @@ async function runLoopDaemon(
     const project = await loadProject(paths.root)
     const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
 
+    if (!loop.validatePushTarget()) return 1
     await loop.initializeIssueQueue()
 
     loop.initializeSessionStateForBranch()

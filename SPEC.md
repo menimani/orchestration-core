@@ -132,7 +132,10 @@ from or equivalent to `orchestration/tests/*.sh`.
     sink and a formatted copy to `loop.log`, then the CI gate,
     then review. Remote work defers the gate with a `Waiting remote` event when its
     pending issue set changes and every ten minutes while unchanged. A light-gate cycle
-    suite logs its `Started Suite` event before invoking the blocking commands.
+    suite logs its `Started Suite` event before invoking the blocking commands. Its
+    passing verdict is retained for that commit while PR setup retries, and is discarded
+    as soon as the branch tip changes. Repeated gate failures remain visible with a
+    count; a repeated push failure logs `ERROR`, writes the stop file, and stops retrying.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
@@ -181,6 +184,8 @@ from or equivalent to `orchestration/tests/*.sh`.
     be another instance's signal). Before task or issue work begins, startup refuses any
     live PID left in task status by an earlier daemon. A worktree with no corresponding
     task status also blocks startup and is reported with an OS-specific handle diagnostic.
+    A run which publishes work also refuses to start when its branch has no unambiguous
+    push target, logging `ERROR` and writing the stop file before task or issue work.
 25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
     /T /F` on Windows and the detached process group on POSIX), retain task state for

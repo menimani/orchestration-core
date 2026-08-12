@@ -1505,19 +1505,60 @@ describe('completion marker output', () => {
     git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
   }
 
-  it('returns failure and leaves the cycle gate incomplete when the branch cannot be pushed', async () => {
+  it('stops after a repeated push failure without rerunning a passing suite', async () => {
     initializeGitRepo()
     git(['remote', 'add', 'origin', join(repoRoot, 'missing-remote.git')])
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
-    const loop = makeLoop({ autoPr: true })
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Marker', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+      }],
+    }
+    const loop = makeLoop({ autoPr: true, taskGate: 'light' }, suiteProject)
 
-    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
     expect(logText()).toContain('WARN could not push branch:')
+    expect(logText()).toContain('ERROR could not push branch:')
+    expect(logText()).toContain('(repeated 2 times)')
     expect(logText()).not.toContain('CYCLE_COMPLETE:')
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(logged.filter((line) => line === 'Started Suite  cycle 1')).toHaveLength(1)
     expect(prStatusCalls).toBe(0)
+  })
+
+  it('retains a suite verdict only while PR retries use the same branch tip', async () => {
+    configureLocalRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Marker', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+      }],
+    }
+    const loop = makeLoop({ autoPr: true, taskGate: 'light' }, suiteProject)
+    fakeForge.prBody = async () => { throw new Error('body read failed') }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(logText()).toContain('WARN could not read PR body: body read failed (repeated 2 times)')
+
+    writeFileSync(join(repoRoot, 'tip-change.txt'), 'new tip\n')
+    git(['add', 'tip-change.txt'])
+    git(['commit', '-m', 'test: change the gate tip'])
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\nrun\n')
   })
 
   it('retries the cycle gate when the existing PR body cannot be read', async () => {
