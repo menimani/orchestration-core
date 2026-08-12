@@ -132,6 +132,7 @@ export function createLoop(deps: LoopDeps) {
     updateCoreBeforeCycle(
       paths,
       config,
+      rawForge,
       runner,
       cycle,
       (name, subject, detail = '') => event(name, subject, detail),

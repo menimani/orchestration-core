@@ -74,6 +74,7 @@ function config(overrides: Record<string, string> = {}) {
 function makeLoop(
   coreConfig: ReturnType<typeof config>,
   runtime: CoreUpdateRuntime = { packageRoot, git },
+  forge: Forge = makeFakeForge(),
 ) {
   mkdirSync(join(paths.root, 'templates'), { recursive: true })
   writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
@@ -87,13 +88,15 @@ function makeLoop(
   const loop = createLoop({
     paths,
     config: coreConfig,
-    forge: makeFakeForge() as Forge,
+    forge,
     runner,
     project: stubProject,
     log: (line) => events.push(line),
     now: () => new Date(2026, 7, 12, 0, 0, 0),
     updateCoreBeforeCycle: (cycle) =>
-      updateCoreBeforeCycle(paths, coreConfig, runner, cycle, event as CoreUpdateEvent, runtime),
+      updateCoreBeforeCycle(
+        paths, coreConfig, forge, runner, cycle, event as CoreUpdateEvent, runtime,
+      ),
   })
   loop.initializeSessionStateForBranch()
   return loop
@@ -159,6 +162,18 @@ describe('pre-cycle core update', () => {
     expect(runnerStarts).toHaveLength(0)
     expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
     expect(events).toContain('Restarting core for cycle 1')
+  })
+
+  it('lets the forge adapter resolve repository shorthand for Git', async () => {
+    advanceUpstream('version two\n')
+    const forge = makeFakeForge()
+    forge.resolveGitRemote = vi.fn(() => upstreamRoot)
+    const loop = makeLoop(config({ UPSTREAM_REMOTE: 'example/shared-core' }), undefined, forge)
+
+    expect(await loop.poll(), events.join('\n')).toBe('restart')
+    expect(forge.resolveGitRemote).toHaveBeenCalledWith('example/shared-core')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+      .toBe('version two\n')
   })
 
   it('starts the cycle without pulling or restarting when the subtree is current', async () => {

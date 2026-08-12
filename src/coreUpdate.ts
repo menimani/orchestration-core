@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { isAbsolute, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
+import type { Forge } from './adapters/forge.ts'
 import type { Runner } from './adapters/runner.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 import { syncSharedSkills } from './sharedSkills.ts'
@@ -48,14 +49,6 @@ function importSplit(message: string, prefix: string): string | undefined {
   const dir = /^git-subtree-dir:\s*(.+?)\s*$/im.exec(message)?.[1]
   const split = /^git-subtree-split:\s*([0-9a-f]{7,64})\s*$/im.exec(message)?.[1]
   return dir === prefix ? split : undefined
-}
-
-function fetchRemote(remote: string): string {
-  // report-upstream records GitHub owner/repository names. Git accepts remote names,
-  // paths, and URLs directly; expand only that repository shorthand into a fetch URL.
-  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(remote)
-    ? `https://github.com/${remote.replace(/\.git$/, '')}.git`
-    : remote
 }
 
 function warn(event: CoreUpdateEvent, message: string): void {
@@ -128,6 +121,7 @@ function syncSkills(
 export async function updateCoreBeforeCycle(
   paths: OrchPaths,
   config: Pick<LoopConfig, 'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch'>,
+  forge: Forge,
   runner: Runner,
   cycle: number,
   event: CoreUpdateEvent,
@@ -168,7 +162,7 @@ export async function updateCoreBeforeCycle(
     return finish('continue')
   }
 
-  const remote = fetchRemote(config.upstreamRemote.trim())
+  const remote = forge.resolveGitRemote(config.upstreamRemote.trim())
   try {
     runtime.git(paths.repoRoot, ['fetch', '--quiet', remote, config.upstreamBranch])
   } catch (error) {

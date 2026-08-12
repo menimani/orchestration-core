@@ -298,6 +298,12 @@ export function createGithubForge(
   })
 
   return {
+    resolveGitRemote(remote: string): string {
+      return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(remote)
+        ? `https://github.com/${remote.replace(/\.git$/, '')}.git`
+        : remote
+    },
+
     issueClosingCommitMessage(message: string, issueNumber: number): string {
       return `${message} (closes #${issueNumber})`
     },
