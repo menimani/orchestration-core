@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { currentBranchRemote } from '../src/gitRemote.ts'
+import {
+  currentBranchPushRemote, currentBranchTrackingRemote,
+} from '../src/gitRemote.ts'
 
 let repoRoot: string
 
@@ -32,14 +34,14 @@ afterEach(() => {
 
 describe('current branch remote', () => {
   it('uses the only repository remote when a fresh branch has no upstream', () => {
-    expect(currentBranchRemote(repoRoot)).toBe('origin')
+    expect(currentBranchPushRemote(repoRoot)).toBe('origin')
   })
 
   it('uses an explicit push default when multiple remotes exist', () => {
     git(['remote', 'add', 'upstream', join(repoRoot, 'upstream.git')])
     git(['config', 'remote.pushDefault', 'upstream'])
 
-    expect(currentBranchRemote(repoRoot)).toBe('upstream')
+    expect(currentBranchPushRemote(repoRoot)).toBe('upstream')
   })
 
   it('prefers the branch push remote over its tracking remote', () => {
@@ -48,7 +50,8 @@ describe('current branch remote', () => {
     git(['config', 'branch.main.merge', 'refs/heads/main'])
     git(['config', 'branch.main.pushRemote', 'origin'])
 
-    expect(currentBranchRemote(repoRoot)).toBe('origin')
+    expect(currentBranchPushRemote(repoRoot)).toBe('origin')
+    expect(currentBranchTrackingRemote(repoRoot)).toBe('upstream')
   })
 
   it('prefers the default push remote over the branch tracking remote', () => {
@@ -57,12 +60,14 @@ describe('current branch remote', () => {
     git(['config', 'branch.main.merge', 'refs/heads/main'])
     git(['config', 'remote.pushDefault', 'origin'])
 
-    expect(currentBranchRemote(repoRoot)).toBe('origin')
+    expect(currentBranchPushRemote(repoRoot)).toBe('origin')
+    expect(currentBranchTrackingRemote(repoRoot)).toBe('upstream')
   })
 
   it('rejects an ambiguous repository when no branch or push remote is configured', () => {
     git(['remote', 'add', 'upstream', join(repoRoot, 'upstream.git')])
 
-    expect(() => currentBranchRemote(repoRoot)).toThrow('repository has multiple remotes')
+    expect(() => currentBranchPushRemote(repoRoot)).toThrow('repository has multiple remotes')
+    expect(() => currentBranchTrackingRemote(repoRoot)).toThrow('repository has multiple remotes')
   })
 })

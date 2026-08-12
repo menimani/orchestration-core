@@ -5,8 +5,10 @@ Codex workers in git worktrees, gates each merge, and promotes a pull request. I
 TypeScript with no build step.
 
 `README.md` describes what it is and how to run it. `SPEC.md` states the behaviour the
-suite pins — the two must agree, and tests enforce that. `.claude/skills/` holds the
-workflows for committing, reviewing, merging, and driving the loop.
+suite pins — the two must agree, and tests enforce that. Canonical shared workflows live
+under `skills/`. The selected runner renders them into its repository discovery path;
+Codex receives them under `.agents/skills/`. The repository-local `.claude/skills/`
+contains only `verify-changes`, which is not one of the generated shared workflows.
 
 This file holds only what the source cannot tell you.
 

@@ -66,6 +66,80 @@ describe('createCodexRunner', () => {
     ).toString('utf8')).toBe('npm run -C orchestration/ts loop\n')
   })
 
+  it('renders Claude-oriented skill syntax into complete Codex instructions', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    const source = [
+      '---',
+      'name: example-skill',
+      'description: Example.',
+      'argument-hint: "<pr-number>"',
+      'disable-model-invocation: true',
+      'allowed-tools: Bash, Read',
+      '---',
+      '',
+      'Skills live in `.claude/skills/<name>/SKILL.md`.',
+      'Read `CLAUDE.md` before continuing.',
+      '',
+      '!`gh pr view $ARGUMENTS --json title`',
+      '',
+      'Run `/git-review`, then {{COMMAND_PREFIX}} loop-status.',
+      '',
+    ].join('\n')
+
+    const rendered = createCodexRunner().sharedSkills.renderFile(
+      Buffer.from(source),
+      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+    ).toString('utf8')
+
+    expect(rendered).toBe([
+      '---',
+      'name: example-skill',
+      'description: Example.',
+      '---',
+      '',
+      'Skills live in `.agents/skills/<name>/SKILL.md`.',
+      'Read `AGENTS.md` before continuing.',
+      '',
+      'Run `gh pr view <pr-number> --json title` and use its output as context before continuing.',
+      '',
+      'Run `$git-review`, then npm run -C orchestration/ts loop-status.',
+      '',
+    ].join('\n'))
+  })
+
+  it('renders every complete shipped skill file for Codex', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs')
+    const packageRoot = join(import.meta.dirname, '..')
+    const manifest = JSON.parse(actualFs.readFileSync(
+      join(packageRoot, 'skills', 'manifest.json'), 'utf8',
+    )) as { commandPrefixPlaceholder: string; skills: string[] }
+    const rendered: Record<string, string> = {}
+    const visit = (skill: string, root: string, current = root): void => {
+      for (const entry of actualFs.readdirSync(current, { withFileTypes: true })
+        .sort((left, right) => left.name.localeCompare(right.name))) {
+        const path = join(current, entry.name)
+        if (entry.isDirectory()) visit(skill, root, path)
+        else if (entry.isFile()) {
+          const relativePath = path.slice(root.length + 1).replaceAll('\\', '/')
+          rendered[`${skill}/${relativePath}`] = createCodexRunner().sharedSkills.renderFile(
+            actualFs.readFileSync(path),
+            {
+              repoRoot: packageRoot,
+              packageRoot,
+              commandPrefixPlaceholder: manifest.commandPrefixPlaceholder,
+            },
+          ).toString('utf8')
+        }
+      }
+    }
+    for (const skill of manifest.skills) {
+      visit(skill, join(packageRoot, 'skills', skill))
+    }
+
+    expect(rendered).toMatchSnapshot()
+  })
+
   it('spawns codex directly on POSIX with the final-message, model, effort, and prompt arguments', async () => {
     setPlatform('linux')
     mocks.readFileSync.mockReturnValue('first line\nsecond line')

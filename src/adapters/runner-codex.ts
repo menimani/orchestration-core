@@ -29,13 +29,30 @@ function renderSharedSkillFile(
   options: RunnerSharedSkillRenderOptions,
 ): Buffer {
   const commandPrefix = packageCommandPrefix(options.repoRoot, options.packageRoot)
-  return Buffer.from(contents.toString('utf8').replaceAll(
-    options.commandPrefixPlaceholder,
-    commandPrefix,
-  ))
+  let text = contents.toString('utf8')
+  const argumentHint = /^argument-hint:\s*["']?(.+?)["']?\s*$/m.exec(text)?.[1]
+    ?? '<arguments from the request>'
+  text = text
+    .replaceAll(options.commandPrefixPlaceholder, commandPrefix)
+    .replaceAll('.claude/skills', '.agents/skills')
+    .replaceAll('CLAUDE.md', 'AGENTS.md')
+    .replaceAll('$ARGUMENTS', argumentHint)
+    .replace(/^(?:argument-hint|allowed-tools|disable-model-invocation):[^\r\n]*(?:\r?\n)/gm, '')
+    .replace(
+      /^([ \t]*)!`([^`\r\n]+)`[ \t]*$/gm,
+      (_line, indentation: string, command: string) =>
+        `${indentation}Run \`${command}\` and use its output as context before continuing.`,
+    )
+    .replace(/(^|[\s(—`])\/([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\b/g, '$1$$$2')
+  return Buffer.from(text)
 }
 
-export function createCodexRunner(): Runner {
+export interface CodexRunnerOptions {
+  /** Test hook for comparing Windows process creation modes; production leaves it absent. */
+  windowsHide?: boolean
+}
+
+export function createCodexRunner(runnerOptions: CodexRunnerOptions = {}): Runner {
   return {
     sharedSkills: {
       destinationRoot: (repoRoot) => join(repoRoot, '.agents', 'skills'),
@@ -74,6 +91,9 @@ export function createCodexRunner(): Runner {
             cwd: options.worktree,
             detached: true,
             stdio: ['ignore', logFd, logFd],
+            ...(runnerOptions.windowsHide === undefined
+              ? {}
+              : { windowsHide: runnerOptions.windowsHide }),
           })
         } catch (error) {
           closeLogFd()
