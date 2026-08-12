@@ -199,23 +199,41 @@ export interface ParsedIssue {
   requirement: string
 }
 
-export function parseIssueBody(body: string): ParsedIssue | undefined {
+type IssueBodyParseResult
+  = { parsed: ParsedIssue; problem?: never }
+    | { parsed?: never; problem: string }
+
+function inspectIssueBody(body: string, issueNumber: number): IssueBodyParseResult {
   const lines = body.split(/\r?\n/)
   const fingerprints = lines.filter((line) => line.startsWith('Fingerprint: '))
     .map((line) => line.slice('Fingerprint: '.length))
-  const fingerprint = fingerprints[0]
+  if (fingerprints.length === 0) fingerprints.push(`issue:${issueNumber}`)
+  const fingerprint = fingerprints[0]!
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const inspect = lines.includes('Inspect: true')
   const depthText = lines.find((line) => line.startsWith('Depth: '))?.slice('Depth: '.length)
   const depth = depthText !== undefined && /^\d+$/.test(depthText) ? Number(depthText) : undefined
   const requirementStart = lines.indexOf('## Requirement')
-  if (fingerprint === undefined || requirementStart === -1) return undefined
-  const requirementLines = lines.slice(requirementStart + 1)
+  if (requirementStart === -1) {
+    return { problem: 'missing `## Requirement` heading' }
+  }
+  const nextHeading = lines.findIndex((line, index) =>
+    index > requirementStart && line.startsWith('## '))
+  const requirementLines = lines.slice(
+    requirementStart + 1,
+    nextHeading === -1 ? undefined : nextHeading,
+  )
   while (requirementLines.at(-1)?.trim() === '') requirementLines.pop()
   if (requirementLines.at(-1)?.startsWith('Heartbeat: ') === true) requirementLines.pop()
   const requirement = requirementLines.join('\n').trim()
-  if (requirement === '') return undefined
-  return { fingerprint, fingerprints, effort, inspect, depth, requirement }
+  if (requirement === '') return { problem: 'empty requirement' }
+  return {
+    parsed: { fingerprint, fingerprints, effort, inspect, depth, requirement },
+  }
+}
+
+export function parseIssueBody(body: string, issueNumber: number): ParsedIssue | undefined {
+  return inspectIssueBody(body, issueNumber).parsed
 }
 
 export type PublishResult
@@ -258,7 +276,7 @@ function recordFingerprint(paths: OrchPaths, fingerprint: string, issueNumber: n
 }
 
 function issueFingerprints(issue: ForgeIssue): string[] {
-  const parsed = parseIssueBody(issue.body)
+  const parsed = parseIssueBody(issue.body, issue.number)
   if (parsed === undefined) return []
   const requirementLines = parsed.requirement.split(/\r?\n/)
     .map((line) => line.replace(/^\s*\d+[.)]\s*/, ''))
@@ -285,7 +303,7 @@ function issueFingerprints(issue: ForgeIssue): string[] {
 }
 
 function migrateFingerprintLedgerForIssue(paths: OrchPaths, issue: ForgeIssue): void {
-  const stored = parseIssueBody(issue.body)?.fingerprints ?? []
+  const stored = parseIssueBody(issue.body, issue.number)?.fingerprints ?? []
   const effective = issueFingerprints(issue)
   const replacements = stored.flatMap((fingerprint, index) => {
     const replacement = effective[index]
@@ -953,17 +971,18 @@ export async function claimIssue(
       return { outcome: 'lost-race', issueNumber: issue.number }
     }
 
-    const parsed = parseIssueBody(claimed.body)
-    if (parsed === undefined) {
+    const bodyParse = inspectIssueBody(claimed.body, claimed.number)
+    if (bodyParse.parsed === undefined) {
       // Quarantine a finding whose body lost its structure. Merge-failed is the existing
       // terminal queue state: unlike in-progress it is not a lease that stale reaping
       // may return to the claim path. Keep the assignment and body for inspection.
-      const reason = `Issue #${issue.number} has no parseable requirement. Restore its generated body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`
+      const reason = `Issue #${issue.number} cannot be materialized: ${bodyParse.problem}. Fix the issue body, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, unassign the worker, and restart the loop.`
       await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
       await forge.commentIssue(issue.number, reason)
       await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
       return { outcome: 'unparseable', issueNumber: issue.number, reason }
     }
+    const parsed = bodyParse.parsed
 
     try {
       const existing = existingTaskIdForDesc(paths, 'auto', parsed.requirement)

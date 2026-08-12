@@ -300,7 +300,7 @@ describe('forge poll budget', () => {
 
     expect(await loop.poll()).toBe('continue')
 
-    const reason = `Issue #${issueNumber} has no parseable requirement. Restore its generated body, remove loop:merge-failed, add loop:ready, unassign the worker, and restart the loop.`
+    const reason = `Issue #${issueNumber} cannot be materialized: missing \`## Requirement\` heading. Fix the issue body, remove loop:merge-failed, add loop:ready, unassign the worker, and restart the loop.`
     expect(readFileSync(join(paths.queueDir, 'decisions.txt'), 'utf8')).toBe(`${reason}\n`)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logged).toContain(`ERROR ${reason}`)

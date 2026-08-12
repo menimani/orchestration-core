@@ -167,7 +167,7 @@ describe('report-upstream arguments', () => {
 
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('Title:\nCore defect reported by ')
-    expect(result.stdout).toContain('Body:\n## Description\n\nA safely previewed defect.')
+    expect(result.stdout).toContain('Body:\n## Requirement\n\nA safely previewed defect.')
     expect(result.stderr).not.toContain('Unknown FORGE')
   })
 })

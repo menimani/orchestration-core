@@ -17,7 +17,7 @@ const report: UpstreamReport = {
   repository: 'configured/core',
   title: 'Core defect reported by consumer/repository',
   body: [
-    '## Description',
+    '## Requirement',
     '',
     'The queue loses a finding.',
     '',
