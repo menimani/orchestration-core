@@ -1090,6 +1090,10 @@ describe('cycle gate', () => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    forgeStatus = {
+      ...forgeStatus,
+      url: 'https://forge.example.test/group/project/merge_requests/7',
+    }
     const loop = makeLoop({
       issueQueueEnabled: true,
       scanEnabled: false,
@@ -1103,8 +1107,11 @@ describe('cycle gate', () => {
 
     expect(await loop.poll()).toBe('done')
 
-    expect(logged).toContain('CYCLE_COMPLETE: 1/3 PR:https://example.test/pull/1')
-    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    const prUrl = 'https://forge.example.test/group/project/merge_requests/7'
+    expect(logged).toContain(`CYCLE_COMPLETE: 1/3 PR:${prUrl}`)
+    expect(logged).toContain(`Completed Cycle       PR ${prUrl}`)
+    expect(logged).toContain(`LOOP_DONE: ${prUrl}`)
+    expect(logged).toContain(`Completed Loop        PR ${prUrl}`)
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
   })
 
@@ -2050,9 +2057,10 @@ describe('completion marker output', () => {
     const reminder = 'Status PR body     still reflects history and must be rewritten as a final summary.'
     expect(logged).toContain(marker)
     expect(logged).toContain(reminder)
-    expect(logged).toContain('Completed Loop        PR #1')
+    expect(logged).toContain(`Completed Loop        PR https://example.test/pull/1`)
     expect(logged.indexOf(marker)).toBeLessThan(logged.indexOf(reminder))
-    expect(logged.indexOf(reminder)).toBeLessThan(logged.indexOf('Completed Loop        PR #1'))
+    expect(logged.indexOf(reminder))
+      .toBeLessThan(logged.indexOf('Completed Loop        PR https://example.test/pull/1'))
   })
 
   it('reports repeated draft promotion errors and stops without emitting LOOP_DONE', async () => {
@@ -2077,7 +2085,7 @@ describe('completion marker output', () => {
     )
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
-    expect(logged).not.toContain('Completed Loop        PR #1')
+    expect(logged).not.toContain('Completed Loop        PR https://example.test/pull/1')
   })
 
   it('reports repeated pre-promotion status errors and stops the loop', async () => {
@@ -2149,7 +2157,7 @@ describe('completion marker output', () => {
 
     expect(prStatusCalls).toBe(3)
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
-    expect(logged).not.toContain('Completed Loop        PR #1')
+    expect(logged).not.toContain('Completed Loop        PR https://example.test/pull/1')
   })
 
   it('keeps the final gate state until draft promotion is confirmed', async () => {
