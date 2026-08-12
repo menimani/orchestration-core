@@ -44,12 +44,13 @@ A daemon otherwise runs the code it started with. A dirty working tree or confli
 pull is left for the consumer to resolve: the daemon warns and starts the cycle on the
 old code instead of merging local divergence.
 
-That same boundary syncs the skills declared in `skills/manifest.json` into the
-repository root at `.claude/skills/`. Loop commands are rendered for the installed
-package location (`npm run` here, `npm run -C orchestration/ts` in the layout below).
+That same boundary asks the selected runner adapter to sync the skills declared in
+`skills/manifest.json` into its repository skill directory. The bundled Codex adapter
+uses `.agents/skills/` and renders loop commands for the installed package location
+(`npm run` here, `npm run -C orchestration/ts` in the layout below).
 The sync tracks the exact content it generated: a consumer edit, deletion, or added
 support file is reported and retained, while repository skills absent from the manifest
-are never touched. Canonical skills live outside a nested `.claude/skills/` directory,
+are never touched. Canonical skills live outside a nested runner skill directory,
 so importing the package does not expose a second qualified copy of each shared skill.
 
 Nothing here decides that shipping is safe. Deployment stays a human action.

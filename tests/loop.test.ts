@@ -25,6 +25,7 @@ import { readStatus } from '../src/status.ts'
 import { enqueueTask } from '../src/tasks.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
 
 let repoRoot: string
@@ -62,6 +63,7 @@ function makeForge(): Forge {
 
 function makeRunner(): Runner {
   return {
+    sharedSkills: fakeRunnerSharedSkills,
     start: async (options) => {
       runnerStarts.push(options.specFile)
       return process.pid
@@ -1501,6 +1503,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     const attemptedTaskIds: string[] = []
     let attempt = 0
     const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
       start: async (options) => {
         attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
         if (attempt++ === 0) throw new Error('runner spawn failed')
@@ -1549,6 +1552,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     const description = '[BUG] retain a claimed task until its issue can be released'
     const attemptedTaskIds: string[] = []
     const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
       start: async (options) => {
         attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
         throw new Error('runner spawn failed')

@@ -126,13 +126,14 @@ from or equivalent to `orchestration/tests/*.sh`.
     code it started with. The check never runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
-    At the same boundary, the package manifest's shared skills are rendered into the
-    repository root `.claude/skills/`, using `npm run` as the command prefix in the
-    owning repository and `npm run -C <package-path>` in a subtree consumer. The sync
-    replaces only a tree whose content matches its recorded last output; consumer
+    At the same boundary, the selected runner adapter supplies the shared-skill
+    destination and rendering behavior. The Codex adapter renders the package manifest's
+    skills into repository root `.agents/skills/`, using `npm run` as the command prefix
+    in the owning repository and `npm run -C <package-path>` in a subtree consumer. The
+    sync replaces only a tree whose content matches its recorded last output; consumer
     divergence is warned and retained, and skills absent from the manifest are untouched.
-    Shared canonical sources do not live below `.claude/skills/`, so a subtree exposes
-    no nested duplicate of a shared skill.
+    Shared canonical sources do not live below a runner skill directory, so a subtree
+    exposes no nested duplicate of a shared skill.
 
 ## The cycle gate
 
@@ -234,8 +235,8 @@ from or equivalent to `orchestration/tests/*.sh`.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`). The runner contract is the output markers — `TASK_COMPLETE`,
     `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
-    arguments mapped to CLI flags inside the adapter. Any runner honoring the contract
-    is substitutable.
+    arguments mapped to CLI flags, and the repository skill destination and rendering
+    behavior inside the adapter. Any runner honoring the contract is substitutable.
 31. Everything the orchestration knows about the repository it runs in — which staged
     paths select fast pre-commit checks, which commands verify a merge, which paths make
     each check relevant, which suites prove a cycle's

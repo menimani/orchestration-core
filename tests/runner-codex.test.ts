@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RunnerStartOptions } from '../src/adapters/runner.ts'
 
@@ -52,6 +53,19 @@ afterEach(() => {
 })
 
 describe('createCodexRunner', () => {
+  it('provides the Codex repository skill destination and command rendering', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    const sharedSkills = createCodexRunner().sharedSkills
+
+    expect(sharedSkills.destinationRoot(repoRoot))
+      .toBe(join(repoRoot, '.agents', 'skills'))
+    expect(sharedSkills.renderFile(
+      Buffer.from('{{COMMAND_PREFIX}} loop\n'),
+      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+    ).toString('utf8')).toBe('npm run -C orchestration/ts loop\n')
+  })
+
   it('spawns codex directly on POSIX with the final-message, model, effort, and prompt arguments', async () => {
     setPlatform('linux')
     mocks.readFileSync.mockReturnValue('first line\nsecond line')

@@ -14,6 +14,7 @@ import {
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { writeStatus } from '../src/status.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
 
 let tempRoot: string
@@ -35,6 +36,7 @@ const project: ProjectAdapter = {
 }
 
 const runner: Runner = {
+  sharedSkills: fakeRunnerSharedSkills,
   start: async () => process.pid,
 }
 

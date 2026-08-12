@@ -7,6 +7,7 @@ import { loadConfig, type LoopConfig } from '../src/config.ts'
 import { createLoop, type Loop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
 
 // The branch-state rules ported from test-loop-branch-state.sh: a stopped loop keeps
@@ -24,6 +25,7 @@ function makeLoop(overrides: Partial<LoopConfig> = {}): Loop {
     config: { ...loadConfig({}), ...overrides },
     forge: makeFakeForge(),
     runner: {
+      sharedSkills: fakeRunnerSharedSkills,
       start: async (options) => {
         runnerStarts.push(options.specFile)
         return process.pid
