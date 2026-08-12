@@ -1,7 +1,8 @@
 import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { completionMarkerPresent, refreshAll, refreshTask } from '../src/refresh.ts'
 
@@ -14,6 +15,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -68,6 +70,16 @@ describe('refreshTask', () => {
   it('keeps a live task running while the marker is absent', async () => {
     writeRawStatus('live-task', `{"task_id":"live-task","status":"running","pid":${process.pid}}\n`)
     const after = await refreshTask(paths, 'live-task')
+    expect(after?.status).toBe('running')
+  })
+
+  it('uses the operating-system liveness verdict for a task process', async () => {
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    writeRawStatus('protected-task', '{"task_id":"protected-task","status":"running","pid":2147483647}\n')
+
+    const after = await refreshTask(paths, 'protected-task')
+
+    expect(processIsAlive).toHaveBeenCalledWith(2147483647)
     expect(after?.status).toBe('running')
   })
 

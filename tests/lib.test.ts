@@ -5,7 +5,8 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
   branchName, finalMessageFile, isInspectionTaskId, isReviewFixTaskId, isReviewTaskId,
@@ -45,6 +46,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -98,6 +100,18 @@ describe('status files', () => {
     writeFileSync(join(lockDir, 'pid'), `${dead}\n`)
     await writeStatus(paths, 'task-stale', 'completed')
     expect(readStatus(paths, 'task-stale')?.status).toBe('completed')
+  })
+
+  it('uses the operating-system liveness verdict before reclaiming a lock', async () => {
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+    const lockDir = join(paths.statusDir, '.adapter-lock.lock')
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'pid'), '2147483647\n')
+
+    await writeStatus(paths, 'adapter-lock', 'completed')
+
+    expect(processIsAlive).toHaveBeenCalledWith(2147483647)
+    expect(readStatus(paths, 'adapter-lock')?.status).toBe('completed')
   })
 
   it('reclaims an aged lock that never published a pid', async () => {

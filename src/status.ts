@@ -2,6 +2,7 @@ import {
   mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { operatingSystem } from './adapters/os.ts'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 
 // A task reads `running` while its runner process is alive, `completed` once the
@@ -40,15 +41,6 @@ export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undef
   }
 }
 
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
 function lockDir(paths: OrchPaths, taskId: string): string {
   return join(paths.statusDir, `.${taskId}.lock`)
 }
@@ -83,7 +75,7 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<void
       } catch {
         // no pid published yet
       }
-      if (/^[1-9][0-9]*$/.test(lockPid) && !isPidAlive(Number(lockPid))) {
+      if (/^[1-9][0-9]*$/.test(lockPid) && !operatingSystem.processIsAlive(Number(lockPid))) {
         try {
           rmSync(pidFile)
           rmdirSync(dir)
