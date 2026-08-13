@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { recordIssueForTask } from '../src/issueQueue.ts'
 import { branchName, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
+import { recordTaskProcess } from '../src/processRegistry.ts'
 import { writeStatus } from '../src/status.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -351,6 +352,8 @@ describe('loop daemon ownership', () => {
       status: 'running',
       pid: process.pid,
     }))
+    // A task's process lives in the registry, not in the record.
+    recordTaskProcess(paths, taskId, process.pid)
 
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,

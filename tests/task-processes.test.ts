@@ -12,6 +12,7 @@ import {
   type WindowsOperatingSystemRuntime,
 } from '../src/adapters/os-windows.ts'
 import { orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import { recordTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
 import {
   orphanedWorktreeDirectories, terminateLiveTaskProcesses, worktreeHolderHint,
 } from '../src/taskProcesses.ts'
@@ -21,6 +22,7 @@ let paths: OrchPaths
 
 function writeRunningTask(taskId: string, pid: number): void {
   writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, status: 'running', pid }))
+  recordTaskProcess(paths, taskId, pid)
 }
 
 function gone(): NodeJS.ErrnoException {
@@ -67,6 +69,10 @@ describe('terminateLiveTaskProcesses', () => {
     expect(result.failures).toEqual([{
       taskId: 'first-task', pid: 101, error: 'Could not stop process tree 101.',
     }])
+    // Stopping is what makes a recorded identifier false, so a stopped task releases it
+    // and one that resisted keeps it: something is still running under that number.
+    expect(taskProcessPid(paths, 'second-task')).toBeUndefined()
+    expect(taskProcessPid(paths, 'first-task')).toBe(101)
   })
 })
 

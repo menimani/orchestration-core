@@ -13,6 +13,7 @@ import {
 } from '../src/adapters/os-windows.ts'
 import { cleanupTask, type CleanupRuntime } from '../src/cleanup.ts'
 import { finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths } from '../src/paths.ts'
+import { recordTaskProcess } from '../src/processRegistry.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -24,6 +25,8 @@ function seedTask(pid: number | null): void {
   mkdirSync(worktree, { recursive: true })
   mkdirSync(join(paths.queueDir, 'scanned'), { recursive: true })
   writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, pid }))
+  // A task's process lives in the registry, not in the record.
+  if (pid !== null) recordTaskProcess(paths, taskId, pid)
   writeFileSync(finalMessageFile(paths, taskId), 'TASK_COMPLETE\n')
   writeFileSync(join(paths.queueDir, 'scanned', taskId), '')
   writeFileSync(join(paths.queueDir, 'scanned', `${taskId}.failed`), '')

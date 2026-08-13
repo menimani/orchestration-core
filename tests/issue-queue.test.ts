@@ -20,6 +20,7 @@ import {
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc } from '../src/ids.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
+import { recordTaskProcess } from '../src/processRegistry.ts'
 import { specFile } from '../src/tasks.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -1479,6 +1480,7 @@ describe('loop integration in issue mode', () => {
     recordIssueForTask(paths, 'task-running', linked)
     writeFileSync(join(paths.statusDir, 'task-running.json'),
       JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+    recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
 
     const { createLoop } = await import('../src/loop.ts')
@@ -1516,6 +1518,7 @@ describe('loop integration in issue mode', () => {
     recordIssueForTask(paths, 'task-running', issueNumber)
     writeFileSync(join(paths.statusDir, 'task-running.json'),
       JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+    recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
     forge.commentIssue = async () => { throw new Error('forge unavailable') }
     const logged: string[] = []
