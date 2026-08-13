@@ -180,9 +180,17 @@ export function syncOrchestrationDepsAtStartup(
   runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
 ): void {
   const root = runtime.packageRoot ?? PACKAGE_ROOT
-  // Installing is for the copy this repository carries. A CLI pointed at some other
-  // checkout — a test fixture, another clone — must not reinstall the package it is
-  // itself running from.
+  // Only the repository this loop was started against gets its package synchronized. A
+  // package outside it belongs to someone else's checkout, and installing there would
+  // rewrite dependencies nobody here asked about.
+  //
+  // The package may equally be the repository — that is how this repository runs itself,
+  // and a core that updates its own source has no one else to install the lockfile it
+  // just pulled. `npm ci` empties node_modules before refilling it, so this is safe only
+  // because it happens at startup, before any task or suite depends on that directory.
+  // What must never happen is a process reaching this from somewhere else and pointing it
+  // at its own package: that is why the daemon starts in the repository it was given
+  // rather than in the package directory (see `cmdLoop`).
   if (!isInside(paths.repoRoot, root)) return
   if (!orchestrationDepsMissing(root)) return
   installOrchestrationDeps('at startup', event, runtime)
@@ -278,11 +286,13 @@ function runMergeChecks(
 ): void {
   if (options.testCmd !== undefined && options.testCmd !== '') {
     io.out(`=== Running tests in worktree: ${options.testCmd} ===`)
-    assertModuleIsolation(worktree, 'the worktree', io)
     try {
       io.run(worktree, options.testCmd)
     } catch {
       throw new MergeError('Tests failed. Aborting merge.')
+    }
+    if (!ranIsolated(worktree, 'the worktree', io)) {
+      throw new MergeError('Tests passed against borrowed dependencies. Aborting merge.')
     }
     return
   }
@@ -299,25 +309,30 @@ function runMergeChecks(
     if (install !== undefined && !existsSync(join(worktree, install.path))) {
       ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) && ok
     }
-    assertModuleIsolation(join(worktree, check.cwd), check.label, io)
-    ok = io.tryRun(join(worktree, check.cwd), check.command, check.label) && ok
+    const directory = join(worktree, check.cwd)
+    ok = io.tryRun(directory, check.command, check.label)
+      && ranIsolated(directory, check.label, io)
+      && ok
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
 }
 
 /**
- * Refuse to run a check whose dependencies would come from outside its own directory.
- * Reaching a parent's node_modules produces a run against a dependency tree nobody
- * installed, whose result says nothing about the commit under test.
+ * Whether a check that just passed did so on dependencies of its own. A worktree sits
+ * inside the checkout it was cut from, so Node resolves whatever the directory lacks from
+ * the parent's node_modules: a half-finished install produces a pass against a dependency
+ * tree nobody assembled, describing neither tree.
+ *
+ * This runs after the command, not before it, because a check may install as its own
+ * first step — the core's own gate is `npm ci && tsc && npm test` in one command, and
+ * judging it beforehand condemns every gate for a worktree that has not installed yet.
  */
-function assertModuleIsolation(directory: string, label: string, io: MergeIo): void {
+function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
   const isolation = verifyModuleIsolation(directory)
-  if (isolation.isolated) return
-  io.out(`=== ${label}: dependencies are not installed in place ===`)
+  if (isolation.isolated) return true
+  io.out(`=== ${label}: passed on dependencies it does not have ===`)
   io.out(isolation.reason ?? '')
-  throw new MergeError(
-    `${label} would resolve dependencies from outside ${directory}: ${isolation.reason}`,
-  )
+  return false
 }
 
 export function removeTemporaryWorktree(

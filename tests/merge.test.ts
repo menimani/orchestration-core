@@ -429,7 +429,7 @@ describe('mergeTask', () => {
     expect(outputLines).toContain('check warning')
   })
 
-  it('refuses a check whose dependencies would resolve from the parent checkout', async () => {
+  it('rejects a check that passed on dependencies it does not have', async () => {
     const taskId = '20260808_000000_013_user-declares-uninstalled-dependency'
     const worktree = await makeCompletedTask(taskId, { commit: true })
     writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
@@ -437,9 +437,42 @@ describe('mergeTask', () => {
     }, null, 2)}\n`)
     git(worktree, ['add', 'package.json'])
     git(worktree, ['commit', '-qm', 'test: declare a dependency nobody installed'])
+    const outputFile = join(repoRoot, 'merge-check.log')
 
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: installProject }))
-      .rejects.toThrow(/resolve dependencies from outside/)
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: installProject, outputFile,
+    })).rejects.toThrow(/Tests failed/)
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain('passed on dependencies it does not have')
+    expect(output).toContain('fixture-dependency')
+  })
+
+  it('accepts a check that installs its own dependencies as its first step', async () => {
+    const taskId = '20260808_000000_014_user-installs-inside-the-check'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
+      name: 'fixture', devDependencies: { 'fixture-dependency': '^1.0.0' },
+    }, null, 2)}\n`)
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'test: declare a dependency the check installs'])
+    // The core's own gate is `npm ci && tsc && npm test` in one command: nothing is
+    // installed when the check starts, and everything is by the time it ends.
+    const installingProject: ProjectAdapter = {
+      ...stubProject,
+      name: 'installs-inside-check',
+      mergeChecks: () => [{
+        label: 'Fixture gate',
+        cwd: '',
+        command: 'node -e "const {mkdirSync,writeFileSync}=require(\'fs\');'
+          + "mkdirSync('node_modules/fixture-dependency',{recursive:true});"
+          + "writeFileSync('node_modules/.package-lock.json','{}')\"",
+      }],
+    }
+
+    await mergeTask(paths, taskId, { taskGate: 'light', project: installingProject })
+
+    expect(git(repoRoot, ['log', '-1', '--pretty=%s'])).toContain(taskId)
   })
 
   it('skips installation when the merge check dependency path is present', async () => {
