@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { isAbsolute, relative, sep } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
 import type { Runner } from './adapters/runner.ts'
@@ -48,6 +48,26 @@ function warn(event: CoreUpdateEvent, message: string): void {
   event('WARN', message)
 }
 
+function repositoryPaths(repoRoot: string, paths: string[]): string[] {
+  return paths.map((path) => {
+    const repositoryPath = relative(repoRoot, path)
+    if (repositoryPath === '' || repositoryPath === '..'
+      || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
+      throw new Error(`shared skill output escaped the repository: ${path}`)
+    }
+    return repositoryPath.replaceAll('\\', '/')
+  })
+}
+
+function sharedSkillRoots(repoRoot: string, runner: Runner): string[] {
+  const roots = [
+    runner.sharedSkills.destinationRoot(repoRoot),
+    ...(runner.sharedSkills.legacyRoots?.(repoRoot) ?? []),
+    join(repoRoot, '.claude', 'skills'),
+  ]
+  return [...new Set(repositoryPaths(repoRoot, roots))]
+}
+
 function syncSkills(
   repoRoot: string,
   packageRoot: string,
@@ -56,6 +76,22 @@ function syncSkills(
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime,
 ): void {
+  if (isConsumer) {
+    try {
+      const alreadyStaged = runtime.git(repoRoot, [
+        'diff', '--cached', '--name-only', '--', ...sharedSkillRoots(repoRoot, runner),
+      ]).trim()
+      if (alreadyStaged !== '') {
+        event('WARN',
+          `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
+        return
+      }
+    } catch (error) {
+      event('WARN', `shared skill sync could not be committed: ${summary(error)}`)
+      return
+    }
+  }
+
   let result: ReturnType<typeof syncSharedSkills>
   try {
     result = syncSharedSkills(repoRoot, packageRoot, runner)
@@ -74,16 +110,8 @@ function syncSkills(
       `legacy shared skill ${relative(repoRoot, path).replaceAll('\\', '/')} differs from the last synced copy; left unchanged`)
   }
   if (isConsumer) {
-    const repositoryPaths = (paths: string[]): string[] => paths.map((path) => {
-      const repositoryPath = relative(repoRoot, path)
-      if (repositoryPath === '' || repositoryPath === '..'
-        || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
-        throw new Error(`shared skill output escaped the repository: ${path}`)
-      }
-      return repositoryPath.replaceAll('\\', '/')
-    })
-    const managed = repositoryPaths(result.managedPaths)
-    const removed = repositoryPaths(result.removedPaths)
+    const managed = repositoryPaths(repoRoot, result.managedPaths)
+    const removed = repositoryPaths(repoRoot, result.removedPaths)
     try {
       const scope = [...managed, ...removed]
       if (scope.length > 0) {
