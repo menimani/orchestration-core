@@ -14,13 +14,15 @@ describe('English-only source check', () => {
       'full-width\uff08text\uff09',
       'zero\u200bwidth',
       'unexpected \u00d7 symbol',
+      'unexpected \ud83d\udca1\ufe0f emoji',
     ].join('\n'))
 
-    expect(violations.map((violation) => violation.line)).toEqual([1, 2, 3, 4, 5])
+    expect(violations.map((violation) => violation.line)).toEqual([1, 2, 3, 4, 5, 6])
     expect(violations[0]?.codePoints).toEqual(['U+65E5', 'U+672C', 'U+8A9E'])
     expect(violations[2]?.codePoints).toEqual(['U+FF08', 'U+FF09'])
     expect(violations[3]?.codePoints).toEqual(['U+200B'])
     expect(violations[4]?.codePoints).toEqual(['U+00D7'])
+    expect(violations[5]?.codePoints).toEqual(['U+1F4A1', 'U+FE0F'])
   })
 
   it('checks every repository source during the normal test suite', () => {

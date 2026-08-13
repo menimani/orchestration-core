@@ -25,10 +25,6 @@ const PUNCTUATION: ReadonlySet<string> = new Set([
   '─', '│', '├', '└',
 ])
 
-// Emoji carry no language. Variation selectors are included because they form part of
-// the displayed glyph rather than independent text.
-const PICTOGRAPH = /[🌀-🫿️]/u
-
 const SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
   '.cjs', '.css', '.cts', '.html', '.js', '.json', '.md', '.mjs', '.mts',
   '.properties', '.sh', '.snap', '.sql', '.ts', '.tsx', '.txt', '.xml', '.yaml', '.yml',
@@ -52,7 +48,6 @@ const permitted = (character: string): boolean =>
   || PUNCTUATION.has(character)
   || LATIN_LETTER.test(character)
   || COMBINING_DIACRITICS.test(character)
-  || PICTOGRAPH.test(character)
 
 const normalizedPath = (file: string): string => file.replaceAll('\\', '/')
 
