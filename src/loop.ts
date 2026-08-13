@@ -24,7 +24,7 @@ import {
 } from './paths.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds } from './refresh.ts'
-import { readStatus } from './status.ts'
+import { readStatus, transitionStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
@@ -926,11 +926,10 @@ export function createLoop(deps: LoopDeps) {
     if (!isScanTaskId(taskId)) return
     const cycleNow = readCount(scanCountFile)
     const yieldFile = join(paths.queueDir, `scan-yield-${cycleNow}`)
-    if (actionableFindings(finalMessageFile(paths, taskId)).length > 0) {
-      appendFileSync(yieldFile, 'found\n')
-    } else {
-      appendFileSync(yieldFile, 'empty\n')
-    }
+    const value = actionableFindings(finalMessageFile(paths, taskId)).length > 0
+      ? 'found'
+      : 'empty'
+    appendFileSync(yieldFile, `${taskId}\t${value}\n`)
   }
 
   function completeScanYields(cycle: number): string[] | undefined {
@@ -938,9 +937,19 @@ export function createLoop(deps: LoopDeps) {
     const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
     if (!existsSync(expectedFile) || !existsSync(yieldFile)) return undefined
     const expected = readCount(expectedFile)
-    const yields = readFileSync(yieldFile, 'utf8').split(/\r?\n/).filter((line) => line !== '')
-    if (expected === 0 || yields.length !== expected
-      || yields.some((yieldValue) => yieldValue !== 'found' && yieldValue !== 'empty')) {
+    const keyedYields = new Map<string, string>()
+    const legacyYields: string[] = []
+    for (const line of readFileSync(yieldFile, 'utf8').split(/\r?\n/).filter(Boolean)) {
+      if (line === 'found' || line === 'empty') {
+        legacyYields.push(line)
+        continue
+      }
+      const match = /^(\S+)\t(found|empty)$/.exec(line)
+      if (match === null) return undefined
+      keyedYields.set(match[1]!, match[2]!)
+    }
+    const yields = [...legacyYields, ...keyedYields.values()]
+    if (expected === 0 || yields.length !== expected) {
       return undefined
     }
     return yields
@@ -1795,6 +1804,10 @@ export function createLoop(deps: LoopDeps) {
         const abandoned = noteMergeFailure(mergeLog)
         if (abandoned && linkedIssues.length > 1 && remoteOperationsAvailable) {
           try {
+            const terminalized = await transitionStatus(paths, taskId, 'completed', 'failed')
+            if (!terminalized) {
+              throw new Error(`task status changed before grouped merge abandonment`)
+            }
             await Promise.all(linkedIssues.map((issueNumber) =>
               returnIssueToReady(forge, issueNumber, true)))
             dropClaimedTaskMaterialization(paths, taskId)

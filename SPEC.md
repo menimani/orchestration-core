@@ -50,9 +50,9 @@ from or equivalent to `orchestration/tests/*.sh`.
 ### Retained runtime configuration
 
 `loadConfig` keeps the environment-variable surface from the pre-rewrite launcher.
-Missing and empty values use the defaults below. A Boolean is enabled only by the exact
-lowercase value `true`; every other non-empty value disables it. Numeric values must be
-non-negative integers, with the narrower bounds stated below.
+Missing and empty values use the defaults below. Boolean values accept only the exact
+lowercase values `true` and `false`; every other non-empty value is rejected. Numeric
+values must be non-negative integers, with the narrower bounds stated below.
 
 | Variable | Default | Contract |
 |----------|---------|----------|

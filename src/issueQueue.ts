@@ -141,7 +141,9 @@ export function groupReadyFindings(
     }
     // A grouped task has one identifier, so keep scan and review origins separate even
     // when their findings name the same file.
-    const key = `${findingTaskOrigin(parseIssueBody(issue.body, issue.number)?.parentTaskId)}:${file}`
+    const parsed = parseIssueBody(issue.body, issue.number)
+    const mode = parsed?.inspect === true ? 'inspect' : 'implement'
+    const key = `${findingTaskOrigin(parsed?.parentTaskId)}:${mode}:${file}`
     let group = byFile.get(key)
     if (group === undefined || group.length >= limit) {
       group = []
@@ -1231,6 +1233,10 @@ export async function claimIssueGroup(
     const description = requirements.map(({ requirement }) => requirement).join('\n\n')
     let createdTaskId: string | undefined
     try {
+      const inspectionModes = new Set(claimedIssues.map(({ parsed }) => parsed.inspect))
+      if (inspectionModes.size > 1) {
+        throw new Error('A claim group cannot mix inspection and implementation issues.')
+      }
       const origin = claimedIssues.some(({ parsed }) =>
         findingTaskOrigin(parsed.parentTaskId) === 'fix') ? 'fix' : 'auto'
       const existing = existingTaskIdForDesc(paths, origin, description)
