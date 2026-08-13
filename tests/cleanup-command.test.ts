@@ -64,13 +64,13 @@ describe('cleanup command', () => {
     expect(issueNumbersForTask(paths, taskId)).toEqual([41])
   })
 
-  it('releases a linked issue claim and drops its local materialization', async () => {
-    const forge = makeFakeForge('worker-a')
+  it('releases the issue\'s actual assignees even when another operator cleans up', async () => {
+    const forge = makeFakeForge('operator-b')
     const issueNumber = await forge.createIssue({
       title: 'cleanup claim',
       body: 'claimed work',
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-      assignees: [forge.user],
+      assignees: ['worker-a', 'worker-c'],
     })
     recordIssueForTask(paths, taskId, issueNumber)
     writeFileSync(specFile(paths, taskId), '# claimed task\n')

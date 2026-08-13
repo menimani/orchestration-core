@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { scanText } from '../checks/english-only.ts'
+import { main, scanText } from '../checks/english-only.ts'
 
 describe('English-only source check', () => {
   it('accepts ASCII, English typography, and borrowed Latin letters', () => {
@@ -21,5 +21,9 @@ describe('English-only source check', () => {
     expect(violations[2]?.codePoints).toEqual(['U+FF08', 'U+FF09'])
     expect(violations[3]?.codePoints).toEqual(['U+200B'])
     expect(violations[4]?.codePoints).toEqual(['U+00D7'])
+  })
+
+  it('checks every repository source during the normal test suite', () => {
+    expect(main()).toBe(0)
   })
 })

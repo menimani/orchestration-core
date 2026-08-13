@@ -152,10 +152,10 @@ and verifies the revision that actually came up.
 
 If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
-subtree installation). The command requires exactly one PR number, optionally prefixed
-with `#`, or one PR URL. It refuses to run while the loop is active, performs no forge
-operation, records the completion in `logs/loop.log`, and emits the exact standalone
-`LOOP_DONE: <pr-number-or-url>` marker to `logs/loop-markers.log`.
+subtree installation). The command requires exactly one positive PR number, optionally
+prefixed with `#`, or one absolute HTTP(S) URL. It refuses to run while the loop is active,
+performs no forge operation, records the completion in `logs/loop.log`, and emits the exact
+standalone `LOOP_DONE: <pr-number-or-url>` marker to `logs/loop-markers.log`.
 
 Automatic pulls are enabled by default. To pull later improvements manually, or when
 `CORE_AUTO_UPDATE=false` pins the consumed version, use:

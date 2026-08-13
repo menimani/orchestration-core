@@ -1,7 +1,6 @@
 import type { Forge } from './adapters/forge.ts'
 import {
-  dropClaimedTaskMaterialization, issueNumbersForTask, releaseIssueClaim,
-  returnIssueToReady,
+  dropClaimedTaskMaterialization, issueNumbersForTask, returnIssueToReady,
 } from './issueQueue.ts'
 import type { OrchPaths } from './paths.ts'
 
@@ -38,18 +37,9 @@ async function releaseIssues(
   forge: Forge,
   issueNumbers: readonly number[],
 ): Promise<ReleaseFailure[]> {
-  if (issueNumbers.length === 1) {
-    const issueNumber = issueNumbers[0]!
-    try {
-      await releaseIssueClaim(forge, issueNumber, await forge.currentUser())
-      return []
-    } catch (error) {
-      return [{ issueNumber, error }]
-    }
-  }
-
+  const keepSingleton = issueNumbers.length > 1
   const results = await Promise.allSettled(issueNumbers.map((issueNumber) =>
-    returnIssueToReady(forge, issueNumber, true)))
+    returnIssueToReady(forge, issueNumber, keepSingleton)))
   return results.flatMap((result, index) => result.status === 'rejected'
     ? [{ issueNumber: issueNumbers[index]!, error: result.reason }]
     : [])

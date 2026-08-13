@@ -40,7 +40,7 @@ function makeLoop(overrides: Partial<LoopConfig> = {}): Loop {
 const cycleFileNames = [
   'cycle-complete-4', 'cycle-suite-tip-4', 'cycle-resume-4', 'ci-fix-emitted-4', 'review-round-4',
   'review-id-4', 'decisions.txt', 'failed-4', 'scan-yield-4', 'pr-url.txt',
-  'empty-scan-count.txt', 'merge-failure-count.txt',
+  'empty-scan-count.txt',
 ]
 
 function seedState(): void {
@@ -50,6 +50,7 @@ function seedState(): void {
   for (const name of cycleFileNames) {
     writeFileSync(join(paths.queueDir, name), 'cycle state\n')
   }
+  writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '3\n')
   writeFileSync(join(paths.queueDir, 'scanned', 'completed-task'), 'terminal marker\n')
   writeFileSync(join(paths.queueDir, 'scanned', 'failed-task.failed'), 'terminal marker\n')
   writeFileSync(join(paths.statusDir, 'completed-task.json'),
@@ -101,6 +102,7 @@ describe('initializeSessionStateForBranch', () => {
     for (const name of cycleFileNames) {
       expect(existsSync(join(paths.queueDir, name)), `cycle state survived: ${name}`).toBe(false)
     }
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
     assertPersistentState()
   })
 
@@ -115,7 +117,16 @@ describe('initializeSessionStateForBranch', () => {
     for (const name of cycleFileNames) {
       expect(readFileSync(join(paths.queueDir, name), 'utf8').trim()).toBe('cycle state')
     }
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('3')
     assertPersistentState()
+  })
+
+  it('resets the merge streak when no previous run was recorded', () => {
+    seedState()
+
+    makeLoop().initializeSessionStateForBranch()
+
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
   })
 })
 

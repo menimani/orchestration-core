@@ -250,7 +250,8 @@ values must be non-negative integers, with the narrower bounds stated below.
     `LOOP_DONE: <PR URL>` is emitted to the machine-marker sink and as a formatted
     `loop.log` copy, session state is cleaned up, and the loop exits.
 18a. `shipped <pr-number-or-url>` records the equivalent ending for a run whose PR was
-     promoted by hand. It requires exactly one PR number (with an optional `#`) or URL
+     promoted by hand. It requires exactly one positive PR number (with an optional `#`)
+     or absolute HTTP(S) URL
      and refuses to run while the loop is active, because an active loop records its own
      ending. It performs no forge operation: it appends a cycle-aware `Completed Loop`
      event to `logs/loop.log`, appends the exact standalone marker
@@ -320,8 +321,10 @@ values must be non-negative integers, with the narrower bounds stated below.
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; gitea/gitlab implementations can be added without touching the
     core). The interface returns normalized values only: PR state plus check records with
-    `name`, `conclusion`, and an ISO `startedAt` timestamp; CI waiting keeps only the
-    newest `startedAt` record for each check name so reruns supersede earlier attempts.
+    `name`, `conclusion`, and `startedAt`, which is an ISO timestamp when the forge reports
+    one and otherwise an empty string. CI waiting uses the newest available `startedAt`
+    record for each check name so timestamped reruns supersede earlier attempts; when a
+    forge omits timestamps, repeated names cannot be reliably ordered.
     Draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
     likewise normalizes issues, comments, and author write-access verdicts. It exposes
     current-user and label discovery/creation; issue creation, lookup, open/closed
