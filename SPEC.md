@@ -21,11 +21,14 @@ from or equivalent to `orchestration/tests/*.sh`.
   off at startup; `false` skips the pre-cycle check entirely. `UPSTREAM_REMOTE` defaults
   to the package's `upstreamRepo` value used by `report-upstream`, and
   `UPSTREAM_BRANCH` defaults to `main`.
-- The command surface is the `scripts` block of the package's `package.json` (the
-  repository-root manifest here, or `orchestration/ts/package.json` when installed as a
-  subtree) — `orchestrate.sh` is not kept (decided 2026-08-08; supersedes the
-  frozen-wrapper plan). Runtime commands map to same-name entries in the command registry
-  in `src/cli.ts`; those two files are the authoritative command list. The skills
+- The public command surface is the runtime entries in the `scripts` block of the
+  package's `package.json` (the repository-root manifest here, or
+  `orchestration/ts/package.json` when installed as a subtree) — `orchestrate.sh` is not
+  kept (decided 2026-08-08; supersedes the frozen-wrapper plan). Those entries map to
+  same-name dispatches in the command registry in `src/cli.ts`. The manifest also owns
+  the check-only `test`, `test:linux`, and `typecheck` scripts, which are not CLI
+  dispatches; the registry additionally owns the hook-only `pre-commit` dispatch, which
+  is invoked by the generated Git hook rather than exposed as a package script. The skills
   (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
   the npm form as part of the cutover. A background launch prints status and stop
   commands for the package's actual location: direct `npm run` commands at the repository
@@ -244,6 +247,13 @@ values must be non-negative integers, with the narrower bounds stated below.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
     `LOOP_DONE: <PR URL>` is emitted to the machine-marker sink and as a formatted
     `loop.log` copy, session state is cleaned up, and the loop exits.
+18a. `shipped <pr-number-or-url>` records the equivalent ending for a run whose PR was
+     promoted by hand. It requires exactly one PR number (with an optional `#`) or URL
+     and refuses to run while the loop is active, because an active loop records its own
+     ending. It performs no forge operation: it appends a cycle-aware `Completed Loop`
+     event to `logs/loop.log`, appends the exact standalone marker
+     `LOOP_DONE: <pr-number-or-url>` to `logs/loop-markers.log`, and confirms the record
+     on stdout.
 
 ## Failure containment
 
