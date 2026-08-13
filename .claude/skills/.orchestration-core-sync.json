@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "skills": {
+    "git-commit": "9227c69fd20f4abb33d31b06a3923a1e0893af7459adf362890a09da5c8f4f66",
+    "git-merge": "f48b624ddfe2aa3ae2bd2a7ad4ea166cd2c9290904f9a8a6ca41b26fe362653f",
+    "git-pr": "b631462e5fd0ea3d9b6d974d17fa02f38aee09f336d9d401616ef5d9c96c536a",
+    "git-review": "c71b70fc4064c1bd626b43b40b94530daadcaf8cd3af5ecd65fbb1739f423b61",
+    "loop-delegate": "9f32215042f497eb3c0def1d841a109d190bda8d1614925686ec9ef185fec285",
+    "loop-setup": "3241c77cf74cc2591cb7cf2e694e904baf7f6225f8e151d184e867128d8da26a",
+    "loop-start": "7c0f00fbcca9c0c2d4a1cd8e6c5f230ce2a7b1d23fb93603f6df9bfe637064aa",
+    "loop-stop": "1574efbe1187d48675c9cb3244af16daa6e13d72ec75190f97b830de7c6e059c",
+    "skill-create": "6657e1650e63fc255cb3b2b286b1f2a5161d4dfe126a170504b6df1d8b4fc09e"
+  }
+}
