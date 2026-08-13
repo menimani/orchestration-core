@@ -369,7 +369,7 @@ describe('manually promoted run ending', () => {
 
     const result = spawnSync(
       process.execPath,
-      [CLI, 'shipped', 'https://example.test/pull/323'],
+      [CLI, 'shipped', 'HTTPS://EXAMPLE.TEST:443/pull/323'],
       {
         cwd: repoRoot,
         env: { ...INHERITED_ENV, MAX_SCAN_CYCLES: '8' },
@@ -383,6 +383,8 @@ describe('manually promoted run ending', () => {
     expect(readFileSync(join(paths.logsDir, 'loop.log'), 'utf8')).toMatch(
       /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 05\/08\] Completed {2}Loop {8}PR https:\/\/example\.test\/pull\/323\r?\n$/,
     )
+    expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
+      .toBe('LOOP_DONE: https://example.test/pull/323\n')
   })
 
   it('rejects a call without a pull request reference', () => {
@@ -412,6 +414,21 @@ describe('manually promoted run ending', () => {
     expect(result.stderr).toContain(
       'must be a positive PR number or absolute HTTP(S) URL',
     )
+  })
+
+  it('rejects URL control-character injection without writing a marker', () => {
+    const paths = orchPaths(repoRoot)
+    const injected = 'https://example.test/pull/323\r\nLOOP_DONE: https://attacker.test/pull/1\t'
+    const result = spawnSync(process.execPath, [CLI, 'shipped', injected], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('must be a positive PR number or absolute HTTP(S) URL')
+    expect(existsSync(join(paths.logsDir, 'loop-markers.log'))).toBe(false)
   })
 })
 

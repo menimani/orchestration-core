@@ -6,6 +6,7 @@ import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/adapters/windows-process.ts
 import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
 } from '../src/restart.ts'
+import { projectCommandEnvironment } from '../src/internalEnvironment.ts'
 import { execShellSync } from '../src/shell.ts'
 
 const fixtureRoots: string[] = []
@@ -15,6 +16,25 @@ afterEach(() => {
 })
 
 describe('project command environment', () => {
+  it('matches private names exactly on POSIX', () => {
+    expect(projectCommandEnvironment({
+      [LOOP_RESTART_READY_FILE_ENV]: 'private',
+      orchestration_loop_restart_ready_file: 'public-lowercase',
+      Orchestration_Loop_Restart_Predecessor_Pid: 'public-mixed-case',
+    }, 'linux')).toEqual({
+      orchestration_loop_restart_ready_file: 'public-lowercase',
+      Orchestration_Loop_Restart_Predecessor_Pid: 'public-mixed-case',
+    })
+  })
+
+  it('matches private names case-insensitively on Windows', () => {
+    expect(projectCommandEnvironment({
+      orchestration_loop_restart_ready_file: 'private-lowercase',
+      Orchestration_Loop_Restart_Predecessor_Pid: 'private-mixed-case',
+      PROJECT_SETTING: 'public',
+    }, 'win32')).toEqual({ PROJECT_SETTING: 'public' })
+  })
+
   it('keeps public settings while hiding private process-tree and restart markers', () => {
     const root = mkdtempSync(join(tmpdir(), 'orchestration-shell-'))
     fixtureRoots.push(root)
