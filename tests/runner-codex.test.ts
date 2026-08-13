@@ -250,7 +250,7 @@ describe('createCodexRunner', () => {
   })
 
   it('never passes the specification as an argument regardless of its size', async () => {
-    const specification = 'non-ASCII specification 日本語\n'.repeat(1_000)
+    const specification = 'non-ASCII specification \u65e5\u672c\u8a9e\n'.repeat(1_000)
     mocks.readFileSync.mockReturnValue(specification)
     const child = mockChild()
     mocks.spawn.mockReturnValue(child)
