@@ -33,10 +33,12 @@ interface StatusMetadata {
   runBranch: string
 }
 
+type DurableTaskStatus = Omit<TaskStatus, 'pid'>
+
 export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undefined {
-  let record: TaskStatus
+  let record: DurableTaskStatus
   try {
-    record = JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as TaskStatus
+    record = JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as DurableTaskStatus
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
@@ -135,10 +137,9 @@ function writeStatusUnlocked(
   if (pid !== undefined && Number.isInteger(pid)) recordTaskProcess(paths, taskId, pid)
   else forgetTaskProcess(paths, taskId)
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-  const record: TaskStatus = {
+  const record: DurableTaskStatus = {
     task_id: taskId,
     status,
-    pid: pid !== undefined && Number.isInteger(pid) ? pid : null,
     started_at: existing?.started_at ?? now,
     updated_at: now,
     worktree: worktreeDir(paths, taskId),
