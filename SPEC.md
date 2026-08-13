@@ -241,6 +241,11 @@ values must be non-negative integers, with the narrower bounds stated below.
     zero checks remains unknown regardless of its age unless the project adapter
     explicitly sets `ciChecksExpected: false`.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
+    when the package is a consumer subtree, its repository-relative path is explicitly
+    out of scope and excluded from every Git diff/log command printed by the default
+    review template. The exclusion and command-scope placeholders render empty when the
+    package owns the repository. Consumer review-template overrides must retain both
+    placeholders to retain both protections.
     findings come back as `NEXT_TASK` lines that become fix tasks and clear the cycle
     flag (the gate re-verifies before the next round reads the corrected diff). A clean
     round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle.

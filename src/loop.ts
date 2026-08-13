@@ -29,6 +29,7 @@ import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
   frameUntrustedText, frameVerifiedRequirement, readTemplate, repositoryInspectionPreamble,
+  reviewScopeTemplateValues,
 } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { currentBranchPushRemote, currentBranchTrackingRemote } from './gitRemote.ts'
@@ -1073,6 +1074,7 @@ export function createLoop(deps: LoopDeps) {
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       BASE_BRANCH: baseBranch,
       ACCEPTED_LIMITS: frameUntrustedText(acceptedLimits),
+      ...reviewScopeTemplateValues(paths.repoRoot),
     })
     writeFileSync(specFile(paths, reviewId), text)
     return true

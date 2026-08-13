@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // The on-disk layout is shared state with everything the loop leaves behind between
@@ -14,6 +14,17 @@ import { fileURLToPath } from 'node:url'
  * resolves from here — hardcoding 'orchestration/ts' broke the owning repository.
  */
 export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
+/** This package's repository-relative path when it is installed inside a consumer. */
+export function packageSubtreePrefix(
+  repoRoot: string,
+  packageRoot = PACKAGE_ROOT,
+): string | undefined {
+  const prefix = relative(repoRoot, packageRoot)
+  if (prefix === '' || prefix === '..' || prefix.startsWith(`..${sep}`)
+    || isAbsolute(prefix)) return undefined
+  return prefix.replaceAll('\\', '/')
+}
 
 export function packageFile(...segments: string[]): string {
   return join(PACKAGE_ROOT, ...segments)

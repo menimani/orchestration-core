@@ -9,14 +9,16 @@ Review the diff this cycle produced and report what is wrong with it as NEXT_TAS
 
 Scan cycle {{CYCLE}} of the autonomous loop. Pull request: {{PR_URL}}
 
+{{REVIEW_SCOPE_EXCLUSION}}
+
 ```bash
-git diff {{BASE_BRANCH}}...HEAD --stat
+git diff {{BASE_BRANCH}}...HEAD --stat{{REVIEW_DIFF_SCOPE}}
 ```
 ```bash
-git log {{BASE_BRANCH}}..HEAD --oneline
+git log {{BASE_BRANCH}}..HEAD --oneline{{REVIEW_DIFF_SCOPE}}
 ```
 ```bash
-git diff {{BASE_BRANCH}}...HEAD
+git diff {{BASE_BRANCH}}...HEAD{{REVIEW_DIFF_SCOPE}}
 ```
 
 Read the whole diff before judging any part of it. Where a hunk does not make sense on
