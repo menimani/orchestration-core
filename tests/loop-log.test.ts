@@ -101,11 +101,9 @@ describe('loopLogLines', () => {
   const now = new Date(2026, 7, 10, 1, 2, 3)
   const context = { currentCycle: 4, cycleCap: 12, now }
 
-  it('prefixes every physical line with a local date and time', () => {
+  it('keeps a multiline error to one summarized loop-log line', () => {
     expect(loopLogLines('WARN git failed\nraw stderr\n', context)).toEqual([
       '2026-08-10 01:02:03 [loop 04/12] WARN       git failed',
-      '2026-08-10 01:02:03 [loop 04/12] WARN       raw stderr',
-      '2026-08-10 01:02:03 [loop 04/12] WARN      ',
     ])
   })
 
@@ -152,13 +150,19 @@ describe('loopLogLines', () => {
     expect(scan.indexOf('scan 1/4')).toBe(review.indexOf('effort medium'))
   })
 
-  it('aligns the Status counter groups with the shared event column', () => {
-    expect(loopLogLines('Status Scan=4', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Status     Scan=4')
-    expect(loopLogLines('Status Running=8  Queue=0', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Status     Running=8  Queue=0')
-    expect(loopLogLines('Status Scan=2  Running=3  Queue=1', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Status     Scan=2  Running=3  Queue=1')
+  it('aligns the event grid at one subject offset', () => {
+    const messages = [
+      'Installed orchestration deps  at startup',
+      'Failed 048_auto    log 048_auto.log',
+      'Waiting remote      issues #76',
+      'Running Status      Task=2  Queue=0',
+      'Idle Status      Task=0  Queue=0  1m21s',
+    ]
+    const lines = messages.map((message) => loopLogLines(message, context)[0]!)
+    const subjectOffset = lines[0]!.indexOf('orchestration deps')
+
+    expect(lines.map((line, index) => line.indexOf(messages[index]!.split(' ')[1]!)))
+      .toEqual(Array(messages.length).fill(subjectOffset))
   })
 
   it('does not rewrite frozen automation markers as presentation events', () => {
@@ -170,13 +174,12 @@ describe('loopLogLines', () => {
       .toBe('2026-08-10 01:02:03 [loop 04/12] LOOP_DONE: https://example.test/pull/322')
   })
 
-  it('caps an over-length message at 79 characters plus an ellipsis', () => {
+  it('preserves an over-length message intact', () => {
     const content = 'a'.repeat(81)
 
     const line = loopLogLines(content, context)[0]!
 
-    expect(line).toBe(`2026-08-10 01:02:03 [loop 04/12] ${'a'.repeat(79)}…`)
-    expect(line.slice('2026-08-10 01:02:03 [loop 04/12] '.length)).toHaveLength(80)
+    expect(line).toBe(`2026-08-10 01:02:03 [loop 04/12] ${content}`)
   })
 
   it.each([79, 80])('leaves a %i-character message unchanged', (length) => {
@@ -186,14 +189,12 @@ describe('loopLogLines', () => {
       .toEqual([`2026-08-10 01:02:03 [loop 04/12] ${content}`])
   })
 
-  it('caps each line of a multiline message independently', () => {
+  it('preserves a long first line and drops multiline detail', () => {
     expect(loopLogLines(
       `WARN ${'a'.repeat(81)}\n${'b'.repeat(80)}\n${'c'.repeat(100)}`,
       context,
     )).toEqual([
-      `2026-08-10 01:02:03 [loop 04/12] WARN       ${'a'.repeat(68)}…`,
-      `2026-08-10 01:02:03 [loop 04/12] WARN       ${'b'.repeat(68)}…`,
-      `2026-08-10 01:02:03 [loop 04/12] WARN       ${'c'.repeat(68)}…`,
+      `2026-08-10 01:02:03 [loop 04/12] WARN       ${'a'.repeat(81)}`,
     ])
   })
 })
@@ -219,7 +220,7 @@ describe('LoopWarningLog', () => {
 
     expect(logged).toHaveLength(2)
     expect(logged[0]).toBe(`WARN ${message}`)
-    expect(logged[1]).toMatch(/^WARN forge unavailable: .*… repeated 2 times$/)
+    expect(logged[1]).toBe(`WARN ${message} repeated 2 times`)
     expect(loopLogLines(logged[1]!, { currentCycle: 1, cycleCap: 12, now })[0])
       .toContain('repeated 2 times')
   })

@@ -583,7 +583,7 @@ describe('loop daemon ownership', () => {
     )
   })
 
-  it('separates daemon markers while formatting their loop-log copies', async () => {
+  it('separates daemon markers from the aligned loop-log event', async () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260810_010203_032_auto-failed-task'
     const markerLog = join(paths.logsDir, 'loop-markers.log')
@@ -618,9 +618,10 @@ describe('loop daemon ownership', () => {
     expect(loopLogLines).not.toContain(marker)
     expect(loopLogLines.every((line) =>
       /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 00\/12\] /.test(line))).toBe(true)
-    expect(loopLogLines).toContainEqual(
-      expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 00\/12\] FAILED:/),
-    )
+    expect(loopLogLines).toContainEqual(expect.stringMatching(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 00\/12\] Failed     032_auto\s+log 032_auto\.log$/,
+    ))
+    expect(loopLogLines.filter((line) => line.includes('032_auto'))).toHaveLength(1)
   })
 
   it('removes the PID and issue marker after a startup failure', () => {
@@ -657,7 +658,7 @@ describe('loop daemon ownership', () => {
     })
 
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain('Mode       core        auto-update on')
+    expect(result.stdout).toContain('Started    core        auto-update on')
     expect(existsSync(daemonFile('loop.pid'))).toBe(false)
     expect(existsSync(daemonFile('issue-mode'))).toBe(false)
     expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('0\n')
@@ -681,7 +682,7 @@ describe('loop daemon ownership', () => {
     })
 
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain('Mode       core        auto-update off')
+    expect(result.stdout).toContain('Started    core        auto-update off')
   })
 })
 

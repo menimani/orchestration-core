@@ -36,12 +36,13 @@ from or equivalent to `orchestration/tests/*.sh`.
   `LOOP_DONE:`, and `FAILED:`). Loop daemon events in `loop.log` use
   `YYYY-MM-DD HH:mm:ss [loop <cycle>/<cap>] <event> <subject> <detail>`: cycle and cap
   are zero-padded, event names occupy a ten-character column, and subjects shorter than
-  twelve characters are padded so details align. Every physical line receives the full
-  prefix and messages are capped at 80 characters after it. The three machine markers
+  twelve characters are padded so details align. Events preserve their complete first
+  line; multiline traces and command output belong in the referenced task or suite log.
+  The three machine markers
   are the exception to presentation-only output: a foreground loop also prints each
   marker as an exact standalone line, while a background loop writes that exact line to
-  `logs/loop-markers.log`. Their copies in `loop.log` still receive the timestamp and
-  cycle prefix, and retain the marker name rather than being rewritten as display events.
+  `logs/loop-markers.log`. The corresponding result is represented separately by an
+  aligned display event in `loop.log`.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
@@ -193,7 +194,8 @@ non-negative integers, with the narrower bounds stated below.
     remains an external source whose state is unknown, so the gate waits. An idle continuing
     status names its wait target, such as an open finding or finding status that could not
     be read. A continuing status with no scan, running task, or queued item carries the
-    current idle stretch as `Idle=<duration>`; repeated idle statuses back off from the
+    current idle stretch as an `Idle` event whose `Status` subject is followed by
+    `Task=<n>`, `Queue=<n>`, and the duration; repeated idle statuses back off from the
     early milestones to a five-minute maximum interval, and any active work resets the
     stretch. A status with a non-zero scan, running, or queue counter omits `Waiting=`
     because the counters already explain why the poll continues and remains visible on
@@ -439,7 +441,7 @@ so authorship and verified ancestry must both hold.
     on its issue, and
     swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection with no
     commits comments and closes its issue instead. Its poll status uses the shared
-    `Status     Running=<n>  Queue=<n>` event while work is active and appends
+    `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.
 36. Exactly one normal, non-worker daemon owns the run tree and is the merger. After

@@ -516,7 +516,7 @@ describe('mergeTask', () => {
     expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
     expect(statusDuringInstall).toEqual(['merged'])
     expect(event).toHaveBeenCalledWith(
-      'Installed', ' orchestration deps  after 010_user',
+      'Installed', 'after 010_user',
     )
   })
 

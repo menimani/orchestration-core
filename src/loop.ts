@@ -61,6 +61,7 @@ export interface LoopDeps {
   runner: Runner
   project: ProjectAdapter
   log: (line: string) => void
+  marker?: ((line: string) => void) | undefined
   now: () => Date
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   enqueueTask?: typeof enqueueTask
@@ -111,7 +112,8 @@ export function formatEventLine(name: string, subject = '', detail = ''): string
 
 export function createLoop(deps: LoopDeps) {
   const {
-    paths, config, forge: rawForge, runner, project, log, now, orchestrationDepsRuntime,
+    paths, config, forge: rawForge, runner, project, log, marker = log, now,
+    orchestrationDepsRuntime,
     enqueueTask: enqueueTaskImpl = enqueueTask,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
@@ -168,10 +170,6 @@ export function createLoop(deps: LoopDeps) {
       (name, subject, detail = '') => event(name, subject, detail),
     ))
 
-  function compactEvent(name: string, subject: string, detail: string): void {
-    log(`${formatEventLine(name, subject)}  ${detail}`)
-  }
-
   function rateLimitTime(resetAt: Date): string {
     return new Intl.DateTimeFormat('en-GB', {
       hour: '2-digit', minute: '2-digit', hour12: false,
@@ -185,7 +183,7 @@ export function createLoop(deps: LoopDeps) {
       : currentTime + 60_000
     forgeRateLimitUntil = Math.max(forgeRateLimitUntil, resetTime)
     if (loggedForgeRateLimitUntil !== forgeRateLimitUntil) {
-      compactEvent(
+      event(
         'Waiting', 'forge',
         `rate limit until ${rateLimitTime(new Date(forgeRateLimitUntil))}`,
       )
@@ -259,7 +257,8 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function orchestrationDepsEvent(name: 'Installed' | 'WARN', subject: string): void {
-    event(name, subject)
+    if (name === 'Installed') event(name, 'orchestration deps', subject)
+    else event(name, subject)
   }
 
   function warning(callSite: string, operation: string, subject: string): void {
@@ -1364,7 +1363,7 @@ export function createLoop(deps: LoopDeps) {
     if (status.state !== 'open' || status.isDraft) return false
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
-    log(`LOOP_DONE: ${prUrl}`)
+    marker(`LOOP_DONE: ${prUrl}`)
     event(
       'Status', 'PR body',
       'still reflects history and must be rewritten as a final summary.',
@@ -1383,7 +1382,7 @@ export function createLoop(deps: LoopDeps) {
    */
   function runCycleSuite(cycle: number): boolean {
     if (config.taskGate !== 'light') return true
-    compactEvent('Started', 'Suite', `cycle ${cycle}`)
+    event('Started', 'Suite', `cycle ${cycle}`)
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
     writeFileSync(suiteLog, '')
 
@@ -1493,7 +1492,7 @@ export function createLoop(deps: LoopDeps) {
           const currentTime = now().getTime()
           if (remoteWaitState?.pending !== pending
             || currentTime - remoteWaitState.loggedAt >= 10 * 60 * 1000) {
-            compactEvent(
+            event(
               'Waiting',
               'remote',
               `issues ${pendingIssueNumbers.slice(0, 5).map((issueNumber) => `#${issueNumber}`).join(' ')}`,
@@ -1565,7 +1564,7 @@ export function createLoop(deps: LoopDeps) {
             return 'continue'
           }
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
-          log(`CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
+          marker(`CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
           event('Completed', 'Cycle', prUrl === '' ? '' : `PR ${prUrl}`)
           writeFileSync(completeFlag, '')
         }
@@ -1861,7 +1860,7 @@ export function createLoop(deps: LoopDeps) {
       }
       if (status === 'failed' && !existsSync(failedFlag)) {
         const cycleNow = readCount(scanCountFile)
-        log(`FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
+        marker(`FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.log`)
         appendFileSync(join(paths.queueDir, `failed-${cycleNow}`), `${taskId}\n`)
         // Failures can arrive while the cycle gate is waiting on CI or review. The
@@ -2100,9 +2099,8 @@ export function createLoop(deps: LoopDeps) {
     const queue = queueLength()
     const counters = [
       ...(scans > 0 ? [`Scan=${scans}`] : []),
-      ...(scans === 0 || runningTasks > 0 || queue > 0
-        ? [`Running=${runningTasks}`, `Queue=${queue}`]
-        : []),
+      `Task=${runningTasks}`,
+      `Queue=${queue}`,
     ]
     const waitingFor: string[] = []
     if (scans === 0 && runningTasks === 0 && queue === 0) {
@@ -2121,7 +2119,7 @@ export function createLoop(deps: LoopDeps) {
     const idle = scans === 0 && runningTasks === 0 && queue === 0
     if (!idle) {
       idleLogState = undefined
-      event('Status', statusParts.join('  '))
+      event('Running', 'Status', statusParts.join('  '))
       return 'continue'
     }
 
@@ -2132,8 +2130,8 @@ export function createLoop(deps: LoopDeps) {
         nextLogAge: nextIdleLogAge(0),
         detail: statusParts.join('  '),
       }
-      statusParts.splice(counters.length, 0, 'Idle=0s')
-      event('Status', statusParts.join('  '))
+      statusParts.splice(counters.length, 0, '0s')
+      event('Idle', 'Status', statusParts.join('  '))
       return 'continue'
     }
 
@@ -2142,8 +2140,8 @@ export function createLoop(deps: LoopDeps) {
     if (detail !== idleLogState.detail || idleAge >= idleLogState.nextLogAge) {
       idleLogState.detail = detail
       idleLogState.nextLogAge = nextIdleLogAge(idleAge)
-      statusParts.splice(counters.length, 0, `Idle=${formatIdleDuration(idleAge)}`)
-      event('Status', statusParts.join('  '))
+      statusParts.splice(counters.length, 0, formatIdleDuration(idleAge))
+      event('Idle', 'Status', statusParts.join('  '))
     }
     return 'continue'
   }
