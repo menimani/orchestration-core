@@ -91,9 +91,14 @@ values must be non-negative integers, with the narrower bounds stated below.
 
 ## Growth and decisions
 
-6. A completed task's final message is scanned for `NEXT_TASK: <description>` lines;
-   each becomes a queued task. `MAX_GROWTH_DEPTH` (default 2) and `MAX_TOTAL_TASKS`
-   (default 50) bound the growth. Directives elsewhere in the transcript are ignored.
+6. A completed task's final message is scanned for lines beginning exactly with
+   `NEXT_TASK:`. After trimming the description, a line becomes work only when it is
+   non-empty, contains none of the pinned format placeholders (literal or HTML-encoded),
+   is not pinned no-finding prose, and produces a task slug containing an ASCII letter
+   or digit. `MAX_GROWTH_DEPTH` (default 2) and `MAX_TOTAL_TASKS` (default 50) bound the
+   growth. Directives elsewhere in the transcript are ignored. The completion remains
+   pending, and cannot merge or pass the cycle gate, until accepted findings are
+   reconciled and the durable scanned flag is written.
 7. `DECISION_REQUIRED: <text>` is logged and carried into the PR risks, never queued.
    Dedup: a line naming a `GHSA-`/`CVE-` identifier matches on the identifier (a scan
    words the same advisory differently every cycle); a line naming neither matches on
@@ -239,7 +244,8 @@ values must be non-negative integers, with the narrower bounds stated below.
     (Features, Bug Fixes, Security, Project Operations, Risks), `- None` where empty.
     Title and body come from the same classification, so they cannot disagree.
 22. An HTML comment on the first body line marks the text as generated; a hand-edited
-    body (marker gone) is never overwritten again.
+    body (marker gone) is never overwritten again. Body ownership does not freeze the
+    generated title, which is still updated through the adapter's title-only field.
 23. The body is built from commit history and therefore shows intermediate steps of
     reworked changes; `LOOP_DONE` output reminds that the summary is rewritten by hand
     from the diff before review.

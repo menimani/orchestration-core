@@ -458,7 +458,7 @@ describe('forge poll budget', () => {
     expect(fakeForge.issueComments.get(issueNumber)).toContain(reason)
   })
 
-  it('continues local refresh, merging, and queued work when queue labels are unavailable', async () => {
+  it('continues local refresh and queued work but defers unscanned merging when queue labels are unavailable', async () => {
     const completedTask = '20260811_120000_001_auto-completed'
     const failedTask = '20260811_120001_002_auto-failed'
     const queuedTask = '20260811_120002_003_auto-queued'
@@ -477,7 +477,9 @@ describe('forge poll budget', () => {
 
     expect(await loop.poll()).toBe('continue')
 
-    expect(readStatus(paths, completedTask)?.status).toBe('merged')
+    expect(readStatus(paths, completedTask)?.status).toBe('completed')
+    expect(existsSync(join(paths.queueDir, 'scanned', completedTask))).toBe(false)
+    expect(logged).not.toContain('Merging 001_auto')
     expect(readStatus(paths, failedTask)?.status).toBe('failed')
     expect(logged).toContain(`FAILED: ${failedTask} — log: ${join(paths.logsDir, `${failedTask}.log`)}`)
     expect(runnerStarts).toEqual([join(paths.tasksDir, `${queuedTask}.md`)])
@@ -1367,6 +1369,7 @@ describe('cycle gate', () => {
     expect(fixId).toMatch(/^20260808_120000_002_ci-fix-c1$/)
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     writeRawStatus(fixId as string, 'completed')
+    writeFileSync(join(paths.queueDir, 'scanned', fixId as string), '')
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(enqueue).toHaveBeenCalledTimes(2)
@@ -2070,7 +2073,10 @@ describe('completion marker output', () => {
     fakeForge.updatePr = updatePr
 
     expect(await loop.ensureDraftPr('cycle')).toBe(true)
-    expect(updatePr).not.toHaveBeenCalled()
+    expect(updatePr).toHaveBeenCalledOnce()
+    expect(updatePr).toHaveBeenCalledWith('main', {
+      title: 'feat: autonomous scan loop — cycle 0/3',
+    })
     expect(readFileSync(join(paths.queueDir, 'pr-url.txt'), 'utf8'))
       .toBe('https://example.test/pull/1\n')
   })
@@ -2500,6 +2506,12 @@ describe('completed task merge recovery', () => {
       }
       return listOpenIssues(label)
     }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(logged).toContain('Claimed 064_auto    #1')
+    expect(logged).not.toContain('Merging 064_auto')
 
     expect(await loop.poll()).toBe('continue')
 
@@ -3004,9 +3016,16 @@ describe('scanForNextTasks', () => {
 
   it('leaves a local finding unreconciled when enqueue fails so a later scan retries it', async () => {
     initializeGitRepo()
+    const initialHead = git(['rev-parse', 'HEAD'])
     let attempts = 0
     const loop = makeLoop(
-      { scanEnabled: false, autoMerge: false, maxParallel: 0 },
+      {
+        scanEnabled: false,
+        autoMerge: true,
+        maxParallel: 0,
+        reviewEnabled: true,
+        autoReview: false,
+      },
       stubProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
       (...args) => {
         attempts += 1
@@ -3015,25 +3034,32 @@ describe('scanForNextTasks', () => {
       },
     )
     loop.initializeSessionStateForBranch()
-    const taskId = '20250101_000000_018_scan'
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const taskId = '20250101_000000_018_auto-parent'
+    makeCompletedTask(taskId)
     writeFinal(taskId, [
       'NEXT_TASK: [BUG] retry a finding after a local queue failure',
       'TASK_COMPLETE',
     ].join('\n'))
-    writeRawStatus(taskId, 'completed')
     const backlog = join(paths.queueDir, 'backlog.txt')
     const scannedFlag = join(paths.queueDir, 'scanned', taskId)
 
     await loop.poll()
 
     expect(existsSync(scannedFlag)).toBe(false)
-    expect(readdirSync(paths.tasksDir)).toHaveLength(1)
+    expect(readdirSync(paths.tasksDir)).toHaveLength(2)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
 
     await loop.poll()
 
     expect(existsSync(scannedFlag)).toBe(true)
     expect(attempts).toBe(2)
     expect(readFileSync(backlog, 'utf8').trim()).toMatch(/:1$/)
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(git(['rev-parse', 'HEAD'])).not.toBe(initialHead)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
   })
 
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {

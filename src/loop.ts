@@ -1261,18 +1261,19 @@ export function createLoop(deps: LoopDeps) {
         }
         return false
       }
-      if (body.includes(GENERATED_BODY_MARKER)) {
-        try {
-          await forge.updatePr(branch, {
-            title,
-            body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
-          })
-        } catch (error) {
-          if (!(error instanceof ForgeRateLimitError)) {
-            reportGateFailure(`could not update PR body: ${errorSummary(error)}`)
-          }
-          return false
+      const generatedBody = body.includes(GENERATED_BODY_MARKER)
+      try {
+        await forge.updatePr(branch, generatedBody
+          ? {
+              title,
+              body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
+            }
+          : { title })
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          reportGateFailure(`could not update PR ${generatedBody ? 'body' : 'title'}: ${errorSummary(error)}`)
         }
+        return false
       }
       writeFileSync(prUrlFile, `${status.url}\n`)
       previousGateFailures.delete('draft-pr')
@@ -1484,6 +1485,11 @@ export function createLoop(deps: LoopDeps) {
     gateWaitTarget = undefined
     if (countRunning() > 0 || queueLength() > 0) return 'continue'
     if (isScanRunning()) return 'continue'
+    if (listTaskIds(paths).some((taskId) => readStatus(paths, taskId)?.status === 'completed'
+      && !existsSync(join(scannedDir, taskId)))) {
+      gateWaitTarget = 'completion scan'
+      return 'continue'
+    }
     if (config.issueQueueEnabled) {
       if (knownOpenFindings === null) {
         gateWaitTarget = 'finding status'
@@ -1784,7 +1790,8 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const mergeCompletedTask = async (taskId: string): Promise<void> => {
-      if (!config.autoMerge || mergeAttempts.has(taskId)) return
+      if (!config.autoMerge || mergeAttempts.has(taskId)
+        || !existsSync(join(scannedDir, taskId))) return
       mergeAttempts.add(taskId)
       event('Merging', shortTaskId(taskId))
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
