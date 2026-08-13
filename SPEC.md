@@ -90,7 +90,10 @@ values must be non-negative integers, with the narrower bounds stated below.
    `cleanup` clears the announce markers so a manual retry is watched, not silent, but
    only after verifying that the task process stopped, the worktree directory and Git
    registration were removed, and the task branch was deleted; a failed cleanup returns
-   non-zero and retains the task state for a safe retry.
+   non-zero and retains the task state for a safe retry. In issue-queue mode, a successful
+   operator cleanup also returns linked issues to `loop:ready` and removes their local
+   task mapping. A forge failure is warned about without undoing the local cleanup; the
+   issues return when their leases expire.
 
 ## Growth and decisions
 
