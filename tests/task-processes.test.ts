@@ -168,12 +168,13 @@ describe('process-group liveness', () => {
   it('verifies captured Windows descendants after taskkill stops the parent', () => {
     const alive = new Set([4321, 4322])
     let now = 0
+    const listProcesses = vi.fn(() => [
+      { pid: 4321, parentPid: 1 },
+      { pid: 4322, parentPid: 4321 },
+    ])
     const runtime: WindowsOperatingSystemRuntime = {
       spawn: () => { alive.delete(4321) },
-      listProcesses: () => [
-        { pid: 4321, parentPid: 1 },
-        { pid: 4322, parentPid: 4321 },
-      ],
+      listProcesses,
       probeProcess: (pid) => {
         if (!alive.has(pid)) throw gone()
       },
@@ -184,5 +185,6 @@ describe('process-group liveness', () => {
 
     expect(() => createWindowsOperatingSystem(runtime).terminateProcessTree(4321))
       .toThrow('Could not stop process tree 4321.')
+    expect(listProcesses).toHaveBeenCalledTimes(1)
   })
 })
