@@ -1,9 +1,11 @@
 import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PACKAGE_ROOT } from './paths.ts'
 
 export const LOOP_RESTART_READY_FILE_ENV = 'ORCHESTRATION_LOOP_RESTART_READY_FILE'
+export const LOOP_RESTART_PREDECESSOR_PID_ENV = 'ORCHESTRATION_LOOP_RESTART_PREDECESSOR_PID'
 
 export interface LoopRestartCommand {
   executable: string
@@ -20,10 +22,40 @@ export interface LoopRestartResult {
 interface LoopRestartRuntime {
   argv?: string[]
   env?: NodeJS.ProcessEnv
+  onReady?: (pid: number) => void
   packageRoot?: string
   spawn?: typeof spawn
   startupTimeoutMs?: number
   stdio?: StdioOptions
+}
+
+/** Identify the live daemon whose PID reservation a replacement is allowed to use. */
+export function loopRestartPredecessorPid(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  const value = env[LOOP_RESTART_PREDECESSOR_PID_ENV]
+  if (value === undefined || !/^\d+$/.test(value)) return undefined
+  const pid = Number(value)
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
+}
+
+/** Atomically replace a live predecessor's PID reservation with its ready replacement. */
+export function publishLoopReplacementPid(
+  pidFile: string,
+  predecessorPid: number,
+  replacementPid: number,
+): void {
+  const owner = readFileSync(pidFile, 'utf8').trim()
+  if (owner !== `${predecessorPid}`) {
+    throw new Error(`loop PID owner changed before restart handover (${owner || 'empty'})`)
+  }
+  const candidate = `${pidFile}.handover-${predecessorPid}-${replacementPid}-${randomUUID()}`
+  try {
+    writeFileSync(candidate, `${replacementPid}\n`, { flag: 'wx' })
+    renameSync(candidate, pidFile)
+  } finally {
+    rmSync(candidate, { force: true })
+  }
 }
 
 /** Resolve re-execution from the installed package, never from the invocation spelling. */
@@ -65,6 +97,7 @@ export async function startLoopReplacement(
       env: {
         ...(runtime.env ?? process.env),
         [LOOP_RESTART_READY_FILE_ENV]: readyFile,
+        [LOOP_RESTART_PREDECESSOR_PID_ENV]: `${process.pid}`,
       },
       stdio: runtime.stdio ?? 'inherit',
       windowsHide: true,
@@ -123,6 +156,13 @@ export async function startLoopReplacement(
         return
       }
       if (replacement.exitCode !== null) return
+      try {
+        runtime.onReady?.(pid)
+      } catch (error) {
+        replacement.kill()
+        finish({ ok: false, pid, error: errorSummary(error) })
+        return
+      }
       finish({ ok: true, pid })
     }, 10)
     const timeout = setTimeout(() => {
