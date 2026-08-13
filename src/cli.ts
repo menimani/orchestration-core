@@ -7,7 +7,6 @@ import {
 import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
-import { loadProject } from './adapters/project.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { operatingSystem } from './adapters/os.ts'
 import { cleanupTask } from './cleanup.ts'
@@ -15,7 +14,6 @@ import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
 import { createLoop, formatEventLine } from './loop.ts'
-import { initializeRepository } from './initialize.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
@@ -33,7 +31,6 @@ import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
-import { verifyRepositorySetup } from './setup.ts'
 import {
   liveTaskProcesses, orphanedWorktreeDirectories, terminateLiveTaskProcesses,
   worktreeHolderHint, type TaskProcessTermination,
@@ -57,6 +54,11 @@ import { processTreeRootPid, startWindowsProcess } from './adapters/windows-proc
 type Command = (paths: OrchPaths, args: string[]) => Promise<number>
 
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high'])
+
+async function loadProject(pathsRoot: string) {
+  const projectModule = await import('./adapters/project.ts')
+  return projectModule.loadProject(pathsRoot)
+}
 
 function repoRoot(): string {
   return execFileSync('git', ['rev-parse', '--show-toplevel'], {
@@ -179,6 +181,7 @@ const cmdInit: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const forge = await loadForge(config.forge, paths.repoRoot)
+  const { initializeRepository } = await import('./initialize.ts')
   const result = await initializeRepository(paths, forge, args[0])
   return result.ok ? 0 : 1
 }
@@ -201,6 +204,7 @@ const cmdVerifySetup: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const forge = await loadForge(config.forge, paths.repoRoot)
+  const { verifyRepositorySetup } = await import('./setup.ts')
   return await verifyRepositorySetup(paths, forge, { env: process.env }) ? 0 : 1
 }
 
