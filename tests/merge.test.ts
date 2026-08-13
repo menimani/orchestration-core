@@ -23,6 +23,7 @@ let paths: OrchPaths
 const installProject: ProjectAdapter = {
   ...stubProject,
   name: 'install-test',
+  verifyDependencyIsolation: true,
   mergeChecks: () => [{
     label: 'Fixture check',
     cwd: '',
@@ -232,6 +233,23 @@ describe('removeTemporaryWorktree', () => {
     expect(gitRuntime).toHaveBeenNthCalledWith(
       2, paths.repoRoot, ['worktree', 'prune'],
     )
+  })
+
+  it('fails when both Git and the direct-removal fallback fail', () => {
+    const worktree = join(paths.worktreesDir, '.merge-still-present')
+    const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Git removal failed')
+      return ''
+    })
+
+    expect(() => removeTemporaryWorktree(paths, worktree, {
+      os: posixOperatingSystem(() => { throw new Error('Direct removal failed') }),
+      git: gitRuntime,
+    })).toThrow(
+      `Could not remove temporary worktree ${worktree}; merge was not applied. `
+      + '(git: Git removal failed; fallback: Direct removal failed)',
+    )
+    expect(gitRuntime).toHaveBeenNthCalledWith(2, paths.repoRoot, ['worktree', 'prune'])
   })
 })
 
@@ -446,6 +464,25 @@ describe('mergeTask', () => {
     const output = readFileSync(outputFile, 'utf8')
     expect(output).toContain('passed on dependencies it does not have')
     expect(output).toContain('fixture-dependency')
+  })
+
+  it('does not apply Node dependency isolation to adapters that did not opt in', async () => {
+    const taskId = '20260808_000000_018_user-uses-another-package-manager'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
+      name: 'fixture', devDependencies: { 'virtual-dependency': '^1.0.0' },
+    }, null, 2)}\n`)
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'test: declare a virtual dependency'])
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'virtual-dependencies',
+      mergeChecks: () => [{ label: 'Non-Node gate', cwd: '', command: 'node -e ""' }],
+    }
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project,
+    })).resolves.toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
   })
 
   it('accepts a check that installs its own dependencies as its first step', async () => {
@@ -684,6 +721,25 @@ describe('mergeRemoteTask', () => {
     expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
       'Merge remote-runner-neutral-message via orchestration (resolves ticket 219)',
     )
+  })
+
+  it('removes the checked worktree before applying the remote merge', async () => {
+    const branch = 'task/remote-clean-before-merge'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    const onMerged = vi.fn(() => expectNoTemporaryWorktree('.adopt-'))
+
+    await mergeRemoteTask(paths, 226, 'origin', branch, expectedHead, {
+      taskGate: 'light', project: noCheckProject, onMerged,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })
+
+    expect(onMerged).toHaveBeenCalledOnce()
   })
 
   it('runs checks against the worker branch merged with the current branch', async () => {

@@ -14,6 +14,7 @@ const SUITE = 'npm test -- --pool=threads --poolOptions.threads.singleThread'
 
 export const coreProject: ProjectAdapter = {
   name: 'core',
+  verifyDependencyIsolation: true,
 
   preCommitChecks: [
     {
