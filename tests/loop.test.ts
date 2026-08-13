@@ -212,7 +212,7 @@ describe('daemon startup', () => {
     expect(install).toHaveBeenCalledOnce()
   })
 
-  it('reinstalls after a lockfile change and retries a failed upgrade on restart', () => {
+  it('stops startup with recovery instructions after a lockfile upgrade fails', () => {
     writeOrchestrationManifests('{"lockfileVersion":3}\n')
     syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: successfulInstall, packageRoot: fixturePackageRoot() })
     writeFileSync(
@@ -221,10 +221,12 @@ describe('daemon startup', () => {
     )
     const failedInstall = vi.fn(() => { throw new Error('registry unavailable') })
 
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
+    expect(() => syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install: failedInstall,
+      packageRoot: fixturePackageRoot(),
+    })).toThrow(/Run "npm ci --no-audit --no-fund".*then restart the loop/)
 
-    expect(failedInstall).toHaveBeenCalledTimes(2)
+    expect(failedInstall).toHaveBeenCalledOnce()
   })
 
   it('synchronizes a package at the repository root', () => {

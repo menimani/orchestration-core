@@ -660,7 +660,7 @@ describe('mergeTask', () => {
     expect(install).not.toHaveBeenCalled()
   })
 
-  it('warns without failing the merge when orchestration dependency installation fails', async () => {
+  it('persists the merge and stops when orchestration dependency installation fails', async () => {
     const taskId = '20260808_000000_012_user-adds-broken-dependency'
     const worktree = await makeCompletedTask(taskId)
     mkdirSync(join(worktree, 'orchestration', 'ts'), { recursive: true })
@@ -677,11 +677,11 @@ describe('mergeTask', () => {
         packageRoot: join(repoRoot, 'orchestration', 'ts'),
       },
       onOrchestrationDepsEvent: event,
-    })).resolves.toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
-
-    expect(event).toHaveBeenCalledWith(
-      'WARN', expect.stringContaining('registry unavailable'),
+    })).rejects.toThrow(
+      `Orchestration dependency installation after 012_user failed in ${join(repoRoot, 'orchestration', 'ts')}: registry unavailable. Run "npm ci --no-audit --no-fund" in ${join(repoRoot, 'orchestration', 'ts')}, then restart the loop.`,
     )
+
+    expect(event).not.toHaveBeenCalled()
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 })
