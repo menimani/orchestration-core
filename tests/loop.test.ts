@@ -1980,7 +1980,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(attemptedTaskIds).toHaveLength(1)
     expect(issue.labels).toContain(LABEL_IN_PROGRESS)
     expect(issue.labels).not.toContain(LABEL_READY)
-    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.assignees).toEqual([])
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:1\n`)
     expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(true)
     expect(existsSync(statusFile(paths, taskId))).toBe(true)
