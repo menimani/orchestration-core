@@ -21,6 +21,7 @@ interface SpawnProbe {
   cwd: string | undefined
   detached: boolean
   hasWindowsHide: boolean
+  windowsHide: boolean | undefined
 }
 
 function processIsAlive(pid: number): boolean {
@@ -85,6 +86,7 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
     '    cwd: options?.cwd,',
     '    detached: options?.detached === true,',
     "    hasWindowsHide: Object.hasOwn(options ?? {}, 'windowsHide'),",
+    '    windowsHide: options?.windowsHide,',
     '  })}\\n`)',
     '  return originalSpawn.apply(this, arguments)',
     '}',
@@ -121,9 +123,17 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
     .map((line) => JSON.parse(line) as SpawnProbe)
   const daemonSpawn = probes.find((probe) => probe.command === process.execPath
     && probe.args.includes('--marker-output'))
-  // The wrapper owns the independent hidden console. The daemon is deliberately
-  // attached to it so every console tool in the daemon tree inherits that console.
-  expect(daemonSpawn).toMatchObject({ detached: false, hasWindowsHide: false })
+  if (process.platform === 'win32') {
+    // The wrapper owns the independent hidden console. The daemon is deliberately
+    // attached to it so every console tool in the daemon tree inherits that console.
+    expect(daemonSpawn).toMatchObject({ detached: false, hasWindowsHide: false })
+  } else {
+    expect(daemonSpawn).toMatchObject({
+      detached: true,
+      hasWindowsHide: true,
+      windowsHide: true,
+    })
+  }
   // The daemon must inherit the repository the launcher was pointed at. Started in the
   // package directory instead, it resolves its own checkout as the repository and the
   // startup dependency install reinstalls the package it is running from.
