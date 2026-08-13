@@ -50,9 +50,9 @@ serves one purpose and says what changed and why.
 ## Leave nothing that does not work
 
 No placeholder bodies, truncated files, or unresolved TODOs. A change is finished when
-`npm run typecheck` and `npm test` both pass and you can explain its purpose to a
-reviewer. Reporting something finished while a known failure remains is worse than
-reporting it unfinished.
+`node checks/english-only.ts`, `npm run typecheck`, and `npm test` pass and you can explain
+its purpose to a reviewer. Reporting something finished while a known failure remains is
+worse than reporting it unfinished.
 
 The suite drives real git repositories in temporary directories, so CI runs it
 single-threaded. Reproduce a stubborn failure with
@@ -62,14 +62,17 @@ workers need.
 
 Before pushing a change that touches a platform branch, commit or stash all other
 changes and run `npm run test:linux` from Windows. It exports the committed tree into a
-Node 24 Linux container, then installs, typechecks, and runs the single-threaded suite
-there. The container never mounts the checkout, so its Linux dependencies cannot
-replace the Windows binaries in the working tree's `node_modules`.
+Node 24 Linux container, then installs, checks the source language, typechecks, and runs
+the single-threaded suite there. The container never mounts the checkout, so its Linux
+dependencies cannot replace the Windows binaries in the working tree's `node_modules`.
 
 ## English everywhere
 
 Code, comments, tests, commit messages, pull request titles and bodies, and
 documentation are written in English.
+
+`node checks/english-only.ts` enforces this repository's source rule. Its allowlist is
+narrow and evidence-based; it does not apply to the repositories that consume this core.
 
 ## Git
 
