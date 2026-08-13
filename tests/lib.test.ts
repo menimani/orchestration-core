@@ -14,7 +14,7 @@ import {
   orchPaths, packageScriptCommand, statusFile, type OrchPaths,
 } from '../src/paths.ts'
 import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
-import { TestProcessRegistry } from './testProcess.ts'
+import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -204,17 +204,22 @@ describe('task ids', () => {
     const readyFiles = Array.from({ length: 4 }, (_, index) => join(repoRoot, `sequence-ready-${index}`))
     const children = readyFiles.map((readyFile, index) => testProcesses.spawn(process.execPath, [
       '--input-type=module', '--eval',
-      `const [{ writeFileSync }, { newTaskId }, { orchPaths }] = await Promise.all([import('node:fs'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})]); writeFileSync(process.argv[3], ''); console.log(newTaskId(orchPaths(process.argv[1]), process.argv[2], new Date(2026, 7, 8, 9, 30, 5)))`,
-      repoRoot, `child-${index}`, readyFile,
+      [
+        lockContentionProbeScript(4, 3),
+        `const [{ newTaskId }, { orchPaths }] = await Promise.all([import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})])`,
+        'console.log(newTaskId(orchPaths(process.argv[1]), process.argv[2], new Date(2026, 7, 8, 9, 30, 5)))',
+      ].join('\n'),
+      repoRoot, `child-${index}`, readyFile, lockDir,
     ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }))
-    const outputs = children.map(childOutput)
+    const outputs = Promise.allSettled(children.map(childOutput))
 
     await waitForFiles(readyFiles)
-    await new Promise((resolve) => setTimeout(resolve, 50))
     expect(children.every((child) => child.exitCode === null)).toBe(true)
     rmSync(lockDir, { recursive: true })
 
-    const ids = await Promise.all(outputs)
+    const results = await outputs
+    expect(results.filter((result) => result.status === 'rejected')).toEqual([])
+    const ids = results.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
     expect(new Set(ids).size).toBe(4)
     expect(ids.map((id) => id.split('_')[2]).sort()).toEqual(['001', '002', '003', '004'])
   })
@@ -240,17 +245,22 @@ describe('task ids', () => {
     const readyFiles = Array.from({ length: 4 }, (_, index) => join(repoRoot, `desc-ready-${index}`))
     const children = readyFiles.map((readyFile) => testProcesses.spawn(process.execPath, [
       '--input-type=module', '--eval',
-      `const [{ writeFileSync }, { join }, { taskIdForDesc }, { orchPaths }] = await Promise.all([import('node:fs'), import('node:path'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})]); writeFileSync(process.argv[3], ''); const paths = orchPaths(process.argv[1]); const id = taskIdForDesc(paths, 'auto', process.argv[2]); writeFileSync(join(paths.tasksDir, id + '.md'), '# spec\\n'); console.log(id)`,
-      repoRoot, 'the same concurrent finding', readyFile,
+      [
+        lockContentionProbeScript(4, 3),
+        `const [{ writeFileSync }, { join }, { taskIdForDesc }, { orchPaths }] = await Promise.all([import('node:fs'), import('node:path'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})])`,
+        "const paths = orchPaths(process.argv[1]); const id = taskIdForDesc(paths, 'auto', process.argv[2]); writeFileSync(join(paths.tasksDir, id + '.md'), '# spec\\n'); console.log(id)",
+      ].join('\n'),
+      repoRoot, 'the same concurrent finding', readyFile, lockDir,
     ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }))
-    const outputs = children.map(childOutput)
+    const outputs = Promise.allSettled(children.map(childOutput))
 
     await waitForFiles(readyFiles)
-    await new Promise((resolve) => setTimeout(resolve, 50))
     expect(children.every((child) => child.exitCode === null)).toBe(true)
     rmSync(lockDir, { recursive: true })
 
-    const ids = await Promise.all(outputs)
+    const results = await outputs
+    expect(results.filter((result) => result.status === 'rejected')).toEqual([])
+    const ids = results.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
     expect(new Set(ids).size).toBe(1)
   })
 

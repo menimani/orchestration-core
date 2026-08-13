@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { withBacklogLock } from '../src/backlog.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
-import { TestProcessRegistry } from './testProcess.ts'
+import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -143,25 +143,32 @@ describe('backlog process lock', () => {
     const enqueueReady = join(repoRoot, 'enqueue-ready')
     const dequeue = testProcesses.spawn(process.execPath, [
       '--input-type=module', '--eval',
-      `const [{ writeFileSync }, { dequeueBacklog }] = await Promise.all([import('node:fs'), import(${JSON.stringify(backlogModule)})]); writeFileSync(process.argv[2], ''); dequeueBacklog(process.argv[1])`,
-      backlog, dequeueReady,
+      [
+        lockContentionProbeScript(3, 2),
+        `const { dequeueBacklog } = await import(${JSON.stringify(backlogModule)})`,
+        'dequeueBacklog(process.argv[1])',
+      ].join('\n'),
+      backlog, dequeueReady, lockDir,
     ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
     const enqueue = testProcesses.spawn(process.execPath, [
       '--input-type=module', '--eval',
-      `const [{ writeFileSync }, { enqueueTask }, { orchPaths }] = await Promise.all([import('node:fs'), import(${JSON.stringify(tasksModule)}), import(${JSON.stringify(pathsModule)})]); writeFileSync(process.argv[2], ''); enqueueTask(orchPaths(process.argv[1]), 'second-task')`,
-      repoRoot, enqueueReady,
+      [
+        lockContentionProbeScript(3, 2),
+        `const [{ enqueueTask }, { orchPaths }] = await Promise.all([import(${JSON.stringify(tasksModule)}), import(${JSON.stringify(pathsModule)})])`,
+        "enqueueTask(orchPaths(process.argv[1]), 'second-task')",
+      ].join('\n'),
+      repoRoot, enqueueReady, lockDir,
     ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
-    const dequeued = completion(dequeue)
-    const enqueued = completion(enqueue)
+    const completions = Promise.allSettled([completion(dequeue), completion(enqueue)])
 
     await waitForFiles([dequeueReady, enqueueReady])
-    await new Promise((resolve) => setTimeout(resolve, 50))
     expect(dequeue.exitCode).toBeNull()
     expect(enqueue.exitCode).toBeNull()
     expect(readFileSync(backlog, 'utf8')).toBe('first-task:0\n')
 
     rmSync(lockDir, { recursive: true })
-    await Promise.all([dequeued, enqueued])
+    const results = await completions
+    expect(results.filter((result) => result.status === 'rejected')).toEqual([])
 
     expect(readFileSync(backlog, 'utf8')).toBe('second-task:0\n')
   })
