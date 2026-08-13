@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { packageCommandPrefix } from '../paths.ts'
+import { startWindowsProcess } from './windows-process.ts'
 import type {
   Runner, RunnerSharedSkillRenderOptions, RunnerStartOptions,
 } from './runner.ts'
@@ -95,6 +96,28 @@ export function createCodexRunner(): Runner {
     },
     start(options: RunnerStartOptions): Promise<number> {
       const args = buildArgs(options)
+      // On Windows the `codex` on PATH is an npm .cmd shim, which Node cannot spawn
+      // without a shell. Git Bash is already a hard requirement of this repository,
+      // so route through `bash -c` with positional arguments.
+      const viaBash = process.platform === 'win32'
+      const command = viaBash ? 'bash' : 'codex'
+      const commandArgs = viaBash
+        ? ['-c', 'exec codex "$@"', 'codex', ...args]
+        : args
+
+      if (viaBash) {
+        // Measured on Windows: detached launches gave every console descendant its own
+        // visible window. The hidden launcher gives the task one non-visible console,
+        // inherited by all of its tools, while still surviving the daemon that starts it.
+        return startWindowsProcess({
+          args: commandArgs,
+          command,
+          cwd: options.worktree,
+          inputFile: options.specFile,
+          outputFile: options.logFile,
+        })
+      }
+
       // startTask clears this file before setup; append so setup output remains ahead
       // of the runner transcript instead of being silently truncated here.
       const logFd = openSync(options.logFile, 'a')
@@ -105,15 +128,6 @@ export function createCodexRunner(): Runner {
         closeSync(logFd)
         return Promise.reject(error)
       }
-
-      // On Windows the `codex` on PATH is an npm .cmd shim, which Node cannot spawn
-      // without a shell. Git Bash is already a hard requirement of this repository,
-      // so route through `bash -c` with positional arguments.
-      const viaBash = process.platform === 'win32'
-      const command = viaBash ? 'bash' : 'codex'
-      const commandArgs = viaBash
-        ? ['-c', 'exec codex "$@"', 'codex', ...args]
-        : args
 
       return new Promise((resolve, reject) => {
         let descriptorsClosed = false
@@ -129,12 +143,11 @@ export function createCodexRunner(): Runner {
 
         let child
         try {
-          // Keep windowsHide absent: a detached Windows runner then owns one hidden
-          // console that its whole subtree shares instead of leaving each tool to open one.
           child = spawn(command, commandArgs, {
             cwd: options.worktree,
             detached: true,
             stdio: [specFd, logFd, logFd],
+            windowsHide: true,
           })
         } catch (error) {
           closeDescriptors()

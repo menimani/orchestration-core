@@ -47,6 +47,7 @@ import {
   loopRestartPredecessorPid, publishLoopReplacementPid, signalLoopRestartReady,
   startLoopReplacement,
 } from './restart.ts'
+import { processTreeRootPid, startWindowsProcess } from './adapters/windows-process.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -588,24 +589,37 @@ const cmdLoop: Command = async (paths, args) => {
       windowsHide: true,
     }).trim()
     prepareLoopLog(paths, { runBranch })
-    const fd = openSync(loopLog, 'a')
     const markerLog = join(paths.logsDir, 'loop-markers.log')
-    // Match runner launches: the detached Windows tree needs one shared hidden console.
-    const child = spawn(process.execPath, [
-      packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
-    ], {
-      // The daemon must work on the repository this launcher was pointed at. Starting it
-      // in the package directory instead made it resolve its own checkout as the
-      // repository, which put the startup dependency install inside the very package the
-      // daemon runs from — `npm ci` deletes node_modules first, so a suite launching a
-      // daemon deleted its own dependencies mid-run. The script path is absolute, so the
-      // working directory is free to be the repository.
-      cwd: paths.repoRoot,
-      detached: true,
-      stdio: ['ignore', fd, fd],
-    })
-    child.unref()
-    console.log(`Started the loop in the background (PID=${child.pid})`)
+    const daemonArgs = [packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog]
+    // The daemon must work on the repository this launcher was pointed at. Starting it
+    // in the package directory instead made it resolve its own checkout as the
+    // repository, which put the startup dependency install inside the very package the
+    // daemon runs from — `npm ci` deletes node_modules first, so a suite launching a
+    // daemon deleted its own dependencies mid-run. The script path is absolute, so the
+    // working directory is free to be the repository.
+    let daemonPid: number
+    if (process.platform === 'win32') {
+      // Measured on Windows: detached launches gave every console descendant its own
+      // visible window. The hidden launcher creates one non-visible console shared by
+      // the daemon tree, and that tree remains alive after this launcher exits.
+      daemonPid = await startWindowsProcess({
+        args: daemonArgs,
+        command: process.execPath,
+        cwd: paths.repoRoot,
+        outputFile: loopLog,
+      })
+    } else {
+      const fd = openSync(loopLog, 'a')
+      const child = spawn(process.execPath, daemonArgs, {
+        cwd: paths.repoRoot,
+        detached: true,
+        stdio: ['ignore', fd, fd],
+        windowsHide: true,
+      })
+      child.unref()
+      daemonPid = child.pid ?? 0
+    }
+    console.log(`Started the loop in the background (PID=${daemonPid})`)
     console.log(`Log: ${loopLog}`)
     console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
     console.log(`Stop: ${packageScriptCommand(paths.repoRoot, 'stop')}`)
@@ -675,6 +689,7 @@ async function runLoopDaemon(
   marker: (line: string) => void,
   config: LoopConfig,
 ): Promise<number> {
+  const daemonPid = processTreeRootPid()
   const pidFile = join(paths.queueDir, 'loop.pid')
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
@@ -688,7 +703,7 @@ async function runLoopDaemon(
   // PID lock: one loop per repository.
   for (;;) {
     try {
-      writeFileSync(pidFile, `${process.pid}\n`, { flag: 'wx' })
+      writeFileSync(pidFile, `${daemonPid}\n`, { flag: 'wx' })
       break
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
@@ -722,12 +737,12 @@ async function runLoopDaemon(
   const releaseDaemonState = (): void => {
     if (!ownsDaemonState) return
     try {
-      removeIssueModeMarker(paths, process.pid)
+      removeIssueModeMarker(paths, daemonPid)
     } catch {
       // nothing to release
     }
     try {
-      if (readFileSync(pidFile, 'utf8').trim() === `${process.pid}`) {
+      if (readFileSync(pidFile, 'utf8').trim() === `${daemonPid}`) {
         rmSync(pidFile, { force: true })
       }
     } catch {
@@ -786,7 +801,7 @@ async function runLoopDaemon(
     // process has completed initialization. The predecessor publishes this PID as one
     // atomic handover after observing the ready signal.
     if (!usesRestartReservation) {
-      writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+      writeIssueModeMarker(paths, config.issueQueueEnabled, daemonPid)
     }
     log(formatEventLine(
       'Started', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
@@ -838,7 +853,7 @@ async function runLoopDaemon(
           // explicit ready signal.
           const readyFile = join(
             paths.queueDir,
-            `loop.restart-${process.pid}-${Date.now()}.ready`,
+            `loop.restart-${daemonPid}-${Date.now()}.ready`,
           )
           const replacement = await startLoopReplacement(readyFile, {
             onReady: (replacementPid) => {
@@ -847,17 +862,18 @@ async function runLoopDaemon(
               process.off('exit', releaseDaemonState)
               try {
                 writeIssueModeMarker(paths, config.issueQueueEnabled, replacementPid)
-                publishLoopReplacementPid(pidFile, process.pid, replacementPid)
+                publishLoopReplacementPid(pidFile, daemonPid, replacementPid)
                 ownsDaemonState = false
               } catch (error) {
                 try {
-                  writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+                  writeIssueModeMarker(paths, config.issueQueueEnabled, daemonPid)
                 } finally {
                   process.on('exit', releaseDaemonState)
                 }
                 throw error
               }
             },
+            outputFile: join(paths.logsDir, 'loop.log'),
           })
           if (!replacement.ok) {
             log(formatEventLine(
