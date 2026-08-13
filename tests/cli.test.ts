@@ -6,11 +6,12 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { recordIssueForTask } from '../src/issueQueue.ts'
 import { branchName, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { writeStatus } from '../src/status.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { TestProcessRegistry } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -131,23 +132,63 @@ describe('command registry', () => {
     expect(result.stderr).toContain('Usage: worker <base-ref>')
   })
 
-  it('reads runner-neutral task settings when manually starting a task', () => {
-    const result = spawnSync(process.execPath, [CLI, 'start', 'manual-task'], {
-      cwd: repoRoot,
-      env: {
-        ...CORE_ENV,
-        TASK_EFFORT: 'maximum',
-        CODEX_EFFORT: 'low',
-        CODEX_MODEL: 'codex-specific-model',
-      },
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: CLI_TIMEOUT_MS,
-    })
+  it('reads runner-neutral task settings when manually starting a task', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+    const paths = orchPaths(repoRoot)
+    writeFileSync(join(paths.tasksDir, 'manual-task.md'), '# manual task\n')
 
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain("TASK_EFFORT must be minimal, low, medium or high, got 'maximum'")
-    expect(readFileSync(CLI, 'utf8')).not.toMatch(/CODEX_(?:EFFORT|MODEL)/)
+    const start = vi.fn(async () => process.pid)
+    vi.doMock('../src/adapters/runner.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/adapters/runner.ts')>(),
+      loadRunner: async () => ({ sharedSkills: fakeRunnerSharedSkills, start }),
+    }))
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    try {
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV, {
+        RUNNER: 'fake',
+        TASK_EFFORT: 'high',
+        TASK_MODEL: 'runner-neutral-model',
+      })
+      process.argv = [process.execPath, CLI, 'start', 'manual-task']
+
+      await import('../src/cli.ts')
+
+      expect(process.exitCode).toBe(0)
+      expect(start).toHaveBeenCalledWith(expect.objectContaining({
+        effort: 'high',
+        model: 'runner-neutral-model',
+      }))
+    } finally {
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      vi.doUnmock('../src/adapters/runner.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
   })
 })
 
