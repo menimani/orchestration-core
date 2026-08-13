@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -16,9 +16,11 @@ import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { stubProject } from './stubProject.ts'
+import { TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
+const testProcesses = new TestProcessRegistry()
 
 const installProject: ProjectAdapter = {
   ...stubProject,
@@ -108,7 +110,8 @@ beforeEach(async () => {
   git(repoRoot, ['commit', '-qm', 'chore: initial commit'])
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await testProcesses.cleanup()
   vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
@@ -275,7 +278,7 @@ describe('mergeTask', () => {
   it('stops and verifies a completed runner with a live PID before merging', async () => {
     const taskId = '20260808_000000_017_user-runner-finishes-output-first'
     const worktree = await makeCompletedTask(taskId, { commit: true })
-    const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    const runner = testProcesses.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
@@ -285,18 +288,12 @@ describe('mergeTask', () => {
     runner.unref()
     await writeStatus(paths, taskId, 'completed', runnerPid)
 
-    try {
-      await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
+    await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
 
-      expect(operatingSystem.processTreeIsAlive(runnerPid)).toBe(false)
-      expect(existsSync(worktree)).toBe(false)
-      expect(readStatus(paths, taskId)?.status).toBe('merged')
-      expect(readStatus(paths, taskId)?.pid).toBeNull()
-    } finally {
-      if (operatingSystem.processTreeIsAlive(runnerPid)) {
-        operatingSystem.terminateProcessTree(runnerPid)
-      }
-    }
+    expect(operatingSystem.processTreeIsAlive(runnerPid)).toBe(false)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(readStatus(paths, taskId)?.pid).toBeNull()
   })
 
   it('keeps completed task state when the runner cannot be verified stopped', async () => {

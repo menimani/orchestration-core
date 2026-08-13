@@ -1,4 +1,4 @@
-import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process'
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync,
   writeFileSync,
@@ -11,6 +11,7 @@ import { recordIssueForTask } from '../src/issueQueue.ts'
 import { branchName, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { writeStatus } from '../src/status.ts'
+import { TestProcessRegistry } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'src', 'cli.ts')
@@ -45,6 +46,7 @@ const CORE_ENV = {
 }
 
 let repoRoot: string
+const testProcesses = new TestProcessRegistry()
 
 beforeEach(() => {
   // The runner's temp path contains an 8.3 short name when the account name is long
@@ -55,7 +57,8 @@ beforeEach(() => {
   expect(init.status).toBe(0)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await testProcesses.cleanup()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -412,7 +415,7 @@ describe('loop daemon ownership', () => {
       '',
     ].join('\n'))
 
-    const children = Array.from({ length: 6 }, () => spawn(process.execPath, [wrapper, 'loop'], {
+    const children = Array.from({ length: 6 }, () => testProcesses.spawn(process.execPath, [wrapper, 'loop'], {
       cwd: repoRoot,
       env: {
         ...CORE_ENV,
@@ -427,27 +430,21 @@ describe('loop daemon ownership', () => {
     }))
     const completions = children.map(childCompletion)
 
-    try {
-      await waitUntil(
-        () => children.filter((child) => child.exitCode !== null).length >= children.length - 1,
-        'competing loop starts did not reject the PID lock',
-      )
-      await waitUntil(
-        () => existsSync(daemonFile('cycle-cap.txt')),
-        'winning loop did not finish daemon initialization',
-      )
-      writeFileSync(daemonFile('stop'), '')
-      const results = await Promise.all(completions)
+    await waitUntil(
+      () => children.filter((child) => child.exitCode !== null).length >= children.length - 1,
+      'competing loop starts did not reject the PID lock',
+    )
+    await waitUntil(
+      () => existsSync(daemonFile('cycle-cap.txt')),
+      'winning loop did not finish daemon initialization',
+    )
+    writeFileSync(daemonFile('stop'), '')
+    const results = await Promise.all(completions)
 
-      expect(results.filter((result) => result.code === 0)).toHaveLength(1)
-      const rejected = results.filter((result) => result.code === 1)
-      expect(rejected).toHaveLength(children.length - 1)
-      expect(rejected.every((result) => result.output.includes('Loop is already running'))).toBe(true)
-    } finally {
-      for (const child of children) {
-        if (child.exitCode === null) child.kill()
-      }
-    }
+    expect(results.filter((result) => result.code === 0)).toHaveLength(1)
+    const rejected = results.filter((result) => result.code === 1)
+    expect(rejected).toHaveLength(children.length - 1)
+    expect(rejected.every((result) => result.output.includes('Loop is already running'))).toBe(true)
   })
 
   it('allows only one concurrent starter to reclaim a stale PID file', async () => {
@@ -471,7 +468,7 @@ describe('loop daemon ownership', () => {
       '',
     ].join('\n'))
 
-    const children = Array.from({ length: 6 }, () => spawn(process.execPath, [wrapper, 'loop'], {
+    const children = Array.from({ length: 6 }, () => testProcesses.spawn(process.execPath, [wrapper, 'loop'], {
       cwd: repoRoot,
       env: {
         ...CORE_ENV,
@@ -486,28 +483,22 @@ describe('loop daemon ownership', () => {
     }))
     const completions = children.map(childCompletion)
 
-    try {
-      await waitUntil(
-        () => children.filter((child) => child.exitCode !== null).length >= children.length - 1,
-        'competing stale-PID recoveries did not settle on one owner',
-      )
-      await waitUntil(
-        () => existsSync(daemonFile('cycle-cap.txt')),
-        'winning stale-PID recovery did not finish daemon initialization',
-      )
-      writeFileSync(daemonFile('stop'), '')
-      const results = await Promise.all(completions)
+    await waitUntil(
+      () => children.filter((child) => child.exitCode !== null).length >= children.length - 1,
+      'competing stale-PID recoveries did not settle on one owner',
+    )
+    await waitUntil(
+      () => existsSync(daemonFile('cycle-cap.txt')),
+      'winning stale-PID recovery did not finish daemon initialization',
+    )
+    writeFileSync(daemonFile('stop'), '')
+    const results = await Promise.all(completions)
 
-      expect(results.filter((result) => result.code === 0)).toHaveLength(1)
-      const rejected = results.filter((result) => result.code === 1)
-      expect(rejected).toHaveLength(children.length - 1)
-      expect(rejected.every((result) => result.output.includes('Loop is already running'))).toBe(true)
-      expect(existsSync(`${daemonFile('loop.pid')}.recovery`)).toBe(false)
-    } finally {
-      for (const child of children) {
-        if (child.exitCode === null) child.kill()
-      }
-    }
+    expect(results.filter((result) => result.code === 0)).toHaveLength(1)
+    const rejected = results.filter((result) => result.code === 1)
+    expect(rejected).toHaveLength(children.length - 1)
+    expect(rejected.every((result) => result.output.includes('Loop is already running'))).toBe(true)
+    expect(existsSync(`${daemonFile('loop.pid')}.recovery`)).toBe(false)
   })
 
   it('reclaims an aged ownerless recovery directory', () => {
@@ -691,7 +682,11 @@ describe('stop', () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260812_010203_041_auto-stop-tree'
     const childPidFile = join(repoRoot, 'child.pid')
-    const parent = spawn(process.execPath, ['-e', [
+    testProcesses.trackPid(() => {
+      if (!existsSync(childPidFile)) return undefined
+      return Number(readFileSync(childPidFile, 'utf8'))
+    })
+    const parent = testProcesses.spawn(process.execPath, ['-e', [
       "const { spawn } = require('node:child_process')",
       "const { writeFileSync } = require('node:fs')",
       "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
@@ -706,40 +701,26 @@ describe('stop', () => {
     expect(parentPid).toBeTypeOf('number')
     parent.unref()
 
-    let childPid = 0
-    try {
-      await waitUntil(() => existsSync(childPidFile), 'task child did not publish its PID')
-      childPid = Number(readFileSync(childPidFile, 'utf8'))
-      expect(pidIsAlive(parentPid as number)).toBe(true)
-      expect(pidIsAlive(childPid)).toBe(true)
-      await writeStatus(paths, taskId, 'running', parentPid)
+    await waitUntil(() => existsSync(childPidFile), 'task child did not publish its PID')
+    const childPid = Number(readFileSync(childPidFile, 'utf8'))
+    expect(pidIsAlive(parentPid as number)).toBe(true)
+    expect(pidIsAlive(childPid)).toBe(true)
+    await writeStatus(paths, taskId, 'running', parentPid)
 
-      const result = spawnSync(process.execPath, [CLI, 'stop'], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: CLI_TIMEOUT_MS,
-      })
+    const result = spawnSync(process.execPath, [CLI, 'stop'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
 
-      expect(result.status).toBe(0)
-      expect(result.stdout).toContain(`Stopped ${taskId}`)
-      expect(result.stdout).toContain(`process tree PID ${parentPid}`)
-      await waitUntil(
-        () => !pidIsAlive(parentPid as number) && !pidIsAlive(childPid),
-        'stop left a task process or its child running',
-      )
-    } finally {
-      if (typeof parentPid === 'number' && pidIsAlive(parentPid)) {
-        if (process.platform === 'win32') {
-          spawnSync('taskkill', ['/PID', String(parentPid), '/T', '/F'], { windowsHide: true })
-        } else {
-          try { process.kill(-parentPid, 'SIGKILL') } catch { /* already gone */ }
-        }
-      }
-      if (childPid > 0 && pidIsAlive(childPid)) {
-        try { process.kill(childPid, 'SIGKILL') } catch { /* already gone */ }
-      }
-    }
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain(`Stopped ${taskId}`)
+    expect(result.stdout).toContain(`process tree PID ${parentPid}`)
+    await waitUntil(
+      () => !pidIsAlive(parentPid as number) && !pidIsAlive(childPid),
+      'stop left a task process or its child running',
+    )
   })
 
   it('reports when there are no live task process trees to terminate', () => {
