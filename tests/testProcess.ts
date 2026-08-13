@@ -10,6 +10,25 @@ interface TrackedProcess {
   tree: boolean
 }
 
+/**
+ * Child-process prelude that publishes when backlog-lock contention is observed and
+ * keeps that retry from consuming its time budget until the fixture releases the lock.
+ */
+export function lockContentionProbeScript(lockArg: number, readyArg: number): string {
+  return [
+    "const { existsSync: probeLockExists, writeFileSync: publishLockContention } = await import('node:fs')",
+    'const originalAtomicsWait = Atomics.wait',
+    'const probeSleep = new Int32Array(new SharedArrayBuffer(4))',
+    'Atomics.wait = function (...args) {',
+    `  publishLockContention(process.argv[${readyArg}], '')`,
+    `  while (probeLockExists(process.argv[${lockArg}])) {`,
+    '    originalAtomicsWait(probeSleep, 0, 0, 10)',
+    '  }',
+    "  return 'timed-out'",
+    '}',
+  ].join('\n')
+}
+
 async function waitForExit(pid: number): Promise<void> {
   const deadline = Date.now() + PROCESS_EXIT_TIMEOUT_MS
   while (operatingSystem.processIsAlive(pid)) {
