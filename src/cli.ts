@@ -11,6 +11,7 @@ import { loadProject } from './adapters/project.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { operatingSystem } from './adapters/os.ts'
 import { cleanupTask } from './cleanup.ts'
+import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
 import { createLoop, formatEventLine } from './loop.ts'
@@ -483,13 +484,14 @@ const cmdMerge: Command = async (paths, args) => {
 }
 
 const cmdCleanup: Command = async (paths, args) => {
-  const taskId = args[0]
-  if (taskId === undefined) {
-    console.error('Usage: cleanup <task-id>')
-    return 1
-  }
-  cleanupTask(paths, taskId)
-  return 0
+  let config: LoopConfig | undefined
+  const cleanupConfig = (): LoopConfig => config ??= loadConfig()
+  return runCleanupCommand(paths, args, {
+    issueQueueEnabled: () => cleanupConfig().issueQueueEnabled,
+    loadForge: () => loadForge(cleanupConfig().forge, paths.repoRoot),
+    cleanup: cleanupTask,
+    error: (message) => console.error(message),
+  })
 }
 
 const cmdPrune: Command = async (paths, args) => {
