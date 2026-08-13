@@ -1847,7 +1847,7 @@ export function createLoop(deps: LoopDeps) {
       // silence. Say so, once per task, and keep the count for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
-      if (failedIssues.length > 1 && remoteOperationsAvailable) {
+      if (failedIssues.length > 0 && remoteOperationsAvailable) {
         try {
           await Promise.all(failedIssues.map((issueNumber) =>
             returnIssueToReady(forge, issueNumber, true)))
