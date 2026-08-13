@@ -39,17 +39,24 @@ jobs:
       - name: Assemble the site source
         run: |
           mkdir site
-          cat > site/_config.yml <<'CONFIG'
-          title: orchestration-core
+          # A project site is served under /<repository>/, and the theme resolves its
+          # stylesheet against baseurl. Left empty, the page arrives unstyled because
+          # every asset link points at the domain root. Both values come from the
+          # context rather than being written out, so renaming the repository or the
+          # owner does not silently break the assets.
+          cat > site/_config.yml <<CONFIG
+          title: ${{ github.event.repository.name }}
           description: The behaviour the suite pins
           theme: jekyll-theme-primer
+          url: https://${{ github.repository_owner }}.github.io
+          baseurl: /${{ github.event.repository.name }}
           CONFIG
           {
             echo '---'
             echo 'title: Specification'
             echo '---'
             echo
-            echo '[Repository](https://github.com/menimani/orchestration-core)'
+            echo "[Repository](${{ github.server_url }}/${{ github.repository }})"
             echo
             cat SPEC.md
           } > site/index.md
