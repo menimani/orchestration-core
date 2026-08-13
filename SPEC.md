@@ -77,8 +77,11 @@ values must be non-negative integers, with the narrower bounds stated below.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
    `scan` for scans and start with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes,
    scan findings, review-origin fixes, and delegated work. Listings sort chronologically.
-3. `queue/desc-index` maps a description to its task id: the same finding reported twice
-   or the same decision delegated twice resolves to the one existing task.
+3. `queue/desc-index` maps a description to its current task id. The same decision
+   delegated twice resolves to one task, as does a repeated finding while its indexed
+   task is queued, running, completed, or retryable after failure. If an identical
+   non-advisory finding returns after that task has merged, it creates a fresh task and
+   updates the index; merged advisories remain deduplicated.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
    `task/<id>`.
 5. Failure handling: emit `FAILED: <id>` with the log path to the machine-marker sink,
