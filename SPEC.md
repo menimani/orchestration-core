@@ -61,6 +61,7 @@ values must be non-negative integers, with the narrower bounds stated below.
 | `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
+| `REVIEW_EFFORT` | `high` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
 | `MAX_PARALLEL` | `3` | Limit concurrently running queued-task processes and shared-issue claim capacity. It must be at least 1; scan fan-out is controlled separately by `SCAN_PARALLEL`. |
 | `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
 | `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
@@ -151,9 +152,11 @@ values must be non-negative integers, with the narrower bounds stated below.
     `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop).
-14. Effort defaults: scans run the runner at high reasoning effort, queued tasks at
-    medium; `SCAN_EFFORT`, `TASK_EFFORT`, `SCAN_MODEL`, `TASK_MODEL` override, and
-    `delegate --effort` overrides per task.
+14. Effort defaults: scans and automatic reviews run the runner at high reasoning
+    effort, and queued tasks at medium. `SCAN_EFFORT`, `TASK_EFFORT`, and
+    `REVIEW_EFFORT` accept `minimal`, `low`, `medium`, or `high` and override their
+    respective defaults; `SCAN_MODEL` and `TASK_MODEL` override the runner model, and
+    `delegate --effort` overrides effort per task.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
     previous cycle gate has closed and while no task is running, the daemon fetches the
     configured core upstream and compares its tip with the last `git-subtree-split` for
