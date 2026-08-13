@@ -26,6 +26,18 @@ function fakeChild(pid: number): ChildProcess {
   }) as unknown as ChildProcess
 }
 
+/**
+ * A daemon started through the hidden-console wrapper identifies itself by the wrapper's
+ * PID, and every descendant inherits the variable that says so. The suite runs as one of
+ * those descendants at a merge gate, where inheriting it made these tests assert the
+ * daemon's PID against their own. The premise is stated here instead of inherited.
+ */
+function environmentWithoutWrapper(): NodeJS.ProcessEnv {
+  const { [WINDOWS_PROCESS_ROOT_PID_ENV]: wrapper, ...rest } = process.env
+  void wrapper
+  return rest
+}
+
 describe('loop replacement startup', () => {
   it('keeps the predecessor PID until the replacement publishes readiness', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
@@ -47,6 +59,7 @@ describe('loop replacement startup', () => {
     }) as unknown as typeof spawn
 
     await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
       packageRoot: root,
       onReady: (pid) => publishLoopReplacementPid(pidFile, process.pid, pid),
       spawn: spawnProcess,
@@ -72,6 +85,7 @@ describe('loop replacement startup', () => {
     }) as unknown as typeof spawn
 
     await expect(startLoopReplacement(join(root, 'ready'), {
+      env: environmentWithoutWrapper(),
       packageRoot: root,
       onReady: (pid) => publishLoopReplacementPid(pidFile, process.pid, pid),
       spawn: spawnProcess,
@@ -103,6 +117,7 @@ describe('loop replacement startup', () => {
     } as unknown as OperatingSystem
 
     await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
       operatingSystem: os,
       outputFile,
       packageRoot: root,

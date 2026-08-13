@@ -33,10 +33,15 @@ const INHERITED_ENV = Object.fromEntries(
   Object.entries(process.env).filter(([name]) => !isLoopSetting(name)),
 )
 
+// The ORCHESTRATION_ prefix belongs here for the same reason and cost the same way: the
+// hidden-console launcher marks its tree with ORCHESTRATION_WINDOWS_PROCESS_ROOT_PID, a
+// daemon running the merge gate passes it down, and a CLI started by these tests then
+// took the daemon for its own process-tree root and refused the PID lock it should have
+// won. Every merge failed until the variable was noticed.
 function isLoopSetting(name: string): boolean {
   return name === 'PROJECT' || name === 'PROJECT_ADAPTER' || name === 'FORGE'
     || name === 'RUNNER' || name === 'UPSTREAM_REMOTE' || name === 'UPSTREAM_BRANCH'
-    || /^(CORE_|MAX_|SCAN_|TASK_|REVIEW_|ISSUE_|CI_|AUTO_|POLL_)/.test(name)
+    || /^(CORE_|MAX_|SCAN_|TASK_|REVIEW_|ISSUE_|CI_|AUTO_|POLL_|ORCHESTRATION_)/.test(name)
 }
 
 const CORE_ENV = {
