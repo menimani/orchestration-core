@@ -988,13 +988,31 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function numberedScanSections(specification: string): number[] {
-    const sections = [...specification.matchAll(/^ {0,3}#{1,6}[\t ]+(\d+)\.(?:[\t ]|$)/gm)]
-      .map((match) => Number(match[1]))
-    if (sections.length === 0) {
-      throw new Error('parallel scan requires numbered sections in scan-template.md')
+    const sections: number[] = []
+    let fence: { marker: '`' | '~'; length: number } | undefined
+    for (const line of specification.split(/\r?\n/)) {
+      const fenceMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+      if (fence !== undefined) {
+        if (fenceMatch !== null
+          && fenceMatch[1]![0] === fence.marker
+          && fenceMatch[1]!.length >= fence.length
+          && fenceMatch[2]!.trim() === '') {
+          fence = undefined
+        }
+        continue
+      }
+      if (fenceMatch !== null) {
+        fence = {
+          marker: fenceMatch[1]![0] as '`' | '~',
+          length: fenceMatch[1]!.length,
+        }
+        continue
+      }
+      const heading = /^ {0,3}#{1,6}[\t ]+(\d+)\.(?:[\t ]|$)/.exec(line)
+      if (heading !== null) sections.push(Number(heading[1]))
     }
     if (new Set(sections).size !== sections.length) {
-      throw new Error('parallel scan requires unique numbered sections in scan-template.md')
+      throw new Error('numbered sections must be unique')
     }
     return sections
   }
@@ -1687,13 +1705,25 @@ export function createLoop(deps: LoopDeps) {
     // This is the only safe restart boundary: the previous gate is closed, no task is
     // running, and the next cycle has not yet consumed its number or started a scan.
     if (await updateCore(nextCycle) === 'restart') return 'restart'
-    const nScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
-    const sectionGroups = nScans === 1
-      ? []
-      : partitionScanSections(
-        numberedScanSections(scanSpecification('scan', '')),
-        nScans,
-      )
+    const requestedScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
+    let nScans = requestedScans
+    let sectionGroups: number[][] = []
+    if (nScans > 1) {
+      let sections: number[]
+      try {
+        sections = numberedScanSections(scanSpecification('scan', ''))
+      } catch (error) {
+        event('ERROR', `scan-template.md is unusable: it must contain unique numbered Markdown headings outside fenced code blocks (${errorSummary(error)})`)
+        writeFileSync(stopFile, '')
+        return 'continue'
+      }
+      if (sections.length === 0) {
+        event('WARN', `scan-template.md has no numbered sections; requested ${requestedScans} parallel scans, running one full scan`)
+        nScans = 1
+      } else {
+        sectionGroups = partitionScanSections(sections, nScans)
+      }
+    }
     writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
     writeFileSync(scanCountFile, `${nextCycle}\n`)
 
@@ -1702,7 +1732,7 @@ export function createLoop(deps: LoopDeps) {
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
       const scope = nScans === 1
-        ? 'Perform every numbered section below.'
+        ? 'Perform the full scan described below.'
         : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
       if (generateScanTask(scanId, scope)) {
         try {

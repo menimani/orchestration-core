@@ -1172,17 +1172,90 @@ describe('cycle gate', () => {
     expect(Math.max(...assignmentSizes) - Math.min(...assignmentSizes)).toBeLessThanOrEqual(1)
   })
 
-  it('fails a parallel scan before creating cycle state when sections cannot be found', async () => {
+  it('falls back to one full scan with a warning when the template has no numbered sections', async () => {
+    initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
-    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const loop = makeLoop({ scanParallel: 4, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-1'), 'utf8')).toBe('1\n')
+    expect(logText()).toContain(
+      'WARN scan-template.md has no numbered sections; requested 4 parallel scans, running one full scan',
+    )
+    expect(readFileSync(runnerStarts[0]!, 'utf8'))
+      .toContain('Perform the full scan described below.')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('ignores numbered headings inside fenced code blocks', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      [
+        '# {{SCAN_ID}}',
+        '{{SCAN_SCOPE}}',
+        '### 1. First check',
+        '```markdown',
+        '### 1. Quoted duplicate',
+        '```',
+        '~~~markdown',
+        '### 99. Quoted phantom',
+        '~~~',
+        '### 2. Second check',
+      ].join('\n'),
+    )
     const loop = makeLoop({ scanParallel: 2, autoPr: false, reviewEnabled: false })
 
-    await expect(loop.triggerScanIfIdle()).rejects.toThrow(
-      'parallel scan requires numbered sections in scan-template.md',
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(2)
+    const assignedSections = runnerStarts.flatMap((file) => {
+      const specification = readFileSync(file, 'utf8')
+      const assignment = /Perform only sections ([^;]+);/.exec(specification)?.[1] ?? ''
+      return [...assignment.matchAll(/\d+/g)].map((match) => Number(match[0]))
+    })
+    expect(assignedSections.sort((a, b) => a - b)).toEqual([1, 2])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('stops before creating cycle state when numbered sections are ambiguous', async () => {
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 1. Duplicate check\n',
     )
+    const loop = makeLoop({ scanParallel: 2, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(runnerStarts).toHaveLength(0)
     expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR scan-template.md is unusable: it must contain unique numbered Markdown headings outside fenced code blocks',
+    )
+  })
+
+  it('does not derive sections when only one scan is requested', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 1. Duplicate check\n',
+    )
+    const loop = makeLoop({ scanParallel: 1, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(1)
+    expect(readFileSync(runnerStarts[0]!, 'utf8'))
+      .toContain('Perform the full scan described below.')
+    expect(logText()).not.toContain('scan-template.md')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
   it('resumes when review is enabled but automatic review is disabled', async () => {
