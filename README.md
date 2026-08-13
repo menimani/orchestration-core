@@ -44,10 +44,15 @@ A daemon otherwise runs the code it started with. A dirty working tree or confli
 pull is left for the consumer to resolve: the daemon warns and starts the cycle on the
 old code instead of merging local divergence.
 
-That same boundary asks the selected runner adapter to sync the skills declared in
-`skills/manifest.json` into its repository skill directory. The bundled Codex adapter
-uses `.agents/skills/` and renders loop commands for the installed package location
-(`npm run` here, `npm run -C orchestration/ts` in the layout below).
+That same boundary syncs the skills declared in `skills/manifest.json` into every
+directory an agent working in the repository reads them from. The selected runner adapter
+supplies one — the bundled Codex adapter uses `.agents/skills/` and rewrites the sources
+into Codex's own form — and `.claude/skills/` receives them for the interactive agent a
+person drives, in the canonical form that agent already speaks. Serving only the runner
+meant that selecting Codex silently took every shared workflow away from the person, so
+one destination failing no longer costs the others theirs. Loop commands are rendered for
+the installed package location (`npm run` here, `npm run -C orchestration/ts` in the
+layout below).
 The sync tracks the exact content it generated: a consumer edit, deletion, or added
 support file is reported and retained, while repository skills absent from the manifest
 are never touched. Canonical skills live outside a nested runner skill directory,

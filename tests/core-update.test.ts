@@ -187,6 +187,7 @@ describe('pre-cycle core update', () => {
 
   it('installs missing shared skills and commits them when the subtree is current', async () => {
     rmSync(join(repoRoot, '.agents'), { recursive: true })
+    rmSync(join(repoRoot, '.claude'), { recursive: true })
     commit(repoRoot, 'chore: remove initial skill fixture')
     const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
     const loop = makeLoop(config())
@@ -197,7 +198,13 @@ describe('pre-cycle core update', () => {
       .toBe('version one: npm run -C orchestration/ts loop\n')
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
-    expect(events).toContain('Updated skill installed loop-start')
+    expect(events).toContain('Updated skill installed .agents/skills/loop-start')
+    // The interactive agent's directory is served in the same boundary, or a person
+    // driving it loses every shared workflow the moment a runner is selected.
+    expect(events).toContain('Updated skill installed .claude/skills/loop-start')
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe('version one: npm run -C orchestration/ts loop\n')
   })
 
   it('refreshes shared skills at the consumer root in the same clean update boundary', async () => {
@@ -211,12 +218,14 @@ describe('pre-cycle core update', () => {
       .toBe('version two: npm run -C orchestration/ts loop-status\n')
     expect(existsSync(join(packageRoot, '.agents', 'skills', 'loop-start'))).toBe(false)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
-    expect(events).toContain('Updated skill refreshed loop-start')
+    expect(events).toContain('Updated skill refreshed .agents/skills/loop-start')
   })
 
-  it('migrates and commits tracked legacy shared skill copies', async () => {
+  it('keeps a repository adopted before the interactive target was served', async () => {
+    // Between the sync's introduction and this behaviour, the bundled runner claimed
+    // `.claude/skills` as a legacy root and emptied it. A repository carrying that
+    // arrangement must come out of an update with both directories filled, not one.
     rmSync(join(repoRoot, '.agents'), { recursive: true })
-    commit(repoRoot, 'chore: remove current skill fixture')
     syncSharedSkills(repoRoot, packageRoot, {
       sharedSkills: {
         ...fakeRunnerSharedSkills,
@@ -224,16 +233,14 @@ describe('pre-cycle core update', () => {
       },
       start: async () => process.pid,
     })
-    git(repoRoot, ['add', '-f', '--', '.claude/skills'])
-    commit(repoRoot, 'chore: install legacy skill fixture')
+    commit(repoRoot, 'chore: adopt the former arrangement')
     const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(existsSync(join(repoRoot, '.claude', 'skills', 'loop-start'))).toBe(false)
-    expect(existsSync(join(
-      repoRoot, '.claude', 'skills', '.orchestration-core-sync.json',
-    ))).toBe(false)
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe('version one: npm run -C orchestration/ts loop\n')
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
       .toBe('version one: npm run -C orchestration/ts loop\n')
@@ -241,26 +248,17 @@ describe('pre-cycle core update', () => {
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
   })
 
-  it('preserves and reports a divergent tracked legacy shared skill', async () => {
-    syncSharedSkills(repoRoot, packageRoot, {
-      sharedSkills: {
-        ...fakeRunnerSharedSkills,
-        destinationRoot: (root) => join(root, '.claude', 'skills'),
-      },
-      start: async () => process.pid,
-    })
-    git(repoRoot, ['add', '-f', '--', '.claude/skills'])
-    commit(repoRoot, 'chore: install legacy skill fixture')
-    const legacySkill = join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md')
-    writeFileSync(legacySkill, 'consumer command\n')
-    commit(repoRoot, 'chore: customize legacy skill fixture')
+  it('preserves and reports a divergent interactive shared skill', async () => {
+    const interactiveSkill = join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md')
+    writeFileSync(interactiveSkill, 'consumer command\n')
+    commit(repoRoot, 'chore: customize interactive skill fixture')
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(readFileSync(legacySkill, 'utf8').replaceAll('\r', '')).toBe('consumer command\n')
+    expect(readFileSync(interactiveSkill, 'utf8').replaceAll('\r', '')).toBe('consumer command\n')
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
     expect(events).toContain(
-      'WARN legacy shared skill .claude/skills/loop-start differs from the last synced copy; left unchanged',
+      'WARN shared skill .claude/skills/loop-start differs from the last synced copy; left unchanged',
     )
   })
 
@@ -276,7 +274,7 @@ describe('pre-cycle core update', () => {
     expect(readFileSync(installed, 'utf8').replaceAll('\r', '')).toBe('consumer command\n')
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
     expect(events).toContain(
-      'WARN shared skill loop-start differs from the last synced copy; left unchanged',
+      'WARN shared skill .agents/skills/loop-start differs from the last synced copy; left unchanged',
     )
   })
 

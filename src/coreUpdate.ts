@@ -70,6 +70,9 @@ function syncSkills(
     event('WARN', `shared skill sync failed: ${summary(error)}`)
     return
   }
+  for (const failure of result.failures) {
+    event('WARN', `shared skill sync failed: ${failure}`)
+  }
   for (const skill of result.conflicts) {
     event('WARN', `shared skill ${skill} differs from the last synced copy; left unchanged`)
   }
