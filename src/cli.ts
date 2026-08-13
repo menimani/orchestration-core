@@ -456,6 +456,9 @@ const cmdMerge: Command = async (paths, args) => {
       closesIssues: linkedIssues,
       forge,
     })
+    // A completed manual merge proves the previous failures are no longer consecutive.
+    // Clear the durable streak immediately, before optional forge bookkeeping can fail.
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
     if (linkedIssues.length > 0) {
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
         cwd: paths.repoRoot,
@@ -813,6 +816,11 @@ async function runLoopDaemon(
     // instance's signal is never removed.
     rmSync(stopFile, { force: true })
     if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
+    // A normal daemon start begins a new run, so it must not inherit a failure streak
+    // from the session that ended. A coordinated hot restart remains the same run.
+    if (!usesRestartReservation) {
+      writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+    }
     writeFileSync(cycleCapFile, `${config.maxScanCycles}\n`)
 
     syncOrchestrationDepsAtStartup(
