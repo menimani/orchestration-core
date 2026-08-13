@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
 import {
   closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
