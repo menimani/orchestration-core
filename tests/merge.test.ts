@@ -373,6 +373,59 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
+  it('rejects a successful explicit test that borrowed dependencies', async () => {
+    const taskId = '20260808_000000_019_user-test-borrows-dependencies'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
+      name: 'fixture', devDependencies: { 'fixture-dependency': '^1.0.0' },
+    }, null, 2)}\n`)
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'test: declare an uninstalled test dependency'])
+    const outputFile = join(repoRoot, 'merge-check.log')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: installProject, outputFile,
+      testCmd: 'node -e "process.exit(0)"',
+    })).rejects.toThrow('Tests passed against borrowed dependencies. Aborting merge.')
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain('the worktree: passed on dependencies it does not have')
+    expect(output).toContain('fixture-dependency')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('bypasses automatic checks when they are disabled', async () => {
+    const taskId = '20260808_000000_020_user-skips-automatic-checks'
+    await makeCompletedTask(taskId, { commit: true })
+    const mergeChecks = vi.fn(() => [{
+      label: 'Failing automatic check', cwd: '', command: 'node -e "process.exit(1)"',
+    }])
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'skipped-checks',
+      mergeChecks,
+    }
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project, skipAutoTest: true,
+    })
+
+    expect(mergeChecks).not.toHaveBeenCalled()
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('runs an explicit test command even when automatic checks are disabled', async () => {
+    const taskId = '20260808_000000_021_user-explicit-test-takes-precedence'
+    await makeCompletedTask(taskId, { commit: true })
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, skipAutoTest: true,
+      testCmd: 'node -e "process.exit(1)"',
+    })).rejects.toThrow(/Tests failed/)
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
   it('runs checks against the task merged with intervening run-branch commits', async () => {
     const taskId = '20260808_000000_014_user-combined-check'
     const worktree = await makeCompletedTask(taskId, { commit: true })
