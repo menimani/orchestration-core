@@ -278,16 +278,19 @@ describe('pre-cycle core update', () => {
     )
   })
 
-  it('never replaces a consumer version already staged in the index', async () => {
+  it('checks staged skill conflicts before changing generated files', async () => {
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     const generated = readFileSync(installed)
+    writeFileSync(join(packageRoot, 'skills', 'loop-start', 'SKILL.md'), 'version two\n')
+    commit(repoRoot, 'test: update bundled skill fixture')
     writeFileSync(installed, 'staged consumer command\n')
     git(repoRoot, ['add', '--', '.agents/skills/loop-start/SKILL.md'])
     writeFileSync(installed, generated)
-    advanceUpstream('version two\n')
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
+    expect(readFileSync(installed, 'utf8').replaceAll('\r', ''))
+      .toBe('version one: npm run -C orchestration/ts loop\n')
     expect(git(repoRoot, ['show', ':.agents/skills/loop-start/SKILL.md'])
       .replaceAll('\r', ''))
       .toBe('staged consumer command')
