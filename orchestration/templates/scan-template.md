@@ -17,6 +17,9 @@ Perform in the following order. Run the commands and read their output before ju
 ### 1. Automatic checks
 
 ```bash
+node checks/english-only.ts
+```
+```bash
 npx tsc --noEmit
 ```
 ```bash
@@ -28,7 +31,16 @@ about the test, not a reason to rerun until it passes.
 
 ---
 
-### 2. Behaviour against the specification
+### 2. Source language
+
+Read `CLAUDE.md`'s English-only rule against the sources and the allowlist in
+`checks/english-only.ts`. Report non-English source text, or an exemption broader than
+the intentional multi-byte runner fixture. This check belongs only to this repository;
+do not extend it into a consumer repository or its vendored core subtree.
+
+---
+
+### 3. Behaviour against the specification
 
 `SPEC.md` is the contract this package keeps. Read it against the code and report where
 they disagree — a documented behaviour no code implements, an implemented behaviour the
@@ -40,7 +52,7 @@ moved.
 
 ---
 
-### 3. Portability
+### 4. Portability
 
 The package runs on Windows and on Linux CI, and its consumers may sit on either. Look for
 code and tests that assume one of them:
@@ -55,7 +67,7 @@ platform guard in the test.
 
 ---
 
-### 4. Adapter boundaries
+### 5. Adapter boundaries
 
 Three seams keep this package independent of any repository: `forge`, `runner`, `project`.
 Report anything that leaks across them — a forge command outside the forge adapter, an
@@ -67,7 +79,7 @@ core may not.
 
 ---
 
-### 5. Failure handling
+### 6. Failure handling
 
 This package's job is to keep running unattended and to stop safely when it cannot. Look
 for paths that:
@@ -81,7 +93,7 @@ State in the finding what the loop would do wrongly, not merely that the code lo
 
 ---
 
-### 6. Tests worth having or deleting
+### 7. Tests worth having or deleting
 
 ```bash
 npm test -- --pool=threads --poolOptions.threads.singleThread --coverage 2>&1 | tail -30
@@ -94,7 +106,7 @@ cannot fail, and duplicates.
 
 ---
 
-### 7. Redundancy — keep only what is needed
+### 8. Redundancy — keep only what is needed
 
 Read the sources for material whose deletion loses nothing: comments that restate the
 adjacent code or narrate history instead of naming a constraint, unused exports, dead
@@ -106,7 +118,7 @@ behaves as it does.
 
 ---
 
-### 8. Consumer-facing surface
+### 9. Consumer-facing surface
 
 `README.md` is what a new consumer reads. Check its claims against the code: the commands
 it lists, the environment variables it documents, the adapter contract it describes, the

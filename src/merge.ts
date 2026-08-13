@@ -326,8 +326,9 @@ function runMergeChecks(
  * tree nobody assembled, describing neither tree.
  *
  * This runs after the command, not before it, because a check may install as its own
- * first step — the core's own gate is `npm ci && tsc && npm test` in one command, and
- * judging it beforehand condemns every gate for a worktree that has not installed yet.
+ * first step — the core's own gate is `english-only && npm ci && tsc && npm test` in one
+ * command, and judging it beforehand condemns every gate for a worktree that has not
+ * installed yet.
  */
 function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
   const isolation = verifyModuleIsolation(directory)

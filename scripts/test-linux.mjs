@@ -6,6 +6,7 @@ const containerCommand = [
   'tar -xf - -C /workspace',
   'cd /workspace',
   'npm ci --no-audit --no-fund',
+  'node checks/english-only.ts',
   'npm run typecheck',
   'npm test -- --pool=threads --poolOptions.threads.singleThread',
 ].join(' && ')
