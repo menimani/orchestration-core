@@ -1,8 +1,15 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { operatingSystem } from '../src/adapters/os.ts'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 10
+const PARENT_EXIT_POLL_MS = 100
+
+interface FixtureProcessDescriptor {
+  args: string[]
+  command: string
+}
 
 interface TrackedProcess {
   child?: ChildProcess
@@ -37,13 +44,84 @@ async function waitForExit(pid: number): Promise<void> {
   }
 }
 
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Keep the fixture's process tree subordinate to the Vitest worker even when the worker
+ * is terminated before afterEach can run. The wrapper is a detached process-group root;
+ * it stays alive for the fixture's lifetime and tears the fixture down if its parent
+ * disappears.
+ */
+function runFixtureProcessWrapper(parentPid: number, encodedDescriptor: string): void {
+  const descriptor = JSON.parse(
+    Buffer.from(encodedDescriptor, 'base64').toString('utf8'),
+  ) as FixtureProcessDescriptor
+  const fixture = spawn(descriptor.command, descriptor.args, {
+    detached: false,
+    stdio: 'inherit',
+    windowsHide: true,
+  })
+  let settled = false
+
+  const stopFixture = (): void => {
+    if (settled) return
+    settled = true
+    if (process.platform === 'win32') {
+      if (fixture.pid !== undefined) {
+        spawnSync('taskkill', ['/PID', String(fixture.pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        })
+      }
+      process.exit(1)
+    }
+    try {
+      process.kill(-process.pid, 'SIGKILL')
+    } catch {
+      process.exit(1)
+    }
+  }
+
+  const parentMonitor = setInterval(() => {
+    if (!processIsAlive(parentPid)) stopFixture()
+  }, PARENT_EXIT_POLL_MS)
+  parentMonitor.unref()
+  fixture.once('error', () => {
+    settled = true
+    clearInterval(parentMonitor)
+    process.exitCode = 1
+  })
+  fixture.once('exit', (code, signal) => {
+    settled = true
+    clearInterval(parentMonitor)
+    process.exitCode = signal === null ? (code ?? 1) : 1
+  })
+}
+
 /** Registers real child processes at spawn time for failure-safe afterEach cleanup. */
 export class TestProcessRegistry {
   private readonly processes: TrackedProcess[] = []
 
   spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
-    const child = spawn(command, args, options)
-    this.processes.push({ child, pid: () => child.pid, tree: options.detached === true })
+    const descriptor: FixtureProcessDescriptor = { command, args: [...args] }
+    const encodedDescriptor = Buffer.from(JSON.stringify(descriptor)).toString('base64')
+    const child = spawn(process.execPath, [
+      fileURLToPath(import.meta.url), '--fixture-process-wrapper',
+      String(process.pid), encodedDescriptor,
+    ], {
+      ...options,
+      // A dedicated process group lets cleanup stop descendants, not only the immediate
+      // fixture. It also keeps a failed Vitest worker from taking the watchdog with it.
+      detached: true,
+    })
+    this.processes.push({ child, pid: () => child.pid, tree: true })
     return child
   }
 
@@ -61,8 +139,9 @@ export class TestProcessRegistry {
       const pid = tracked.pid()
       if (pid === undefined || pid <= 0 || cleanedPids.has(pid)) continue
       cleanedPids.add(pid)
+      // The watchdog does not exit until its fixture has exited, so a reaped wrapper is
+      // proof that the whole fixture tree completed normally.
       if (tracked.child?.exitCode !== null && tracked.child?.exitCode !== undefined) continue
-
       if (tracked.tree) {
         if (operatingSystem.processTreeIsAlive(pid)) operatingSystem.terminateProcessTree(pid)
         continue
@@ -79,5 +158,15 @@ export class TestProcessRegistry {
       }
       await waitForExit(pid)
     }
+  }
+}
+
+if (process.argv[2] === '--fixture-process-wrapper') {
+  const parentPid = Number(process.argv[3])
+  const descriptor = process.argv[4]
+  if (!Number.isSafeInteger(parentPid) || parentPid <= 0 || descriptor === undefined) {
+    process.exitCode = 1
+  } else {
+    runFixtureProcessWrapper(parentPid, descriptor)
   }
 }

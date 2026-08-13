@@ -136,6 +136,10 @@ values must be non-negative integers, with the narrower bounds stated below.
     `node_modules` turns the pass into a failure that names what was borrowed. The
     verification follows the check rather than preceding it, because a check may install
     as its own first step.
+9b. The core project's merge and cycle gates build `node_modules` with `npm ci` in a
+    staging directory, then activate the complete tree. The working dependency tree is
+    never npm's cleanup target: a failed install leaves it untouched, a failed activation
+    restores it, and a busy backup left after successful activation is only warned about.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. Re-claiming completed-but-unmerged work requests that merge instead

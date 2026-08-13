@@ -8,7 +8,7 @@ import type { MergeCheck, ProjectAdapter, SuiteStep } from '../../src/adapters/p
 // The suite is single-threaded because its fixtures drive real git repositories in
 // temporary directories, and parallel workers made those fixtures race.
 
-const INSTALL = 'npm ci --no-audit --no-fund'
+const INSTALL = 'node orchestration/project/safe-npm-ci.ts'
 const ENGLISH_ONLY = 'node checks/english-only.ts'
 const TYPECHECK = 'npx tsc --noEmit'
 const SUITE = 'npm test -- --pool=threads --poolOptions.threads.singleThread'
