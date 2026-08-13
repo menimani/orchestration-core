@@ -43,7 +43,10 @@ import {
 } from './tasks.ts'
 import { observeNextPoll } from './wake.ts'
 import { runWorkerCommand } from './worker.ts'
-import { signalLoopRestartReady, startLoopReplacement } from './restart.ts'
+import {
+  loopRestartPredecessorPid, publishLoopReplacementPid, signalLoopRestartReady,
+  startLoopReplacement,
+} from './restart.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -678,6 +681,9 @@ async function runLoopDaemon(
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
   const recoveryLock = `${pidFile}.recovery`
   let ownsTaskLifecycle = false
+  let ownsDaemonState = true
+  const restartPredecessorPid = loopRestartPredecessorPid()
+  let usesRestartReservation = false
 
   // PID lock: one loop per repository.
   for (;;) {
@@ -697,6 +703,12 @@ async function runLoopDaemon(
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
         throw error
       }
+      if (restartPredecessorPid !== undefined
+        && existing === `${restartPredecessorPid}`
+        && operatingSystem.processIsAlive(restartPredecessorPid)) {
+        usesRestartReservation = true
+        break
+      }
       if (/^\d+$/.test(existing) && operatingSystem.processIsAlive(Number(existing))) {
         log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
         return 1
@@ -708,6 +720,7 @@ async function runLoopDaemon(
     }
   }
   const releaseDaemonState = (): void => {
+    if (!ownsDaemonState) return
     try {
       removeIssueModeMarker(paths, process.pid)
     } catch {
@@ -769,7 +782,12 @@ async function runLoopDaemon(
     }
     ownsTaskLifecycle = true
 
-    writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+    // During a restart the predecessor stays visible and owns both markers until this
+    // process has completed initialization. The predecessor publishes this PID as one
+    // atomic handover after observing the ready signal.
+    if (!usesRestartReservation) {
+      writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+    }
     log(formatEventLine(
       'Started', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
     ))
@@ -815,26 +833,33 @@ async function runLoopDaemon(
         if (outcome === 'stopped' && !stopOwnedTaskProcesses(true)) return 1
         if (outcome === 'restart') {
           if (!stopOwnedTaskProcesses(false)) return 1
-          // Node has no portable exec(2). Release ownership so the replacement can
-          // claim it, but do not report success until that daemon finishes startup.
-          releaseDaemonState()
+          // Node has no portable exec(2). Keep this live PID published while the
+          // replacement initializes, then atomically transfer ownership after its
+          // explicit ready signal.
           const readyFile = join(
             paths.queueDir,
             `loop.restart-${process.pid}-${Date.now()}.ready`,
           )
-          const replacement = await startLoopReplacement(readyFile)
-          if (!replacement.ok) {
-            const childOwner = replacement.pid === undefined ? '' : `${replacement.pid}`
-            try {
-              if (existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() === childOwner) {
-                rmSync(pidFile, { force: true })
+          const replacement = await startLoopReplacement(readyFile, {
+            onReady: (replacementPid) => {
+              // Once the child PID is published, neither finally nor the process exit
+              // handler may race it with the predecessor's read-then-remove cleanup.
+              process.off('exit', releaseDaemonState)
+              try {
+                writeIssueModeMarker(paths, config.issueQueueEnabled, replacementPid)
+                publishLoopReplacementPid(pidFile, process.pid, replacementPid)
+                ownsDaemonState = false
+              } catch (error) {
+                try {
+                  writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+                } finally {
+                  process.on('exit', releaseDaemonState)
+                }
+                throw error
               }
-              writeFileSync(pidFile, `${process.pid}\n`, { flag: 'wx' })
-              writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
-            } catch (error) {
-              const detail = error instanceof Error ? error.message : String(error)
-              log(formatEventLine('ERROR', 'restart state', detail))
-            }
+            },
+          })
+          if (!replacement.ok) {
             log(formatEventLine(
               'ERROR', 'restart', `replacement could not start: ${replacement.error ?? 'unknown error'}`,
             ))
