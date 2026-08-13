@@ -1025,11 +1025,6 @@ export function createLoop(deps: LoopDeps) {
     return groups
   }
 
-  function generateScanTask(scanId: string, scope: string): boolean {
-    writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
-    return true
-  }
-
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
     let remote: string
     try {
@@ -1046,8 +1041,13 @@ export function createLoop(deps: LoopDeps) {
     if (baseBranch.startsWith(remotePrefix)
       && git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
       const branch = baseBranch.slice(remotePrefix.length)
-      git(['fetch', '--quiet', remote,
-        `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
+      try {
+        gitIn(paths.repoRoot, ['fetch', '--quiet', remote,
+          `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
+      } catch (error) {
+        event('WARN', `could not refresh review base ${baseBranch}: ${errorSummary(error)}`)
+        return false
+      }
     }
     if (!baseBranch.startsWith(remotePrefix)
       || git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
@@ -1055,8 +1055,13 @@ export function createLoop(deps: LoopDeps) {
       const branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(advertised)?.[1] ?? ''
       baseBranch = branch === '' ? '' : `${remote}/${branch}`
       if (branch !== '') {
-        git(['fetch', '--quiet', remote,
-          `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
+        try {
+          gitIn(paths.repoRoot, ['fetch', '--quiet', remote,
+            `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
+        } catch (error) {
+          event('WARN', `could not refresh review base ${baseBranch}: ${errorSummary(error)}`)
+          return false
+        }
       }
     }
     if (!baseBranch.startsWith(remotePrefix)
@@ -1742,17 +1747,16 @@ export function createLoop(deps: LoopDeps) {
       const scope = nScans === 1
         ? 'Perform the full scan described below.'
         : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
-      if (generateScanTask(scanId, scope)) {
-        try {
-          await startTask(paths, runner, scanId, {
-            effort: config.scanEffort as 'high',
-            model: config.scanModel === '' ? undefined : config.scanModel,
-            setup: project.scanWorktreeSetup,
-          })
-          event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
-        } catch (error) {
-          event('WARN', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))})`)
-        }
+      writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
+      try {
+        await startTask(paths, runner, scanId, {
+          effort: config.scanEffort as 'high',
+          model: config.scanModel === '' ? undefined : config.scanModel,
+          setup: project.scanWorktreeSetup,
+        })
+        event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
+      } catch (error) {
+        event('WARN', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))})`)
       }
     }
     return 'continue'

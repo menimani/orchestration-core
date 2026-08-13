@@ -1001,6 +1001,25 @@ describe('runAutoReview', () => {
     expect(logged).toContain('Stopped Loop        review base unavailable')
   })
 
+  it('stops without reviewing a stale remote ref when refreshing the base fails', () => {
+    const staleBase = git(['rev-parse', 'refs/remotes/origin/main'])
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'advanced\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'advance default branch'])
+    git(['push', 'origin', 'main'])
+    git(['update-ref', 'refs/remotes/origin/main', staleBase])
+    git(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
+    writeFileSync(join(repoRoot, '.git', 'refs', 'remotes', 'origin', 'main.lock'), '')
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-7'))).toBe(false)
+    expect(readdirSync(paths.tasksDir).filter((name) => name.includes('_review-c7'))).toEqual([])
+    expect(logText()).toContain('WARN could not refresh review base origin/main:')
+    expect(logged).toContain('Stopped Loop        review base unavailable')
+  })
+
   it('resumes after a review reports NO_FINDINGS', () => {
     const loop = makeLoop()
     expect(loop.runAutoReview(7, false)).toBe(false)
