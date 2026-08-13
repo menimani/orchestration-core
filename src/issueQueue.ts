@@ -845,9 +845,9 @@ export async function releaseIssueClaim(
   assignee: string,
 ): Promise<void> {
   await withIssueCoordination(forge, issueNumber, async () => {
+    await forge.unassignIssue(issueNumber, assignee)
     await forge.addLabel(issueNumber, LABEL_READY)
     await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
-    await forge.unassignIssue(issueNumber, assignee)
   })
 }
 
@@ -860,14 +860,14 @@ export async function returnIssueToReady(
   await withIssueCoordination(forge, issueNumber, async () => {
     const issue = await forge.getIssue(issueNumber)
     if (issue.state !== 'open') return
+    for (const assignee of issue.assignees) await forge.unassignIssue(issueNumber, assignee)
     if (keepSingleton && !issue.labels.includes(LABEL_GROUP_SINGLETON)) {
       await forge.addLabel(issueNumber, LABEL_GROUP_SINGLETON)
     }
     if (!issue.labels.includes(LABEL_READY)) await forge.addLabel(issueNumber, LABEL_READY)
-    for (const label of [LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED]) {
+    for (const label of [LABEL_MERGE_READY, LABEL_MERGE_FAILED, LABEL_IN_PROGRESS]) {
       if (issue.labels.includes(label)) await forge.removeLabel(issueNumber, label)
     }
-    for (const assignee of issue.assignees) await forge.unassignIssue(issueNumber, assignee)
   })
 }
 
