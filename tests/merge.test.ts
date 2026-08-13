@@ -429,6 +429,19 @@ describe('mergeTask', () => {
     expect(outputLines).toContain('check warning')
   })
 
+  it('refuses a check whose dependencies would resolve from the parent checkout', async () => {
+    const taskId = '20260808_000000_013_user-declares-uninstalled-dependency'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
+      name: 'fixture', devDependencies: { 'fixture-dependency': '^1.0.0' },
+    }, null, 2)}\n`)
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'test: declare a dependency nobody installed'])
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: installProject }))
+      .rejects.toThrow(/resolve dependencies from outside/)
+  })
+
   it('skips installation when the merge check dependency path is present', async () => {
     const taskId = '20260808_000000_009_user-has-dependency'
     const worktree = await makeCompletedTask(taskId, { commit: true })

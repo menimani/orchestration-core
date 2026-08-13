@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
@@ -15,6 +15,7 @@ const PROJECT_ADAPTER = join(HERE, 'fixtures', 'project-loader-fixture.ts')
 interface SpawnProbe {
   command: string
   args: string[]
+  cwd: string | undefined
   detached: boolean
   hasWindowsHide: boolean
 }
@@ -85,6 +86,7 @@ it('launches the real CLI daemon in the detached console-sharing mode', async ()
       '  appendFileSync(process.env.ORCH_TEST_SPAWN_PROBE, `${JSON.stringify({',
       '    command,',
       '    args,',
+      '    cwd: options?.cwd,',
       '    detached: options?.detached === true,',
       "    hasWindowsHide: Object.hasOwn(options ?? {}, 'windowsHide'),",
       '  })}\\n`)',
@@ -124,6 +126,11 @@ it('launches the real CLI daemon in the detached console-sharing mode', async ()
     const daemonSpawn = probes.find((probe) => probe.command === process.execPath
       && probe.args.includes('--marker-output'))
     expect(daemonSpawn).toMatchObject({ detached: true, hasWindowsHide: false })
+    // The daemon must inherit the repository the launcher was pointed at. Started in the
+    // package directory instead, it resolves its own checkout as the repository and the
+    // startup dependency install reinstalls the package it is running from.
+    expect(resolve(daemonSpawn?.cwd ?? '').toLowerCase())
+      .toBe(realpathSync.native(root).toLowerCase())
 
     mkdirSync(dirname(stopFile), { recursive: true })
     writeFileSync(stopFile, '')

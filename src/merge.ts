@@ -8,6 +8,7 @@ import type { Forge } from './adapters/forge.ts'
 import { operatingSystem } from './adapters/os.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
+import { verifyModuleIsolation } from './moduleIsolation.ts'
 import {
   branchName, isInspectionTaskId, logFile, packageFile, worktreeDir, PACKAGE_ROOT,
   type OrchPaths,
@@ -277,6 +278,7 @@ function runMergeChecks(
 ): void {
   if (options.testCmd !== undefined && options.testCmd !== '') {
     io.out(`=== Running tests in worktree: ${options.testCmd} ===`)
+    assertModuleIsolation(worktree, 'the worktree', io)
     try {
       io.run(worktree, options.testCmd)
     } catch {
@@ -297,9 +299,25 @@ function runMergeChecks(
     if (install !== undefined && !existsSync(join(worktree, install.path))) {
       ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) && ok
     }
+    assertModuleIsolation(join(worktree, check.cwd), check.label, io)
     ok = io.tryRun(join(worktree, check.cwd), check.command, check.label) && ok
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
+}
+
+/**
+ * Refuse to run a check whose dependencies would come from outside its own directory.
+ * Reaching a parent's node_modules produces a run against a dependency tree nobody
+ * installed, whose result says nothing about the commit under test.
+ */
+function assertModuleIsolation(directory: string, label: string, io: MergeIo): void {
+  const isolation = verifyModuleIsolation(directory)
+  if (isolation.isolated) return
+  io.out(`=== ${label}: dependencies are not installed in place ===`)
+  io.out(isolation.reason ?? '')
+  throw new MergeError(
+    `${label} would resolve dependencies from outside ${directory}: ${isolation.reason}`,
+  )
 }
 
 export function removeTemporaryWorktree(
