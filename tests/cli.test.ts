@@ -346,7 +346,7 @@ describe('manually promoted run ending', () => {
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '12\n')
     writeFileSync(join(paths.queueDir, 'cycle-cap.txt'), '12\n')
 
-    const result = spawnSync(process.execPath, [CLI, 'shipped', '322'], {
+    const result = spawnSync(process.execPath, [CLI, 'shipped', '#322'], {
       cwd: repoRoot,
       env: { ...INHERITED_ENV, MAX_SCAN_CYCLES: '3' },
       encoding: 'utf8',
@@ -360,24 +360,28 @@ describe('manually promoted run ending', () => {
       /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 12\/12\] Completed {2}Loop {8}PR #322\r?\n$/,
     )
     expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
-      .toBe('LOOP_DONE: 322\n')
+      .toBe('LOOP_DONE: #322\n')
   })
 
   it('falls back to its configured cycle cap when no daemon cap was recorded', () => {
     const paths = orchPaths(repoRoot)
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '5\n')
 
-    const result = spawnSync(process.execPath, [CLI, 'shipped', '323'], {
-      cwd: repoRoot,
-      env: { ...INHERITED_ENV, MAX_SCAN_CYCLES: '8' },
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: CLI_TIMEOUT_MS,
-    })
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'shipped', 'https://example.test/pull/323'],
+      {
+        cwd: repoRoot,
+        env: { ...INHERITED_ENV, MAX_SCAN_CYCLES: '8' },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
 
     expect(result.status).toBe(0)
     expect(readFileSync(join(paths.logsDir, 'loop.log'), 'utf8')).toMatch(
-      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 05\/08\] Completed {2}Loop {8}PR #323\r?\n$/,
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 05\/08\] Completed {2}Loop {8}PR https:\/\/example\.test\/pull\/323\r?\n$/,
     )
   })
 
@@ -391,6 +395,23 @@ describe('manually promoted run ending', () => {
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('Usage: shipped')
+  })
+
+  it.each([
+    '0', '#0', '-12', 'not-a-pr', '/pull/12', 'ftp://example.test/pull/12', 'https://',
+    'https:example.test/pull/12',
+  ])('rejects invalid pull request reference %s', (reference) => {
+    const result = spawnSync(process.execPath, [CLI, 'shipped', reference], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      'must be a positive PR number or absolute HTTP(S) URL',
+    )
   })
 })
 
@@ -596,10 +617,12 @@ describe('loop daemon ownership', () => {
     expect(existsSync(recovery)).toBe(false)
   })
 
-  it('prints a failed-task contract marker as an exact standalone line', async () => {
+  it('prints a failed-task marker and preserves a same-branch merge streak', async () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260810_010203_031_auto-failed-task'
     await writeStatus(paths, taskId, 'failed')
+    writeFileSync(daemonFile('run-branch.txt'), `${git(['branch', '--show-current']).trim()}\n`)
+    writeFileSync(daemonFile('merge-failure-count.txt'), '2\n')
 
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,
@@ -620,6 +643,7 @@ describe('loop daemon ownership', () => {
     expect(result.stdout.split(/\r?\n/)).toContain(
       `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`,
     )
+    expect(readFileSync(daemonFile('merge-failure-count.txt'), 'utf8')).toBe('2\n')
   })
 
   it('separates daemon markers from the aligned loop-log event', async () => {
@@ -663,7 +687,7 @@ describe('loop daemon ownership', () => {
     expect(loopLogLines.filter((line) => line.includes('032_auto'))).toHaveLength(1)
   })
 
-  it('resets the merge streak and removes daemon markers after a startup failure', () => {
+  it('preserves the merge streak when startup fails before session initialization', () => {
     mkdirSync(dirname(daemonFile('merge-failure-count.txt')), { recursive: true })
     writeFileSync(daemonFile('merge-failure-count.txt'), '3\n')
 
@@ -679,7 +703,7 @@ describe('loop daemon ownership', () => {
     expect(result.stderr).toContain("Unknown FORGE 'missing'")
     expect(existsSync(daemonFile('loop.pid'))).toBe(false)
     expect(existsSync(daemonFile('issue-mode'))).toBe(false)
-    expect(readFileSync(daemonFile('merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(readFileSync(daemonFile('merge-failure-count.txt'), 'utf8')).toBe('3\n')
   })
 
   it('refreshes the cycle cap and removes daemon markers after a normal shutdown', () => {

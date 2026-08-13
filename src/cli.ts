@@ -816,11 +816,6 @@ async function runLoopDaemon(
     // instance's signal is never removed.
     rmSync(stopFile, { force: true })
     if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
-    // A normal daemon start begins a new run, so it must not inherit a failure streak
-    // from the session that ended. A coordinated hot restart remains the same run.
-    if (!usesRestartReservation) {
-      writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
-    }
     writeFileSync(cycleCapFile, `${config.maxScanCycles}\n`)
 
     syncOrchestrationDepsAtStartup(
@@ -909,6 +904,20 @@ const cmdShipped: Command = async (paths, args) => {
   const pr = args[0]
   if (pr === undefined || args.length !== 1) {
     console.error('Usage: shipped <pr-number-or-url>')
+    return 1
+  }
+  const isPositiveNumber = /^#?\d+$/.test(pr) && BigInt(pr.replace(/^#/, '')) > 0n
+  let isAbsoluteHttpUrl = false
+  try {
+    const url = new URL(pr)
+    isAbsoluteHttpUrl = /^https?:\/\//i.test(pr)
+      && (url.protocol === 'http:' || url.protocol === 'https:')
+      && url.hostname !== ''
+  } catch {
+    // A non-URL may still be a valid numeric reference, handled above.
+  }
+  if (!isPositiveNumber && !isAbsoluteHttpUrl) {
+    console.error('A shipped reference must be a positive PR number or absolute HTTP(S) URL.')
     return 1
   }
   if (isLoopRunning(paths)) {

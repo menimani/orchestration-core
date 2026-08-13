@@ -1184,14 +1184,19 @@ export function createLoop(deps: LoopDeps) {
    */
   function initializeSessionStateForBranch(): void {
     const currentBranch = git(['branch', '--show-current']).trim()
-    if (existsSync(runBranchFile)) {
-      const previous = readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
-      if (previous !== currentBranch) {
-        // Status files span branches, so their announcement markers must span branches
-        // too; explicit task cleanup removes a marker when a retry is wanted.
-        cleanupSessionState(true)
-      }
+    const previousBranch = existsSync(runBranchFile)
+      ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
+      : undefined
+    if (previousBranch === currentBranch) {
+      writeFileSync(runBranchFile, `${currentBranch}\n`)
+      return
     }
+    if (previousBranch !== undefined) {
+      // Status files span branches, so their announcement markers must span branches
+      // too; explicit task cleanup removes a marker when a retry is wanted.
+      cleanupSessionState(true)
+    }
+    writeFileSync(mergeFailureFile, '0\n')
     writeFileSync(runBranchFile, `${currentBranch}\n`)
   }
 
