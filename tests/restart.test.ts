@@ -1,11 +1,12 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  LOOP_RESTART_READY_FILE_ENV, startLoopReplacement,
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
+  publishLoopReplacementPid, startLoopReplacement,
 } from '../src/restart.ts'
 
 const fixtureRoots: string[] = []
@@ -24,30 +25,38 @@ function fakeChild(pid: number): ChildProcess {
 }
 
 describe('loop replacement startup', () => {
-  it('reports success only after the replacement publishes its ready signal', async () => {
+  it('keeps the predecessor PID until the replacement publishes readiness', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
     fixtureRoots.push(root)
     const readyFile = join(root, 'ready')
+    const pidFile = join(root, 'loop.pid')
+    writeFileSync(pidFile, `${process.pid}\n`)
     const child = fakeChild(43210)
     const spawnProcess = vi.fn((_executable, _args, options) => {
       const env = options.env as NodeJS.ProcessEnv
       expect(env[LOOP_RESTART_READY_FILE_ENV]).toBe(readyFile)
+      expect(env[LOOP_RESTART_PREDECESSOR_PID_ENV]).toBe(`${process.pid}`)
+      expect(readFileSync(pidFile, 'utf8')).toBe(`${process.pid}\n`)
       setTimeout(() => writeFileSync(readyFile, '43210\n'), 0)
       return child
     }) as unknown as typeof spawn
 
     await expect(startLoopReplacement(readyFile, {
       packageRoot: root,
+      onReady: (pid) => publishLoopReplacementPid(pidFile, process.pid, pid),
       spawn: spawnProcess,
       startupTimeoutMs: 1_000,
       stdio: 'ignore',
     })).resolves.toEqual({ ok: true, pid: 43210 })
+    expect(readFileSync(pidFile, 'utf8')).toBe('43210\n')
     expect(child.unref).toHaveBeenCalled()
   })
 
-  it('reports a replacement that exits before publishing readiness', async () => {
+  it('keeps the predecessor PID when the replacement exits before readiness', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
     fixtureRoots.push(root)
+    const pidFile = join(root, 'loop.pid')
+    writeFileSync(pidFile, `${process.pid}\n`)
     const child = fakeChild(43211)
     const spawnProcess = vi.fn(() => {
       setTimeout(() => {
@@ -59,6 +68,7 @@ describe('loop replacement startup', () => {
 
     await expect(startLoopReplacement(join(root, 'ready'), {
       packageRoot: root,
+      onReady: (pid) => publishLoopReplacementPid(pidFile, process.pid, pid),
       spawn: spawnProcess,
       startupTimeoutMs: 1_000,
       stdio: 'ignore',
@@ -67,6 +77,7 @@ describe('loop replacement startup', () => {
       pid: 43211,
       error: 'replacement exited before becoming ready (exit code 1)',
     })
+    expect(readFileSync(pidFile, 'utf8')).toBe(`${process.pid}\n`)
     expect(child.unref).not.toHaveBeenCalled()
   })
 })

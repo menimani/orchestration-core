@@ -982,10 +982,49 @@ export function createLoop(deps: LoopDeps) {
     return text
   }
 
-  function generateScanTask(scanId: string, scope: string): boolean {
-    const text = repositoryInspectionPreamble()
+  function scanSpecification(scanId: string, scope: string): string {
+    return repositoryInspectionPreamble()
       + renderTemplate('scan-template.md', { SCAN_ID: scanId, SCAN_SCOPE: scope })
-    writeFileSync(specFile(paths, scanId), text)
+  }
+
+  function numberedScanSections(specification: string): number[] {
+    const sections: number[] = []
+    let fence: { marker: '`' | '~'; length: number } | undefined
+    for (const line of specification.split(/\r?\n/)) {
+      const fenceMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+      if (fence !== undefined) {
+        if (fenceMatch !== null
+          && fenceMatch[1]![0] === fence.marker
+          && fenceMatch[1]!.length >= fence.length
+          && fenceMatch[2]!.trim() === '') {
+          fence = undefined
+        }
+        continue
+      }
+      if (fenceMatch !== null) {
+        fence = {
+          marker: fenceMatch[1]![0] as '`' | '~',
+          length: fenceMatch[1]!.length,
+        }
+        continue
+      }
+      const heading = /^ {0,3}#{1,6}[\t ]+(\d+)\.(?:[\t ]|$)/.exec(line)
+      if (heading !== null) sections.push(Number(heading[1]))
+    }
+    if (new Set(sections).size !== sections.length) {
+      throw new Error('numbered sections must be unique')
+    }
+    return sections
+  }
+
+  function partitionScanSections(sections: readonly number[], groupCount: number): number[][] {
+    const groups = Array.from({ length: groupCount }, () => [] as number[])
+    sections.forEach((section, index) => groups[index % groupCount]!.push(section))
+    return groups
+  }
+
+  function generateScanTask(scanId: string, scope: string): boolean {
+    writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
     return true
   }
 
@@ -1240,18 +1279,19 @@ export function createLoop(deps: LoopDeps) {
         }
         return false
       }
-      if (body.includes(GENERATED_BODY_MARKER)) {
-        try {
-          await forge.updatePr(branch, {
-            title,
-            body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
-          })
-        } catch (error) {
-          if (!(error instanceof ForgeRateLimitError)) {
-            reportGateFailure(`could not update PR body: ${errorSummary(error)}`)
-          }
-          return false
+      const generatedBody = body.includes(GENERATED_BODY_MARKER)
+      try {
+        await forge.updatePr(branch, generatedBody
+          ? {
+              title,
+              body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
+            }
+          : { title })
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          reportGateFailure(`could not update PR ${generatedBody ? 'body' : 'title'}: ${errorSummary(error)}`)
         }
+        return false
       }
       writeFileSync(prUrlFile, `${status.url}\n`)
       previousGateFailures.delete('draft-pr')
@@ -1463,6 +1503,11 @@ export function createLoop(deps: LoopDeps) {
     gateWaitTarget = undefined
     if (countRunning() > 0 || queueLength() > 0) return 'continue'
     if (isScanRunning()) return 'continue'
+    if (listTaskIds(paths).some((taskId) => readStatus(paths, taskId)?.status === 'completed'
+      && !existsSync(join(scannedDir, taskId)))) {
+      gateWaitTarget = 'completion scan'
+      return 'continue'
+    }
     if (config.issueQueueEnabled) {
       if (knownOpenFindings === null) {
         gateWaitTarget = 'finding status'
@@ -1660,23 +1705,35 @@ export function createLoop(deps: LoopDeps) {
     // This is the only safe restart boundary: the previous gate is closed, no task is
     // running, and the next cycle has not yet consumed its number or started a scan.
     if (await updateCore(nextCycle) === 'restart') return 'restart'
-    const nScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
+    const requestedScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
+    let nScans = requestedScans
+    let sectionGroups: number[][] = []
+    if (nScans > 1) {
+      let sections: number[]
+      try {
+        sections = numberedScanSections(scanSpecification('scan', ''))
+      } catch (error) {
+        event('ERROR', `scan-template.md is unusable: it must contain unique numbered Markdown headings outside fenced code blocks (${errorSummary(error)})`)
+        writeFileSync(stopFile, '')
+        return 'continue'
+      }
+      if (sections.length === 0) {
+        event('WARN', `scan-template.md has no numbered sections; requested ${requestedScans} parallel scans, running one full scan`)
+        nScans = 1
+      } else {
+        sectionGroups = partitionScanSections(sections, nScans)
+      }
+    }
     writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
     writeFileSync(scanCountFile, `${nextCycle}\n`)
 
-    // Disjoint groups of the checklist's eight sections, balanced so the deep reads
-    // (bugs, tests) do not share a scan at higher parallelism.
-    const sectionGroups: Record<number, string[]> = {
-      1: [''],
-      2: ['1, 2, 5 and 6', '3, 4, 7 and 8'],
-      3: ['1 and 2', '3, 4, 5 and 6', '7 and 8'],
-      4: ['1 and 2', '5 and 6', '3 and 4', '7 and 8'],
-    }
+    // Round-robin groups cover every discovered section exactly once while keeping
+    // group sizes within one, without assuming what any section asks the scan to do.
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
       const scope = nScans === 1
-        ? 'Perform every numbered section below.'
-        : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${(sectionGroups[nScans] as string[])[i - 1]}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
+        ? 'Perform the full scan described below.'
+        : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
       if (generateScanTask(scanId, scope)) {
         try {
           await startTask(paths, runner, scanId, {
@@ -1763,7 +1820,8 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const mergeCompletedTask = async (taskId: string): Promise<void> => {
-      if (!config.autoMerge || mergeAttempts.has(taskId)) return
+      if (!config.autoMerge || mergeAttempts.has(taskId)
+        || !existsSync(join(scannedDir, taskId))) return
       mergeAttempts.add(taskId)
       event('Merging', shortTaskId(taskId))
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)

@@ -6,11 +6,11 @@ import type {
   Runner, RunnerSharedSkillRenderOptions, RunnerStartOptions,
 } from './runner.ts'
 
-// The spec content is the prompt, passed as one
-// argument; the final message lands in --output-last-message, which is the only
-// place the core reads completion markers from. Effort maps to the codex-specific
+// The spec is the prompt, read by Codex from standard input via `-`; the final
+// message lands in --output-last-message, which is the only place the core reads
+// completion markers from. Effort maps to the codex-specific
 // `model_reasoning_effort` config key here, not in the core.
-function buildArgs(options: RunnerStartOptions, specContent: string): string[] {
+function buildArgs(options: RunnerStartOptions): string[] {
   const args = [
     'exec',
     '--dangerously-bypass-approvals-and-sandbox',
@@ -20,7 +20,7 @@ function buildArgs(options: RunnerStartOptions, specContent: string): string[] {
     args.push('--model', options.model)
   }
   args.push('--config', `model_reasoning_effort=${options.effort}`)
-  args.push(specContent)
+  args.push('-')
   return args
 }
 
@@ -92,16 +92,21 @@ export function createCodexRunner(): Runner {
       renderFile: renderSharedSkillFile,
     },
     start(options: RunnerStartOptions): Promise<number> {
-      const specContent = readFileSync(options.specFile, 'utf8')
-      const args = buildArgs(options, specContent)
+      const args = buildArgs(options)
       // startTask clears this file before setup; append so setup output remains ahead
       // of the runner transcript instead of being silently truncated here.
       const logFd = openSync(options.logFile, 'a')
+      let specFd: number
+      try {
+        specFd = openSync(options.specFile, 'r')
+      } catch (error) {
+        closeSync(logFd)
+        return Promise.reject(error)
+      }
 
       // On Windows the `codex` on PATH is an npm .cmd shim, which Node cannot spawn
-      // without a shell — and shell quoting would mangle the multi-line spec argument.
-      // Git Bash is already a hard requirement of this repository, so route through
-      // `bash -c` with positional arguments: nothing is ever re-quoted.
+      // without a shell. Git Bash is already a hard requirement of this repository,
+      // so route through `bash -c` with positional arguments.
       const viaBash = process.platform === 'win32'
       const command = viaBash ? 'bash' : 'codex'
       const commandArgs = viaBash
@@ -109,11 +114,15 @@ export function createCodexRunner(): Runner {
         : args
 
       return new Promise((resolve, reject) => {
-        let logFdClosed = false
-        const closeLogFd = (): void => {
-          if (logFdClosed) return
-          closeSync(logFd)
-          logFdClosed = true
+        let descriptorsClosed = false
+        const closeDescriptors = (): void => {
+          if (descriptorsClosed) return
+          descriptorsClosed = true
+          try {
+            closeSync(specFd)
+          } finally {
+            closeSync(logFd)
+          }
         }
 
         let child
@@ -123,19 +132,19 @@ export function createCodexRunner(): Runner {
           child = spawn(command, commandArgs, {
             cwd: options.worktree,
             detached: true,
-            stdio: ['ignore', logFd, logFd],
+            stdio: [specFd, logFd, logFd],
           })
         } catch (error) {
-          closeLogFd()
+          closeDescriptors()
           reject(error)
           return
         }
         child.once('error', (error) => {
-          closeLogFd()
+          closeDescriptors()
           reject(error)
         })
         child.once('spawn', () => {
-          closeLogFd()
+          closeDescriptors()
           child.unref()
           if (child.pid === undefined) {
             reject(new Error('codex spawned without a PID'))

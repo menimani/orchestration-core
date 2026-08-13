@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # ==============================
 # commit-msg
@@ -18,28 +18,18 @@ code=0
 printf " - Checking commit message prefix: "
 
 # Allowed commit types
-readonly ALLOWED_TYPES=(
-  "feat"
-  "fix"
-  "chore"
-  "docs"
-  "refactor"
-  "test"
-)
+ALLOWED_TYPES="feat fix chore docs refactor test"
+readonly ALLOWED_TYPES
 
 # Read first line of commit message
 FIRST_LINE="$(head -n 1 "$COMMIT_MSG_FILE")"
 
 # Skip merge commits
-if echo "$FIRST_LINE" | grep -q "^Merge "; then
+if printf '%s\n' "$FIRST_LINE" | grep -q "^Merge "; then
   printf "\033[33;22mSKIPPED\033[0m\n"
 else
-  # Build regex:
-  # ^(type1|type2|...): <non-space>.*
-  TYPES_REGEX="$(printf "|%s" "${ALLOWED_TYPES[@]}")"
-  TYPES_REGEX="^(${TYPES_REGEX:1}): [^ ].*"
-
-  if echo "$FIRST_LINE" | grep -Eq "$TYPES_REGEX"; then
+  if printf '%s\n' "$FIRST_LINE" \
+    | grep -Eq '^(feat|fix|chore|docs|refactor|test): [^ ].*'; then
     printf "\033[32;22mOK\033[0m\n"
   else
     printf "\033[31;22mNG\033[0m\n"
@@ -54,7 +44,7 @@ else
     printf "  - Exactly ONE space after ':'\n"
     printf "  - Subject must not start with a space\n\n"
     printf "Allowed types:\n"
-    printf "  %s\n" "${ALLOWED_TYPES[*]}"
+    printf "  %s\n" "${ALLOWED_TYPES}"
     printf "\nExample:\n"
     printf "  feat: add login feature\n"
     printf "================================================================\033[0m\n"

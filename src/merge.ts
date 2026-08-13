@@ -291,7 +291,8 @@ function runMergeChecks(
     } catch {
       throw new MergeError('Tests failed. Aborting merge.')
     }
-    if (!ranIsolated(worktree, 'the worktree', io)) {
+    if (options.project.verifyDependencyIsolation === true
+      && !ranIsolated(worktree, 'the worktree', io)) {
       throw new MergeError('Tests passed against borrowed dependencies. Aborting merge.')
     }
     return
@@ -310,9 +311,10 @@ function runMergeChecks(
       ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) && ok
     }
     const directory = join(worktree, check.cwd)
-    ok = io.tryRun(directory, check.command, check.label)
-      && ranIsolated(directory, check.label, io)
-      && ok
+    const passed = io.tryRun(directory, check.command, check.label)
+    const isolated = options.project.verifyDependencyIsolation !== true
+      || (passed && ranIsolated(directory, check.label, io))
+    ok = passed && isolated && ok
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
 }
@@ -340,7 +342,12 @@ export function removeTemporaryWorktree(
   worktree: string,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
-  removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+  if (result.fallbackFailure === undefined) return
+  throw new MergeError(
+    `Could not remove temporary worktree ${worktree}; merge was not applied. `
+    + `(git: ${result.gitFailure}; fallback: ${result.fallbackFailure})`,
+  )
 }
 
 function stopCompletedRunner(pid: number): void {
@@ -534,24 +541,24 @@ export async function mergeRemoteTask(
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
     runMergeChecks(worktree, currentBranch, options, io)
-
-    try {
-      git(paths.repoRoot, ['merge', '--quiet', '--no-ff', remoteRef, '-m', mergeMessage])
-    } catch {
-      try {
-        git(paths.repoRoot, ['merge', '--abort'])
-      } catch {
-        // nothing to abort
-      }
-      throw new MergeError(`A merge conflict occurred while adopting ${branch}.`)
-    }
-    const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
-    options.onMerged?.(mergeCommit)
-    syncOrchestrationDepsAfterMerge(
-      paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
-    )
-    return mergeCommit
   } finally {
     removeTemporaryWorktree(paths, worktree)
   }
+
+  try {
+    git(paths.repoRoot, ['merge', '--quiet', '--no-ff', remoteRef, '-m', mergeMessage])
+  } catch {
+    try {
+      git(paths.repoRoot, ['merge', '--abort'])
+    } catch {
+      // nothing to abort
+    }
+    throw new MergeError(`A merge conflict occurred while adopting ${branch}.`)
+  }
+  const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  options.onMerged?.(mergeCommit)
+  syncOrchestrationDepsAfterMerge(
+    paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+  )
+  return mergeCommit
 }

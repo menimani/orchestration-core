@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/bin/sh
 
 printf "\033[37;1m== pre-commit ==\033[0m\n"
 
-HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+HOOK_DIR="$(CDPATH= cd -P "$(dirname "$0")" && pwd)"
 readonly HOOK_DIR
 node "${HOOK_DIR}/../src/cli.ts" pre-commit

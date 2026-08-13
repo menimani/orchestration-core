@@ -36,8 +36,10 @@ function resolveCurrentBranchRemote(
 
   if (remotes.size === 1) return [...remotes][0]!
   if (remotes.size === 0) throw new Error('repository has no configured remote')
+  const remoteNames = [...remotes].sort().join(', ')
   throw new Error(
-    `current branch '${branch}' has no upstream and the repository has multiple remotes`,
+    `current branch '${branch}' has no upstream and the repository has multiple remotes: ${remoteNames}; `
+      + `push the branch with an upstream, or configure branch.${branch}.remote`,
   )
 }
 

@@ -67,8 +67,10 @@ describe('current branch remote', () => {
   it('rejects an ambiguous repository when no branch or push remote is configured', () => {
     git(['remote', 'add', 'upstream', join(repoRoot, 'upstream.git')])
 
-    expect(() => currentBranchPushRemote(repoRoot)).toThrow('repository has multiple remotes')
-    expect(() => currentBranchTrackingRemote(repoRoot)).toThrow('repository has multiple remotes')
+    const message = "current branch 'main' has no upstream and the repository has multiple remotes: "
+      + 'origin, upstream; push the branch with an upstream, or configure branch.main.remote'
+    expect(() => currentBranchPushRemote(repoRoot)).toThrow(message)
+    expect(() => currentBranchTrackingRemote(repoRoot)).toThrow(message)
   })
 
   it('reads the remote advertised default branch when no local HEAD ref is cached', () => {
