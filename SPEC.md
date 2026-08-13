@@ -269,9 +269,10 @@ values must be non-negative integers, with the narrower bounds stated below.
 ## The generated pull request
 
 21. The title reports `cycle <n>/<max>` while running and category counts when finished.
-    The body is rebuilt each cycle from commit classification into fixed sections
-    (Features, Bug Fixes, Security, Project Operations, Risks), `- None` where empty.
-    Title and body come from the same classification, so they cannot disagree.
+    The body is rebuilt each cycle from commit classification into the sections defined
+    by `ProjectAdapter.pullRequest.categories` (generated adapters default to `Changes`),
+    followed by the core-owned Risks section; every empty section says `- None`. Title
+    and body come from the same classification, so they cannot disagree.
 22. An HTML comment on the first body line marks the text as generated; a hand-edited
     body (marker gone) is never overwritten again. Body ownership does not freeze the
     generated title, which is still updated through the adapter's title-only field.
