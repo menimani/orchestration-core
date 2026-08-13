@@ -1128,9 +1128,22 @@ describe('cycleIsFinal', () => {
 })
 
 describe('cycle gate', () => {
-  it.each([2, 3, 4])('partitions the eight scan sections across %i scans', async (scanParallel) => {
+  it.each([
+    { sectionCount: 5, scanParallel: 2 },
+    { sectionCount: 8, scanParallel: 3 },
+    { sectionCount: 10, scanParallel: 4 },
+  ])('partitions $sectionCount scan sections across $scanParallel scans', async ({
+    sectionCount, scanParallel,
+  }) => {
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
-    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const sections = Array.from(
+      { length: sectionCount },
+      (_, index) => `### ${index + 1}. Check ${index + 1}\n`,
+    ).join('\n')
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      `# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n\n${sections}`,
+    )
     const loop = makeLoop({ scanParallel, autoPr: false, reviewEnabled: false })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
@@ -1148,7 +1161,26 @@ describe('cycle gate', () => {
       const assignment = /Perform only sections ([^;]+);/.exec(scope)?.[1] ?? ''
       return [...assignment.matchAll(/\d+/g)].map((match) => Number(match[0]))
     })
-    expect(assignedSections.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+    expect(assignedSections.sort((a, b) => a - b))
+      .toEqual(Array.from({ length: sectionCount }, (_, index) => index + 1))
+    const assignmentSizes = scopes.map((scope) => {
+      const assignment = /Perform only sections ([^;]+);/.exec(scope)?.[1] ?? ''
+      return [...assignment.matchAll(/\d+/g)].length
+    })
+    expect(Math.max(...assignmentSizes) - Math.min(...assignmentSizes)).toBeLessThanOrEqual(1)
+  })
+
+  it('fails a parallel scan before creating cycle state when sections cannot be found', async () => {
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const loop = makeLoop({ scanParallel: 2, autoPr: false, reviewEnabled: false })
+
+    await expect(loop.triggerScanIfIdle()).rejects.toThrow(
+      'parallel scan requires numbered sections in scan-template.md',
+    )
+    expect(runnerStarts).toHaveLength(0)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
   })
 
   it('resumes when review is enabled but automatic review is disabled', async () => {

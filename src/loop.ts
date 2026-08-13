@@ -982,10 +982,31 @@ export function createLoop(deps: LoopDeps) {
     return text
   }
 
-  function generateScanTask(scanId: string, scope: string): boolean {
-    const text = repositoryInspectionPreamble()
+  function scanSpecification(scanId: string, scope: string): string {
+    return repositoryInspectionPreamble()
       + renderTemplate('scan-template.md', { SCAN_ID: scanId, SCAN_SCOPE: scope })
-    writeFileSync(specFile(paths, scanId), text)
+  }
+
+  function numberedScanSections(specification: string): number[] {
+    const sections = [...specification.matchAll(/^ {0,3}#{1,6}[\t ]+(\d+)\.(?:[\t ]|$)/gm)]
+      .map((match) => Number(match[1]))
+    if (sections.length === 0) {
+      throw new Error('parallel scan requires numbered sections in scan-template.md')
+    }
+    if (new Set(sections).size !== sections.length) {
+      throw new Error('parallel scan requires unique numbered sections in scan-template.md')
+    }
+    return sections
+  }
+
+  function partitionScanSections(sections: readonly number[], groupCount: number): number[][] {
+    const groups = Array.from({ length: groupCount }, () => [] as number[])
+    sections.forEach((section, index) => groups[index % groupCount]!.push(section))
+    return groups
+  }
+
+  function generateScanTask(scanId: string, scope: string): boolean {
+    writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
     return true
   }
 
@@ -1661,22 +1682,22 @@ export function createLoop(deps: LoopDeps) {
     // running, and the next cycle has not yet consumed its number or started a scan.
     if (await updateCore(nextCycle) === 'restart') return 'restart'
     const nScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
+    const sectionGroups = nScans === 1
+      ? []
+      : partitionScanSections(
+        numberedScanSections(scanSpecification('scan', '')),
+        nScans,
+      )
     writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
     writeFileSync(scanCountFile, `${nextCycle}\n`)
 
-    // Disjoint groups of the checklist's eight sections, balanced so the deep reads
-    // (bugs, tests) do not share a scan at higher parallelism.
-    const sectionGroups: Record<number, string[]> = {
-      1: [''],
-      2: ['1, 2, 5 and 6', '3, 4, 7 and 8'],
-      3: ['1 and 2', '3, 4, 5 and 6', '7 and 8'],
-      4: ['1 and 2', '5 and 6', '3 and 4', '7 and 8'],
-    }
+    // Round-robin groups cover every discovered section exactly once while keeping
+    // group sizes within one, without assuming what any section asks the scan to do.
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
       const scope = nScans === 1
         ? 'Perform every numbered section below.'
-        : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${(sectionGroups[nScans] as string[])[i - 1]}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
+        : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
       if (generateScanTask(scanId, scope)) {
         try {
           await startTask(paths, runner, scanId, {

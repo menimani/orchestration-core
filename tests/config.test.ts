@@ -79,7 +79,7 @@ describe('loadConfig', () => {
     )
   })
 
-  it('clamps SCAN_PARALLEL to the four defined checklist groups', () => {
+  it('clamps SCAN_PARALLEL to four concurrent scans', () => {
     expect(loadConfig({ SCAN_PARALLEL: '9' }).scanParallel).toBe(4)
   })
 
