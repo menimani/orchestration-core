@@ -1,10 +1,11 @@
-import { execFileSync, execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { appendFileSync, closeSync, existsSync, openSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
+import { execShellSync } from './shell.ts'
 import { readStatus, writeStatus } from './status.ts'
 import { specFile } from './tasks.ts'
 
@@ -80,8 +81,9 @@ export async function startTask(
       options.report?.(`Preparing worktree: ${step.label}`)
       const setupLogFd = openSync(log, 'a')
       try {
-        execSync(step.command, {
+        execShellSync(step.command, {
           cwd: join(worktree, step.cwd),
+          encoding: 'utf8',
           stdio: ['ignore', setupLogFd, setupLogFd],
           windowsHide: true,
         })

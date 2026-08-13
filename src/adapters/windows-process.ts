@@ -6,8 +6,9 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../internalEnvironment.ts'
 
-export const WINDOWS_PROCESS_ROOT_PID_ENV = 'ORCHESTRATION_WINDOWS_PROCESS_ROOT_PID'
+export { WINDOWS_PROCESS_ROOT_PID_ENV } from '../internalEnvironment.ts'
 
 const WINDOWS_LAUNCH_CONFIG_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_CONFIG'
 const WINDOWS_LAUNCH_ERROR_FILE_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_ERROR_FILE'
