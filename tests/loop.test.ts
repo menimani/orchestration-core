@@ -368,6 +368,40 @@ describe('forge poll budget', () => {
     expect(logText()).toContain('grouped task failed')
   })
 
+  it('returns a failed single-issue task to ready and drops its materialization', async () => {
+    initializeGitRepo()
+    let starts = 0
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async () => {
+        if (starts++ > 0) throw new Error('do not restart during this test')
+        return process.pid
+      },
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1 },
+      stubProject, undefined, undefined, runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: '[BUG] `src/single.ts` single failure',
+      body: buildIssueBody('[BUG] `src/single.ts` single failure', 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    await loop.poll()
+    const failedTaskId = readdirSync(paths.statusDir)[0]!.replace(/\.json$/, '')
+    writeRawStatus(failedTaskId, 'failed')
+    await loop.poll()
+
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(issue.assignees).toEqual([])
+    expect(issueNumbersForTask(paths, failedTaskId)).toEqual([])
+    expect(existsSync(join(paths.tasksDir, `${failedTaskId}.md`))).toBe(false)
+  })
+
   it('warns with the outsider login and leaves an untrusted issue unclaimed', async () => {
     initializeGitRepo()
     const loop = makeLoop({
