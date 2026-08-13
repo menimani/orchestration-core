@@ -33,6 +33,14 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
+When the core is installed as a subtree, the default review template excludes that
+vendored path from both the review instructions and every printed Git command. Defects in
+the vendored core belong upstream, not in a consumer finding. A custom
+`orchestration/templates/review-template.md` must retain both
+`{{REVIEW_SCOPE_EXCLUSION}}` and `{{REVIEW_DIFF_SCOPE}}`; omitting either placeholder opts
+out of the corresponding prose or command protection. Both render as empty strings when
+this package owns the repository, so this repository's review still covers its own source.
+
 Immediately before each cycle starts, the daemon fetches the configured shared-core
 upstream and compares it with the last import of this package's subtree. If the subtree
 is behind, it runs `git subtree pull --squash`; when package files change, it replaces

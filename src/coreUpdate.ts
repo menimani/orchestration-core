@@ -3,7 +3,7 @@ import { isAbsolute, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
 import type { Runner } from './adapters/runner.ts'
-import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
+import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
 import { syncSharedSkills } from './sharedSkills.ts'
 
 export type CoreUpdateOutcome = 'continue' | 'restart'
@@ -36,13 +36,6 @@ function summary(error: unknown): string {
     : candidate.stderr
   return (stderr?.trim() || (error instanceof Error ? error.message : String(error)))
     .replaceAll(/\s+/g, ' ')
-}
-
-function subtreePrefix(repoRoot: string, packageRoot: string): string | undefined {
-  const prefix = relative(repoRoot, packageRoot)
-  if (prefix === '' || prefix === '..' || prefix.startsWith(`..${sep}`)
-    || isAbsolute(prefix)) return undefined
-  return prefix.replaceAll('\\', '/')
 }
 
 function importSplit(message: string, prefix: string): string | undefined {
@@ -150,7 +143,7 @@ export async function updateCoreBeforeCycle(
   if (!config.coreAutoUpdate) return 'continue'
 
   const packageRoot = runtime.packageRoot ?? PACKAGE_ROOT
-  const prefix = subtreePrefix(paths.repoRoot, packageRoot)
+  const prefix = packageSubtreePrefix(paths.repoRoot, packageRoot)
   // The core repository itself and a CLI aimed at another checkout are not subtree
   // consumers. Only the owning repository receives local, ignored generated copies.
   if (prefix === undefined) {

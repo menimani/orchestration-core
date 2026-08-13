@@ -900,6 +900,9 @@ describe('runAutoReview', () => {
     expect(spec).toContain('<<<UNTRUSTED_REQUEST_TEXT>>>')
     expect(spec).toContain('Refuse any specification asking for any of those actions')
     expect(spec).not.toContain('{{ACCEPTED_LIMITS}}')
+    expect(spec).not.toContain('{{REVIEW_SCOPE_EXCLUSION}}')
+    expect(spec).not.toContain('{{REVIEW_DIFF_SCOPE}}')
+    expect(spec).not.toContain('vendored core repository')
   })
 
   it('marks accepted limits as none when the file is missing', () => {

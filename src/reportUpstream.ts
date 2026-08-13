@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { platform } from 'node:os'
-import { basename, isAbsolute, join, relative, sep } from 'node:path'
+import { basename, join } from 'node:path'
 import type { CreateIssueInRepositoryOptions, Forge } from './adapters/forge.ts'
-import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
+import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
 
 interface PackageMetadata {
   version?: unknown
@@ -79,19 +79,12 @@ function reportingRepository(paths: OrchPaths, runtime: ReportUpstreamRuntime): 
   return basename(paths.repoRoot)
 }
 
-function packageSubtreePath(paths: OrchPaths, packageRoot: string): string | undefined {
-  const subtreePath = relative(paths.repoRoot, packageRoot)
-  if (subtreePath === '' || subtreePath === '..' || subtreePath.startsWith(`..${sep}`)
-    || isAbsolute(subtreePath)) return undefined
-  return subtreePath.replaceAll('\\', '/')
-}
-
 function subtreeCommit(
   paths: OrchPaths,
   packageRoot: string,
   runtime: ReportUpstreamRuntime,
 ): string | undefined {
-  const subtreePath = packageSubtreePath(paths, packageRoot)
+  const subtreePath = packageSubtreePrefix(paths.repoRoot, packageRoot)
   if (subtreePath === undefined) return undefined
   try {
     const message = runtime.git(paths.repoRoot, [
