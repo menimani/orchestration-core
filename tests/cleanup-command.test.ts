@@ -8,8 +8,9 @@ import {
   CLEANUP_USAGE, runCleanupCommand, type CleanupCommandRuntime,
 } from '../src/cleanupCommand.ts'
 import {
-  issueNumbersForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
-  LABEL_READY, recordIssueForTask, recordIssuesForTask,
+  issueNumbersForTask, issueReleaseIntentForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON,
+  LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
+  reapStaleLeases, recordIssueForTask, recordIssuesForTask,
 } from '../src/issueQueue.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
@@ -125,9 +126,81 @@ describe('cleanup command', () => {
     expect(existsSync(statusFile(paths, taskId))).toBe(false)
     expect(existsSync(finalMessageFile(paths, taskId))).toBe(false)
     expect(existsSync(specFile(paths, taskId))).toBe(false)
-    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    expect(issueNumbersForTask(paths, taskId)).toEqual([51, 52])
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([51, 52])
     expect(commandRuntime.error).toHaveBeenCalledWith(expect.stringMatching(
-      /^WARN: Could not release issues #51 #52 from the forge .* They will return to loop:ready when their leases expire\.$/,
+      /^WARN: Could not release issues #51 #52 from the forge .* The daemon will retry the persisted release\.$/,
     ))
+  })
+
+  it.each([
+    'unassign:worker-a',
+    'unassign:worker-b',
+    `add:${LABEL_GROUP_SINGLETON}`,
+    `add:${LABEL_READY}`,
+    `remove:${LABEL_MERGE_READY}`,
+    `remove:${LABEL_MERGE_FAILED}`,
+    `remove:${LABEL_IN_PROGRESS}`,
+  ])('persists and reconciles the %s partial release state end to end', async (failure) => {
+    const forge = makeFakeForge('operator')
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `partial cleanup ${index}`,
+      body: 'claimed work',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED],
+      assignees: ['worker-a', 'worker-b'],
+    })))
+    const failingIssue = issueNumbers[0]!
+    recordIssuesForTask(paths, taskId, issueNumbers)
+    writeFileSync(specFile(paths, taskId), '# claimed task\n')
+
+    const unassignIssue = forge.unassignIssue.bind(forge)
+    const addLabel = forge.addLabel.bind(forge)
+    const removeLabel = forge.removeLabel.bind(forge)
+    let failed = false
+    forge.unassignIssue = async (number, assignee) => {
+      if (!failed && number === failingIssue && `unassign:${assignee}` === failure) {
+        failed = true
+        throw new Error(`${failure} failed`)
+      }
+      await unassignIssue(number, assignee)
+    }
+    forge.addLabel = async (number, label) => {
+      if (!failed && number === failingIssue && `add:${label}` === failure) {
+        failed = true
+        throw new Error(`${failure} failed`)
+      }
+      await addLabel(number, label)
+    }
+    forge.removeLabel = async (number, label) => {
+      if (!failed && number === failingIssue && `remove:${label}` === failure) {
+        failed = true
+        throw new Error(`${failure} failed`)
+      }
+      await removeLabel(number, label)
+    }
+    const commandRuntime = runtime({ loadForge: vi.fn(async () => forge) })
+
+    await expect(runCleanupCommand(paths, [taskId], commandRuntime)).resolves.toBe(0)
+
+    expect(failed).toBe(true)
+    expect(issueNumbersForTask(paths, taskId)).toEqual(issueNumbers)
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual(issueNumbers)
+    expect(existsSync(specFile(paths, taskId))).toBe(false)
+    expect(commandRuntime.error).toHaveBeenCalledWith(expect.stringContaining(failure))
+
+    await expect(reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-14T00:00:00Z'),
+    )).resolves.toEqual([])
+
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.assignees).toEqual([])
+      expect(issue.labels.filter((label) => [
+        LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
+      ].includes(label))).toEqual([LABEL_READY])
+      expect(issue.labels).toContain(LABEL_GROUP_SINGLETON)
+    }
   })
 })

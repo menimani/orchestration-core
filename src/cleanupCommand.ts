@@ -1,6 +1,7 @@
 import type { Forge } from './adapters/forge.ts'
 import {
-  dropClaimedTaskMaterialization, issueNumbersForTask, returnIssueToReady,
+  dropClaimedTaskMaterialization, issueNumbersForTask, reconcileIssueReleaseIntent,
+  recordIssueReleaseIntent, type IssueReleaseFailure,
 } from './issueQueue.ts'
 import type { OrchPaths } from './paths.ts'
 
@@ -13,36 +14,17 @@ export interface CleanupCommandRuntime {
   error(message: string): void
 }
 
-interface ReleaseFailure {
-  issueNumber: number
-  error: unknown
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function releaseWarning(failures: readonly ReleaseFailure[]): string {
+function releaseWarning(failures: readonly IssueReleaseFailure[]): string {
   const issues = failures.map(({ issueNumber }) => `#${issueNumber}`).join(' ')
   const details = failures
     .map(({ issueNumber, error }) => `#${issueNumber}: ${errorMessage(error)}`)
     .join('; ')
   const subject = failures.length === 1 ? `issue ${issues}` : `issues ${issues}`
-  const pronoun = failures.length === 1 ? 'It' : 'They'
-  const lease = failures.length === 1 ? 'its lease expires' : 'their leases expire'
-  return `WARN: Could not release ${subject} from the forge (${details}). ${pronoun} will return to loop:ready when ${lease}.`
-}
-
-async function releaseIssues(
-  forge: Forge,
-  issueNumbers: readonly number[],
-): Promise<ReleaseFailure[]> {
-  const keepSingleton = issueNumbers.length > 1
-  const results = await Promise.allSettled(issueNumbers.map((issueNumber) =>
-    returnIssueToReady(forge, issueNumber, keepSingleton)))
-  return results.flatMap((result, index) => result.status === 'rejected'
-    ? [{ issueNumber: issueNumbers[index]!, error: result.reason }]
-    : [])
+  return `WARN: Could not release ${subject} from the forge (${details}). The daemon will retry the persisted release.`
 }
 
 /** Clean local task state, then release any operator-owned issue-queue claim. */
@@ -62,16 +44,17 @@ export async function runCleanupCommand(
   runtime.cleanup(paths, taskId)
   if (issueNumbers.length === 0) return 0
 
-  let failures: ReleaseFailure[]
+  // Keep the mapping until the durable intent verifies the remote release. Other task
+  // materialization can be removed now without losing the issue reconciliation source.
+  recordIssueReleaseIntent(paths, taskId, issueNumbers)
+  dropClaimedTaskMaterialization(paths, taskId, true)
+
+  let failures: IssueReleaseFailure[]
   try {
-    failures = await releaseIssues(await runtime.loadForge(), issueNumbers)
+    failures = await reconcileIssueReleaseIntent(await runtime.loadForge(), paths, taskId)
   } catch (error) {
     failures = issueNumbers.map((issueNumber) => ({ issueNumber, error }))
   }
-
-  // Once cleanup succeeds, a future claim must materialize a fresh task rather than
-  // resolving the returned issue to this task id, even when the forge is unavailable.
-  dropClaimedTaskMaterialization(paths, taskId)
   if (failures.length > 0) runtime.error(releaseWarning(failures))
   return 0
 }

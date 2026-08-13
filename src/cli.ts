@@ -907,16 +907,20 @@ const cmdShipped: Command = async (paths, args) => {
     return 1
   }
   const isPositiveNumber = /^#?\d+$/.test(pr) && BigInt(pr.replace(/^#/, '')) > 0n
-  let isAbsoluteHttpUrl = false
-  try {
-    const url = new URL(pr)
-    isAbsoluteHttpUrl = /^https?:\/\//i.test(pr)
-      && (url.protocol === 'http:' || url.protocol === 'https:')
-      && url.hostname !== ''
-  } catch {
-    // A non-URL may still be a valid numeric reference, handled above.
+  let reference = isPositiveNumber ? `#${pr.replace(/^#/, '')}` : undefined
+  if (reference === undefined && !/[\u0000-\u001f\u007f]/.test(pr)) {
+    try {
+      const url = new URL(pr)
+      if (/^https?:\/\//i.test(pr)
+        && (url.protocol === 'http:' || url.protocol === 'https:')
+        && url.hostname !== '') {
+        reference = url.href
+      }
+    } catch {
+      // A non-URL may still be a valid numeric reference, handled above.
+    }
   }
-  if (!isPositiveNumber && !isAbsoluteHttpUrl) {
+  if (reference === undefined) {
     console.error('A shipped reference must be a positive PR number or absolute HTTP(S) URL.')
     return 1
   }
@@ -924,7 +928,6 @@ const cmdShipped: Command = async (paths, args) => {
     console.error('The loop is running and records its own ending; shipped is for runs promoted by hand.')
     return 1
   }
-  const reference = /^#?\d+$/.test(pr) ? `#${pr.replace(/^#/, '')}` : pr
   const config = loadConfig()
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
@@ -940,7 +943,7 @@ const cmdShipped: Command = async (paths, args) => {
     cycleCap,
   })
   appendFileSync(join(paths.logsDir, 'loop.log'), `${lines.join('\n')}\n`)
-  appendFileSync(join(paths.logsDir, 'loop-markers.log'), `LOOP_DONE: ${pr}\n`)
+  appendFileSync(join(paths.logsDir, 'loop-markers.log'), `LOOP_DONE: ${reference}\n`)
   console.log(`Recorded: Completed Loop PR ${reference}`)
   return 0
 }

@@ -1079,6 +1079,23 @@ describe('claimIssue', () => {
 })
 
 describe('issue claim release', () => {
+  it('does not claim an issue with conflicting lifecycle labels', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'conflicting ready issue',
+      body: buildIssueBody('[BUG] `src/conflict.ts` conflicts', 'parent-task'),
+      labels: [LABEL_FINDING, LABEL_READY, LABEL_MERGE_FAILED],
+    })
+    const issue = await forge.getIssue(issueNumber)
+
+    await expect(claimIssue(forge, paths, issue, 'worker-a', () => {
+      throw new Error('conflicting issue must not materialize')
+    })).resolves.toEqual({ outcome: 'lost-race', issueNumber })
+
+    const unchanged = await forge.getIssue(issueNumber)
+    expect(unchanged.assignees).toEqual([])
+    expect(unchanged.labels).toEqual([LABEL_FINDING, LABEL_READY, LABEL_MERGE_FAILED])
+  })
+
   it.each([
     {
       failure: 'unassign:worker-a',
@@ -1300,6 +1317,21 @@ describe('reapStaleLeases', () => {
     const recovered = await forge.getIssue(issueNumber)
     expect(recovered.labels).toContain(LABEL_READY)
     expect(recovered.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('reaps an unassigned release conflict even when merge-failed is present', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'interrupted cleanup', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_READY],
+    })
+
+    await expect(reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-14T00:00:00Z'),
+    )).resolves.toEqual([issueNumber])
+
+    const recovered = await forge.getIssue(issueNumber)
+    expect(recovered.assignees).toEqual([])
+    expect(recovered.labels).toEqual([LABEL_FINDING, LABEL_READY])
   })
 
   it('revalidates a stale listing after a concurrent heartbeat before reaping', async () => {

@@ -41,7 +41,7 @@ import {
   claimIssueGroup, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
-  issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
   recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
   returnIssueToReady,
@@ -401,7 +401,8 @@ export function createLoop(deps: LoopDeps) {
         return
       }
     }
-    const issues = findings.filter((issue) => issue.labels.includes(LABEL_MERGE_READY))
+    const issues = findings.filter((issue) =>
+      issueHasExactlyLifecycleLabel(issue, LABEL_MERGE_READY))
     const processedIssues = new Set<number>()
 
     for (const issue of issues) {
@@ -2049,7 +2050,7 @@ export function createLoop(deps: LoopDeps) {
           if (capacity > 0) {
             if (cachedUser === undefined) cachedUser = await forge.currentUser()
             const readyIssues = openFindings.filter((candidate) =>
-              candidate.labels.includes(LABEL_READY)
+              issueHasExactlyLifecycleLabel(candidate, LABEL_READY)
                 && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR)
                 && candidate.assignees.length === 0
                 && issuePromotionForIssue(paths, candidate.number) === undefined)

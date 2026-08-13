@@ -9,8 +9,13 @@ const PRIVATE_PROJECT_COMMAND_ENV = new Set([
 ])
 
 /** Preserve the operator's environment while withholding core-owned process metadata. */
-export function projectCommandEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function projectCommandEnvironment(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
   return Object.fromEntries(
-    Object.entries(env).filter(([name]) => !PRIVATE_PROJECT_COMMAND_ENV.has(name.toUpperCase())),
+    Object.entries(env).filter(([name]) => !PRIVATE_PROJECT_COMMAND_ENV.has(
+      platform === 'win32' ? name.toUpperCase() : name,
+    )),
   )
 }
