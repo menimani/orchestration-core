@@ -1,8 +1,9 @@
 import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync,
   writeFileSync,
 } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -433,6 +434,59 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('repairs incomplete orchestration dependencies before loading the project adapter', () => {
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    const packageModules = join(packageRoot, 'node_modules')
+    const require = createRequire(import.meta.url)
+    const installedZod = dirname(require.resolve('zod/package.json'))
+    const installedTypescript = dirname(dirname(require.resolve('typescript')))
+    mkdirSync(packageModules, { recursive: true })
+    cpSync(join(HERE, '..', 'src'), join(packageRoot, 'src'), { recursive: true })
+    cpSync(join(HERE, '..', 'package.json'), join(packageRoot, 'package.json'))
+    cpSync(join(HERE, '..', 'package-lock.json'), join(packageRoot, 'package-lock.json'))
+    cpSync(installedZod, join(packageModules, 'zod'), { recursive: true })
+
+    const cli = join(packageRoot, 'src', 'cli.ts')
+    const installMarker = join(repoRoot, 'install-called')
+    const wrapper = join(repoRoot, 'repair-dependencies.mjs')
+    writeFileSync(wrapper, [
+      "import childProcess from 'node:child_process'",
+      "import { cpSync, writeFileSync } from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalExecSync = childProcess.execSync',
+      'childProcess.execSync = function (command, options) {',
+      "  if (String(command).startsWith('npm ci ')) {",
+      `    cpSync(${JSON.stringify(installedTypescript)}, ${JSON.stringify(join(packageModules, 'typescript'))}, { recursive: true })`,
+      `    writeFileSync(${JSON.stringify(installMarker)}, '')`,
+      "    return options?.encoding ? '' : Buffer.from('')",
+      '  }',
+      '  return originalExecSync.call(this, command, options)',
+      '}',
+      'syncBuiltinESMExports()',
+      `await import(${JSON.stringify(pathToFileURL(cli).href)})`,
+      '',
+    ].join('\n'))
+
+    expect(existsSync(join(packageModules, 'typescript'))).toBe(false)
+    const result = spawnSync(process.execPath, [wrapper, 'loop'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_SCAN_CYCLES: '0',
+        SCAN_ENABLED: 'true',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(installMarker)).toBe(true)
+    expect(result.stdout).toMatch(/Installed\s+orchestration deps\s+at startup/)
+  })
+
   it('refuses startup while a task status names a foreign live PID', async () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260812_010203_040_auto-foreign-task'
