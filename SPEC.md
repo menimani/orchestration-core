@@ -36,27 +36,46 @@ from or equivalent to `orchestration/tests/*.sh`.
   `LOOP_DONE:`, and `FAILED:`). Loop daemon events in `loop.log` use
   `YYYY-MM-DD HH:mm:ss [loop <cycle>/<cap>] <event> <subject> <detail>`: cycle and cap
   are zero-padded, event names occupy a ten-character column, and subjects shorter than
-  twelve characters are padded so details align. Every physical line receives the full
-  prefix and messages are capped at 80 characters after it. The three machine markers
+  twelve characters are padded so details align. Events preserve their complete first
+  line; multiline traces and command output belong in the referenced task or suite log.
+  The three machine markers
   are the exception to presentation-only output: a foreground loop also prints each
   marker as an exact standalone line, while a background loop writes that exact line to
-  `logs/loop-markers.log`. Their copies in `loop.log` still receive the timestamp and
-  cycle prefix, and retain the marker name rather than being rewritten as display events.
+  `logs/loop-markers.log`. The corresponding result is represented separately by an
+  aligned display event in `loop.log`.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
   preview and requires confirmation; a declined confirmation never contacts the forge.
 
+### Retained runtime configuration
+
+`loadConfig` keeps the environment-variable surface from the pre-rewrite launcher.
+Missing and empty values use the defaults below. Boolean values accept only the exact
+lowercase values `true` and `false`; every other non-empty value is rejected. Numeric
+values must be non-negative integers, with the narrower bounds stated below.
+
+| Variable | Default | Contract |
+|----------|---------|----------|
+| `AUTO_MERGE` | `true` | Merge completed local task worktrees automatically. `false` leaves them completed and eligible for an explicit or later merge. |
+| `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
+| `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
+| `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
+| `MAX_PARALLEL` | `3` | Limit concurrently running queued-task processes and shared-issue claim capacity. It must be at least 1; scan fan-out is controlled separately by `SCAN_PARALLEL`. |
+| `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
+| `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
+| `SKIP_AUTO_TEST` | `false` | When `true` and no `TEST_CMD` or `--test-cmd` is set, skip the project adapter's automatic merge checks. It does not skip the explicit test command. |
+
 ## Task lifecycle
 
-1. A task is `running` while its runner process is alive, `completed` once
-   `TASK_COMPLETE` appears on its own line in the task's `.final` file (written by the
-   runner through its last-message output), and `failed` when the process is gone without
-   that marker. Markers in the transcript log are ignored — only the final-message file
-   is authoritative.
+1. A task is `completed` once `TASK_COMPLETE` appears on its own line in the task's
+   `.final` file (written by the runner through its last-message output), even if its
+   runner process is still alive. Without that marker, it remains `running` while the
+   process is alive and becomes `failed` when the process is gone. Markers in the
+   transcript log are ignored — only the final-message file is authoritative.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
-   `scan` for scans and start with `ci-fix`, `auto-`, or `user-` for CI fixes, scan
-   findings, and delegated work. Listings sort chronologically.
+   `scan` for scans and start with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes,
+   scan findings, review-origin fixes, and delegated work. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its task id: the same finding reported twice
    or the same decision delegated twice resolves to the one existing task.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
@@ -83,12 +102,23 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 8. A merge aborts and keeps the worktree when the worktree holds uncommitted changes or
    no new commits — an agent that forgot to commit must not silently lose its work.
-   Scan tasks and `--inspect` tasks are exempt (investigation produces no commits).
+   Scan tasks and `--inspect` tasks are exempt (investigation produces no commits). A
+   completed task that still records a runner PID has its process tree stopped and
+   verified gone before the merge can discard that PID or remove the worktree.
 9. Pre-merge tests are chosen from the paths the worktree touched. `TASK_GATE=full`
    asks the project adapter for its full merge checks; `TASK_GATE=light` asks it for
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
    entry. Light-gate attribution cost (a suite break at the gate names no task) is
    accepted and documented; the gate stops the loop rather than promote a failing tip.
+9a. A merge check that passes counts only where its directory satisfies its own declared
+    dependencies. A worktree sits inside the checkout it was cut from, so Node resolves
+    anything the worktree lacks from the parent's `node_modules`: an install that stopped
+    partway produces a pass against a dependency tree nobody assembled, and that verdict
+    describes neither tree. Declared dependencies with no `node_modules`, an npm-owned
+    directory with no completed-install record, or any declared dependency absent from
+    `node_modules` turns the pass into a failure that names what was borrowed. The
+    verification follows the check rather than preceding it, because a check may install
+    as its own first step.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. Re-claiming completed-but-unmerged work requests that merge instead
@@ -97,14 +127,25 @@ from or equivalent to `orchestration/tests/*.sh`.
     "tests failed" misattributes an environment failure to the task's diff.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
+11a. After a local or remote task merge, a first-parent change to this package's
+    `package.json` or `package-lock.json` runs `npm ci --no-audit --no-fund` in the
+    package root. A successful install records the lockfile hash under `node_modules`.
+    At daemon startup, after ownership is acquired and before adapters are loaded, the
+    same install runs when that recorded hash does not match or a declared dependency is
+    missing. Startup synchronization is limited to the package copy inside the repository
+    being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
+    it is running from. Install output is captured; a failure logs a summarized `WARN`
+    but does not undo the merge or stop startup. Because failure does not update the
+    recorded hash or restore a missing dependency, the next daemon restart retries it.
 
 ## Scans and cycles
 
 12. Scans start on idle (nothing queued or running), `SCAN_PARALLEL` (1-4) at a time
     over disjoint groups of the checklist's sections. A cycle counts as empty only when
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
-    run early. Scan yield is recorded per cycle (`queue/scan-yield-<n>`) and folded into
-    the empty counter once, at the gate.
+    run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
+    (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
+    counter once, at the gate, only when every expected scan completed successfully.
 13. `cycle_is_final` is true when the cycle number reaches `MAX_SCAN_CYCLES`, or when
     the cycle's scans all came back empty and one more empty cycle reaches
     `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
@@ -126,13 +167,14 @@ from or equivalent to `orchestration/tests/*.sh`.
     code it started with. The check never runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
-    At the same boundary, the package manifest's shared skills are rendered into the
-    repository root `.claude/skills/`, using `npm run` as the command prefix in the
-    owning repository and `npm run -C <package-path>` in a subtree consumer. The sync
-    replaces only a tree whose content matches its recorded last output; consumer
+    At the same boundary, the selected runner adapter supplies the shared-skill
+    destination and rendering behavior. The Codex adapter renders the package manifest's
+    skills into repository root `.agents/skills/`, using `npm run` as the command prefix
+    in the owning repository and `npm run -C <package-path>` in a subtree consumer. The
+    sync replaces only a tree whose content matches its recorded last output; consumer
     divergence is warned and retained, and skills absent from the manifest are untouched.
-    Shared canonical sources do not live below `.claude/skills/`, so a subtree exposes
-    no nested duplicate of a shared skill.
+    Shared canonical sources do not live below a runner skill directory, so a subtree
+    exposes no nested duplicate of a shared skill.
 
 ## The cycle gate
 
@@ -149,9 +191,15 @@ from or equivalent to `orchestration/tests/*.sh`.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot
-    remains an external source whose state is unknown, so the gate waits. Every continuing
-    status names its wait target, such as an unfinished task, an unfinished scan, worker
-    capacity, an open finding, or finding status that could not be read.
+    remains an external source whose state is unknown, so the gate waits. An idle continuing
+    status names its wait target, such as an open finding or finding status that could not
+    be read. A continuing status with no scan, running task, or queued item carries the
+    current idle stretch as an `Idle` event whose `Status` subject is followed by
+    `Task=<n>`, `Queue=<n>`, and the duration; repeated idle statuses back off from the
+    early milestones to a five-minute maximum interval, and any active work resets the
+    stretch. A status with a non-zero scan, running, or queue counter omits `Waiting=`
+    because the counters already explain why the poll continues and remains visible on
+    every poll.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
@@ -202,6 +250,14 @@ from or equivalent to `orchestration/tests/*.sh`.
     task status also blocks startup and is reported with an OS-specific handle diagnostic.
     A run which publishes work also refuses to start when its branch has no unambiguous
     push target, logging `ERROR` and writing the stop file before task or issue work.
+24a. A task's runner PID is held in `queue/pids/<task-id>`, not in its status record, so
+    the identifier lasts exactly as long as what it describes. Stopping a task's process
+    tree releases its entry in the same step; a tree that resisted termination keeps
+    its entry, because something still runs under that number. An entry written before
+    the running system booted is not believed and is dropped as it is read: identifiers
+    are reassigned across a restart, and a survivor would otherwise refuse a startup or
+    direct a termination at a stranger. A PID left in an older status record is never
+    read back.
 25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
     /T /F` on Windows and the detached process group on POSIX), retain task state for
@@ -225,14 +281,17 @@ from or equivalent to `orchestration/tests/*.sh`.
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; gitea/gitlab implementations can be added without touching the
     core). The interface returns normalized values only: PR state plus `name:conclusion`
-    check lines; draft-vs-ready is a forge-neutral flag. Planned issue-queue operations
-    (create/list-ready/claim/close, fingerprint dedup, files-touched metadata,
-    stale-lease reaping) belong to this interface but ship after the parity cutover.
+    check lines; draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
+    likewise normalizes issues, comments, and author write-access verdicts. It exposes
+    current-user and label discovery/creation; issue creation, lookup, open/closed
+    listing, and comments; assignment and label mutation; direct closure; and merge
+    message decoration for forge-driven closure. Fingerprint deduplication, claim
+    arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`). The runner contract is the output markers — `TASK_COMPLETE`,
     `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
-    arguments mapped to CLI flags inside the adapter. Any runner honoring the contract
-    is substitutable.
+    arguments mapped to CLI flags, and the repository skill destination and rendering
+    behavior inside the adapter. Any runner honoring the contract is substitutable.
 31. Everything the orchestration knows about the repository it runs in — which staged
     paths select fast pre-commit checks, which commands verify a merge, which paths make
     each check relevant, which suites prove a cycle's
@@ -244,9 +303,10 @@ from or equivalent to `orchestration/tests/*.sh`.
     core executes the declarations and owns the generic behavior: Git history and diff
     collection, pull-request formatting, output capture, failure attribution, and stop
     decisions. Porting the orchestration to another repository means writing a project
-    adapter and nothing else. The core owns the commit-message hook and default-branch
-    guard; its pre-commit hook loads the adapter's `preCommitChecks` instead of embedding
-    a repository gate in shell.
+    adapter and nothing else. The core owns the commit-message hook and resolves the
+    default-branch guard from the tracking remote's advertised HEAD, failing closed when
+    it cannot; its pre-commit hook loads the adapter's `preCommitChecks` instead of
+    embedding repository branch names or a repository gate in shell.
 
     A consumer imports the core with one deliberate `git subtree add`, then uses `init`
     as the single setup and repair command. Init generates its adapter from the same
@@ -281,9 +341,12 @@ lookup that fails for any reason other than a rate limit answers "no write acces
 missing collaborator and an unreachable forge both resolve to untrusted rather than to a
 guess.
 
-Authorship is checked when a ready issue is claimed, not while findings are listed. An
-untrusted issue remains unassigned and ready, receives `loop:untrusted-author`, and emits
-a warning naming its author so a maintainer can inspect it and re-file genuine work.
+Authorship is checked both when a ready issue is claimed and when fingerprint ownership
+is reconciled. An untrusted issue remains unassigned and ready, receives
+`loop:untrusted-author`, and emits a warning naming its author so a maintainer can inspect
+it and re-file genuine work. An issue whose author lacks write access, or which already
+carries that label, never suppresses or closes a trusted finding and is never recorded in
+the local fingerprint ledger.
 
 A task materialized from a trusted issue frames the requirement as the specification it
 is, because the claim gate has already established that its author may change this
@@ -316,8 +379,20 @@ so authorship and verified ancestry must both hold.
     merges because the same advisory recurs with different prose. Pre-granularity open
     issue bodies are interpreted from their requirement text, and their coarse local
     ledger entry is replaced when encountered, avoiding a one-time duplicate round.
-33. Worker daemons claim a ready issue by self-assignment. The forge login is the worker
-    identity, and every daemon that may claim concurrently must authenticate as a
+33. Before claiming, worker daemons group ready findings whose titles name the same first
+    path, using the same primary-path convention as fingerprinting. A group contains at
+    most four issues; another batch remains ready for the next claim. Titles without a
+    path stay singleton tasks. Every grouped requirement appears separately in the task
+    specification and requires an exact `REQUIREMENT_COMPLETE: #N` final-response marker.
+    The worker refuses to publish or merge the task until all linked issues have markers,
+    so partial implementation cannot close an unaddressed finding. A grouped task that
+    fails, cannot start, or reaches abandoned merge handling returns every member to ready,
+    unassigned, with `loop:group-singleton`; those findings are claimed individually on
+    retry rather than recreating the failed group. Fingerprints and their ledger remain per
+    finding.
+
+    Worker daemons claim a ready issue or group by self-assignment. The forge login is the
+    worker identity, and every daemon that may claim concurrently must authenticate as a
     distinct forge account. Under that invariant, a simultaneous claim is settled
     deterministically — the lexicographically first login wins, losers unassign
     themselves — and the winner relabels to `loop:in-progress` and materializes the
@@ -332,10 +407,11 @@ so authorship and verified ancestry must both hold.
     issue without heartbeats for `ISSUE_LEASE_HOURS` (default 3) is reaped back to
     ready, unassigned, so lease expiry identifies a worker that is no longer polling
     rather than a long-running task.
-34. The merge commit of an issue-born task carries `closes #N`, so the forge closes
-    the issue when the promotion PR lands the commit on the default branch. Immediately
-    after merging, the worker comments with the merge commit and run branch and states
-    that closure happens on promotion; this refreshes `updatedAt` across the ordinary
+34. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
+    the forge closes all of them when the promotion PR lands the commit on the default
+    branch. Immediately after merging, the worker comments on every linked issue with the
+    merge commit and run branch and states that closure happens on promotion; this refreshes
+    `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
     stale-lease reaping recognizes its linked locally merged task and repeats the merge
     comment instead of unassigning or relabeling the issue. That refreshes `updatedAt`
@@ -361,24 +437,29 @@ so authorship and verified ancestry must both hold.
     daemon is execution-only: it never scans, enters a cycle gate, creates or updates a
     pull request, runs a review, or merges. It claims and heartbeats ready issues through
     the standard path and starts their local tasks. A completed task with commits pushes
-    `task/<id>` to `origin`, comments the branch and exact head commit on its issue, and
+    `task/<id>` to the configured push remote, comments the branch and exact head commit
+    on its issue, and
     swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection with no
     commits comments and closes its issue instead. Its poll status uses the shared
-    `Status     Running=<n>  Queue=<n>` event; because workers never scan, their loop-log
-    prefix carries cycle zero rather than a worker-specific replacement for the cycle.
+    `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
+    `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
+    carries cycle zero rather than a worker-specific replacement for the cycle.
 36. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts `loop:merge-ready`
     issues from that poll's shared finding snapshot: it reads the reported branch and head, fetches that branch
-    from `origin`, verifies the head and that it adds commits to the current branch, runs
+    from the configured push remote, verifies the head and that it adds commits to the
+    current branch, runs
     the project adapter's path-selected checks in a detached worktree, and merges with
-    `--no-ff` and `closes #N`. It persists a successful adoption before updating the
-    issue, so a later poll retries failed metadata updates without merging again. A
+    `--no-ff` and `closes #N` for every issue named by a grouped worker report. It persists
+    a successful adoption for every member before updating the issues, so a later poll
+    retries failed metadata updates without merging again. A
     successful adoption logs aligned `Merging` and `Merged` events keyed by the short
     task id, with the latter naming the first eight characters of the merge commit;
     promotion closes the issue. A failure logs the aligned `Failed` event with the short
     task id and merge-log name. It is
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
-    through the consecutive-merge-failure limit instead of returning work to ready.
+    through the consecutive-merge-failure limit instead of returning singleton work to
+    ready. A failed grouped adoption instead returns all members as singleton-ready work.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; inspections take the intentional
     `loop:in-progress` → closed shortcut.

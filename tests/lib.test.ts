@@ -5,10 +5,12 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
-  branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId,
+  branchName, finalMessageFile, isInspectionTaskId, isReviewFixTaskId, isReviewTaskId,
+  isScanTaskId,
   orchPaths, packageScriptCommand, statusFile, type OrchPaths,
 } from '../src/paths.ts'
 import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
@@ -44,6 +46,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -99,6 +102,18 @@ describe('status files', () => {
     expect(readStatus(paths, 'task-stale')?.status).toBe('completed')
   })
 
+  it('uses the operating-system liveness verdict before reclaiming a lock', async () => {
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+    const lockDir = join(paths.statusDir, '.adapter-lock.lock')
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'pid'), '2147483647\n')
+
+    await writeStatus(paths, 'adapter-lock', 'completed')
+
+    expect(processIsAlive).toHaveBeenCalledWith(2147483647)
+    expect(readStatus(paths, 'adapter-lock')?.status).toBe('completed')
+  })
+
   it('reclaims an aged lock that never published a pid', async () => {
     const lockDir = join(paths.statusDir, '.task-pidless.lock')
     mkdirSync(lockDir)
@@ -144,6 +159,11 @@ describe('package script commands', () => {
   it('selects the package directory when it is installed as a subtree', () => {
     expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'ts')))
       .toBe('npm run -C orchestration/ts stop')
+  })
+
+  it('quotes a subtree package directory containing spaces', () => {
+    expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'core package')))
+      .toBe('npm run -C "orchestration/core package" stop')
   })
 })
 
@@ -248,6 +268,15 @@ describe('task id classes', () => {
   it('matches review ids', () => {
     expect(isReviewTaskId('20260808_093005_001_review-c2')).toBe(true)
     expect(isReviewTaskId('20260808_093005_001_auto-review-page')).toBe(false)
+  })
+
+  it('matches review-fix ids without classifying them as inspections', () => {
+    const id = '20260808_093005_001_fix-preserve-zero'
+    expect(isReviewFixTaskId(id)).toBe(true)
+    expect(isReviewFixTaskId('20260808_093005_001_auto-preserve-zero')).toBe(false)
+    expect(isReviewTaskId(id)).toBe(false)
+    expect(isScanTaskId(id)).toBe(false)
+    expect(isInspectionTaskId(paths, id)).toBe(false)
   })
 
   it('treats a delegated task with the inspect marker as inspection', () => {

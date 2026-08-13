@@ -21,7 +21,10 @@ export function packageFile(...segments: string[]): string {
 
 export function packageCommandPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT): string {
   const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
-  return packageDirectory === '' ? 'npm run' : `npm run -C ${packageDirectory}`
+  const packageArgument = packageDirectory.includes(' ')
+    ? `"${packageDirectory}"`
+    : packageDirectory
+  return packageDirectory === '' ? 'npm run' : `npm run -C ${packageArgument}`
 }
 
 export function packageScriptCommand(
@@ -89,6 +92,12 @@ export function isScanTaskId(taskId: string): boolean {
 // Review ids are <timestamp>_<seq>_review-c<cycle>, one per review round of a cycle.
 export function isReviewTaskId(taskId: string): boolean {
   return taskId.includes('_review-c')
+}
+
+// Review-fix ids are <timestamp>_<seq>_fix-<slug>. They remain ordinary executable
+// work; the distinct kind carries their review origin through every task event.
+export function isReviewFixTaskId(taskId: string): boolean {
+  return /^\d{8}_\d{6}_\d{3}_fix-/.test(taskId)
 }
 
 // A task that only inspects reports findings and never commits: an empty worktree is

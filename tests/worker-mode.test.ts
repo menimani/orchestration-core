@@ -9,11 +9,14 @@ import { loadConfig } from '../src/config.ts'
 import { createLoop } from '../src/loop.ts'
 import {
   buildIssueBody, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY,
-  recordIssueForTask,
+  recordIssueForTask, recordIssuesForTask,
 } from '../src/issueQueue.ts'
-import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
+import {
+  branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
+} from '../src/paths.ts'
 import { writeStatus } from '../src/status.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
 
 let tempRoot: string
@@ -35,6 +38,7 @@ const project: ProjectAdapter = {
 }
 
 const runner: Runner = {
+  sharedSkills: fakeRunnerSharedSkills,
   start: async () => process.pid,
 }
 
@@ -107,6 +111,42 @@ afterEach(() => {
 })
 
 describe('worker mode', () => {
+  it('publishes a grouped branch only after every per-issue completion marker is present', async () => {
+    const taskId = '20260809_000000_003_auto-grouped-fix'
+    await completedTask(taskId, true)
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `[BUG] \`src/shared.ts\` grouped requirement ${index}`,
+      body: buildIssueBody(`[BUG] \`src/shared.ts\` grouped requirement ${index}`, 'parent'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [forge.user],
+    })))
+    recordIssuesForTask(paths, taskId, issueNumbers)
+    writeFileSync(finalMessageFile(paths, taskId),
+      `TASK_COMPLETE\nREQUIREMENT_COMPLETE: #${issueNumbers[0]}\n`)
+    const loop = makeWorkerLoop()
+
+    await loop.poll()
+
+    expect(() => git(origin, ['rev-parse', `refs/heads/${branchName(taskId)}`])).toThrow()
+    expect(logged.join('\n')).toContain(`missing requirement completion markers for #${issueNumbers[1]}`)
+    expect((await forge.getIssue(issueNumbers[0]!)).labels).toContain(LABEL_IN_PROGRESS)
+
+    writeFileSync(finalMessageFile(paths, taskId), [
+      'TASK_COMPLETE',
+      `REQUIREMENT_COMPLETE: #${issueNumbers[0]}`,
+      `REQUIREMENT_COMPLETE: #${issueNumbers[1]}`,
+      '',
+    ].join('\n'))
+    await loop.poll()
+
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_MERGE_READY)
+      expect(forge.issueComments.get(issueNumber)?.join('\n'))
+        .toContain(`Issues: #${issueNumbers[0]} #${issueNumbers[1]}`)
+    }
+  })
+
   it('pushes a completed task and relabels its issue as merge-ready without merging locally', async () => {
     git(repoRoot, ['remote', 'rename', 'origin', 'shared'])
     const taskId = '20260809_000000_001_auto-shared-fix'
@@ -128,7 +168,7 @@ describe('worker mode', () => {
     expect(forge.issueComments.get(issueNumber)?.join('\n')).toContain(`Branch: ${branchName(taskId)}`)
     expect(forge.issueComments.get(issueNumber)?.join('\n')).toContain(`Head commit: ${localTaskHead}`)
     expect(existsSync(join(repoRoot, 'worker-change.txt'))).toBe(false)
-    expect(logged.join('\n')).toContain('Status Running=0  Queue=0')
+    expect(logged.join('\n')).toContain('Idle Status      Task=0  Queue=0')
     expect(logged.join('\n')).not.toContain('cycle')
   })
 

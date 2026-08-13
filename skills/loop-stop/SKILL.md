@@ -17,31 +17,36 @@ Current state:
 ```
 
 This writes a stop file. The loop notices it on its next poll, so it exits within
-`POLL_INTERVAL` seconds — 30 by default — not immediately.
+`POLL_INTERVAL` seconds — 30 by default. The command also terminates every live task
+process tree immediately and reports each task and PID. If a process tree cannot be
+terminated, the command reports the failure and exits non-zero.
 
-## What stopping does not do
+## What stopping retains
 
-**Running Codex processes are not killed.** They carry on in their worktrees, finish, and
-sit there with nobody to merge them. Anything reported as `running` above is in that
-position once the loop is gone.
+Task specifications, logs, status files, worktrees, and branches are retained for
+recovery. No terminated agent continues working after `stop` returns.
 
-For each one, either wait for it and merge by hand:
+For a task that completed before the stop, inspect its log and merge it by hand:
 
 ```bash
 {{ORCHESTRATION_COMMAND_PREFIX}} logs -- <task-id>
 {{ORCHESTRATION_COMMAND_PREFIX}} merge -- <task-id> --yes
 ```
 
-or abandon it:
+For a task that was terminated while running, inspect its log and worktree before doing
+anything destructive. It has no automatic retry. Preserve any useful changes manually,
+then clean up and re-enqueue the retained specification:
 
 ```bash
+{{ORCHESTRATION_COMMAND_PREFIX}} logs -- <task-id>
 {{ORCHESTRATION_COMMAND_PREFIX}} cleanup -- <task-id>
+{{ORCHESTRATION_COMMAND_PREFIX}} enqueue -- <task-id>
 ```
 
 `cleanup` removes the worktree and its branch. Look at the log first — a task that
-finished its work but had not been merged yet loses it here.
+produced useful uncommitted or unmerged work loses it here.
 
 ## Report
 
-Say that the loop is stopping, then list what was running and what has been left in a
-worktree. A task left unmerged and unmentioned is work that quietly disappears.
+Say that the loop is stopping, list the task process trees it terminated, and identify
+the retained worktrees that need recovery or cleanup.

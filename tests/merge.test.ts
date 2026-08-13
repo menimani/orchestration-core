@@ -1,14 +1,16 @@
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
-import type { OperatingSystem } from '../src/adapters/os.ts'
+import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
+  MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
 } from '../src/merge.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
@@ -44,13 +46,27 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' })
 }
 
+function expectNoTemporaryWorktree(prefix: '.merge-' | '.adopt-'): void {
+  expect(readdirSync(paths.worktreesDir).filter((name) => name.startsWith(prefix))).toEqual([])
+  expect(git(repoRoot, ['worktree', 'list', '--porcelain'])).not.toContain(prefix)
+}
+
+function repositoryState(): { head: string; status: string; worktrees: string } {
+  return {
+    head: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    status: git(repoRoot, ['status', '--porcelain']),
+    worktrees: git(repoRoot, ['worktree', 'list', '--porcelain']),
+  }
+}
+
 function windowsOperatingSystem(remove: (path: string, options: {
   force: true
   maxRetries?: 3
   recursive: true
 }) => void): OperatingSystem {
   return createWindowsOperatingSystem({
-    spawn: () => {}, probeProcess: () => {}, remove, now: Date.now, sleep: () => {},
+    spawn: () => {}, listProcesses: () => [], probeProcess: () => {}, remove,
+    now: Date.now, sleep: () => {},
   })
 }
 
@@ -196,6 +212,29 @@ describe('removeMergedWorktree', () => {
   })
 })
 
+describe('removeTemporaryWorktree', () => {
+  it('uses the Windows long-path fallback and prunes after git removal fails', () => {
+    const worktree = join(paths.worktreesDir, '.merge-long-path')
+    const remove = vi.fn()
+    const gitRuntime = vi.fn((_cwd: string, args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('Removal failed')
+      return ''
+    })
+
+    removeTemporaryWorktree(paths, worktree, {
+      os: windowsOperatingSystem(remove), git: gitRuntime,
+    })
+
+    expect(remove).toHaveBeenCalledWith(
+      `\\\\?\\${worktree.replaceAll('/', '\\')}`,
+      { recursive: true, force: true, maxRetries: 3 },
+    )
+    expect(gitRuntime).toHaveBeenNthCalledWith(
+      2, paths.repoRoot, ['worktree', 'prune'],
+    )
+  })
+})
+
 describe('mergeTask', () => {
   it('merges a committed task, removes its worktree and branch, and records merged', async () => {
     const taskId = '20260808_000000_001_user-adds-a-file'
@@ -213,6 +252,51 @@ describe('mergeTask', () => {
     expect(existsSync(worktree)).toBe(false)
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
     expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('stops and verifies a completed runner with a live PID before merging', async () => {
+    const taskId = '20260808_000000_017_user-runner-finishes-output-first'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    const runnerPid = runner.pid
+    if (runnerPid === undefined) throw new Error('Runner did not publish a PID.')
+    runner.unref()
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+
+    try {
+      await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
+
+      expect(operatingSystem.processTreeIsAlive(runnerPid)).toBe(false)
+      expect(existsSync(worktree)).toBe(false)
+      expect(readStatus(paths, taskId)?.status).toBe('merged')
+      expect(readStatus(paths, taskId)?.pid).toBeNull()
+    } finally {
+      if (operatingSystem.processTreeIsAlive(runnerPid)) {
+        operatingSystem.terminateProcessTree(runnerPid)
+      }
+    }
+  })
+
+  it('keeps completed task state when the runner cannot be verified stopped', async () => {
+    const taskId = '20260808_000000_018_user-runner-resists-stop'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runnerPid = 12345
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
+      .rejects.toThrow(`Could not stop completed runner ${runnerPid}; task state was retained.`)
+
+    expect(terminate).toHaveBeenCalledWith(runnerPid)
+    expect(existsSync(worktree)).toBe(true)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).not.toBe('')
+    expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
   })
 
   it('leaves linked-issue closing syntax to the forge adapter', async () => {
@@ -294,6 +378,34 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
+  it('aborts a conflicting merge without changing the run branch or task state', async () => {
+    const taskId = '20260808_000000_016_user-conflicting-change'
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, 'README.md'), '# task version\n')
+    git(worktree, ['add', 'README.md'])
+    git(worktree, ['commit', '-qm', 'feat: change README in task'])
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+
+    writeFileSync(join(repoRoot, 'README.md'), '# run version\n')
+    git(repoRoot, ['add', 'README.md'])
+    git(repoRoot, ['commit', '-qm', 'feat: change README on run branch'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const runStatus = git(repoRoot, ['status', '--porcelain'])
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    })).rejects.toThrow('A merge conflict occurred. Rebase the worktree, then retry the merge.')
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe(runStatus)
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toBe('# run version\n')
+    expect(existsSync(worktree)).toBe(true)
+    expect(git(worktree, ['rev-parse', 'HEAD']).trim()).toBe(taskHead)
+    expect(git(worktree, ['status', '--porcelain'])).toBe('')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expectNoTemporaryWorktree('.merge-')
+  })
+
   it('throws MergeError instances so callers can count merge failures', async () => {
     const taskId = '20260808_000000_007_user-error-type'
     await makeCompletedTask(taskId)
@@ -315,6 +427,52 @@ describe('mergeTask', () => {
     expect(outputLines.filter((line) => line === 'install ran')).toHaveLength(1)
     expect(outputLines.indexOf('install ran')).toBeLessThan(outputLines.indexOf('check ran'))
     expect(outputLines).toContain('check warning')
+  })
+
+  it('rejects a check that passed on dependencies it does not have', async () => {
+    const taskId = '20260808_000000_013_user-declares-uninstalled-dependency'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
+      name: 'fixture', devDependencies: { 'fixture-dependency': '^1.0.0' },
+    }, null, 2)}\n`)
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'test: declare a dependency nobody installed'])
+    const outputFile = join(repoRoot, 'merge-check.log')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: installProject, outputFile,
+    })).rejects.toThrow(/Tests failed/)
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain('passed on dependencies it does not have')
+    expect(output).toContain('fixture-dependency')
+  })
+
+  it('accepts a check that installs its own dependencies as its first step', async () => {
+    const taskId = '20260808_000000_014_user-installs-inside-the-check'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
+      name: 'fixture', devDependencies: { 'fixture-dependency': '^1.0.0' },
+    }, null, 2)}\n`)
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'test: declare a dependency the check installs'])
+    // The core's own gate is `npm ci && tsc && npm test` in one command: nothing is
+    // installed when the check starts, and everything is by the time it ends.
+    const installingProject: ProjectAdapter = {
+      ...stubProject,
+      name: 'installs-inside-check',
+      mergeChecks: () => [{
+        label: 'Fixture gate',
+        cwd: '',
+        command: 'node -e "const {mkdirSync,writeFileSync}=require(\'fs\');'
+          + "mkdirSync('node_modules/fixture-dependency',{recursive:true});"
+          + "writeFileSync('node_modules/.package-lock.json','{}')\"",
+      }],
+    }
+
+    await mergeTask(paths, taskId, { taskGate: 'light', project: installingProject })
+
+    expect(git(repoRoot, ['log', '-1', '--pretty=%s'])).toContain(taskId)
   })
 
   it('skips installation when the merge check dependency path is present', async () => {
@@ -341,7 +499,10 @@ describe('mergeTask', () => {
     writeFileSync(join(worktree, 'orchestration', 'ts', 'package.json'), '{"dependencies":{}}\n')
     git(worktree, ['add', 'orchestration/ts/package.json'])
     git(worktree, ['commit', '-qm', 'feat: add orchestration dependency'])
-    const install = vi.fn()
+    const statusDuringInstall: Array<string | undefined> = []
+    const install = vi.fn(() => {
+      statusDuringInstall.push(readStatus(paths, taskId)?.status)
+    })
     const event = vi.fn()
 
     await mergeTask(paths, taskId, {
@@ -353,8 +514,9 @@ describe('mergeTask', () => {
 
     expect(install).toHaveBeenCalledOnce()
     expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
+    expect(statusDuringInstall).toEqual(['merged'])
     expect(event).toHaveBeenCalledWith(
-      'Installed', ' orchestration deps  after 010_user',
+      'Installed', 'after 010_user',
     )
   })
 
@@ -417,6 +579,90 @@ describe('mergeTask', () => {
 })
 
 describe('mergeRemoteTask', () => {
+  it('rejects a malformed task branch without changing HEAD or worktree state', async () => {
+    const before = repositoryState()
+
+    await expect(mergeRemoteTask(
+      paths,
+      222,
+      'origin',
+      'task/../outside',
+      before.head,
+      {
+        taskGate: 'light',
+        project: noCheckProject,
+        forge: { issueClosingCommitMessage: (message) => message },
+      },
+    )).rejects.toThrow('Issue #222 reported an invalid task branch: task/../outside')
+
+    expect(repositoryState()).toEqual(before)
+  })
+
+  it('rejects a malformed reported head without changing HEAD or worktree state', async () => {
+    const before = repositoryState()
+
+    await expect(mergeRemoteTask(
+      paths,
+      223,
+      'origin',
+      'task/remote-malformed-head',
+      'not-a-commit',
+      {
+        taskGate: 'light',
+        project: noCheckProject,
+        forge: { issueClosingCommitMessage: (message) => message },
+      },
+    )).rejects.toThrow('Issue #223 reported an invalid head commit: not-a-commit')
+
+    expect(repositoryState()).toEqual(before)
+  })
+
+  it('rejects a mismatched reported head without changing HEAD or worktree state', async () => {
+    const branch = 'task/remote-mismatched-head'
+    const reportedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const fetchedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, fetchedHead])
+    git(repoRoot, ['branch', '-D', branch])
+    const before = repositoryState()
+
+    await expect(mergeRemoteTask(paths, 224, 'origin', branch, reportedHead, {
+      taskGate: 'light',
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(
+      `Remote branch ${branch} is at ${fetchedHead}, not the reported ${reportedHead}.`,
+    )
+
+    expect(repositoryState()).toEqual(before)
+  })
+
+  it('rejects an already-merged branch without changing HEAD or worktree state', async () => {
+    const branch = 'task/remote-already-merged'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['merge', '--ff-only', branch])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    git(repoRoot, ['branch', '-D', branch])
+    const before = repositoryState()
+
+    await expect(mergeRemoteTask(paths, 225, 'origin', branch, expectedHead, {
+      taskGate: 'light',
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(`${branch} has no new commits relative to main.`)
+
+    expect(repositoryState()).toEqual(before)
+  })
+
   it('leaves issue-closing syntax to the forge adapter', async () => {
     const branch = 'task/remote-runner-neutral-message'
     git(repoRoot, ['switch', '-qc', branch])
@@ -464,5 +710,37 @@ describe('mergeRemoteTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(existsSync(join(repoRoot, 'run.txt'))).toBe(true)
     expect(existsSync(join(repoRoot, 'task.txt'))).toBe(false)
+  })
+
+  it('aborts a conflicting adoption without changing the run branch or remote state', async () => {
+    const branch = 'task/remote-conflicting-change'
+    const remoteRef = `refs/remotes/origin/${branch}`
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'README.md'), '# remote version\n')
+    git(repoRoot, ['add', 'README.md'])
+    git(repoRoot, ['commit', '-qm', 'feat: change README remotely'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', remoteRef, expectedHead])
+    git(repoRoot, ['branch', '-D', branch])
+
+    writeFileSync(join(repoRoot, 'README.md'), '# run version\n')
+    git(repoRoot, ['add', 'README.md'])
+    git(repoRoot, ['commit', '-qm', 'feat: change README on run branch'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const runStatus = git(repoRoot, ['status', '--porcelain'])
+
+    await expect(mergeRemoteTask(paths, 221, 'origin', branch, expectedHead, {
+      taskGate: 'light',
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(`A merge conflict occurred while adopting ${branch}.`)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe(runStatus)
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toBe('# run version\n')
+    expect(git(repoRoot, ['rev-parse', remoteRef]).trim()).toBe(expectedHead)
+    expect(git(repoRoot, ['show', `${remoteRef}:README.md`])).toBe('# remote version\n')
+    expectNoTemporaryWorktree('.adopt-')
   })
 })

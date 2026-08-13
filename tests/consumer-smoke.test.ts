@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Forge } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import { makeFakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 
 const packageRoot = resolve(import.meta.dirname, '..')
 const fixtureRoot = resolve(import.meta.dirname, 'fixtures', 'consumer')
@@ -176,7 +177,7 @@ project.cycleSuite = () => consumerFixture.cycleSuite
       paths,
       config,
       forge,
-      runner: { start: runnerStart },
+      runner: { sharedSkills: fakeRunnerSharedSkills, start: runnerStart },
       project,
       log: (line) => logs.push(line),
       now: () => new Date('2026-08-12T00:00:00Z'),

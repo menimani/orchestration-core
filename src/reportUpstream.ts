@@ -158,12 +158,3 @@ export async function submitUpstreamReport(
 ): Promise<string> {
   return forge.createIssueInRepository(report)
 }
-
-export async function reportUpstream(
-  paths: OrchPaths,
-  description: string,
-  forge: Forge,
-  runtime: ReportUpstreamRuntime = defaultRuntime,
-): Promise<string> {
-  return submitUpstreamReport(prepareUpstreamReport(paths, description, runtime), forge)
-}

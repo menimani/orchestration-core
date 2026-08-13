@@ -8,6 +8,7 @@ import { readStatus } from './status.ts'
 import { readTemplate } from './templates.ts'
 import { signalWake } from './wake.ts'
 import type { Forge } from './adapters/forge.ts'
+import { operatingSystem } from './adapters/os.ts'
 
 // The queue-writing commands: new, enqueue, delegate. Everything here prints the exact
 // lines the bash implementation printed (`Created:`, `Enqueued:`, `WARN:`), because the
@@ -150,12 +151,7 @@ export function isIssueModeActive(
   if (!existsSync(marker)) return false
   const [enabled, owner] = readFileSync(marker, 'utf8').trim().split(/\s+/)
   if (enabled !== 'true' || owner === undefined || !/^\d+$/.test(owner)) return false
-  try {
-    process.kill(Number(owner), 0)
-    return true
-  } catch {
-    return false
-  }
+  return operatingSystem.processIsAlive(Number(owner))
 }
 
 /**
@@ -255,10 +251,5 @@ export function isLoopRunning(paths: OrchPaths): boolean {
   if (!existsSync(pidFile)) return false
   const pid = readFileSync(pidFile, 'utf8').trim()
   if (!/^\d+$/.test(pid)) return false
-  try {
-    process.kill(Number(pid), 0)
-    return true
-  } catch {
-    return false
-  }
+  return operatingSystem.processIsAlive(Number(pid))
 }

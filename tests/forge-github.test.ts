@@ -80,6 +80,20 @@ describe('GitHub issue promotion', () => {
   })
 })
 
+describe('GitHub Git remotes', () => {
+  it('expands GitHub repository shorthand at the forge boundary', () => {
+    const forge = createGithubForge('repo-root')
+
+    expect(forge.resolveGitRemote('example/shared-core'))
+      .toBe('https://github.com/example/shared-core.git')
+    expect(forge.resolveGitRemote('example/shared-core.git'))
+      .toBe('https://github.com/example/shared-core.git')
+    expect(forge.resolveGitRemote('upstream')).toBe('upstream')
+    expect(forge.resolveGitRemote('https://example.test/shared-core.git'))
+      .toBe('https://example.test/shared-core.git')
+  })
+})
+
 describe('GitHub pull request bodies', () => {
   it('fences issue-number-like references when creating a pull request', async () => {
     const calls: string[][] = []
@@ -98,6 +112,8 @@ describe('GitHub pull request bodies', () => {
     })
 
     expect(calls[0]).toContain('Decision `#12` remains open')
+    expect(calls[0]).not.toContain('--head')
+    expect(calls[0]).not.toContain('task/branch')
   })
 
   it('fences issue-number-like references when updating a pull request', async () => {
@@ -271,7 +287,7 @@ describe('GitHub issue queue repository targeting', () => {
 })
 
 describe('GitHub author permissions', () => {
-  it('trusts actual write-level permission, not author association, and caches each login', async () => {
+  it('trusts actual write-level permission and deduplicates authors within one listing', async () => {
     const calls: string[][] = []
     const issues = [
       { ...openIssueFixture, number: 1, author: { login: 'read-member' }, authorAssociation: 'MEMBER' },
@@ -296,6 +312,22 @@ describe('GitHub author permissions', () => {
     expect(normalized.map((issue) => issue.author.hasWriteAccess))
       .toEqual([false, false, true, true])
     expect(calls.filter((args) => args[0] === 'api')).toHaveLength(3)
+  })
+
+  it('observes permission revocation on the fresh issue read used by a claim', async () => {
+    let permission = 'write'
+    const command: GithubCommand = async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'issue') {
+        return JSON.stringify(args[1] === 'list' ? [openIssueFixture] : openIssueFixture)
+      }
+      return JSON.stringify({ permission })
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    expect((await forge.listOpenIssues('loop:ready'))[0]?.author.hasWriteAccess).toBe(true)
+    permission = 'read'
+    expect((await forge.getIssue(1)).author.hasWriteAccess).toBe(false)
   })
 })
 

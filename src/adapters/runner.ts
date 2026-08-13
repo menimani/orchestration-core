@@ -21,7 +21,24 @@ export interface RunnerStartOptions {
   model?: string | undefined
 }
 
+export interface RunnerSharedSkillRenderOptions {
+  repoRoot: string
+  packageRoot: string
+  commandPrefixPlaceholder: string
+}
+
+export interface RunnerSharedSkills {
+  /** Absolute directory where this runner discovers repository-scoped skills. */
+  destinationRoot(repoRoot: string): string
+  /** Absolute former discovery directories whose generated skills may be migrated. */
+  legacyRoots?(repoRoot: string): string[]
+  /** Render a canonical shared-skill file into the runner's on-disk format. */
+  renderFile(contents: Buffer, options: RunnerSharedSkillRenderOptions): Buffer
+}
+
 export interface Runner {
+  /** Runner-specific repository skill discovery and rendering behavior. */
+  sharedSkills: RunnerSharedSkills
   /** Start the agent process detached; resolve with its PID once spawned. */
   start(options: RunnerStartOptions): Promise<number>
 }

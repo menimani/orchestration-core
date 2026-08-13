@@ -1,6 +1,7 @@
 import { execFileSync, execSync } from 'node:child_process'
 import { appendFileSync, closeSync, existsSync, openSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { operatingSystem } from './adapters/os.ts'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
@@ -20,15 +21,6 @@ export interface StartOptions {
 
 export function worktreeAddArgs(worktree: string, branch: string): string[] {
   return ['worktree', 'add', '--quiet', worktree, '-b', branch]
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
-  }
 }
 
 /**
@@ -60,7 +52,8 @@ export async function startTask(
   const branch = branchName(taskId)
   if (existsSync(worktree)) {
     const status = readStatus(paths, taskId)
-    if (status?.pid !== null && status?.pid !== undefined && processIsAlive(status.pid)) {
+    if (status?.pid !== null && status?.pid !== undefined
+      && operatingSystem.processIsAlive(status.pid)) {
       return { outcome: 'already-running' }
     }
     throw new Error(

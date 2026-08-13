@@ -1,13 +1,14 @@
 import { execFileSync, execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync,
 } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import { operatingSystem } from './adapters/os.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
+import { verifyModuleIsolation } from './moduleIsolation.ts'
 import {
   branchName, isInspectionTaskId, logFile, packageFile, worktreeDir, PACKAGE_ROOT,
   type OrchPaths,
@@ -37,6 +38,8 @@ export interface MergeOptions {
    * closes the issue when the commit lands on the default branch.
    */
   closesIssue?: number | undefined
+  /** All issues resolved by a grouped task; takes precedence over closesIssue. */
+  closesIssues?: readonly number[] | undefined
   /** Required for a linked issue; the core does not know forge-specific closing syntax. */
   forge?: Pick<Forge, 'issueClosingCommitMessage'> | undefined
   /**
@@ -46,6 +49,11 @@ export interface MergeOptions {
   outputFile?: string | undefined
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   onOrchestrationDepsEvent?: OrchestrationDepsEvent | undefined
+}
+
+export interface RemoteMergeOptions extends MergeOptions {
+  /** Persist adoption before post-merge work begins or this function returns. */
+  onMerged?: ((mergeCommit: string) => void) | undefined
 }
 
 export interface OrchestrationDepsRuntime {
@@ -112,7 +120,7 @@ function installOrchestrationDeps(
       mkdirSync(join(root, 'node_modules'), { recursive: true })
       writeFileSync(hashFile, `${lockHash}\n`)
     }
-    event('Installed', ` orchestration deps  ${subject}`)
+    event('Installed', subject)
   } catch (error) {
     event('WARN', `orchestration deps install ${subject} failed: ${installFailureSummary(error)}`)
   }
@@ -172,9 +180,17 @@ export function syncOrchestrationDepsAtStartup(
   runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
 ): void {
   const root = runtime.packageRoot ?? PACKAGE_ROOT
-  // Installing is for the copy this repository carries. A CLI pointed at some other
-  // checkout — a test fixture, another clone — must not reinstall the package it is
-  // itself running from.
+  // Only the repository this loop was started against gets its package synchronized. A
+  // package outside it belongs to someone else's checkout, and installing there would
+  // rewrite dependencies nobody here asked about.
+  //
+  // The package may equally be the repository — that is how this repository runs itself,
+  // and a core that updates its own source has no one else to install the lockfile it
+  // just pulled. `npm ci` empties node_modules before refilling it, so this is safe only
+  // because it happens at startup, before any task or suite depends on that directory.
+  // What must never happen is a process reaching this from somewhere else and pointing it
+  // at its own package: that is why the daemon starts in the repository it was given
+  // rather than in the package directory (see `cmdLoop`).
   if (!isInside(paths.repoRoot, root)) return
   if (!orchestrationDepsMissing(root)) return
   installOrchestrationDeps('at startup', event, runtime)
@@ -275,6 +291,9 @@ function runMergeChecks(
     } catch {
       throw new MergeError('Tests failed. Aborting merge.')
     }
+    if (!ranIsolated(worktree, 'the worktree', io)) {
+      throw new MergeError('Tests passed against borrowed dependencies. Aborting merge.')
+    }
     return
   }
   if (options.skipAutoTest === true) return
@@ -290,21 +309,48 @@ function runMergeChecks(
     if (install !== undefined && !existsSync(join(worktree, install.path))) {
       ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) && ok
     }
-    ok = io.tryRun(join(worktree, check.cwd), check.command, check.label) && ok
+    const directory = join(worktree, check.cwd)
+    ok = io.tryRun(directory, check.command, check.label)
+      && ranIsolated(directory, check.label, io)
+      && ok
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
 }
 
-function removeTemporaryWorktree(paths: OrchPaths, worktree: string): void {
+/**
+ * Whether a check that just passed did so on dependencies of its own. A worktree sits
+ * inside the checkout it was cut from, so Node resolves whatever the directory lacks from
+ * the parent's node_modules: a half-finished install produces a pass against a dependency
+ * tree nobody assembled, describing neither tree.
+ *
+ * This runs after the command, not before it, because a check may install as its own
+ * first step — the core's own gate is `npm ci && tsc && npm test` in one command, and
+ * judging it beforehand condemns every gate for a worktree that has not installed yet.
+ */
+function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
+  const isolation = verifyModuleIsolation(directory)
+  if (isolation.isolated) return true
+  io.out(`=== ${label}: passed on dependencies it does not have ===`)
+  io.out(isolation.reason ?? '')
+  return false
+}
+
+export function removeTemporaryWorktree(
+  paths: OrchPaths,
+  worktree: string,
+  runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
+): void {
+  removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+}
+
+function stopCompletedRunner(pid: number): void {
   try {
-    git(paths.repoRoot, ['worktree', 'remove', worktree, '--force'])
-  } catch {
-    try {
-      rmSync(worktree, { recursive: true, force: true })
-      git(paths.repoRoot, ['worktree', 'prune'])
-    } catch {
-      // cleanup is best effort; the merge verdict is already known
+    operatingSystem.terminateProcessTree(pid)
+    if (operatingSystem.processTreeIsAlive(pid)) {
+      throw new Error(`Process tree ${pid} is still alive.`)
     }
+  } catch {
+    throw new MergeError(`Could not stop completed runner ${pid}; task state was retained.`)
   }
 }
 
@@ -325,6 +371,7 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   if (status.status !== 'completed') {
     throw new MergeError(`Task status is not 'completed' (current: ${status.status}).`)
   }
+  if (status.pid !== null) stopCompletedRunner(status.pid)
 
   const worktree = worktreeDir(paths, taskId)
   const branch = branchName(taskId)
@@ -347,12 +394,16 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   }
 
   const baseMergeMessage = `Merge ${taskId} via orchestration`
-  if (options.closesIssue !== undefined && options.forge === undefined) {
+  const closingIssues = options.closesIssues ?? (options.closesIssue === undefined
+    ? []
+    : [options.closesIssue])
+  if (closingIssues.length > 0 && options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
-  const mergeMessage = options.closesIssue === undefined
-    ? baseMergeMessage
-    : options.forge!.issueClosingCommitMessage(baseMergeMessage, options.closesIssue)
+  const mergeMessage = closingIssues.reduce(
+    (message, issueNumber) => options.forge!.issueClosingCommitMessage(message, issueNumber),
+    baseMergeMessage,
+  )
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
@@ -391,14 +442,14 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   }
 
   const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  // Publish the merge identity before any post-merge work. If dependency synchronization
+  // or later cleanup is interrupted, startup can retry it without attempting to merge
+  // commits that are already on the run branch or counting a false merge failure.
+  await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
+
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
   )
-
-  // Publish the merge identity before cleanup. If the process exits before the loop
-  // records/comments on a linked issue, the next process can finish reconciliation
-  // without attempting to merge commits that are already on the run branch.
-  await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
 
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
   // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
@@ -424,7 +475,7 @@ export async function mergeRemoteTask(
   remote: string,
   branch: string,
   expectedHead: string,
-  options: MergeOptions,
+  options: RemoteMergeOptions,
 ): Promise<string> {
   if (!/^task\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(branch)) {
     throw new MergeError(`Issue #${issueNumber} reported an invalid task branch: ${branch}`)
@@ -463,7 +514,11 @@ export async function mergeRemoteTask(
   if (options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
-  const mergeMessage = options.forge.issueClosingCommitMessage(baseMergeMessage, issueNumber)
+  const closingIssues = options.closesIssues ?? [issueNumber]
+  const mergeMessage = closingIssues.reduce(
+    (message, closingIssue) => options.forge!.issueClosingCommitMessage(message, closingIssue),
+    baseMergeMessage,
+  )
   try {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     try {
@@ -491,6 +546,7 @@ export async function mergeRemoteTask(
       throw new MergeError(`A merge conflict occurred while adopting ${branch}.`)
     }
     const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+    options.onMerged?.(mergeCommit)
     syncOrchestrationDepsAfterMerge(
       paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     )

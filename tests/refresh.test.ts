@@ -1,8 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import { recordTaskProcess } from '../src/processRegistry.ts'
 import { completionMarkerPresent, refreshAll, refreshTask } from '../src/refresh.ts'
 
 let repoRoot: string
@@ -14,12 +16,17 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
 function writeRawStatus(taskId: string, content: string): string {
   const file = statusFile(paths, taskId)
   writeFileSync(file, content)
+  // A running task's process lives in the registry, not in the record. A fixture that
+  // names one has to put it where the reader looks.
+  const pid = (JSON.parse(content) as { pid?: number | null }).pid
+  if (typeof pid === 'number') recordTaskProcess(paths, taskId, pid)
   return file
 }
 
@@ -68,6 +75,16 @@ describe('refreshTask', () => {
   it('keeps a live task running while the marker is absent', async () => {
     writeRawStatus('live-task', `{"task_id":"live-task","status":"running","pid":${process.pid}}\n`)
     const after = await refreshTask(paths, 'live-task')
+    expect(after?.status).toBe('running')
+  })
+
+  it('uses the operating-system liveness verdict for a task process', async () => {
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    writeRawStatus('protected-task', '{"task_id":"protected-task","status":"running","pid":2147483647}\n')
+
+    const after = await refreshTask(paths, 'protected-task')
+
+    expect(processIsAlive).toHaveBeenCalledWith(2147483647)
     expect(after?.status).toBe('running')
   })
 

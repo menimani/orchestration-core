@@ -3,13 +3,16 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import {
   branchName, logFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
+import { recordTaskProcess } from '../src/processRegistry.ts'
 import { startTask, worktreeAddArgs } from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -30,6 +33,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -56,7 +60,9 @@ describe('startTask', () => {
     }))
     const start = vi.fn(async () => process.pid)
 
-    await expect(startTask(paths, { start }, taskId, { effort: 'medium' }))
+    await expect(startTask(
+      paths, { sharedSkills: fakeRunnerSharedSkills, start }, taskId, { effort: 'medium' },
+    ))
       .rejects.toThrow('then run cleanup explicitly')
 
     expect(start).not.toHaveBeenCalled()
@@ -74,20 +80,45 @@ describe('startTask', () => {
     writeFileSync(statusFile(paths, taskId), JSON.stringify({
       task_id: taskId, status: 'running', pid: process.pid,
     }))
+    // A task's process lives in the registry, not in the record.
+    recordTaskProcess(paths, taskId, process.pid)
     const start = vi.fn(async () => process.pid)
 
-    await expect(startTask(paths, { start }, taskId, { effort: 'medium' }))
+    await expect(startTask(
+      paths, { sharedSkills: fakeRunnerSharedSkills, start }, taskId, { effort: 'medium' },
+    ))
       .resolves.toEqual({ outcome: 'already-running' })
 
     expect(start).not.toHaveBeenCalled()
     expect(existsSync(join(worktree, 'owned.txt'))).toBe(true)
   })
 
+  it('uses the operating-system liveness verdict for an existing worktree', async () => {
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+    const taskId = '20260809_000000_003_auto-adapter-verdict'
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(specFile(paths, taskId), '# adapter verdict task\n')
+    mkdirSync(worktree, { recursive: true })
+    writeFileSync(statusFile(paths, taskId), JSON.stringify({
+      task_id: taskId, status: 'running', pid: process.pid,
+    }))
+    recordTaskProcess(paths, taskId, process.pid)
+    const start = vi.fn(async () => process.pid)
+
+    await expect(startTask(
+      paths, { sharedSkills: fakeRunnerSharedSkills, start }, taskId, { effort: 'medium' },
+    ))
+      .rejects.toThrow('without a live owner')
+
+    expect(processIsAlive).toHaveBeenCalledWith(process.pid)
+    expect(start).not.toHaveBeenCalled()
+  })
+
   it('records and preserves a worktree setup failure before the runner starts', async () => {
     const taskId = '20260809_000000_001_scan'
     writeFileSync(specFile(paths, taskId), '# scan\n')
     const start = vi.fn(async () => process.pid)
-    const runner: Runner = { start }
+    const runner: Runner = { sharedSkills: fakeRunnerSharedSkills, start }
     const previousError = process.env['ORCH_TEST_SETUP_ERROR']
     process.env['ORCH_TEST_SETUP_ERROR'] = 'setup exploded'
 

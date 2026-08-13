@@ -13,6 +13,7 @@ import { syncSharedSkills } from '../src/sharedSkills.ts'
 import { createLoop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
 
 let fixtureRoot: string
@@ -73,10 +74,12 @@ function config(overrides: Record<string, string> = {}) {
 function makeLoop(
   coreConfig: ReturnType<typeof config>,
   runtime: CoreUpdateRuntime = { packageRoot, git },
+  forge: Forge = makeFakeForge(),
 ) {
   mkdirSync(join(paths.root, 'templates'), { recursive: true })
   writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
   const runner: Runner = {
+    sharedSkills: fakeRunnerSharedSkills,
     start: async (options) => {
       runnerStarts.push(options.specFile)
       return process.pid
@@ -85,13 +88,15 @@ function makeLoop(
   const loop = createLoop({
     paths,
     config: coreConfig,
-    forge: makeFakeForge() as Forge,
+    forge,
     runner,
     project: stubProject,
     log: (line) => events.push(line),
     now: () => new Date(2026, 7, 12, 0, 0, 0),
     updateCoreBeforeCycle: (cycle) =>
-      updateCoreBeforeCycle(paths, coreConfig, cycle, event as CoreUpdateEvent, runtime),
+      updateCoreBeforeCycle(
+        paths, coreConfig, forge, runner, cycle, event as CoreUpdateEvent, runtime,
+      ),
   })
   loop.initializeSessionStateForBranch()
   return loop
@@ -130,7 +135,10 @@ beforeEach(() => {
   ])
 
   packageRoot = join(repoRoot, 'orchestration', 'ts')
-  syncSharedSkills(repoRoot, packageRoot)
+  syncSharedSkills(repoRoot, packageRoot, {
+    sharedSkills: fakeRunnerSharedSkills,
+    start: async () => process.pid,
+  })
   commit(repoRoot, 'chore: install shared skills')
   paths = orchPaths(repoRoot)
   events = []
@@ -156,6 +164,18 @@ describe('pre-cycle core update', () => {
     expect(events).toContain('Restarting core for cycle 1')
   })
 
+  it('lets the forge adapter resolve repository shorthand for Git', async () => {
+    advanceUpstream('version two\n')
+    const forge = makeFakeForge()
+    forge.resolveGitRemote = vi.fn(() => upstreamRoot)
+    const loop = makeLoop(config({ UPSTREAM_REMOTE: 'example/shared-core' }), undefined, forge)
+
+    expect(await loop.poll(), events.join('\n')).toBe('restart')
+    expect(forge.resolveGitRemote).toHaveBeenCalledWith('example/shared-core')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+      .toBe('version two\n')
+  })
+
   it('starts the cycle without pulling or restarting when the subtree is current', async () => {
     const loop = makeLoop(config())
 
@@ -166,13 +186,13 @@ describe('pre-cycle core update', () => {
   })
 
   it('installs missing shared skills and commits them when the subtree is current', async () => {
-    rmSync(join(repoRoot, '.claude'), { recursive: true })
+    rmSync(join(repoRoot, '.agents'), { recursive: true })
     commit(repoRoot, 'chore: remove initial skill fixture')
     const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
       .toBe('version one: npm run -C orchestration/ts loop\n')
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
@@ -186,16 +206,66 @@ describe('pre-cycle core update', () => {
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
-    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
       .toBe('version two: npm run -C orchestration/ts loop-status\n')
-    expect(existsSync(join(packageRoot, '.claude', 'skills', 'loop-start'))).toBe(false)
+    expect(existsSync(join(packageRoot, '.agents', 'skills', 'loop-start'))).toBe(false)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
     expect(events).toContain('Updated skill refreshed loop-start')
   })
 
+  it('migrates and commits tracked legacy shared skill copies', async () => {
+    rmSync(join(repoRoot, '.agents'), { recursive: true })
+    commit(repoRoot, 'chore: remove current skill fixture')
+    syncSharedSkills(repoRoot, packageRoot, {
+      sharedSkills: {
+        ...fakeRunnerSharedSkills,
+        destinationRoot: (root) => join(root, '.claude', 'skills'),
+      },
+      start: async () => process.pid,
+    })
+    git(repoRoot, ['add', '-f', '--', '.claude/skills'])
+    commit(repoRoot, 'chore: install legacy skill fixture')
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('continue')
+    expect(existsSync(join(repoRoot, '.claude', 'skills', 'loop-start'))).toBe(false)
+    expect(existsSync(join(
+      repoRoot, '.claude', 'skills', '.orchestration-core-sync.json',
+    ))).toBe(false)
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe('version one: npm run -C orchestration/ts loop\n')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
+  })
+
+  it('preserves and reports a divergent tracked legacy shared skill', async () => {
+    syncSharedSkills(repoRoot, packageRoot, {
+      sharedSkills: {
+        ...fakeRunnerSharedSkills,
+        destinationRoot: (root) => join(root, '.claude', 'skills'),
+      },
+      start: async () => process.pid,
+    })
+    git(repoRoot, ['add', '-f', '--', '.claude/skills'])
+    commit(repoRoot, 'chore: install legacy skill fixture')
+    const legacySkill = join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md')
+    writeFileSync(legacySkill, 'consumer command\n')
+    commit(repoRoot, 'chore: customize legacy skill fixture')
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('continue')
+    expect(readFileSync(legacySkill, 'utf8').replaceAll('\r', '')).toBe('consumer command\n')
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
+    expect(events).toContain(
+      'WARN legacy shared skill .claude/skills/loop-start differs from the last synced copy; left unchanged',
+    )
+  })
+
   it('pulls core changes but preserves and reports a committed consumer skill divergence', async () => {
-    const installed = join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md')
+    const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     writeFileSync(installed, 'consumer command\n')
     commit(repoRoot, 'chore: customize loop skill')
     writeUpstreamSkill('upstream command\n')
@@ -211,16 +281,16 @@ describe('pre-cycle core update', () => {
   })
 
   it('never replaces a consumer version already staged in the index', async () => {
-    const installed = join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md')
+    const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     const generated = readFileSync(installed)
     writeFileSync(installed, 'staged consumer command\n')
-    git(repoRoot, ['add', '--', '.claude/skills/loop-start/SKILL.md'])
+    git(repoRoot, ['add', '--', '.agents/skills/loop-start/SKILL.md'])
     writeFileSync(installed, generated)
     advanceUpstream('version two\n')
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(git(repoRoot, ['show', ':.claude/skills/loop-start/SKILL.md'])
+    expect(git(repoRoot, ['show', ':.agents/skills/loop-start/SKILL.md'])
       .replaceAll('\r', ''))
       .toBe('staged consumer command')
     expect(events.some((line) => line.startsWith(

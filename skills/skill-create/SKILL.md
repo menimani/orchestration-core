@@ -1,20 +1,18 @@
 ---
 name: skill-create
-description: Writes and revises the skills in this repository against Anthropic's authoring guidance. Use when creating a skill, or when an existing skill's frontmatter, description, or structure needs reviewing.
-disable-model-invocation: true
-allowed-tools: Read, Write, Glob, Grep
+description: Writes and revises repository skills against the Agent Skills format and runner-specific conventions. Use when creating a skill, or when an existing skill's frontmatter, description, or structure needs reviewing.
 ---
 
 # Creating a skill
 
 Existing skills:
 
-!`ls .claude/skills/`
+Run `ls .agents/skills/` and use its output as context before continuing.
 
-Skills live in `.claude/skills/<name>/SKILL.md`. Only the frontmatter is preloaded at
+Skills live in `.agents/skills/<name>/SKILL.md`. Only the frontmatter is preloaded at
 startup; the body is read when the skill is selected, and supporting files only when the
 body links to them. That is the whole reason to put something in a skill rather than in
-`CLAUDE.md` — the latter is paid for in every session.
+always-loaded repository guidance — the latter is paid for in every session.
 
 ## Frontmatter
 
@@ -42,9 +40,8 @@ description: Reviews a pull request's diff and submits the result as a GitHub re
 review PRs` fails differently: first person reads inconsistently once it has been
 injected into the system prompt.
 
-Optional: `argument-hint` when the body uses `$ARGUMENTS`, `allowed-tools` to narrow what
-the skill may do, and `disable-model-invocation: true` for skills that should only ever
-run because a person asked.
+Keep runner-specific presentation and invocation policy out of this frontmatter. For
+Codex, put it in `agents/openai.yaml`; see [reference.md](reference.md).
 
 ## Body
 
@@ -60,17 +57,15 @@ Link supporting files directly from SKILL.md, never file to file: a reference re
 through another reference tends to be read only in part. Give any file over 100 lines a
 contents list at the top, for the same reason.
 
-## Dynamic context
+## Runtime context
 
-`!` followed by a backtick-wrapped command injects that command's output into the prompt
-before the skill runs. The rules are narrow and fail quietly — see
-[reference.md](reference.md).
+Do not depend on host-specific prompt expansion. Tell the agent to run the command it
+needs as an ordinary workflow step. See [reference.md](reference.md).
 
 ## Before finishing
 
 - Does the description say *when*, not only *what*?
-- Is any of this already in `CLAUDE.md`? A rule that must hold whoever is acting — Codex
-  included, and it cannot invoke skills — belongs there. A procedure for a task someone
-  explicitly starts belongs here.
+- Is any of this already in the repository's always-loaded guidance? A rule that must
+  hold whoever is acting belongs there. A procedure for a selected task belongs here.
 - Will it still be true after the next refactor, or does it name paths that move?
 - Forward slashes in every path, including on Windows.

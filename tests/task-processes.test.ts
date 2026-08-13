@@ -12,6 +12,7 @@ import {
   type WindowsOperatingSystemRuntime,
 } from '../src/adapters/os-windows.ts'
 import { orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import { recordTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
 import {
   orphanedWorktreeDirectories, terminateLiveTaskProcesses, worktreeHolderHint,
 } from '../src/taskProcesses.ts'
@@ -21,6 +22,7 @@ let paths: OrchPaths
 
 function writeRunningTask(taskId: string, pid: number): void {
   writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, status: 'running', pid }))
+  recordTaskProcess(paths, taskId, pid)
 }
 
 function gone(): NodeJS.ErrnoException {
@@ -50,6 +52,7 @@ describe('terminateLiveTaskProcesses', () => {
     })
     const os = createWindowsOperatingSystem({
       spawn,
+      listProcesses: () => [...alive].map((pid) => ({ pid, parentPid: 0 })),
       probeProcess: (pid) => {
         if (!alive.has(pid)) throw gone()
       },
@@ -66,6 +69,10 @@ describe('terminateLiveTaskProcesses', () => {
     expect(result.failures).toEqual([{
       taskId: 'first-task', pid: 101, error: 'Could not stop process tree 101.',
     }])
+    // Stopping is what makes a recorded identifier false, so a stopped task releases it
+    // and one that resisted keeps it: something is still running under that number.
+    expect(taskProcessPid(paths, 'second-task')).toBeUndefined()
+    expect(taskProcessPid(paths, 'first-task')).toBe(101)
   })
 })
 
@@ -130,6 +137,7 @@ describe('process-group liveness', () => {
   it('selects the Windows implementation when group state must not be consulted', () => {
     const runtime: WindowsOperatingSystemRuntime = {
       spawn: () => {},
+      listProcesses: () => [{ pid: 4321, parentPid: 0 }],
       probeProcess: () => {},
       remove: () => {},
       now: Date.now,
@@ -137,5 +145,46 @@ describe('process-group liveness', () => {
     }
 
     expect(createWindowsOperatingSystem(runtime).processTreeIsAlive(4321)).toBe(true)
+  })
+
+  it('reports a Windows tree as alive while an orphaned descendant remains', () => {
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn: () => {},
+      listProcesses: () => [
+        { pid: 4322, parentPid: 4321 },
+        { pid: 4323, parentPid: 4322 },
+      ],
+      probeProcess: (pid) => {
+        if (pid !== 4323) throw gone()
+      },
+      remove: () => {},
+      now: Date.now,
+      sleep: () => {},
+    }
+
+    expect(createWindowsOperatingSystem(runtime).processTreeIsAlive(4321)).toBe(true)
+  })
+
+  it('verifies captured Windows descendants after taskkill stops the parent', () => {
+    const alive = new Set([4321, 4322])
+    let now = 0
+    const listProcesses = vi.fn(() => [
+      { pid: 4321, parentPid: 1 },
+      { pid: 4322, parentPid: 4321 },
+    ])
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn: () => { alive.delete(4321) },
+      listProcesses,
+      probeProcess: (pid) => {
+        if (!alive.has(pid)) throw gone()
+      },
+      remove: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+    }
+
+    expect(() => createWindowsOperatingSystem(runtime).terminateProcessTree(4321))
+      .toThrow('Could not stop process tree 4321.')
+    expect(listProcesses).toHaveBeenCalledTimes(1)
   })
 })

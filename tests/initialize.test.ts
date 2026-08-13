@@ -128,6 +128,53 @@ describe('repository initialization', () => {
     })
   })
 
+  it('repairs a missing project name from the adapter filename', async () => {
+    const { repository, installedPackage } = fixture()
+    const paths = orchPaths(repository)
+    await initializeRepository(paths, makeFakeForge(), 'consumer', {
+      packageRoot: installedPackage,
+    })
+    const adapter = join(repository, 'orchestration', 'project', 'project-consumer.ts')
+    const withoutName = renderProjectAdapter('consumer', '../ts/src/adapters/project.ts')
+      .replace('  name: "consumer",\n\n', '')
+    writeFileSync(adapter, withoutName)
+    const reports: string[] = []
+
+    const result = await initializeRepository(paths, makeFakeForge(), 'consumer', {
+      packageRoot: installedPackage,
+      report: (line) => reports.push(line),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(reports).toContain(`REPAIRED: ${adapter}; added required member 'name'`)
+    await expect(loadProject(join(repository, 'orchestration'), {})).resolves.toMatchObject({
+      name: 'consumer',
+    })
+  })
+
+  it('reports a project name that disagrees with the adapter filename as divergence', async () => {
+    const { repository, installedPackage } = fixture()
+    const paths = orchPaths(repository)
+    await initializeRepository(paths, makeFakeForge(), 'consumer', {
+      packageRoot: installedPackage,
+    })
+    const adapter = join(repository, 'orchestration', 'project', 'project-consumer.ts')
+    const mismatched = renderProjectAdapter('different', '../ts/src/adapters/project.ts')
+    writeFileSync(adapter, mismatched)
+    const reports: string[] = []
+
+    const result = await initializeRepository(paths, makeFakeForge(), 'consumer', {
+      packageRoot: installedPackage,
+      report: (line) => reports.push(line),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(readFileSync(adapter, 'utf8')).toBe(mismatched)
+    expect(reports).toContain(
+      `DIVERGED: ${adapter}; declares project name 'different' but adapter filename requires 'consumer' (left unchanged)`,
+    )
+  })
+
   it('reports a deliberately different hooks path without overwriting it', async () => {
     const { repository, installedPackage } = fixture()
     git(repository, ['config', '--local', 'core.hooksPath', '.custom-hooks'])

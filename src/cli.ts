@@ -1,12 +1,15 @@
 import { spawn, execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync,
+  statSync, writeFileSync,
 } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadProject } from './adapters/project.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
+import { operatingSystem } from './adapters/os.ts'
 import { cleanupTask } from './cleanup.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
@@ -15,7 +18,8 @@ import { initializeRepository } from './initialize.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
-  commentOnIssueMerge, issueNumberForTask, recordIssuePromotion,
+  commentOnIssueMerge, issueNumbersForTask, missingRequirementCompletionMarkers,
+  recordIssuePromotions,
 } from './issueQueue.ts'
 import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
 import { deploy } from './deploy.ts'
@@ -23,7 +27,7 @@ import {
   isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
 } from './paths.ts'
 import { pruneTasks } from './prune.ts'
-import { runPreCommitChecks } from './preCommit.ts'
+import { branchAcceptsCommits, runPreCommitChecks } from './preCommit.ts'
 import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
@@ -56,12 +60,90 @@ function repoRoot(): string {
   }).trim()
 }
 
-function isPidAlive(pid: number): boolean {
+interface RecoveryLockOwner {
+  pid: number
+  acquiredAt: string
+  token: string
+}
+
+const RECOVERY_LOCK_STALE_MS = 10_000
+const RECOVERY_LOCK_TIMEOUT_MS = 10_000
+const RECOVERY_LOCK_POLL_MS = 10
+
+function recoveryLockOwner(recoveryLock: string): RecoveryLockOwner | undefined {
   try {
-    process.kill(pid, 0)
+    const parsed = JSON.parse(readFileSync(join(recoveryLock, 'owner.json'), 'utf8')) as unknown
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const owner = parsed as Partial<RecoveryLockOwner>
+    if (!Number.isSafeInteger(owner.pid) || (owner.pid ?? 0) <= 0
+      || typeof owner.acquiredAt !== 'string' || typeof owner.token !== 'string'
+      || owner.token === '') return undefined
+    return owner as RecoveryLockOwner
+  } catch {
+    return undefined
+  }
+}
+
+function reclaimRecoveryLock(recoveryLock: string): boolean {
+  const owner = recoveryLockOwner(recoveryLock)
+  if (owner !== undefined && operatingSystem.processIsAlive(owner.pid)) return false
+  if (owner === undefined) {
+    try {
+      if (Date.now() - statSync(recoveryLock).mtimeMs < RECOVERY_LOCK_STALE_MS) return false
+    } catch {
+      return false
+    }
+  }
+  try {
+    // Once the owner file is removed, the empty-directory removal either wins or a
+    // successor publishes its non-empty candidate. It never removes that successor.
+    rmSync(toNamespacedPath(join(recoveryLock, 'owner.json')), { force: true })
+    rmdirSync(toNamespacedPath(recoveryLock))
     return true
   } catch {
     return false
+  }
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+async function acquireRecoveryLock(recoveryLock: string): Promise<() => void> {
+  const owner: RecoveryLockOwner = {
+    pid: process.pid,
+    acquiredAt: new Date().toISOString(),
+    token: randomUUID(),
+  }
+  const candidate = `${recoveryLock}.candidate-${process.pid}-${owner.token}`
+  const deadline = Date.now() + RECOVERY_LOCK_TIMEOUT_MS
+  for (;;) {
+    try {
+      // Metadata exists before the atomic publish, so an observer cannot mistake the
+      // acquisition window for a crashed ownerless lock.
+      mkdirSync(candidate)
+      writeFileSync(join(candidate, 'owner.json'), `${JSON.stringify(owner)}\n`, { flag: 'wx' })
+      renameSync(candidate, recoveryLock)
+      return () => {
+        if (recoveryLockOwner(recoveryLock)?.token !== owner.token) return
+        try {
+          rmSync(toNamespacedPath(join(recoveryLock, 'owner.json')), { force: true })
+          rmdirSync(toNamespacedPath(recoveryLock))
+        } catch {
+          // Ownership has already ended or a successor won the publication race.
+        }
+      }
+    } catch (error) {
+      operatingSystem.removeDirectory(candidate)
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'EEXIST' && code !== 'ENOTEMPTY' && code !== 'EPERM') throw error
+    }
+
+    if (reclaimRecoveryLock(recoveryLock)) continue
+    if (Date.now() >= deadline) {
+      throw new Error('Timed out waiting for stale loop PID recovery lock')
+    }
+    await sleep(RECOVERY_LOCK_POLL_MS)
   }
 }
 
@@ -102,7 +184,9 @@ const cmdPreCommit: Command = async (paths, args) => {
     return 1
   }
   const project = await loadProject(paths.root)
-  return runPreCommitChecks(paths.repoRoot, project) ? 0 : 1
+  const ok = branchAcceptsCommits(paths.repoRoot)
+    && runPreCommitChecks(paths.repoRoot, project)
+  return ok ? 0 : 1
 }
 
 const cmdVerifySetup: Command = async (paths, args) => {
@@ -112,7 +196,7 @@ const cmdVerifySetup: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const forge = await loadForge(config.forge, paths.repoRoot)
-  return await verifyRepositorySetup(paths, forge) ? 0 : 1
+  return await verifyRepositorySetup(paths, forge, { env: process.env }) ? 0 : 1
 }
 
 const cmdNew: Command = async (paths, args) => {
@@ -351,8 +435,12 @@ const cmdMerge: Command = async (paths, args) => {
     }
   }
   try {
-    const linkedIssue = issueNumberForTask(paths, taskId)
-    const forge = linkedIssue === undefined
+    const linkedIssues = issueNumbersForTask(paths, taskId)
+    const missingMarkers = missingRequirementCompletionMarkers(paths, taskId)
+    if (missingMarkers.length > 0) {
+      throw new MergeError(`Grouped task is missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}.`)
+    }
+    const forge = linkedIssues.length === 0
       ? undefined
       : await loadForge(config.forge, paths.repoRoot)
     const mergeCommit = await mergeTask(paths, taskId, {
@@ -360,22 +448,24 @@ const cmdMerge: Command = async (paths, args) => {
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(paths.root),
-      closesIssue: linkedIssue,
+      closesIssues: linkedIssues,
       forge,
     })
-    if (linkedIssue !== undefined) {
+    if (linkedIssues.length > 0) {
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
         cwd: paths.repoRoot,
         encoding: 'utf8',
         windowsHide: true,
       }).trim()
-      recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
-      try {
-        await commentOnIssueMerge(forge!, linkedIssue, taskId, mergeCommit, runBranch)
-      } catch (error) {
-        console.error(
-          `WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`,
-        )
+      recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
+      for (const linkedIssue of linkedIssues) {
+        try {
+          await commentOnIssueMerge(forge!, linkedIssue, taskId, mergeCommit, runBranch)
+        } catch (error) {
+          console.error(
+            `WARN: could not link issue #${linkedIssue} to its merge: ${(error as Error).message}`,
+          )
+        }
       }
     }
     return 0
@@ -450,7 +540,7 @@ const cmdLoopStatus: Command = async (paths) => {
   // is safe to embed in a skill preamble.
   const pidFile = join(paths.queueDir, 'loop.pid')
   const pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8').trim() : ''
-  if (/^\d+$/.test(pid) && isPidAlive(Number(pid))) {
+  if (/^\d+$/.test(pid) && operatingSystem.processIsAlive(Number(pid))) {
     console.log(`loop: running (PID=${pid})`)
   } else {
     console.log('loop: not running')
@@ -497,13 +587,19 @@ const cmdLoop: Command = async (paths, args) => {
     prepareLoopLog(paths, { runBranch })
     const fd = openSync(loopLog, 'a')
     const markerLog = join(paths.logsDir, 'loop-markers.log')
+    // Match runner launches: the detached Windows tree needs one shared hidden console.
     const child = spawn(process.execPath, [
       packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
     ], {
-      cwd: packageFile(),
+      // The daemon must work on the repository this launcher was pointed at. Starting it
+      // in the package directory instead made it resolve its own checkout as the
+      // repository, which put the startup dependency install inside the very package the
+      // daemon runs from — `npm ci` deletes node_modules first, so a suite launching a
+      // daemon deleted its own dependencies mid-run. The script path is absolute, so the
+      // working directory is free to be the repository.
+      cwd: paths.repoRoot,
       detached: true,
       stdio: ['ignore', fd, fd],
-      windowsHide: true,
     })
     child.unref()
     console.log(`Started the loop in the background (PID=${child.pid})`)
@@ -517,10 +613,6 @@ const cmdLoop: Command = async (paths, args) => {
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const log = (message: string, error = false): void => {
     const write = error ? console.error : console.log
-    if (/^(?:CYCLE_COMPLETE|FAILED|LOOP_DONE):/.test(message)) {
-      if (markerOutput === undefined) write(message)
-      else appendFileSync(markerOutput, `${message}\n`)
-    }
     const currentCycle = existsSync(scanCountFile)
       ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
       : 0
@@ -529,8 +621,12 @@ const cmdLoop: Command = async (paths, args) => {
       cycleCap: config.maxScanCycles,
     })) write(line)
   }
+  const marker = (message: string): void => {
+    if (markerOutput === undefined) console.log(message)
+    else appendFileSync(markerOutput, `${message}\n`)
+  }
   try {
-    return await runLoopDaemon(paths, log, config)
+    return await runLoopDaemon(paths, log, marker, config)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log(`ERROR: ${(message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'}`, true)
@@ -573,6 +669,7 @@ const cmdCiWait: Command = async (paths, args) => {
 async function runLoopDaemon(
   paths: OrchPaths,
   log: (line: string) => void,
+  marker: (line: string) => void,
   config: LoopConfig,
 ): Promise<number> {
   const pidFile = join(paths.queueDir, 'loop.pid')
@@ -591,12 +688,7 @@ async function runLoopDaemon(
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
 
-    try {
-      mkdirSync(recoveryLock)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
-      throw error
-    }
+    const releaseRecoveryLock = await acquireRecoveryLock(recoveryLock)
     try {
       let existing: string
       try {
@@ -605,14 +697,14 @@ async function runLoopDaemon(
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
         throw error
       }
-      if (/^\d+$/.test(existing) && isPidAlive(Number(existing))) {
+      if (/^\d+$/.test(existing) && operatingSystem.processIsAlive(Number(existing))) {
         log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
         return 1
       }
       log('WARN: Removing stale PID file')
       rmSync(pidFile, { force: true })
     } finally {
-      rmSync(recoveryLock, { recursive: true, force: true })
+      releaseRecoveryLock()
     }
   }
   const releaseDaemonState = (): void => {
@@ -679,7 +771,7 @@ async function runLoopDaemon(
 
     writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
     log(formatEventLine(
-      'Mode', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
+      'Started', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
     ))
 
     // A stale stop file is cleared only after the PID lock is taken, so another
@@ -690,12 +782,14 @@ async function runLoopDaemon(
 
     syncOrchestrationDepsAtStartup(
       paths,
-      (name, subject) => log(`${name} ${subject}`),
+      (name, subject) => log(name === 'Installed'
+        ? formatEventLine(name, 'orchestration deps', subject)
+        : formatEventLine(name, subject)),
     )
     const forge = await loadForge(config.forge, paths.repoRoot)
     const runner = await loadRunner(config.runner)
     const project = await loadProject(paths.root)
-    const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
+    const loop = createLoop({ paths, config, forge, runner, project, log, marker, now: () => new Date() })
 
     if (!loop.validatePushTarget()) return 1
     await loop.initializeIssueQueue()

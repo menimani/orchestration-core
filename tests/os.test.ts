@@ -12,7 +12,8 @@ describe('operating-system adapters', () => {
     const remove = vi.fn()
       .mockImplementationOnce(() => { throw new Error('Filename too long') })
     const os = createWindowsOperatingSystem({
-      spawn: () => {}, probeProcess: () => {}, remove, now: Date.now, sleep: () => {},
+      spawn: () => {}, listProcesses: () => [], probeProcess: () => {}, remove,
+      now: Date.now, sleep: () => {},
     })
 
     os.removeDirectory('C:\\deep\\directory')

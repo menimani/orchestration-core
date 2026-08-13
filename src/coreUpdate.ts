@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { isAbsolute, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
+import type { Forge } from './adapters/forge.ts'
+import type { Runner } from './adapters/runner.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 import { syncSharedSkills } from './sharedSkills.ts'
 
@@ -49,14 +51,6 @@ function importSplit(message: string, prefix: string): string | undefined {
   return dir === prefix ? split : undefined
 }
 
-function fetchRemote(remote: string): string {
-  // report-upstream records GitHub owner/repository names. Git accepts remote names,
-  // paths, and URLs directly; expand only that repository shorthand into a fetch URL.
-  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(remote)
-    ? `https://github.com/${remote.replace(/\.git$/, '')}.git`
-    : remote
-}
-
 function warn(event: CoreUpdateEvent, message: string): void {
   event('WARN', message)
 }
@@ -64,13 +58,14 @@ function warn(event: CoreUpdateEvent, message: string): void {
 function syncSkills(
   repoRoot: string,
   packageRoot: string,
+  runner: Runner,
   isConsumer: boolean,
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime,
 ): void {
   let result: ReturnType<typeof syncSharedSkills>
   try {
-    result = syncSharedSkills(repoRoot, packageRoot)
+    result = syncSharedSkills(repoRoot, packageRoot, runner)
   } catch (error) {
     event('WARN', `shared skill sync failed: ${summary(error)}`)
     return
@@ -78,8 +73,12 @@ function syncSkills(
   for (const skill of result.conflicts) {
     event('WARN', `shared skill ${skill} differs from the last synced copy; left unchanged`)
   }
+  for (const path of result.migrationConflicts) {
+    event('WARN',
+      `legacy shared skill ${relative(repoRoot, path).replaceAll('\\', '/')} differs from the last synced copy; left unchanged`)
+  }
   if (isConsumer) {
-    const managed = result.managedPaths.map((path) => {
+    const repositoryPaths = (paths: string[]): string[] => paths.map((path) => {
       const repositoryPath = relative(repoRoot, path)
       if (repositoryPath === '' || repositoryPath === '..'
         || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
@@ -87,24 +86,37 @@ function syncSkills(
       }
       return repositoryPath.replaceAll('\\', '/')
     })
+    const managed = repositoryPaths(result.managedPaths)
+    const removed = repositoryPaths(result.removedPaths)
     try {
-      if (managed.length > 0) {
+      const scope = [...managed, ...removed]
+      if (scope.length > 0) {
         const alreadyStaged = runtime.git(repoRoot, [
-          'diff', '--cached', '--name-only', '--', ...managed,
+          'diff', '--cached', '--name-only', '--', ...scope,
         ]).trim()
         if (alreadyStaged !== '') {
           event('WARN',
             `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
           return
         }
-        runtime.git(repoRoot, ['add', '-f', '--', ...managed])
-        const staged = runtime.git(repoRoot, [
-          'diff', '--cached', '--name-only', '--', ...managed,
-        ]).trim()
-        if (staged !== '') {
-          runtime.git(repoRoot, [
-            'commit', '-m', 'chore: sync shared orchestration skills', '--', ...managed,
-          ])
+        if (managed.length > 0) runtime.git(repoRoot, ['add', '-f', '--', ...managed])
+        const trackedRemoved = removed.length === 0
+          ? []
+          : runtime.git(repoRoot, ['ls-files', '--deleted', '--', ...removed])
+            .split(/\r?\n/).filter((path) => path !== '')
+        if (trackedRemoved.length > 0) {
+          runtime.git(repoRoot, ['add', '-u', '--', ...trackedRemoved])
+        }
+        const commitPaths = [...managed, ...trackedRemoved]
+        if (commitPaths.length > 0) {
+          const staged = runtime.git(repoRoot, [
+            'diff', '--cached', '--name-only', '--', ...commitPaths,
+          ]).trim()
+          if (staged !== '') {
+            runtime.git(repoRoot, [
+              'commit', '-m', 'chore: sync shared orchestration skills', '--', ...commitPaths,
+            ])
+          }
         }
       }
     } catch (error) {
@@ -126,6 +138,8 @@ function syncSkills(
 export async function updateCoreBeforeCycle(
   paths: OrchPaths,
   config: Pick<LoopConfig, 'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch'>,
+  forge: Forge,
+  runner: Runner,
   cycle: number,
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime = defaultRuntime,
@@ -138,12 +152,12 @@ export async function updateCoreBeforeCycle(
   // consumers. Only the owning repository receives local, ignored generated copies.
   if (prefix === undefined) {
     if (relative(paths.repoRoot, packageRoot) === '') {
-      syncSkills(paths.repoRoot, packageRoot, false, event, runtime)
+      syncSkills(paths.repoRoot, packageRoot, runner, false, event, runtime)
     }
     return 'continue'
   }
   const finish = (outcome: CoreUpdateOutcome): CoreUpdateOutcome => {
-    syncSkills(paths.repoRoot, packageRoot, true, event, runtime)
+    syncSkills(paths.repoRoot, packageRoot, runner, true, event, runtime)
     return outcome
   }
   if (config.upstreamRemote.trim() === '') {
@@ -165,7 +179,7 @@ export async function updateCoreBeforeCycle(
     return finish('continue')
   }
 
-  const remote = fetchRemote(config.upstreamRemote.trim())
+  const remote = forge.resolveGitRemote(config.upstreamRemote.trim())
   try {
     runtime.git(paths.repoRoot, ['fetch', '--quiet', remote, config.upstreamBranch])
   } catch (error) {
@@ -209,7 +223,7 @@ export async function updateCoreBeforeCycle(
     return finish('continue')
   }
 
-  syncSkills(paths.repoRoot, packageRoot, true, event, runtime)
+  syncSkills(paths.repoRoot, packageRoot, runner, true, event, runtime)
   const newHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   const changed = runtime.git(paths.repoRoot, [
     'diff', '--name-only', oldHead, newHead, '--', prefix,

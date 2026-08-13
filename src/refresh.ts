@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { operatingSystem } from './adapters/os.ts'
 import { finalMessageFile, type OrchPaths } from './paths.ts'
 import { readStatus, transitionStatus, type TaskStatus } from './status.ts'
 
@@ -18,15 +19,6 @@ export function completionMarkerPresent(paths: OrchPaths, taskId: string): boole
   return readFileSync(file, 'utf8').split(/\r?\n/).some((line) => line === 'TASK_COMPLETE')
 }
 
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
 /**
  * Refresh one task: a live process with the marker is completed; a dead process is
  * completed or failed by whether the marker made it into the final message. Returns
@@ -36,7 +28,7 @@ export async function refreshTask(paths: OrchPaths, taskId: string): Promise<Tas
   const status = readStatus(paths, taskId)
   if (status === undefined || status.status !== 'running') return status
 
-  const alive = status.pid !== null && isPidAlive(status.pid)
+  const alive = status.pid !== null && operatingSystem.processIsAlive(status.pid)
   let next: 'completed' | 'failed' | undefined
   let nextPid: number | undefined
   if (alive) {

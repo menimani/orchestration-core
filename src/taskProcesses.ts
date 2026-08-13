@@ -2,6 +2,7 @@ import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { type OrchPaths } from './paths.ts'
+import { forgetTaskProcess } from './processRegistry.ts'
 import { listTaskIds } from './refresh.ts'
 import { readStatus } from './status.ts'
 
@@ -42,6 +43,10 @@ export function terminateLiveTaskProcesses(
   for (const task of liveTaskProcesses(paths, os)) {
     try {
       if (os.terminateProcessTree(task.pid)) result.terminated.push(task)
+      // Stopping is what makes the recorded number false, so it is dropped here rather
+      // than left for whoever reads next. A tree that resisted termination keeps its
+      // entry: something is still running under that number.
+      forgetTaskProcess(paths, task.taskId)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       result.failures.push({ ...task, error: message })

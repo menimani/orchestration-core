@@ -98,6 +98,26 @@ describe('worker command checkout validation', () => {
       .rejects.toThrow(/HEAD is ahead of base ref 'origin\/main'/)
     expect(launch).not.toHaveBeenCalled()
   })
+
+  it('fetches the remote named by the base ref when pushes use a fork', async () => {
+    const upstream = join(tempRoot, 'upstream.git')
+    git(tempRoot, ['init', '-q', '--bare', upstream])
+    git(merger, ['remote', 'add', 'upstream', upstream])
+    git(merger, ['push', '-q', 'upstream', 'HEAD:main'])
+    commit(merger, 'upstream.txt', 'upstream\n', 'feat: upstream change')
+    git(merger, ['push', '-q', 'upstream', 'HEAD:main'])
+    git(worker, ['remote', 'add', 'upstream', upstream])
+    git(worker, ['config', 'branch.main.remote', 'upstream'])
+    git(worker, ['config', 'branch.main.merge', 'refs/heads/main'])
+    git(worker, ['config', 'branch.main.pushRemote', 'origin'])
+    const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+
+    await expect(runWorkerCommand(orchPaths(worker), 'upstream/main', dependencies(launch)))
+      .resolves.toBe(0)
+
+    expect(readFileSync(join(worker, 'upstream.txt'), 'utf8').trim()).toBe('upstream')
+    expect(launch).toHaveBeenCalledOnce()
+  })
 })
 
 describe('worker mode self-check', () => {

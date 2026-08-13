@@ -2,7 +2,9 @@ import {
   mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { operatingSystem } from './adapters/os.ts'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
+import { forgetTaskProcess, recordTaskProcess, taskProcessPid } from './processRegistry.ts'
 
 // A task reads `running` while its runner process is alive, `completed` once the
 // completion marker appears in its final-message file, and `failed` when the process is
@@ -32,21 +34,16 @@ interface StatusMetadata {
 }
 
 export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undefined {
+  let record: TaskStatus
   try {
-    return JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as TaskStatus
+    record = JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as TaskStatus
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
-}
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
+  // The record is durable; the process it named is not. The registry answers for the
+  // process, so a number left in an old record is not read back as a live task.
+  return { ...record, pid: taskProcessPid(paths, taskId) ?? null }
 }
 
 function lockDir(paths: OrchPaths, taskId: string): string {
@@ -83,7 +80,7 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<void
       } catch {
         // no pid published yet
       }
-      if (/^[1-9][0-9]*$/.test(lockPid) && !isPidAlive(Number(lockPid))) {
+      if (/^[1-9][0-9]*$/.test(lockPid) && !operatingSystem.processIsAlive(Number(lockPid))) {
         try {
           rmSync(pidFile)
           rmdirSync(dir)
@@ -133,6 +130,10 @@ function writeStatusUnlocked(
   const file = statusFile(paths, taskId)
   const temporaryFile = join(paths.statusDir, `.${taskId}.${process.pid}.tmp`)
   const existing = readStatus(paths, taskId)
+  // The registry, not the record, is what later readers believe. Publish there first so
+  // no window exists in which the record claims a process the registry does not have.
+  if (pid !== undefined && Number.isInteger(pid)) recordTaskProcess(paths, taskId, pid)
+  else forgetTaskProcess(paths, taskId)
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   const record: TaskStatus = {
     task_id: taskId,

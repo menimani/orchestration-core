@@ -1,17 +1,21 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
 import {
-  issuePromotionForIssue, LABEL_FINDING, LABEL_MERGE_FAILED, LABEL_MERGE_READY,
+  issuePromotionForIssue, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_MERGE_FAILED,
+  LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { createLoop } from '../src/loop.ts'
+import type { OrchestrationDepsRuntime } from '../src/merge.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
 
 let tempRoot: string
@@ -27,6 +31,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 const runner: Runner = {
+  sharedSkills: fakeRunnerSharedSkills,
   start: async () => process.pid,
 }
 
@@ -41,7 +46,7 @@ async function mergeReadyIssue(branch: string, head: string): Promise<number> {
   return issueNumber
 }
 
-function makeLoop(project: ProjectAdapter) {
+function makeLoop(project: ProjectAdapter, orchestrationDepsRuntime?: OrchestrationDepsRuntime) {
   const loop = createLoop({
     paths,
     config: loadConfig({ ISSUE_QUEUE_ENABLED: 'true', SCAN_ENABLED: 'false' }),
@@ -50,6 +55,7 @@ function makeLoop(project: ProjectAdapter) {
     project,
     log: (line) => logged.push(line),
     now: () => new Date('2026-08-09T12:00:00Z'),
+    orchestrationDepsRuntime,
   })
   loop.initializeSessionStateForBranch()
   return loop
@@ -92,6 +98,92 @@ afterEach(() => {
 })
 
 describe('remote task adoption', () => {
+  it('adopts one grouped branch and links the merge to every reported issue', async () => {
+    const task = pushWorkerBranch('20260809_000000_002_auto-grouped-remote-fix')
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })))
+    const issueList = issueNumbers.map((number) => `#${number}`).join(' ')
+    await Promise.all(issueNumbers.map((issueNumber) => forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${task.branch}\nHead commit: ${task.head}\nIssues: ${issueList}`)))
+    forge.issueClosingCommitMessage = (message, issueNumber) => `${message} (closes #${issueNumber})`
+
+    expect(await makeLoop(stubProject).poll()).toBe('continue')
+
+    const mergeCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim())
+      .toContain(`(closes #${issueNumbers[0]}) (closes #${issueNumbers[1]})`)
+    for (const issueNumber of issueNumbers) {
+      expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({ mergeCommit })
+      expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+    }
+    expect(logged.filter((line) => line.startsWith('Merged '))).toHaveLength(1)
+  })
+
+  it('returns every member of an abandoned remote group as singleton-ready', async () => {
+    const branch = 'task/20260809_000000_099_auto-missing-group'
+    const head = 'a'.repeat(40)
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'failed grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+      assignees: ['worker-a'],
+    })))
+    const issueList = issueNumbers.map((number) => `#${number}`).join(' ')
+    await Promise.all(issueNumbers.map((issueNumber) => forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}\nIssues: ${issueList}`)))
+
+    await makeLoop(stubProject).poll()
+
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_READY)
+      expect(issue.labels).toContain(LABEL_GROUP_SINGLETON)
+      expect(issue.labels).not.toContain(LABEL_MERGE_READY)
+      expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+      expect(issue.assignees).toEqual([])
+    }
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('1')
+  })
+
+  it('retries a partial release until every member leaves grouped adoption', async () => {
+    const branch = 'task/20260809_000000_098_auto-partial-group'
+    const head = 'b'.repeat(40)
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'partially released grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+      assignees: ['worker-a'],
+    })))
+    const issueList = issueNumbers.map((number) => `#${number}`).join(' ')
+    await Promise.all(issueNumbers.map((issueNumber) => forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}\nIssues: ${issueList}`)))
+    const addLabel = forge.addLabel.bind(forge)
+    let failed = false
+    forge.addLabel = async (issueNumber, label) => {
+      if (!failed && issueNumber === issueNumbers[1] && label === LABEL_READY) {
+        failed = true
+        throw new Error('temporary release failure')
+      }
+      await addLabel(issueNumber, label)
+    }
+    const loop = makeLoop(stubProject)
+
+    await loop.poll()
+    expect((await forge.getIssue(issueNumbers[0]!)).labels).toContain(LABEL_READY)
+    expect((await forge.getIssue(issueNumbers[1]!)).labels).toContain(LABEL_MERGE_READY)
+
+    await loop.poll()
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_GROUP_SINGLETON)
+      expect(issue.labels).not.toContain(LABEL_MERGE_READY)
+      if (issue.labels.includes(LABEL_READY)) expect(issue.assignees).toEqual([])
+    }
+  })
+
   it('guarded-merges a worker branch and records a later failed adoption', async () => {
     git(repoRoot, ['remote', 'rename', 'origin', 'shared'])
     const task = pushWorkerBranch('20260809_000000_003_auto-remote-fix')
@@ -184,5 +276,52 @@ describe('remote task adoption', () => {
     expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
       .toHaveLength(1)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
+  })
+
+  it('persists adoption before post-merge dependency synchronization begins', async () => {
+    const task = pushWorkerBranch('20260809_000000_007_auto-persisted-before-return')
+    writeFileSync(join(workerRoot, 'package.json'), '{"private":true}\n')
+    git(workerRoot, ['add', 'package.json'])
+    git(workerRoot, ['commit', '-qm', 'chore: add worker package manifest'])
+    git(workerRoot, ['push', '-q', 'origin', task.branch])
+    task.head = git(workerRoot, ['rev-parse', 'HEAD']).trim()
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    let promotionDuringSync: ReturnType<typeof issuePromotionForIssue>
+
+    await makeLoop(stubProject, {
+      packageRoot: repoRoot,
+      install: () => {
+        promotionDuringSync = issuePromotionForIssue(paths, issueNumber)
+      },
+    }).adoptRemoteTasks()
+
+    expect(promotionDuringSync).toMatchObject({
+      issueNumber,
+      mergeCommit: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+      runBranch: 'main',
+    })
+  })
+
+  it('invalidates the completed cycle when a post-merge forge update is rate-limited', async () => {
+    const task = pushWorkerBranch('20260809_000000_006_auto-rate-limited-adoption')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const loop = makeLoop(stubProject)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const completeFlag = join(paths.queueDir, 'cycle-complete-1')
+    writeFileSync(completeFlag, '')
+    let completeFlagAtUpdate = true
+    forge.commentIssue = async () => {
+      completeFlagAtUpdate = existsSync(completeFlag)
+      throw new ForgeRateLimitError(new Date('2026-08-09T12:05:00Z'))
+    }
+
+    await loop.adoptRemoteTasks()
+
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({
+      issueNumber,
+      mergeCommit: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    })
+    expect(completeFlagAtUpdate).toBe(false)
+    expect(existsSync(completeFlag)).toBe(false)
   })
 })

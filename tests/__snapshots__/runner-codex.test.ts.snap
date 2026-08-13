@@ -1,0 +1,603 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`createCodexRunner > renders every complete shipped skill file for Codex 1`] = `
+{
+  "git-commit/SKILL.md": "---
+name: git-commit
+description: Turns a dirty working tree into well-formed commits, splitting the changes when they serve more than one purpose. Use when asked to commit work that is already written, including edits made by hand.
+---
+
+# Committing existing work
+
+Working tree:
+
+Run \`git status --short\` and use its output as context before continuing.
+
+Unstaged:
+
+Run \`git diff --stat\` and use its output as context before continuing.
+
+Staged:
+
+Run \`git diff --cached --stat\` and use its output as context before continuing.
+
+## Decide what belongs in the commit
+
+The changes above were not necessarily written in one sitting or for one reason. Read
+them before staging anything — \`git diff\` for what is unstaged, \`git diff --cached\` for
+what is already staged.
+
+Group them by purpose, not by file. If they serve one purpose, commit them together. If
+they serve two, make two commits: stage the paths for the first, commit, then the rest.
+Where a single file contains both, say so rather than splitting it silently — deciding
+what ships together is the author's call.
+
+Leave out anything that is not part of the work: stray debug output, an editor's
+reformatting of untouched lines, a file that was only opened.
+
+## Write the message
+
+The prefix list and the one-purpose rule are in \`CLAUDE.md\`. What matters here is the
+body: state why the change was made, not a prose restatement of the diff. A reader can
+see what changed; they cannot see what it was for.
+
+## Before committing
+
+Run verification directly with the applicable repository commands unless it has already passed on this tree. A commit that fails the
+build is worse than an uncommitted one, because it hides the failure behind a green
+history.
+
+The commit-msg hook rejects a subject without a recognised prefix, so a rejected commit
+is a typo, not a reason to reword the change.
+",
+  "git-merge/SKILL.md": "---
+name: git-merge
+description: Merges a pull request once CI and review allow it, then deletes the branch and returns to main. Use when asked to merge a PR.
+---
+
+# Pull Request Merge
+
+Merge a PR following the Git conventions in \`CLAUDE.md\`.
+
+## PR Context
+
+**PR details:**
+Run \`gh pr view [pr-number] --json number,title,state,mergeable,reviewDecision,author,statusCheckRollup,reviews\` and use its output as context before continuing.
+
+**Current user:**
+Run \`gh api user --jq .login\` and use its output as context before continuing.
+
+## Pre-merge Checks
+
+1. PR is open and mergeable
+2. **Branch freshness**: CI tests the merge of the PR into main as main stood when CI
+   ran, and main no longer re-runs the suites after the merge — so a PR behind main has
+   green checks that describe a tree that will never exist. If main has advanced since
+   the PR's checks ran, run \`gh pr update-branch <number>\`, wait for the re-run to go
+   green, and only then merge. Branch protection enforces this; do not bypass it.
+3. CI: all checks pass (\`statusCheckRollup\`; empty = no CI configured)
+4. Review: see workflow below
+5. No requested changes pending
+
+## Merge Workflow
+
+**Self-PR**: Require review comment via \`$git-review\` → merge (skip approval requirement)
+
+**Others' PR**: Require at least one APPROVED review → **STOP** if none
+
+## Policy
+
+- Always use \`--merge\` (not \`--squash\`) when merging to main
+- Delete branch after merge: \`gh pr merge <number> --merge --delete-branch\`
+- Switch to main and pull: \`git switch main && git pull --ff-only\`
+
+## Output
+
+\`\`\`
+## Verification
+- PR: #<number> merged
+- reviews: [count] approved
+- strategy: merge
+- branch: <branch-name> deleted
+- current: main (up to date)
+\`\`\`
+",
+  "git-pr/SKILL.md": "---
+name: git-pr
+description: Opens a pull request for the current branch, with the body in the repository section format. Use when asked to raise a PR.
+---
+
+# Pull Request Creation
+
+Create a PR following the Git conventions in \`CLAUDE.md\`.
+
+## Current State
+
+**Branch:**
+Run \`git branch --show-current\` and use its output as context before continuing.
+
+**Commits (vs main):**
+Run \`git log main..HEAD --oneline\` and use its output as context before continuing.
+
+**Remote status:**
+Run \`git status -sb\` and use its output as context before continuing.
+
+## PR Description
+
+Write in English. Every section appears even when it has nothing, marked \`- None\`.
+
+\`\`\`markdown
+## Features
+## Bug Fixes
+## Security
+## Project Operations
+## Risks
+\`\`\`
+
+Entries read \`- [Screen] what changed\`, with the screen named for anything a user sees.
+No summary section — the headings and their bullets are the summary.
+
+Describe what the branch delivers, not the route it took there: a change reworked several
+times appears once, in its final form. \`## Risks\` carries what the diff actually shows —
+a new migration, an altered API contract, a change to how data is scoped, deleted tests —
+and \`None identified\` when there is none. Do not pad it with generic caution.
+
+## Output
+
+Return the PR URL when complete.
+",
+  "git-review/SKILL.md": "---
+name: git-review
+description: Reviews a pull request diff and submits the result as a GitHub review. Use when asked to review a PR, including one you opened yourself.
+---
+
+# Pull Request Review
+
+Review PR code changes and submit approval or feedback.
+
+## PR Context
+
+**PR details:**
+Run \`gh pr view <pr-number> --json number,title,author,state,additions,deletions,changedFiles\` and use its output as context before continuing.
+
+**Current user:**
+Run \`gh api user --jq .login\` and use its output as context before continuing.
+
+**Changed files:**
+Run \`gh pr diff <pr-number> --name-only\` and use its output as context before continuing.
+
+## Self-PR Handling
+
+GitHub does not allow self-approval. For self-PRs:
+- Perform full review analysis
+- Submit as **comment** (\`gh pr review <number> --comment\`) instead of approval
+- Include "Verdict: APPROVED (self-review)" in comment
+
+## Review Process
+
+1. Read the full diff: \`gh pr diff <number>\`
+2. Analyze each changed file for bugs, security issues, convention violations
+3. Submit review with appropriate action (\`--approve\`, \`--comment\`, or \`--request-changes\`)
+
+## Output
+
+\`\`\`
+## Verification
+- PR: #<number> reviewed
+- files: [count] files analyzed
+- result: [APPROVED/COMMENTED/CHANGES_REQUESTED]
+- issues: [count] issues found (if any)
+\`\`\`
+",
+  "loop-delegate/SKILL.md": "---
+name: loop-delegate
+description: Turns a decision from the conversation into a queued orchestration task, safe to do while the loop runs. Use when asked to hand work to Codex, queue an improvement for the loop, or capture something just decided as the next loop target.
+---
+
+# Delegating a decision to the loop
+
+Current state:
+
+Run \`npm run loop-status\` and use its output as context before continuing.
+
+## What qualifies
+
+Delegate decisions, not open questions. The task must be able to run unattended:
+it depends on no other task's output, it can be specified so that no judgement
+call is left to the implementer, and it is larger than the cost of writing that
+specification. Anything still being discussed gets settled in the conversation
+first; anything smaller than its own specification is faster done directly.
+
+## Writing the description
+
+The description becomes the task's requirement verbatim, so carry the decision
+over from the conversation completely — the implementer has none of its context:
+
+- Name the files and directories the change touches.
+- State the requirement so nothing is left to interpretation. Where the
+  conversation weighed options and picked one, state the pick, not the debate.
+- Give a completion condition that can be run: a test name, a command.
+
+## Delegating
+
+\`\`\`bash
+npm run delegate -- "<description>"
+\`\`\`
+
+The description may span multiple lines inside one quoted argument. Add
+\`--effort high\` when the work needs deep reasoning; without it the task runs at
+the loop's standard effort (\`TASK_EFFORT\`, default medium).
+
+Delegating the same description twice is safe — the description index maps it
+back to the one existing task. Ids follow \`YYYYMMDD_HHMMSS_nnn_user-<slug>\`.
+
+## What happens next
+
+- **Loop running** — the task starts within one poll (\`POLL_INTERVAL\`, default
+  30s), ahead of any future scan, and is merged automatically. If the loop was
+  waiting at a cycle gate, the gate pushes again and re-checks CI after the
+  merge.
+- **Loop not running** — the task waits in the backlog until \`$loop-start\`, or
+  \`npm run start -- <task-id>\` runs it on its own.
+
+## Report
+
+State the task id and the specification path, whether the loop will pick it up
+or the backlog is holding it, and how to follow it:
+\`npm run logs -- <task-id> -f\`.
+",
+  "loop-setup/SKILL.md": "---
+name: loop-setup
+description: Adopts the shared orchestration core in a repository and verifies the result. Use when installing this core for the first time, repairing its scaffold or hooks, or completing a repository's project adapter.
+---
+
+# Set up the loop
+
+Treat the subtree import as a deliberate user action. If \`orchestration/ts/package.json\`
+does not exist, show this command and pause until the user runs it:
+
+\`\`\`bash
+git subtree add --prefix=orchestration/ts https://github.com/menimani/orchestration-core.git main --squash
+\`\`\`
+
+Do not run \`git subtree add\` on the user's behalf.
+
+## Collect repository decisions
+
+Read the contributor guidance and manifests, then confirm with the user:
+
+- the project name;
+- fast staged-path checks for \`preCommitChecks\`;
+- full and light \`mergeChecks\`, including each check's path predicate;
+- the cycle suite;
+- pull-request categories, path classification, and risk signals;
+- optional CI, scan-worktree, Docker, infrastructure, and deployment declarations.
+
+Use repository-relative paths and commands the repository already documents. Do not
+invent a gate from a tool merely being present.
+
+## Initialize and write the adapter
+
+Run:
+
+\`\`\`bash
+npm ci --prefix orchestration/ts
+node orchestration/ts/src/cli.ts init <project-name>
+\`\`\`
+
+Record every \`CREATED\`, \`EXISTS\`, \`DIVERGED\`, \`PASS\`, and \`FAIL\` line. Init never
+overwrites an existing project-owned file or a different \`core.hooksPath\` value.
+
+Edit the generated \`orchestration/project/project-<name>.ts\` from the decisions above
+only when init created it in this run. If an adapter already existed, report it and ask
+before changing it; deliberate divergence is not a repair target.
+
+Keep \`preCommitChecks\` fast. The core-owned hook supplies the default-branch guard and
+selects these checks from staged paths. Do not create repository-owned hook scripts.
+
+## Verify
+
+Run:
+
+\`\`\`bash
+node orchestration/ts/src/cli.ts verify-setup
+\`\`\`
+
+Report each check exactly as \`PASS\`, \`FAIL\`, or \`SKIP\` with its reason. The verifier
+checks the core TypeScript compilation, the adapter's cycle suite, real \`loadProject\`
+discovery by name, every adapter-referenced path, the current branch's pushable upstream,
+\`core.hooksPath\`, and all \`loop:*\` labels. Never summarize a skipped check as passed.
+
+Do not declare setup complete while any check says \`FAIL\`. Do not create or change a
+remote/upstream merely to clear that failure without the user's approval.
+",
+  "loop-setup/agents/openai.yaml": "interface:
+  display_name: "Loop Setup"
+  short_description: "Adopt and verify the shared orchestration core"
+  default_prompt: "Use $loop-setup to adopt the shared orchestration core in this repository."
+",
+  "loop-start/SKILL.md": "---
+name: loop-start
+description: Starts the autonomous improvement loop in the background, after checking nothing is already running. Use when asked to begin a scan-and-fix run, or to resume one that was stopped.
+---
+
+# Starting the loop
+
+Current state:
+
+Run \`npm run loop-status\` and use its output as context before continuing.
+
+## Before starting
+
+A second loop against the same repository will fight the first over the queue and the
+worktrees. If \`orchestration/queue/loop.pid\` names a live process, stop rather than start.
+
+The loop commits and merges on its own, so start it on a topic branch, never on \`main\`.
+
+## Starting
+
+\`\`\`bash
+npm run loop -- --daemon
+\`\`\`
+
+\`--daemon\` is what puts it in the background; without it the loop holds the terminal.
+Settings go in front of the command:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| \`MAX_SCAN_CYCLES\` | 3 | How many scan-and-fix rounds before it promotes the PR and exits |
+| \`MAX_PARALLEL\` | 3 | Codex processes at once |
+| \`MAX_EMPTY_SCANS\` | 2 | Scans finding nothing before it stops early |
+| \`REVIEW_ENABLED\` | true | Wait for a review flag between cycles instead of continuing |
+| \`AUTO_REVIEW\` | false | Review each cycle's diff automatically; findings become fix tasks |
+| \`MAX_REVIEW_ROUNDS\` | 2 | Review rounds per cycle before resuming with findings outstanding |
+| \`REVIEW_EVERY_N_CYCLES\` | 1 | Review every Nth cycle (the final cycle is always reviewed) |
+| \`MAX_FINAL_REVIEW_ROUNDS\` | 4 | Final-cycle rounds before the loop stops instead of promoting unresolved findings |
+| \`MAX_BURST_FAILURES\` | 3 | Task failures in one poll before the loop stops and blames the environment |
+| \`ISSUE_QUEUE_ENABLED\` | false | Findings become claimable forge issues instead of local queue entries (each concurrent worker requires a distinct forge account) |
+| \`ISSUE_LEASE_HOURS\` | 3 | Hours a claimed issue may sit untouched before its lease is reaped back to ready |
+| \`CI_GATE_ENABLED\` | false | Whether the gate waits for CI — a draft PR has no checks, so waiting would hang |
+| \`MAX_CONSECUTIVE_MERGE_FAILURES\` | 3 | Merges failing in a row before it stops — the task finished, its verification did not |
+| \`SCAN_ENABLED\` | true | Set false to work the existing queue without scanning |
+| \`SCAN_PARALLEL\` | 2 | Scans per cycle, splitting the checklist between them (1 = single full scan, up to 4) |
+| \`SCAN_EFFORT\` | high | Codex reasoning effort for scan tasks |
+| \`TASK_EFFORT\` | medium | Codex reasoning effort for queued tasks (\`delegate --effort\` overrides per task) |
+| \`REVIEW_EFFORT\` | high | Codex reasoning effort for automatic review tasks |
+| \`TASK_GATE\` | full | \`light\` runs compile/lint per task and the full suites once at each cycle gate — faster, but a suite break names no task |
+
+## While it runs
+
+Work can be handed to a running loop without stopping it — \`$loop-delegate\`
+turns a decision from the conversation into a queued task the loop picks up on
+its next poll, ahead of any future scan.
+
+The daemon holds the code it started with. **Editing the loop source under \`src\` changes
+nothing until the loop is restarted**, and reporting that a fix took effect without
+restarting is how a fix gets credited that never ran.
+
+Follow it with \`npm run queue\`, or read
+\`orchestration/logs/loop.log\`. Per-task output is in \`orchestration/logs/<task-id>.log\`,
+and merge output — including the tests run before each merge — in \`<task-id>.merge.log\`.
+
+## When it finishes
+
+It prints \`LOOP_DONE: <PR URL>\` and exits. The PR body it leaves behind is built from the
+commit log, so a change reworked across cycles appears as every intermediate step,
+including ones later reverted. **Rewrite the body from the diff before anyone reviews
+it** — \`$git-pr\` describes the format.
+",
+  "loop-stop/SKILL.md": "---
+name: loop-stop
+description: Stops the autonomous improvement loop and reports what was still in flight when it stopped. Use when asked to halt a running loop, or before switching branches while one is running.
+---
+
+# Stopping the loop
+
+Current state:
+
+Run \`npm run loop-status\` and use its output as context before continuing.
+
+## Stopping
+
+\`\`\`bash
+npm run stop
+\`\`\`
+
+This writes a stop file. The loop notices it on its next poll, so it exits within
+\`POLL_INTERVAL\` seconds — 30 by default. The command also terminates every live task
+process tree immediately and reports each task and PID. If a process tree cannot be
+terminated, the command reports the failure and exits non-zero.
+
+## What stopping retains
+
+Task specifications, logs, status files, worktrees, and branches are retained for
+recovery. No terminated agent continues working after \`stop\` returns.
+
+For a task that completed before the stop, inspect its log and merge it by hand:
+
+\`\`\`bash
+npm run logs -- <task-id>
+npm run merge -- <task-id> --yes
+\`\`\`
+
+For a task that was terminated while running, inspect its log and worktree before doing
+anything destructive. It has no automatic retry. Preserve any useful changes manually,
+then clean up and re-enqueue the retained specification:
+
+\`\`\`bash
+npm run logs -- <task-id>
+npm run cleanup -- <task-id>
+npm run enqueue -- <task-id>
+\`\`\`
+
+\`cleanup\` removes the worktree and its branch. Look at the log first — a task that
+produced useful uncommitted or unmerged work loses it here.
+
+## Report
+
+Say that the loop is stopping, list the task process trees it terminated, and identify
+the retained worktrees that need recovery or cleanup.
+",
+  "skill-create/SKILL.md": "---
+name: skill-create
+description: Writes and revises repository skills against the Agent Skills format and runner-specific conventions. Use when creating a skill, or when an existing skill's frontmatter, description, or structure needs reviewing.
+---
+
+# Creating a skill
+
+Existing skills:
+
+Run \`ls .agents/skills/\` and use its output as context before continuing.
+
+Skills live in \`.agents/skills/<name>/SKILL.md\`. Only the frontmatter is preloaded at
+startup; the body is read when the skill is selected, and supporting files only when the
+body links to them. That is the whole reason to put something in a skill rather than in
+always-loaded repository guidance — the latter is paid for in every session.
+
+## Frontmatter
+
+\`name\` — lowercase letters, digits and hyphens, 64 characters at most. Never \`anthropic\`
+or \`claude\`, and never a placeholder like \`helper\`, \`utils\`, or \`tools\`.
+
+Name it **subject first, then what you do to it**: \`git-pr\`, \`loop-start\`, \`skill-create\`.
+Everything sharing a subject then sorts together, which is how you find a skill you half
+remember. Reversing it to \`start-loop\` reads more naturally in isolation and scatters the
+family, so the collection loses more than the single name gains.
+
+The exception is a skill whose subject is the action — \`verify-changes\` has no noun to
+put first, and \`changes-verify\` would name a report rather than something you run. Reach
+for it only when the subject-first form genuinely has nothing to put in front.
+
+\`description\` — third person, giving both what the skill does and when to reach for it.
+This is the field that selects the skill, so it earns more care than anything in the body.
+
+\`\`\`yaml
+description: Reviews a pull request's diff and submits the result as a GitHub review.
+  Use when asked to review a PR, including one you opened yourself.
+\`\`\`
+
+\`Review pull requests\` fails on both counts — imperative, and silent about when. \`I can
+review PRs\` fails differently: first person reads inconsistently once it has been
+injected into the system prompt.
+
+Keep runner-specific presentation and invocation policy out of this frontmatter. For
+Codex, put it in \`agents/openai.yaml\`; see [reference.md](reference.md).
+
+## Body
+
+Under 500 lines, and written for a reader who is already competent. Cut anything that
+explains a language, a library, or a familiar workflow. Keep what is specific to this
+repository and would otherwise be guessed wrong.
+
+Match how prescriptive you are to what a wrong choice costs. Reviewing code tolerates
+judgement and should be described in general terms. A migration or a merge does not —
+name the exact command and say what must not be varied.
+
+Link supporting files directly from SKILL.md, never file to file: a reference reached
+through another reference tends to be read only in part. Give any file over 100 lines a
+contents list at the top, for the same reason.
+
+## Runtime context
+
+Do not depend on host-specific prompt expansion. Tell the agent to run the command it
+needs as an ordinary workflow step. See [reference.md](reference.md).
+
+## Before finishing
+
+- Does the description say *when*, not only *what*?
+- Is any of this already in the repository's always-loaded guidance? A rule that must
+  hold whoever is acting belongs there. A procedure for a selected task belongs here.
+- Will it still be true after the next refactor, or does it name paths that move?
+- Forward slashes in every path, including on Windows.
+",
+  "skill-create/agents/openai.yaml": "interface:
+  display_name: "Skill Create"
+  short_description: "Create or revise a repository skill"
+  default_prompt: "Use $skill-create to create or revise a repository skill."
+policy:
+  allow_implicit_invocation: false
+",
+  "skill-create/reference.md": "# Skill host reference
+
+## Contents
+
+- Runtime context
+- User arguments and explicit invocation
+- Codex metadata
+
+## Runtime context
+
+Keep runtime context as ordinary instructions so the workflow works across hosts. Name
+the command, say when to run it, and say how its output affects the next step.
+
+### Preferred pattern
+
+\`\`\`markdown
+Run \`git status --short\` and use its output to identify the changed files before staging.
+\`\`\`
+
+This makes failures visible to the agent and lets it choose the appropriate recovery.
+Do not use host-specific pre-execution expansion in a canonical shared skill; Codex
+treats that syntax as inert Markdown.
+
+## User arguments and explicit invocation
+
+Codex receives arguments as part of the user's request; it does not expand an
+\`<arguments from the request>\` variable in \`SKILL.md\`. Describe the expected value in the instruction,
+for example \`Run \\\`gh pr view <pr-number> --json number,title,state\\\`\`.
+
+Mention a Codex skill explicitly as \`$skill-name\`. \`/skills\` opens the selector; a
+slash command named after the skill does not invoke it.
+
+## Frontmatter
+
+\`\`\`yaml
+---
+name: kebab-case-name
+description: >-
+  What this skill does and when.
+  Be specific about triggers.
+---
+\`\`\`
+
+Only \`name\` and \`description\` belong in Codex \`SKILL.md\` frontmatter.
+
+## Codex metadata
+
+Put Codex presentation and invocation policy in \`agents/openai.yaml\`:
+
+\`\`\`yaml
+interface:
+  display_name: "Human-facing name"
+  short_description: "Short purpose"
+  default_prompt: "Use $skill-name to perform the workflow."
+policy:
+  allow_implicit_invocation: false
+\`\`\`
+
+Omit \`policy\` when implicit invocation is appropriate. Keep tool dependencies in this
+file as well; do not put tool allowlists in \`SKILL.md\` frontmatter.
+
+## Content Guidelines
+
+| Guideline | Detail |
+|-----------|--------|
+| Keep SKILL.md under 500 lines | Move details to supporting files |
+| Instructions should be actionable | Not just guidelines, but steps |
+| Include output format | So results are consistent |
+| Reference supporting files | \`See [reference.md](reference.md) for details\` |
+
+## Supporting File Structure
+
+\`\`\`
+my-skill/
+├── SKILL.md           # Main instructions (required, <500 lines)
+├── agents/
+│   └── openai.yaml    # Optional Codex metadata and invocation policy
+├── references/        # Detailed docs loaded on demand
+├── assets/            # Templates and output resources
+└── scripts/           # Deterministic executable helpers
+\`\`\`
+",
+}
+`;

@@ -24,28 +24,29 @@ import {
 } from './paths.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds } from './refresh.ts'
-import { readStatus } from './status.ts'
+import { readStatus, transitionStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
-  frameUntrustedText, readTemplate, repositoryInspectionPreamble,
+  frameUntrustedText, frameVerifiedRequirement, readTemplate, repositoryInspectionPreamble,
 } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
-import { currentBranchRemote } from './gitRemote.ts'
+import { currentBranchPushRemote, currentBranchTrackingRemote } from './gitRemote.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import { execShellSync } from './shell.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
 import {
-  claimIssue, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, confirmIssuePromotion,
-  dropClaimedTaskMaterialization,
-  heartbeatIssueForTask,
-  fingerprintOf, issueMergeComment,
-  issueNumberForTask, issuePromotionForIssue, publishFinding, reapStaleLeases,
-  recordIssueForTask, recordIssuePromotion, releaseIssueClaim,
+  claimIssueGroup, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
+  confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
+  heartbeatIssueForTask, fingerprintOf, issueMergeComment,
+  issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
+  recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
+  returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
-  unresolvedFindings,
+  unresolvedFindings, type ClaimedRequirement,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
   LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
@@ -60,6 +61,7 @@ export interface LoopDeps {
   runner: Runner
   project: ProjectAdapter
   log: (line: string) => void
+  marker?: ((line: string) => void) | undefined
   now: () => Date
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   enqueueTask?: typeof enqueueTask
@@ -77,6 +79,30 @@ interface FindingDispatch {
   reconciled: boolean
 }
 
+const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
+
+function formatIdleDuration(milliseconds: number): string {
+  const totalSeconds = Math.floor(milliseconds / 1000)
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes < 60) return `${minutes}m${seconds === 0 ? '' : `${seconds}s`}`
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return `${hours}h${remainingMinutes === 0 ? '' : `${remainingMinutes}m`}`
+}
+
+function nextIdleLogAge(milliseconds: number): number {
+  if (milliseconds < 30_000) return 30_000
+  if (milliseconds < 60_000) return 60_000
+  if (milliseconds < 2 * 60_000) return 2 * 60_000
+  return Math.max(
+    IDLE_LOG_MAX_INTERVAL_MS,
+    (Math.floor(milliseconds / IDLE_LOG_MAX_INTERVAL_MS) + 1)
+      * IDLE_LOG_MAX_INTERVAL_MS,
+  )
+}
+
 export function formatEventLine(name: string, subject = '', detail = ''): string {
   if (subject === '') return name
   if (detail === '') return `${name} ${subject}`
@@ -86,7 +112,8 @@ export function formatEventLine(name: string, subject = '', detail = ''): string
 
 export function createLoop(deps: LoopDeps) {
   const {
-    paths, config, forge: rawForge, runner, project, log, now, orchestrationDepsRuntime,
+    paths, config, forge: rawForge, runner, project, log, marker = log, now,
+    orchestrationDepsRuntime,
     enqueueTask: enqueueTaskImpl = enqueueTask,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
@@ -116,8 +143,13 @@ export function createLoop(deps: LoopDeps) {
   }>()
   const reconciledCycleGates = new Set<number>()
   let issueQueueInitialized = !config.issueQueueEnabled
-  let previousGateFailure: { message: string; count: number } | undefined
+  const previousGateFailures = new Map<string, { message: string; count: number }>()
   let gateWaitTarget: string | undefined
+  let idleLogState: {
+    startedAt: number
+    nextLogAge: number
+    detail: string
+  } | undefined
 
   function event(name: string, subject = '', detail = ''): void {
     if (name === 'WARN') {
@@ -132,13 +164,11 @@ export function createLoop(deps: LoopDeps) {
     updateCoreBeforeCycle(
       paths,
       config,
+      rawForge,
+      runner,
       cycle,
       (name, subject, detail = '') => event(name, subject, detail),
     ))
-
-  function compactEvent(name: string, subject: string, detail: string): void {
-    log(`${formatEventLine(name, subject)}  ${detail}`)
-  }
 
   function rateLimitTime(resetAt: Date): string {
     return new Intl.DateTimeFormat('en-GB', {
@@ -153,7 +183,7 @@ export function createLoop(deps: LoopDeps) {
       : currentTime + 60_000
     forgeRateLimitUntil = Math.max(forgeRateLimitUntil, resetTime)
     if (loggedForgeRateLimitUntil !== forgeRateLimitUntil) {
-      compactEvent(
+      event(
         'Waiting', 'forge',
         `rate limit until ${rateLimitTime(new Date(forgeRateLimitUntil))}`,
       )
@@ -227,7 +257,8 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function orchestrationDepsEvent(name: 'Installed' | 'WARN', subject: string): void {
-    event(name, subject)
+    if (name === 'Installed') event(name, 'orchestration deps', subject)
+    else event(name, subject)
   }
 
   function warning(callSite: string, operation: string, subject: string): void {
@@ -243,11 +274,16 @@ export function createLoop(deps: LoopDeps) {
     return message.trim() || 'unknown error'
   }
 
-  function reportGateFailure(message: string, stopWhenRepeated = false): void {
-    const count = previousGateFailure?.message === message
-      ? previousGateFailure.count + 1
+  function reportGateFailure(
+    message: string,
+    stopWhenRepeated = false,
+    gate = 'draft-pr',
+  ): void {
+    const previous = previousGateFailures.get(gate)
+    const count = previous?.message === message
+      ? previous.count + 1
       : 1
-    previousGateFailure = { message, count }
+    previousGateFailures.set(gate, { message, count })
     const detail = count === 1 ? message : `${message} (repeated ${count} times)`
     if (stopWhenRepeated && count > 1) {
       event('ERROR', detail)
@@ -283,7 +319,11 @@ export function createLoop(deps: LoopDeps) {
     })
   }
 
-  async function publishWorkerCompletion(taskId: string, issueNumber: number): Promise<void> {
+  async function publishWorkerCompletion(taskId: string, issueNumbers: number[]): Promise<void> {
+    const missingMarkers = missingRequirementCompletionMarkers(paths, taskId)
+    if (missingMarkers.length > 0) {
+      throw new Error(`missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}`)
+    }
     const worktree = worktreeDir(paths, taskId)
     // The comparison base is the checkout's HEAD SHA, not its branch name: a detached
     // worker checkout has an empty branch name, which read as zero commits and left
@@ -298,29 +338,37 @@ export function createLoop(deps: LoopDeps) {
       if (!isInspectionTaskId(paths, taskId)) {
         throw new Error(`${taskId} has no commits and is not an inspection task`)
       }
-      await closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
-        `Inspection task ${taskId} completed without commits.`)
+      await Promise.all(issueNumbers.map((issueNumber) =>
+        closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
+          `Inspection task ${taskId} completed without commits.`)))
       return
     }
 
     const branch = branchName(taskId)
-    const remote = currentBranchRemote(paths.repoRoot)
+    const remote = currentBranchPushRemote(paths.repoRoot)
     gitIn(worktree, ['push', '--quiet', '--set-upstream', remote, branch])
     const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
-    await forge.commentIssue(issueNumber,
-      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}`)
-    await forge.addLabel(issueNumber, LABEL_MERGE_READY)
-    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+    const issueList = issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
+    await Promise.all(issueNumbers.map(async (issueNumber) => {
+      await forge.commentIssue(issueNumber,
+        `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}\nIssues: ${issueList}`)
+      await forge.addLabel(issueNumber, LABEL_MERGE_READY)
+      await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+    }))
   }
 
   function workerBranchReport(
     comments: ForgeIssueComment[],
-  ): { branch: string; head: string } | undefined {
+  ): { branch: string; head: string; issueNumbers?: number[] } | undefined {
     for (const comment of [...comments].reverse()) {
       if (!comment.author.hasWriteAccess) continue
       const branch = /^Branch: (task\/[A-Za-z0-9][A-Za-z0-9._-]*)$/m.exec(comment.body)?.[1]
       const head = /^Head commit: ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/m.exec(comment.body)?.[1]
-      if (branch !== undefined && head !== undefined) return { branch, head }
+      if (branch !== undefined && head !== undefined) {
+        const issueLine = /^Issues: ((?:#\d+\s*)+)$/m.exec(comment.body)?.[1]
+        const issueNumbers = issueLine?.match(/\d+/g)?.map(Number)
+        return { branch, head, ...(issueNumbers === undefined ? {} : { issueNumbers }) }
+      }
     }
     return undefined
   }
@@ -354,8 +402,10 @@ export function createLoop(deps: LoopDeps) {
       }
     }
     const issues = findings.filter((issue) => issue.labels.includes(LABEL_MERGE_READY))
+    const processedIssues = new Set<number>()
 
     for (const issue of issues) {
+      if (processedIssues.has(issue.number)) continue
       if (existsSync(stopFile)) return
       const mergeLog = join(paths.logsDir, `issue-${issue.number}.merge.log`)
       const adopted = issuePromotionForIssue(paths, issue.number)
@@ -374,12 +424,28 @@ export function createLoop(deps: LoopDeps) {
         continue
       }
       let adoptionTaskId: string | undefined
+      let adoptionIssues = [issue]
       try {
-        const remote = currentBranchRemote(paths.repoRoot)
+        const remote = currentBranchPushRemote(paths.repoRoot)
         const report = workerBranchReport(await commentsForIssue(issue))
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
         }
+        const requestedIssues = [...new Set(report.issueNumbers ?? [issue.number])]
+        adoptionIssues = requestedIssues.map((issueNumber) => {
+          const candidate = findings.find((finding) => finding.number === issueNumber)
+          if (candidate === undefined) {
+            throw new MergeError(`Worker branch report for issue #${issue.number} names unavailable issue #${issueNumber}.`)
+          }
+          return candidate
+        })
+        for (const candidate of adoptionIssues) {
+          const candidateReport = workerBranchReport(await commentsForIssue(candidate))
+          if (candidateReport?.branch !== report.branch || candidateReport.head !== report.head) {
+            throw new MergeError(`Grouped issue #${candidate.number} does not report the same worker branch.`)
+          }
+        }
+        adoptionIssues.forEach((candidate) => processedIssues.add(candidate.number))
         const taskId = report.branch.slice('task/'.length)
         adoptionTaskId = taskId
         event('Merging', shortTaskId(taskId))
@@ -396,6 +462,7 @@ export function createLoop(deps: LoopDeps) {
           throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
 
+        const runBranch = git(['branch', '--show-current']).trim()
         const mergeCommit = await mergeRemoteTask(
           paths,
           issue.number,
@@ -411,20 +478,27 @@ export function createLoop(deps: LoopDeps) {
             outputFile: mergeLog,
             orchestrationDepsRuntime,
             onOrchestrationDepsEvent: orchestrationDepsEvent,
+            closesIssues: adoptionIssues.map((candidate) => candidate.number),
+            onMerged: (mergedCommit) => {
+              writeFileSync(mergeFailureFile, '0\n')
+              recordIssuesForTask(
+                paths, taskId, adoptionIssues.map((candidate) => candidate.number),
+              )
+              recordIssuePromotions(paths, taskId, mergedCommit, runBranch)
+              const cycle = readCount(scanCountFile)
+              if (cycle > 0) {
+                rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+              }
+            },
           },
         )
-        writeFileSync(mergeFailureFile, '0\n')
-        const runBranch = git(['branch', '--show-current']).trim()
-        recordIssueForTask(paths, taskId, issue.number)
-        recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
         try {
-          await updateAdoptedIssue(issue, taskId, mergeCommit, runBranch)
+          await Promise.all(adoptionIssues.map((candidate) =>
+            updateAdoptedIssue(candidate, taskId, mergeCommit, runBranch)))
         } catch (error) {
           if (error instanceof ForgeRateLimitError) return
           event('WARN', `could not update adopted issue #${issue.number}: ${errorSummary(error)}`)
         }
-        const cycle = readCount(scanCountFile)
-        if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
       } catch (error) {
         if (error instanceof ForgeRateLimitError) return
@@ -436,15 +510,21 @@ export function createLoop(deps: LoopDeps) {
           event('Failed', shortTaskId(adoptionTaskId), `log ${shortTaskId(adoptionTaskId)}.merge.log`)
         }
         try {
-          await forge.commentIssue(issue.number, `Remote task adoption failed: ${message}`)
+          await Promise.all(adoptionIssues.map((candidate) =>
+            forge.commentIssue(candidate.number, `Remote task adoption failed: ${message}`)))
         } catch (commentError) {
           if (!(commentError instanceof ForgeRateLimitError)) {
             event('WARN', `could not comment on issue #${issue.number}: ${errorSummary(commentError)}`)
           }
         }
         try {
-          await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
-          await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+          if (adoptionIssues.length > 1) {
+            await Promise.all(adoptionIssues.map((candidate) =>
+              returnIssueToReady(forge, candidate.number, true)))
+          } else {
+            await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
+            await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+          }
         } catch (labelError) {
           if (!(labelError instanceof ForgeRateLimitError)) {
             event('WARN', `could not relabel issue #${issue.number}: ${errorSummary(labelError)}`)
@@ -580,6 +660,37 @@ export function createLoop(deps: LoopDeps) {
     appendFileSync(specFile(paths, newId), parts.join(''))
   }
 
+  function appendClaimedRequirements(
+    taskId: string,
+    requirements: ClaimedRequirement[],
+  ): void {
+    if (requirements.length === 1) {
+      const requirement = requirements[0]!
+      appendSharedRequirements(
+        taskId,
+        `issue-${requirement.issueNumber}`,
+        frameVerifiedRequirement(requirement.requirement),
+      )
+      return
+    }
+    const issueList = requirements.map(({ issueNumber }) => `#${issueNumber}`).join(', ')
+    const parts = [`\n## Auto-generated task (findings: ${issueList})\n`]
+    for (const [index, requirement] of requirements.entries()) {
+      parts.push(
+        `\n### Requirement ${index + 1} (issue #${requirement.issueNumber})\n\n`,
+        frameVerifiedRequirement(requirement.requirement),
+        `\n\nAfter addressing this requirement, include this exact standalone line in the final response:\n\nREQUIREMENT_COMPLETE: #${requirement.issueNumber}\n`,
+      )
+    }
+    parts.push(`\n${readTemplate(paths, 'task-requirements.md')}`)
+    const pitfallFiles = new Set(requirements.map(({ requirement }) =>
+      pitfallsFileForDesc(paths, requirement)))
+    for (const file of pitfallFiles) {
+      if (existsSync(file)) parts.push(`\n${readFileSync(file, 'utf8')}`)
+    }
+    appendFileSync(specFile(paths, taskId), parts.join(''))
+  }
+
   /**
    * Turn a finished task's NEXT_TASK lines into queued tasks, bounded by depth and
    * total. In issue mode the findings become forge issues instead — the shared
@@ -590,6 +701,11 @@ export function createLoop(deps: LoopDeps) {
     const destinations: string[] = []
     if (findings.length === 0) return { findings, destinations, reconciled: true }
     const isReview = isReviewTaskId(taskId)
+    const findingOrigin = isReview ? 'fix' : 'auto'
+    const otherFindingOrigin = isReview ? 'auto' : 'fix'
+    const existingFindingTask = (description: string): string | undefined =>
+      existingTaskIdForDesc(paths, findingOrigin, description)
+        ?? existingTaskIdForDesc(paths, otherFindingOrigin, description)
 
     const newDepth = depth + 1
     if (newDepth > config.maxGrowthDepth) {
@@ -599,7 +715,20 @@ export function createLoop(deps: LoopDeps) {
     if (config.issueQueueEnabled) {
       let pendingFindings = findings
       if (isReview) {
-        const filtered = await unresolvedFindings(forge, paths, findings)
+        let filtered: Awaited<ReturnType<typeof unresolvedFindings>>
+        try {
+          filtered = await unresolvedFindings(forge, paths, findings)
+          warningLog.recovered(`unresolved-findings-${taskId}`)
+        } catch (error) {
+          if (!(error instanceof ForgeRateLimitError)) {
+            warning(
+              `unresolved-findings-${taskId}`,
+              `checking review findings from ${shortTaskId(taskId)}`,
+              `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
+            )
+          }
+          return { findings, destinations, reconciled: false }
+        }
         pendingFindings = filtered.unresolved
         for (const duplicate of filtered.duplicates) {
           destinations.push(`#${duplicate.issueNumber}`)
@@ -638,7 +767,7 @@ export function createLoop(deps: LoopDeps) {
 
     const pendingFindings = isReview
       ? [...new Set(findings)].filter((finding) => {
-        const existing = existingTaskIdForDesc(paths, 'auto', finding)
+        const existing = existingFindingTask(finding)
         if (existing !== undefined) {
           // A failed task is retryable by design — enqueueTask re-admits it — so only
           // queued, active or landed work suppresses the finding. Suppressing on the
@@ -665,14 +794,14 @@ export function createLoop(deps: LoopDeps) {
     let reconciled = true
     for (const desc of descriptions) {
       if (!hasTaskCapacity(taskId)) continue
-      const existing = existingTaskIdForDesc(paths, 'auto', desc)
+      const existing = existingFindingTask(desc)
       const needsFreshTask = existing !== undefined
         && readStatus(paths, existing)?.status === 'merged'
         && !fingerprintOf(desc).startsWith('advisory:')
       const newId = needsFreshTask
-        ? newTaskId(paths, `auto-${descSlug(desc)}`)
-        : taskIdForDesc(paths, 'auto', desc)
-      if (needsFreshTask) recordTaskIdForDesc(paths, 'auto', desc, newId)
+        ? newTaskId(paths, `${findingOrigin}-${descSlug(desc)}`)
+        : existing ?? taskIdForDesc(paths, findingOrigin, desc)
+      if (needsFreshTask) recordTaskIdForDesc(paths, findingOrigin, desc, newId)
       destinations.push(shortTaskId(newId))
       if (!existsSync(specFile(paths, newId))) {
         // The template carries the Commit and TASK_COMPLETE instructions — a spec
@@ -693,7 +822,7 @@ export function createLoop(deps: LoopDeps) {
       }
       if (combinesReviewFindings) {
         for (const finding of pendingFindings) {
-          recordTaskIdForDesc(paths, 'auto', finding, newId)
+          recordTaskIdForDesc(paths, findingOrigin, finding, newId)
         }
       }
       // A fix born from a review is repairing something subtle enough to have escaped
@@ -758,7 +887,7 @@ export function createLoop(deps: LoopDeps) {
    * completed and the gate that verifies it could not run. Any successful merge resets
    * the count, so one genuine test failure does not accumulate alongside unrelated ones.
    */
-  function noteMergeFailure(mergeLog: string): void {
+  function noteMergeFailure(mergeLog: string): boolean {
     const failures = readCount(mergeFailureFile) + 1
     writeFileSync(mergeFailureFile, `${failures}\n`)
 
@@ -777,7 +906,9 @@ export function createLoop(deps: LoopDeps) {
     if (failures >= config.maxConsecutiveMergeFailures) {
       event('ERROR', `${failures} consecutive merge failures; stopping the loop`)
       writeFileSync(stopFile, '')
+      return true
     }
+    return false
   }
 
   function isScanRunning(): boolean {
@@ -794,28 +925,53 @@ export function createLoop(deps: LoopDeps) {
     if (!isScanTaskId(taskId)) return
     const cycleNow = readCount(scanCountFile)
     const yieldFile = join(paths.queueDir, `scan-yield-${cycleNow}`)
-    if (actionableFindings(finalMessageFile(paths, taskId)).length > 0) {
-      appendFileSync(yieldFile, 'found\n')
-    } else {
-      appendFileSync(yieldFile, 'empty\n')
+    const value = actionableFindings(finalMessageFile(paths, taskId)).length > 0
+      ? 'found'
+      : 'empty'
+    appendFileSync(yieldFile, `${taskId}\t${value}\n`)
+  }
+
+  function completeScanYields(cycle: number): string[] | undefined {
+    const expectedFile = join(paths.queueDir, `scan-expected-${cycle}`)
+    const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
+    if (!existsSync(expectedFile) || !existsSync(yieldFile)) return undefined
+    const expected = readCount(expectedFile)
+    const keyedYields = new Map<string, string>()
+    const legacyYields: string[] = []
+    for (const line of readFileSync(yieldFile, 'utf8').split(/\r?\n/).filter(Boolean)) {
+      if (line === 'found' || line === 'empty') {
+        legacyYields.push(line)
+        continue
+      }
+      const match = /^(\S+)\t(found|empty)$/.exec(line)
+      if (match === null) return undefined
+      keyedYields.set(match[1]!, match[2]!)
     }
+    const yields = [...legacyYields, ...keyedYields.values()]
+    if (expected === 0 || yields.length !== expected) {
+      return undefined
+    }
+    return yields
   }
 
   /**
    * Fold the finished cycle's scan records into the empty-scan counter: reset on any
-   * finding, increment exactly once when every scan came back empty, untouched when no
-   * record exists (no scan finished).
+   * finding, increment exactly once when every expected scan came back empty, and leave
+   * it untouched when any scan failed or did not finish.
    */
   function foldScanYields(cycle: number): void {
+    const yields = completeScanYields(cycle)
+    if (yields === undefined) return
+    const expectedFile = join(paths.queueDir, `scan-expected-${cycle}`)
     const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
-    if (!existsSync(yieldFile)) return
-    if (readFileSync(yieldFile, 'utf8').includes('found')) {
+    if (yields.includes('found')) {
       writeFileSync(emptyScanFile, '0\n')
     } else {
       const total = readCount(emptyScanFile) + 1
       writeFileSync(emptyScanFile, `${total}\n`)
     }
     rmSync(yieldFile, { force: true })
+    rmSync(expectedFile, { force: true })
   }
 
   function renderTemplate(templateName: string, replacements: Record<string, string>): string {
@@ -836,7 +992,7 @@ export function createLoop(deps: LoopDeps) {
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
     let remote: string
     try {
-      remote = currentBranchRemote(paths.repoRoot)
+      remote = currentBranchTrackingRemote(paths.repoRoot)
     } catch (error) {
       event('WARN', `could not resolve review base: ${errorSummary(error)}`)
       return false
@@ -889,8 +1045,8 @@ export function createLoop(deps: LoopDeps) {
    */
   function cycleIsFinal(cycle: number): boolean {
     if (cycle >= config.maxScanCycles) return true
-    const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
-    if (existsSync(yieldFile) && !readFileSync(yieldFile, 'utf8').includes('found')) {
+    const yields = completeScanYields(cycle)
+    if (yields !== undefined && !yields.includes('found')) {
       return readCount(emptyScanFile) + 1 >= config.maxEmptyScans
     }
     return false
@@ -952,19 +1108,23 @@ export function createLoop(deps: LoopDeps) {
     const effortDir = join(paths.queueDir, 'effort')
     mkdirSync(effortDir, { recursive: true })
     writeFileSync(join(effortDir, reviewId), `${config.reviewEffort}\n`)
+    try {
+      enqueueTaskImpl(paths, reviewId, 0)
+    } catch (error) {
+      event('WARN', `could not enqueue review: ${errorSummary(error)}`)
+      return false
+    }
+    // The round and id are the durable receipt for a dispatched review. Publishing
+    // them before the backlog mutation succeeds consumes a round without any worker
+    // being able to perform it, so keep them behind the enqueue boundary.
     writeFileSync(roundFile, `${rounds + 1}\n`)
     writeFileSync(idFile, `${reviewId}\n`)
-    try {
-      enqueueTask(paths, reviewId, 0)
-    } catch {
-      // enqueue of a just-written spec cannot fail for a missing spec
-    }
     return false
   }
 
   function cleanupSessionState(preserveTaskMarkers = false): void {
     for (const name of readdirSync(paths.queueDir)) {
-      if (/^(cycle-complete-|cycle-suite-tip-|cycle-resume-|ci-fix-emitted-|review-round-|review-id-|failed-|scan-yield-)/.test(name)
+      if (/^(cycle-complete-|cycle-suite-tip-|cycle-resume-|ci-fix-emitted-|review-round-|review-id-|failed-|scan-yield-|scan-expected-)/.test(name)
         || name === 'decisions.txt' || name === 'pr-url.txt'
         || name === 'empty-scan-count.txt' || name === 'merge-failure-count.txt') {
         rmSync(join(paths.queueDir, name), { force: true })
@@ -1000,7 +1160,7 @@ export function createLoop(deps: LoopDeps) {
   function validatePushTarget(): boolean {
     if (!config.autoPr && !config.workerMode) return true
     try {
-      currentBranchRemote(paths.repoRoot)
+      currentBranchPushRemote(paths.repoRoot)
       return true
     } catch (error) {
       event('ERROR', `current branch cannot be pushed: ${errorSummary(error)}`)
@@ -1021,10 +1181,17 @@ export function createLoop(deps: LoopDeps) {
       reportGateFailure('could not get branch name; PR skipped')
       return false
     }
-    let remote: string
+    let pushRemote: string
+    let baseRemote: string
     try {
-      remote = currentBranchRemote(paths.repoRoot)
-      execFileSync('git', ['push', '--quiet', '--set-upstream', remote, branch], {
+      pushRemote = currentBranchPushRemote(paths.repoRoot)
+      baseRemote = currentBranchTrackingRemote(paths.repoRoot)
+      const hasUpstream = git([
+        'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}',
+      ]).trim() !== ''
+      execFileSync('git', [
+        'push', '--quiet', ...(hasUpstream ? [] : ['--set-upstream']), pushRemote, branch,
+      ], {
         cwd: paths.repoRoot,
         stdio: 'ignore',
         windowsHide: true,
@@ -1035,19 +1202,32 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const baseRef = git([
-      'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
+      'symbolic-ref', '--quiet', '--short', `refs/remotes/${baseRemote}/HEAD`,
     ]).trim()
-    if (!baseRef.startsWith(`${remote}/`)) {
-      reportGateFailure(`could not get ${remote} default branch; PR skipped`)
+    if (!baseRef.startsWith(`${baseRemote}/`)) {
+      reportGateFailure(`could not get ${baseRemote} default branch; PR skipped`)
       return false
     }
-    const baseBranch = baseRef.slice(remote.length + 1)
-    git(['fetch', remote, baseBranch, '--quiet'])
+    const baseBranch = baseRef.slice(baseRemote.length + 1)
+    try {
+      gitIn(paths.repoRoot, ['fetch', baseRemote, baseBranch, '--quiet'])
+    } catch (error) {
+      reportGateFailure(`could not fetch ${baseRef}: ${errorSummary(error)}`)
+      return false
+    }
     const cycle = readCount(scanCountFile)
     const title = prTitle(project, paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
       { cycle, maxCycles: config.maxScanCycles })
 
-    const status = await forge.prStatus({ kind: 'branch', value: branch })
+    let status
+    try {
+      status = await forge.prStatus({ kind: 'branch', value: branch })
+    } catch (error) {
+      if (!(error instanceof ForgeRateLimitError)) {
+        reportGateFailure(`could not check PR status: ${errorSummary(error)}`)
+      }
+      return false
+    }
     if (status.state === 'open') {
       // A body left as created stops at the first cycle's content, so it is rebuilt
       // every cycle — unless a person edited it, which removes the generated marker.
@@ -1074,7 +1254,7 @@ export function createLoop(deps: LoopDeps) {
         }
       }
       writeFileSync(prUrlFile, `${status.url}\n`)
-      previousGateFailure = undefined
+      previousGateFailures.delete('draft-pr')
       return true
     }
 
@@ -1087,7 +1267,7 @@ export function createLoop(deps: LoopDeps) {
         draft: true,
       })
       writeFileSync(prUrlFile, `${url}\n`)
-      previousGateFailure = undefined
+      previousGateFailures.delete('draft-pr')
       return true
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
@@ -1104,9 +1284,17 @@ export function createLoop(deps: LoopDeps) {
     let status
     try {
       status = await forge.prStatus({ kind: 'url', value: prUrl })
-    } catch {
+    } catch (error) {
+      if (!(error instanceof ForgeRateLimitError)) {
+        reportGateFailure(
+          `could not check PR CI status: ${errorSummary(error)}`,
+          true,
+          'ci-status',
+        )
+      }
       return 'unknown'
     }
+    previousGateFailures.delete('ci-status')
     if (status.state === 'none') return 'unknown'
     if (status.state === 'merged') return 'success'
     if (status.checks.length === 0) {
@@ -1121,11 +1309,13 @@ export function createLoop(deps: LoopDeps) {
 
   function generateCiFixTask(cycle: number, prUrl: string, failSummary: string): void {
     const fixId = newTaskId(paths, `ci-fix-c${cycle}`, now())
-    const text = renderTemplate('ci-fix-template.md', {
+    const text = repositoryInspectionPreamble() + renderTemplate('ci-fix-template.md', {
       FIX_ID: fixId,
       CYCLE: String(cycle),
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
-      FAIL_SUMMARY: failSummary === '' ? '(check the PR checks for details)' : failSummary,
+      FAIL_SUMMARY: frameUntrustedText(
+        failSummary === '' ? '(check the PR checks for details)' : failSummary,
+      ),
     })
     writeFileSync(specFile(paths, fixId), text)
     enqueueTaskImpl(paths, fixId, 0)
@@ -1137,25 +1327,60 @@ export function createLoop(deps: LoopDeps) {
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     if (prUrl === '') return false
     const branch = git(['branch', '--show-current']).trim()
-    let status = await forge.prStatus({ kind: 'branch', value: branch })
+    let status
+    try {
+      status = await forge.prStatus({ kind: 'branch', value: branch })
+      previousGateFailures.delete('pr-status-before-promotion')
+    } catch (error) {
+      if (!(error instanceof ForgeRateLimitError)) {
+        reportGateFailure(
+          `could not check PR status before promotion: ${errorSummary(error)}`,
+          true,
+          'pr-status-before-promotion',
+        )
+      }
+      return false
+    }
     if (status.isDraft) {
       try {
         await forge.markPrReady(branch)
+        previousGateFailures.delete('pr-promotion')
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          reportGateFailure(
+            `could not promote PR: ${errorSummary(error)}`,
+            true,
+            'pr-promotion',
+          )
+        }
+        return false
+      }
+      try {
         status = await forge.prStatus({ kind: 'branch', value: branch })
-      } catch {
+        previousGateFailures.delete('pr-status-after-promotion')
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          reportGateFailure(
+            `could not confirm PR status after promotion: ${errorSummary(error)}`,
+            true,
+            'pr-status-after-promotion',
+          )
+        }
         return false
       }
     }
     if (status.state !== 'open' || status.isDraft) return false
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
-    log(`LOOP_DONE: ${prUrl}`)
+    marker(`LOOP_DONE: ${prUrl}`)
     event(
       'Status', 'PR body',
       'still reflects history and must be rewritten as a final summary.',
     )
-    const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
-    event('Completed', 'Loop', prNumber === undefined ? '' : `PR #${prNumber}`)
+    event('Completed', 'Loop', `PR ${prUrl}`)
+    previousGateFailures.delete('pr-status-before-promotion')
+    previousGateFailures.delete('pr-promotion')
+    previousGateFailures.delete('pr-status-after-promotion')
     return true
   }
 
@@ -1166,7 +1391,7 @@ export function createLoop(deps: LoopDeps) {
    */
   function runCycleSuite(cycle: number): boolean {
     if (config.taskGate !== 'light') return true
-    compactEvent('Started', 'Suite', `cycle ${cycle}`)
+    event('Started', 'Suite', `cycle ${cycle}`)
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
     writeFileSync(suiteLog, '')
 
@@ -1276,7 +1501,7 @@ export function createLoop(deps: LoopDeps) {
           const currentTime = now().getTime()
           if (remoteWaitState?.pending !== pending
             || currentTime - remoteWaitState.loggedAt >= 10 * 60 * 1000) {
-            compactEvent(
+            event(
               'Waiting',
               'remote',
               `issues ${pendingIssueNumbers.slice(0, 5).map((issueNumber) => `#${issueNumber}`).join(' ')}`,
@@ -1348,9 +1573,8 @@ export function createLoop(deps: LoopDeps) {
             return 'continue'
           }
           const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
-          log(`CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
-          const prNumber = /\/pull\/(\d+)(?:\D|$)/.exec(prUrl)?.[1]
-          event('Completed', 'Cycle', prNumber === undefined ? '' : `PR #${prNumber}`)
+          marker(`CYCLE_COMPLETE: ${currentScans}/${config.maxScanCycles}${prUrl === '' ? '' : ` PR:${prUrl}`}`)
+          event('Completed', 'Cycle', prUrl === '' ? '' : `PR ${prUrl}`)
           writeFileSync(completeFlag, '')
         }
 
@@ -1436,8 +1660,9 @@ export function createLoop(deps: LoopDeps) {
     // This is the only safe restart boundary: the previous gate is closed, no task is
     // running, and the next cycle has not yet consumed its number or started a scan.
     if (await updateCore(nextCycle) === 'restart') return 'restart'
-    writeFileSync(scanCountFile, `${nextCycle}\n`)
     const nScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
+    writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
+    writeFileSync(scanCountFile, `${nextCycle}\n`)
 
     // Disjoint groups of the checklist's eight sections, balanced so the deep reads
     // (bugs, tests) do not share a scan at higher parallelism.
@@ -1496,34 +1721,39 @@ export function createLoop(deps: LoopDeps) {
     const locallyRunningIssues = new Set<number>()
     let issueReconciliationPending = false
 
-    const reconcileMergedIssue = async (
+    const reconcileMergedIssues = async (
       taskId: string,
-      linkedIssue: number,
+      linkedIssues: number[],
       mergeCommit: string,
       runBranch: string,
     ): Promise<boolean> => {
       try {
-        recordIssuePromotion(paths, taskId, mergeCommit, runBranch)
-        const promotion = issuePromotionForIssue(paths, linkedIssue)
-        if (promotion === undefined) throw new Error('promotion record was not persisted')
-        if (!remoteOperationsAvailable || promotion.commentConfirmed === true) return true
+        recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
+        for (const linkedIssue of linkedIssues) {
+          const promotion = issuePromotionForIssue(paths, linkedIssue)
+          if (promotion === undefined) throw new Error('promotion record was not persisted')
+          if (!remoteOperationsAvailable || promotion.commentConfirmed === true) continue
 
-        const expectedComment = issueMergeComment(taskId, mergeCommit, runBranch)
-        let comments = await forge.listIssueComments(linkedIssue)
-        if (!comments.some((comment) =>
-          comment.author.hasWriteAccess && comment.body === expectedComment)) {
-          await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
-          comments = await forge.listIssueComments(linkedIssue)
+          const expectedComment = issueMergeComment(taskId, mergeCommit, runBranch)
+          let comments = await forge.listIssueComments(linkedIssue)
+          if (!comments.some((comment) =>
+            comment.author.hasWriteAccess && comment.body === expectedComment)) {
+            await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
+            comments = await forge.listIssueComments(linkedIssue)
+          }
+          if (!comments.some((comment) =>
+            comment.author.hasWriteAccess && comment.body === expectedComment)) {
+            throw new Error('merge comment is not visible after publishing it')
+          }
+          confirmIssuePromotion(paths, linkedIssue)
         }
-        if (!comments.some((comment) =>
-          comment.author.hasWriteAccess && comment.body === expectedComment)) {
-          throw new Error('merge comment is not visible after publishing it')
-        }
-        confirmIssuePromotion(paths, linkedIssue)
         return true
       } catch (error) {
         if (!(error instanceof ForgeRateLimitError)) {
-          event('WARN', `could not reconcile issue #${linkedIssue} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+          const subject = linkedIssues.length === 1
+            ? `issue #${linkedIssues[0]}`
+            : `issues ${linkedIssues.map((number) => `#${number}`).join(' ')}`
+          event('WARN', `could not reconcile ${subject} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`)
         }
         // The promotion record is the retry state. Keep this poll local-only so the
         // cycle gate cannot advance before a later poll confirms the forge marker.
@@ -1537,14 +1767,18 @@ export function createLoop(deps: LoopDeps) {
       mergeAttempts.add(taskId)
       event('Merging', shortTaskId(taskId))
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
-      const linkedIssue = issueNumberForTask(paths, taskId)
+      const linkedIssues = issueNumbersForTask(paths, taskId)
       try {
+        const missingMarkers = missingRequirementCompletionMarkers(paths, taskId)
+        if (missingMarkers.length > 0) {
+          throw new MergeError(`Grouped task is missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}.`)
+        }
         const mergeCommit = await mergeTask(paths, taskId, {
           taskGate: config.taskGate,
           testCmd: config.testCmd === '' ? undefined : config.testCmd,
           skipAutoTest: config.skipAutoTest,
           project,
-          closesIssue: linkedIssue,
+          closesIssues: linkedIssues,
           forge: rawForge,
           outputFile: mergeLog,
           orchestrationDepsRuntime,
@@ -1552,9 +1786,9 @@ export function createLoop(deps: LoopDeps) {
         })
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
         writeFileSync(mergeFailureFile, '0\n')
-        if (linkedIssue !== undefined) {
+        if (linkedIssues.length > 0) {
           const runBranch = git(['branch', '--show-current']).trim()
-          await reconcileMergedIssue(taskId, linkedIssue, mergeCommit, runBranch)
+          await reconcileMergedIssues(taskId, linkedIssues, mergeCommit, runBranch)
         }
         // A task delegated while the gate was waiting merges commits the gate has
         // already pushed past; clearing the flag makes the gate push and verify
@@ -1566,7 +1800,23 @@ export function createLoop(deps: LoopDeps) {
       } catch (error) {
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.merge.log`)
-        noteMergeFailure(mergeLog)
+        const abandoned = noteMergeFailure(mergeLog)
+        if (abandoned && linkedIssues.length > 1 && remoteOperationsAvailable) {
+          try {
+            const terminalized = await transitionStatus(paths, taskId, 'completed', 'failed')
+            if (!terminalized) {
+              throw new Error(`task status changed before grouped merge abandonment`)
+            }
+            await Promise.all(linkedIssues.map((issueNumber) =>
+              returnIssueToReady(forge, issueNumber, true)))
+            dropClaimedTaskMaterialization(paths, taskId)
+            event('Released', shortTaskId(taskId), 'grouped merge abandoned')
+          } catch (releaseError) {
+            if (!(releaseError instanceof ForgeRateLimitError)) {
+              event('WARN', `${shortTaskId(taskId)} grouped merge failed and its issues could not all be released: ${errorSummary(releaseError)}`)
+            }
+          }
+        }
       }
     }
 
@@ -1580,20 +1830,20 @@ export function createLoop(deps: LoopDeps) {
 
       if (status === 'merged' && config.issueQueueEnabled) {
         const mergedStatus = readStatus(paths, taskId)
-        const linkedIssue = issueNumberForTask(paths, taskId)
-        if (linkedIssue !== undefined
+        const linkedIssues = issueNumbersForTask(paths, taskId)
+        if (linkedIssues.length > 0
           && mergedStatus?.merge_commit !== undefined
           && mergedStatus.run_branch !== undefined) {
-          const reconciled = await reconcileMergedIssue(
-            taskId, linkedIssue, mergedStatus.merge_commit, mergedStatus.run_branch,
+          const reconciled = await reconcileMergedIssues(
+            taskId, linkedIssues, mergedStatus.merge_commit, mergedStatus.run_branch,
           )
           if (!reconciled) break
         }
       }
 
-      const linkedIssue = status === 'running' ? issueNumberForTask(paths, taskId) : undefined
-      if (linkedIssue !== undefined && remoteOperationsAvailable) {
-        locallyRunningIssues.add(linkedIssue)
+      const linkedIssues = status === 'running' ? issueNumbersForTask(paths, taskId) : []
+      if (linkedIssues.length > 0 && remoteOperationsAvailable) {
+        linkedIssues.forEach((issueNumber) => locallyRunningIssues.add(issueNumber))
         try {
           await heartbeatIssueForTask(forge, paths, taskId, now())
           warningLog.recovered(`heartbeat-${taskId}`)
@@ -1608,9 +1858,22 @@ export function createLoop(deps: LoopDeps) {
       // A task whose process is gone without the completion marker used to pass in
       // silence. Say so, once per task, and keep the count for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
+      const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
+      if (failedIssues.length > 0 && remoteOperationsAvailable) {
+        try {
+          await Promise.all(failedIssues.map((issueNumber) =>
+            returnIssueToReady(forge, issueNumber, true)))
+          dropClaimedTaskMaterialization(paths, taskId)
+          event('Released', shortTaskId(taskId), 'grouped task failed')
+        } catch (releaseError) {
+          if (!(releaseError instanceof ForgeRateLimitError)) {
+            event('WARN', `${shortTaskId(taskId)} failed and its grouped issues could not all be released: ${errorSummary(releaseError)}`)
+          }
+        }
+      }
       if (status === 'failed' && !existsSync(failedFlag)) {
         const cycleNow = readCount(scanCountFile)
-        log(`FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
+        marker(`FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.log`)
         appendFileSync(join(paths.queueDir, `failed-${cycleNow}`), `${taskId}\n`)
         // Failures can arrive while the cycle gate is waiting on CI or review. The
@@ -1631,13 +1894,13 @@ export function createLoop(deps: LoopDeps) {
 
         if (config.workerMode) {
           event('Completed', shortTaskId(taskId))
-          const linkedIssue = issueNumberForTask(paths, taskId)
-          if (linkedIssue === undefined) {
+          const linkedIssues = issueNumbersForTask(paths, taskId)
+          if (linkedIssues.length === 0) {
             event('WARN', `worker task ${shortTaskId(taskId)} has no linked issue`)
             continue
           }
           try {
-            await publishWorkerCompletion(taskId, linkedIssue)
+            await publishWorkerCompletion(taskId, linkedIssues)
             writeFileSync(scannedFlag, '')
           } catch (error) {
             if (!(error instanceof ForgeRateLimitError)) {
@@ -1722,23 +1985,28 @@ export function createLoop(deps: LoopDeps) {
           let capacity = config.maxParallel - running - queueLength()
           if (capacity > 0) {
             if (cachedUser === undefined) cachedUser = await forge.currentUser()
-            for (const issue of openFindings.filter((candidate) =>
+            const readyIssues = openFindings.filter((candidate) =>
               candidate.labels.includes(LABEL_READY)
-                && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR))) {
+                && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR)
+                && candidate.assignees.length === 0
+                && issuePromotionForIssue(paths, candidate.number) === undefined)
+            for (const issues of groupReadyFindings(readyIssues)) {
               if (capacity <= 0) break
-              if (issue.assignees.length > 0) continue
-              if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
-              const result = await claimIssue(forge, paths, issue, cachedUser,
-                (newTaskId_, requirement) => appendSharedRequirements(newTaskId_, `issue-${issue.number}`, requirement))
+              const result = await claimIssueGroup(
+                forge, paths, issues, cachedUser, appendClaimedRequirements,
+              )
               if (result.outcome === 'claimed') {
-                event('Claimed', shortTaskId(result.taskId), `#${issue.number}`)
+                event('Claimed', shortTaskId(result.taskId),
+                  result.issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' '))
                 if (result.pendingMerge) await mergeCompletedTask(result.taskId)
                 capacity -= 1
               } else if (result.outcome === 'untrusted-author') {
                 // The poll's shared listing predates the label mutation. Reflect it
                 // locally so this quarantined issue cannot hold today's idle gate open.
-                if (!issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
-                  issue.labels.push(LABEL_UNTRUSTED_AUTHOR)
+                const untrusted = issues.find((issue) => issue.number === result.issueNumber)
+                if (untrusted !== undefined
+                  && !untrusted.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
+                  untrusted.labels.push(LABEL_UNTRUSTED_AUTHOR)
                 }
                 event(
                   'WARN',
@@ -1789,18 +2057,23 @@ export function createLoop(deps: LoopDeps) {
           }
           running += 1
         } catch (error) {
-          const issueNumber = issueNumberForTask(paths, entry.taskId)
-          if (config.issueQueueEnabled && issueNumber !== undefined) {
+          const issueNumbers = issueNumbersForTask(paths, entry.taskId)
+          if (config.issueQueueEnabled && issueNumbers.length > 0) {
             let released = false
             if (remoteOperationsAvailable) {
               try {
                 if (cachedUser === undefined) cachedUser = await forge.currentUser()
-                await releaseIssueClaim(forge, issueNumber, cachedUser)
+                if (issueNumbers.length > 1) {
+                  await Promise.all(issueNumbers.map((issueNumber) =>
+                    returnIssueToReady(forge, issueNumber, true)))
+                } else {
+                  await releaseIssueClaim(forge, issueNumbers[0]!, cachedUser)
+                }
                 released = true
                 event('Released', shortTaskId(entry.taskId), 'startup failed')
               } catch (releaseError) {
                 if (!(releaseError instanceof ForgeRateLimitError)) {
-                  event('WARN', `${shortTaskId(entry.taskId)} startup failed and issue #${issueNumber} could not be released: ${errorSummary(releaseError)}`)
+                  event('WARN', `${shortTaskId(entry.taskId)} startup failed and issues ${issueNumbers.map((number) => `#${number}`).join(' ')} could not all be released: ${errorSummary(releaseError)}`)
                 }
               }
             }
@@ -1839,16 +2112,11 @@ export function createLoop(deps: LoopDeps) {
     const queue = queueLength()
     const counters = [
       ...(scans > 0 ? [`Scan=${scans}`] : []),
-      ...(scans === 0 || runningTasks > 0 || queue > 0
-        ? [`Running=${runningTasks}`, `Queue=${queue}`]
-        : []),
+      `Task=${runningTasks}`,
+      `Queue=${queue}`,
     ]
-    const waitingFor = [
-      ...(scans > 0 ? ['unfinished scan'] : []),
-      ...(runningTasks > 0 ? ['unfinished task'] : []),
-      ...(queue > 0 ? ['worker capacity'] : []),
-    ]
-    if (waitingFor.length === 0) {
+    const waitingFor: string[] = []
+    if (scans === 0 && runningTasks === 0 && queue === 0) {
       if (gateWaitTarget !== undefined) waitingFor.push(gateWaitTarget)
       else if (config.workerMode) waitingFor.push('open finding')
       else if (config.issueQueueEnabled && openFindings === null) waitingFor.push('finding status')
@@ -1857,10 +2125,37 @@ export function createLoop(deps: LoopDeps) {
       } else if (config.scanEnabled) waitingFor.push('next scan')
       else if (config.autoPr) waitingFor.push('pull request promotion')
     }
-    event('Status', [
+    const statusParts = [
       ...counters,
       ...(waitingFor.length > 0 ? [`Waiting=${waitingFor.join(', ')}`] : []),
-    ].join('  '))
+    ]
+    const idle = scans === 0 && runningTasks === 0 && queue === 0
+    if (!idle) {
+      idleLogState = undefined
+      event('Running', 'Status', statusParts.join('  '))
+      return 'continue'
+    }
+
+    const currentTime = now().getTime()
+    if (idleLogState === undefined || currentTime < idleLogState.startedAt) {
+      idleLogState = {
+        startedAt: currentTime,
+        nextLogAge: nextIdleLogAge(0),
+        detail: statusParts.join('  '),
+      }
+      statusParts.splice(counters.length, 0, '0s')
+      event('Idle', 'Status', statusParts.join('  '))
+      return 'continue'
+    }
+
+    const idleAge = currentTime - idleLogState.startedAt
+    const detail = statusParts.join('  ')
+    if (detail !== idleLogState.detail || idleAge >= idleLogState.nextLogAge) {
+      idleLogState.detail = detail
+      idleLogState.nextLogAge = nextIdleLogAge(idleAge)
+      statusParts.splice(counters.length, 0, formatIdleDuration(idleAge))
+      event('Idle', 'Status', statusParts.join('  '))
+    }
     return 'continue'
   }
 

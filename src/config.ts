@@ -39,7 +39,6 @@ export interface LoopConfig {
   taskGate: 'full' | 'light'
   forge: string
   runner: string
-  project: string
   /** Findings become forge issues that workers claim, instead of direct local enqueues. */
   issueQueueEnabled: boolean
   /** Claim and execute shared work without scanning, reviewing, or merging it locally. */
@@ -80,7 +79,9 @@ function num(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
 function bool(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
   const raw = env[name]
   if (raw === undefined || raw === '') return fallback
-  return raw === 'true'
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${name} must be 'true' or 'false', got '${raw}'`)
 }
 
 function str(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
@@ -107,6 +108,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
   }
   // SCAN_PARALLEL: checklist groups are defined up to 4, so higher values clamp.
   const scanParallel = Math.min(num(env, 'SCAN_PARALLEL', 2), 4)
+  if (scanParallel < 1) {
+    throw new Error('SCAN_PARALLEL must be at least 1')
+  }
   const issueQueueEnabled = bool(env, 'ISSUE_QUEUE_ENABLED', false)
   const workerMode = bool(env, 'WORKER_MODE', false)
   if (workerMode && !issueQueueEnabled) {
@@ -146,7 +150,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     taskGate,
     forge: str(env, 'FORGE', 'github'),
     runner: str(env, 'RUNNER', 'codex'),
-    project: str(env, 'PROJECT', ''),
     issueQueueEnabled,
     workerMode,
     issueLeaseHours: num(env, 'ISSUE_LEASE_HOURS', 3),

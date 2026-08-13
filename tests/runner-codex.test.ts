@@ -1,16 +1,19 @@
 import { EventEmitter } from 'node:events'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RunnerStartOptions } from '../src/adapters/runner.ts'
 
 const mocks = vi.hoisted(() => ({
   closeSync: vi.fn(),
+  existsSync: vi.fn((_path: string) => false),
   openSync: vi.fn(() => 42),
-  readFileSync: vi.fn(() => 'task specification'),
+  readFileSync: vi.fn((_path: string, _encoding: string) => 'task specification'),
   spawn: vi.fn(),
 }))
 
 vi.mock('node:fs', () => ({
   closeSync: mocks.closeSync,
+  existsSync: mocks.existsSync,
   openSync: mocks.openSync,
   readFileSync: mocks.readFileSync,
 }))
@@ -42,6 +45,7 @@ function mockChild(pid: number | undefined = 1234): EventEmitter & {
 
 beforeEach(() => {
   mocks.closeSync.mockReset()
+  mocks.existsSync.mockReset().mockReturnValue(false)
   mocks.openSync.mockReset().mockReturnValue(42)
   mocks.readFileSync.mockReset().mockReturnValue('task specification')
   mocks.spawn.mockReset()
@@ -52,6 +56,136 @@ afterEach(() => {
 })
 
 describe('createCodexRunner', () => {
+  it('provides the Codex repository skill destination and command rendering', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    const sharedSkills = createCodexRunner().sharedSkills
+
+    expect(sharedSkills.destinationRoot(repoRoot))
+      .toBe(join(repoRoot, '.agents', 'skills'))
+    expect(sharedSkills.legacyRoots?.(repoRoot))
+      .toEqual([join(repoRoot, '.claude', 'skills')])
+    expect(sharedSkills.renderFile(
+      Buffer.from('{{COMMAND_PREFIX}} loop\n'),
+      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+    ).toString('utf8')).toBe('npm run -C orchestration/ts loop\n')
+  })
+
+  it('renders Claude-oriented skill syntax into complete Codex instructions', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    const source = [
+      '---',
+      'name: example-skill',
+      'description: Example.',
+      'argument-hint: "<pr-number>"',
+      'disable-model-invocation: true',
+      'allowed-tools: Bash, Read',
+      '---',
+      '',
+      'Skills live in `.claude/skills/<name>/SKILL.md`.',
+      'Read `CLAUDE.md` before continuing.',
+      '',
+      '!`gh pr view $ARGUMENTS --json title`',
+      '',
+      'Run `/git-review`, then {{COMMAND_PREFIX}} loop-status.',
+      '',
+    ].join('\n')
+
+    const rendered = createCodexRunner().sharedSkills.renderFile(
+      Buffer.from(source),
+      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+    ).toString('utf8')
+
+    expect(rendered).toBe([
+      '---',
+      'name: example-skill',
+      'description: Example.',
+      '---',
+      '',
+      'Skills live in `.claude/skills/<name>/SKILL.md`.',
+      'Read `CLAUDE.md` before continuing.',
+      '',
+      'Run `gh pr view <pr-number> --json title` and use its output as context before continuing.',
+      '',
+      'Run a direct review of the changes, then npm run -C orchestration/ts loop-status.',
+      '',
+    ].join('\n'))
+  })
+
+  it('uses Codex guidance and skill references only when their files are available', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    mocks.existsSync.mockImplementation((path) => path === join(repoRoot, 'AGENTS.md')
+      || path === join(packageRoot, 'skills', 'git-review', 'SKILL.md'))
+    mocks.readFileSync.mockImplementation((path) => path === join(
+      packageRoot, 'skills', 'manifest.json',
+    ) ? JSON.stringify({ skills: ['git-review'] }) : 'task specification')
+
+    const rendered = createCodexRunner().sharedSkills.renderFile(
+      Buffer.from(
+        'Read `CLAUDE.md` and `.claude/skills/git-review/SKILL.md`, then run `/git-review` and `/verify-changes`.\n',
+      ),
+      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+    ).toString('utf8')
+
+    expect(rendered).toBe(
+      'Read `AGENTS.md` and `.agents/skills/git-review/SKILL.md`, then run `$git-review` and verification directly with the applicable repository commands.\n',
+    )
+  })
+
+  it('preserves explicit repository guidance and skill paths that already exist', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    const localSkill = join(repoRoot, '.claude', 'skills', 'verify-changes', 'SKILL.md')
+    mocks.existsSync.mockImplementation((path) => path === join(repoRoot, 'CLAUDE.md')
+      || path === localSkill)
+
+    const rendered = createCodexRunner().sharedSkills.renderFile(
+      Buffer.from('Read `CLAUDE.md` and `.claude/skills/verify-changes/SKILL.md`.\n'),
+      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+    ).toString('utf8')
+
+    expect(rendered)
+      .toBe('Read `CLAUDE.md` and `.claude/skills/verify-changes/SKILL.md`.\n')
+  })
+
+  it('renders every complete shipped skill file for Codex', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs')
+    mocks.existsSync.mockImplementation(actualFs.existsSync)
+    const packageRoot = join(import.meta.dirname, '..')
+    mocks.readFileSync.mockImplementation((path) => path === join(
+      packageRoot, 'skills', 'manifest.json',
+    ) ? actualFs.readFileSync(path, 'utf8') : 'task specification')
+    const manifest = JSON.parse(actualFs.readFileSync(
+      join(packageRoot, 'skills', 'manifest.json'), 'utf8',
+    )) as { commandPrefixPlaceholder: string; skills: string[] }
+    const rendered: Record<string, string> = {}
+    const visit = (skill: string, root: string, current = root): void => {
+      for (const entry of actualFs.readdirSync(current, { withFileTypes: true })
+        .sort((left, right) => left.name.localeCompare(right.name))) {
+        const path = join(current, entry.name)
+        if (entry.isDirectory()) visit(skill, root, path)
+        else if (entry.isFile()) {
+          const relativePath = path.slice(root.length + 1).replaceAll('\\', '/')
+          rendered[`${skill}/${relativePath}`] = createCodexRunner().sharedSkills.renderFile(
+            actualFs.readFileSync(path),
+            {
+              repoRoot: packageRoot,
+              packageRoot,
+              commandPrefixPlaceholder: manifest.commandPrefixPlaceholder,
+            },
+          ).toString('utf8')
+        }
+      }
+    }
+    for (const skill of manifest.skills) {
+      visit(skill, join(packageRoot, 'skills', skill))
+    }
+
+    expect(rendered).toMatchSnapshot()
+  })
+
   it('spawns codex directly on POSIX with the final-message, model, effort, and prompt arguments', async () => {
     setPlatform('linux')
     mocks.readFileSync.mockReturnValue('first line\nsecond line')
@@ -77,7 +211,6 @@ describe('createCodexRunner', () => {
       cwd: 'worktree',
       detached: true,
       stdio: ['ignore', 42, 42],
-      windowsHide: true,
     })
 
     child.emit('spawn')
@@ -102,7 +235,6 @@ describe('createCodexRunner', () => {
       cwd: 'worktree',
       detached: true,
       stdio: ['ignore', 42, 42],
-      windowsHide: true,
     })
 
     child.emit('spawn')
