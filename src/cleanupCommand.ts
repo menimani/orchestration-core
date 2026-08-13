@@ -1,7 +1,8 @@
 import type { Forge } from './adapters/forge.ts'
 import {
-  dropClaimedTaskMaterialization, issueNumbersForTask, reconcileIssueReleaseIntent,
-  recordIssueReleaseIntent, type IssueReleaseFailure,
+  dropClaimedTaskMaterialization, issueNumbersForTask, issueReleaseIntentForTask,
+  reconcileIssueReleaseIntent, recordIssueReleaseIntent, removeIssueReleaseIntent,
+  type IssueReleaseFailure,
 } from './issueQueue.ts'
 import type { OrchPaths } from './paths.ts'
 
@@ -27,7 +28,7 @@ function releaseWarning(failures: readonly IssueReleaseFailure[]): string {
   return `WARN: Could not release ${subject} from the forge (${details}). The daemon will retry the persisted release.`
 }
 
-/** Clean local task state, then release any operator-owned issue-queue claim. */
+/** Clean local task state and release any operator-owned issue-queue claim. */
 export async function runCleanupCommand(
   paths: OrchPaths,
   args: string[],
@@ -41,12 +42,33 @@ export async function runCleanupCommand(
 
   const issueQueueEnabled = runtime.issueQueueEnabled()
   const issueNumbers = issueQueueEnabled ? issueNumbersForTask(paths, taskId) : []
-  runtime.cleanup(paths, taskId)
+  const previousReleaseIntent = issueNumbers.length > 0
+    ? issueReleaseIntentForTask(paths, taskId)
+    : []
+  if (issueNumbers.length > 0) recordIssueReleaseIntent(paths, taskId, issueNumbers)
+  try {
+    runtime.cleanup(paths, taskId)
+  } catch (error) {
+    if (issueNumbers.length > 0) {
+      try {
+        if (previousReleaseIntent.length > 0) {
+          recordIssueReleaseIntent(paths, taskId, previousReleaseIntent)
+        } else {
+          removeIssueReleaseIntent(paths, taskId)
+        }
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `Cleanup failed and issue release intent rollback failed for task ${taskId}`,
+        )
+      }
+    }
+    throw error
+  }
   if (issueNumbers.length === 0) return 0
 
   // Keep the mapping until the durable intent verifies the remote release. Other task
   // materialization can be removed now without losing the issue reconciliation source.
-  recordIssueReleaseIntent(paths, taskId, issueNumbers)
   dropClaimedTaskMaterialization(paths, taskId, true)
 
   let failures: IssueReleaseFailure[]
