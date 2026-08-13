@@ -318,8 +318,10 @@ values must be non-negative integers, with the narrower bounds stated below.
 
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; gitea/gitlab implementations can be added without touching the
-    core). The interface returns normalized values only: PR state plus `name:conclusion`
-    check lines; draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
+    core). The interface returns normalized values only: PR state plus check records with
+    `name`, `conclusion`, and an ISO `startedAt` timestamp; CI waiting keeps only the
+    newest `startedAt` record for each check name so reruns supersede earlier attempts.
+    Draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
     likewise normalizes issues, comments, and author write-access verdicts. It exposes
     current-user and label discovery/creation; issue creation, lookup, open/closed
     listing, and comments; assignment and label mutation; direct closure; and merge
