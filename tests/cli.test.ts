@@ -239,6 +239,7 @@ describe('manual merge', () => {
     git(['commit', '-qm', 'fix: complete linked task'], worktree)
     await writeStatus(paths, taskId, 'completed')
     recordIssueForTask(paths, taskId, 197)
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '3\n')
     const runBranch = git(['branch', '--show-current']).trim()
 
     const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
@@ -253,6 +254,7 @@ describe('manual merge', () => {
     expect(git(['log', '-1', '--format=%s']).trim()).toBe(
       `Merge ${taskId} via orchestration (closes #197)`,
     )
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
     const mergeCommit = git(['rev-parse', 'HEAD']).trim()
     expect(JSON.parse(readFileSync(
       join(paths.queueDir, 'issue-promotion', '197.json'), 'utf8',
@@ -620,7 +622,10 @@ describe('loop daemon ownership', () => {
     expect(loopLogLines.filter((line) => line.includes('032_auto'))).toHaveLength(1)
   })
 
-  it('removes the PID and issue marker after a startup failure', () => {
+  it('resets the merge streak and removes daemon markers after a startup failure', () => {
+    mkdirSync(dirname(daemonFile('merge-failure-count.txt')), { recursive: true })
+    writeFileSync(daemonFile('merge-failure-count.txt'), '3\n')
+
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
@@ -633,6 +638,7 @@ describe('loop daemon ownership', () => {
     expect(result.stderr).toContain("Unknown FORGE 'missing'")
     expect(existsSync(daemonFile('loop.pid'))).toBe(false)
     expect(existsSync(daemonFile('issue-mode'))).toBe(false)
+    expect(readFileSync(daemonFile('merge-failure-count.txt'), 'utf8')).toBe('0\n')
   })
 
   it('refreshes the cycle cap and removes daemon markers after a normal shutdown', () => {
