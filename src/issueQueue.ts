@@ -939,6 +939,20 @@ export interface IssueReleaseFailure {
   error: unknown
 }
 
+export class IssueReleaseReconciliationError extends AggregateError {
+  readonly failures: readonly IssueReleaseFailure[]
+
+  constructor(failures: readonly IssueReleaseFailure[]) {
+    const issues = failures.map(({ issueNumber }) => `#${issueNumber}`).join(' ')
+    super(
+      failures.map(({ error }) => error),
+      `Could not reconcile persisted issue releases for ${issues}`,
+    )
+    this.name = 'IssueReleaseReconciliationError'
+    this.failures = failures
+  }
+}
+
 /** Retry one durable cleanup release, removing the intent only after every issue verifies. */
 export async function reconcileIssueReleaseIntent(
   forge: Forge,
@@ -1425,7 +1439,10 @@ export async function reapStaleLeases(
     (await forge.listIssueComments(issue.number)).some((comment) =>
       comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
 ): Promise<number[]> {
-  await reconcileIssueReleaseIntents(forge, paths)
+  const releaseFailures = await reconcileIssueReleaseIntents(forge, paths)
+  if (releaseFailures.length > 0) {
+    throw new IssueReleaseReconciliationError(releaseFailures)
+  }
   const reaped: number[] = []
   const openIssues = knownOpenFindings ?? await forge.listOpenIssues(LABEL_IN_PROGRESS)
   for (const issue of openIssues.filter((candidate) =>

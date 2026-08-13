@@ -11,10 +11,12 @@ import {
   buildIssueBody, claimIssue, claimIssueGroup, closeIssueAndRemoveLifecycleLabels,
   commentOnIssueMerge, fingerprintOf, groupReadyFindings, heartbeatIssueForTask,
   issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  IssueReleaseReconciliationError,
   missingRequirementCompletionMarkers, parseIssueBody,
   publishDelegatedTask, publishFinding, reapStaleLeases,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints, recordIssueForTask,
-  recordIssuesForTask, recordIssuePromotion, recordIssuePromotions, releaseIssueClaim,
+  recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotion, recordIssuePromotions,
+  releaseIssueClaim,
   returnIssueToReady, LABEL_FINDING,
   LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
@@ -1217,6 +1219,30 @@ describe('issue claim release', () => {
 })
 
 describe('reapStaleLeases', () => {
+  it('surfaces persisted release failures before reporting stale-lease recovery', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'cleanup release', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    recordIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    forge.addLabel = async (_number, label) => {
+      if (label === LABEL_READY) throw new Error('release unavailable')
+    }
+
+    let caught: unknown
+    try {
+      await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(IssueReleaseReconciliationError)
+    expect((caught as IssueReleaseReconciliationError).failures).toMatchObject([
+      { issueNumber, error: { message: 'release unavailable' } },
+    ])
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(true)
+  })
+
   it('does not return a quarantined claim failure to the ready queue', async () => {
     const base = new Date('2026-08-08T12:00:00Z')
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
