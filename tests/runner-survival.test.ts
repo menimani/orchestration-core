@@ -5,12 +5,15 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, it } from 'vitest'
+import { afterEach, expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
+import { TestProcessRegistry } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'src', 'cli.ts')
 const PROJECT_ADAPTER = join(HERE, 'fixtures', 'project-loader-fixture.ts')
+const fixtureRoots: string[] = []
+const testProcesses = new TestProcessRegistry()
 
 interface SpawnProbe {
   command: string
@@ -37,19 +40,6 @@ async function waitUntil(predicate: () => boolean, message: string): Promise<voi
   }
 }
 
-function terminateProcessTree(pid: number): void {
-  if (!processIsAlive(pid)) return
-  if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true })
-    return
-  }
-  try {
-    process.kill(-pid, 'SIGKILL')
-  } catch {
-    // The detached process group may have exited between the probe and signal.
-  }
-}
-
 async function removeFixture(root: string): Promise<void> {
   const deadline = Date.now() + 10_000
   while (existsSync(root)) {
@@ -63,80 +53,82 @@ async function removeFixture(root: string): Promise<void> {
   }
 }
 
+afterEach(async () => {
+  await testProcesses.cleanup()
+  for (const root of fixtureRoots.splice(0)) await removeFixture(root)
+})
+
 it('launches the real CLI daemon in the detached console-sharing mode', async () => {
   const root = mkdtempSync(join(tmpdir(), 'orch runner-survival-'))
+  fixtureRoots.push(root)
   const probeFile = join(root, 'spawn-probe.jsonl')
   const preload = join(root, 'spawn-probe.cjs')
   const stopFile = join(root, 'orchestration', 'queue', 'stop')
   let daemonPid = 0
+  testProcesses.trackPid(() => daemonPid, { tree: true })
 
-  try {
-    const init = spawnSync('git', ['init', '--initial-branch=main'], {
-      cwd: root,
-      encoding: 'utf8',
-      windowsHide: true,
-    })
-    expect(init.status).toBe(0)
-    writeFileSync(preload, [
-      "const childProcess = require('node:child_process')",
-      "const { appendFileSync } = require('node:fs')",
-      "const { syncBuiltinESMExports } = require('node:module')",
-      'const originalSpawn = childProcess.spawn',
-      'childProcess.spawn = function (command, args, options) {',
-      '  appendFileSync(process.env.ORCH_TEST_SPAWN_PROBE, `${JSON.stringify({',
-      '    command,',
-      '    args,',
-      '    cwd: options?.cwd,',
-      '    detached: options?.detached === true,',
-      "    hasWindowsHide: Object.hasOwn(options ?? {}, 'windowsHide'),",
-      '  })}\\n`)',
-      '  return originalSpawn.apply(this, arguments)',
-      '}',
-      'syncBuiltinESMExports()',
-      '',
-    ].join('\n'))
+  const init = spawnSync('git', ['init', '--initial-branch=main'], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+  })
+  expect(init.status).toBe(0)
+  writeFileSync(preload, [
+    "const childProcess = require('node:child_process')",
+    "const { appendFileSync } = require('node:fs')",
+    "const { syncBuiltinESMExports } = require('node:module')",
+    'const originalSpawn = childProcess.spawn',
+    'childProcess.spawn = function (command, args, options) {',
+    '  appendFileSync(process.env.ORCH_TEST_SPAWN_PROBE, `${JSON.stringify({',
+    '    command,',
+    '    args,',
+    '    cwd: options?.cwd,',
+    '    detached: options?.detached === true,',
+    "    hasWindowsHide: Object.hasOwn(options ?? {}, 'windowsHide'),",
+    '  })}\\n`)',
+    '  return originalSpawn.apply(this, arguments)',
+    '}',
+    'syncBuiltinESMExports()',
+    '',
+  ].join('\n'))
 
-    const launcher = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
-      cwd: root,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        AUTO_PR: 'false',
-        CORE_AUTO_UPDATE: 'false',
-        ISSUE_QUEUE_ENABLED: 'false',
-        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require="${preload.replaceAll('\\', '\\\\')}"`.trim(),
-        ORCH_TEST_SPAWN_PROBE: probeFile,
-        POLL_INTERVAL: '1',
-        PROJECT: 'fixture',
-        PROJECT_ADAPTER,
-        REVIEW_ENABLED: 'false',
-        SCAN_ENABLED: 'false',
-      },
-      timeout: 10_000,
-      windowsHide: true,
-    })
-    expect(launcher.status, launcher.stderr).toBe(0)
-    const match = /Started the loop in the background \(PID=(\d+)\)/.exec(launcher.stdout)
-    expect(match).not.toBeNull()
-    daemonPid = Number(match?.[1])
+  const launcher = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      AUTO_PR: 'false',
+      CORE_AUTO_UPDATE: 'false',
+      ISSUE_QUEUE_ENABLED: 'false',
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require="${preload.replaceAll('\\', '\\\\')}"`.trim(),
+      ORCH_TEST_SPAWN_PROBE: probeFile,
+      POLL_INTERVAL: '1',
+      PROJECT: 'fixture',
+      PROJECT_ADAPTER,
+      REVIEW_ENABLED: 'false',
+      SCAN_ENABLED: 'false',
+    },
+    timeout: 10_000,
+    windowsHide: true,
+  })
+  expect(launcher.status, launcher.stderr).toBe(0)
+  const match = /Started the loop in the background \(PID=(\d+)\)/.exec(launcher.stdout)
+  expect(match).not.toBeNull()
+  daemonPid = Number(match?.[1])
 
-    await waitUntil(() => processIsAlive(daemonPid), 'CLI daemon did not survive its launcher')
-    const probes = readFileSync(probeFile, 'utf8').trim().split(/\r?\n/)
-      .map((line) => JSON.parse(line) as SpawnProbe)
-    const daemonSpawn = probes.find((probe) => probe.command === process.execPath
-      && probe.args.includes('--marker-output'))
-    expect(daemonSpawn).toMatchObject({ detached: true, hasWindowsHide: false })
-    // The daemon must inherit the repository the launcher was pointed at. Started in the
-    // package directory instead, it resolves its own checkout as the repository and the
-    // startup dependency install reinstalls the package it is running from.
-    expect(resolve(daemonSpawn?.cwd ?? '').toLowerCase())
-      .toBe(realpathSync.native(root).toLowerCase())
+  await waitUntil(() => processIsAlive(daemonPid), 'CLI daemon did not survive its launcher')
+  const probes = readFileSync(probeFile, 'utf8').trim().split(/\r?\n/)
+    .map((line) => JSON.parse(line) as SpawnProbe)
+  const daemonSpawn = probes.find((probe) => probe.command === process.execPath
+    && probe.args.includes('--marker-output'))
+  expect(daemonSpawn).toMatchObject({ detached: true, hasWindowsHide: false })
+  // The daemon must inherit the repository the launcher was pointed at. Started in the
+  // package directory instead, it resolves its own checkout as the repository and the
+  // startup dependency install reinstalls the package it is running from.
+  expect(resolve(daemonSpawn?.cwd ?? '').toLowerCase())
+    .toBe(realpathSync.native(root).toLowerCase())
 
-    mkdirSync(dirname(stopFile), { recursive: true })
-    writeFileSync(stopFile, '')
-    await waitUntil(() => !processIsAlive(daemonPid), 'CLI daemon did not stop')
-  } finally {
-    terminateProcessTree(daemonPid)
-    await removeFixture(root)
-  }
+  mkdirSync(dirname(stopFile), { recursive: true })
+  writeFileSync(stopFile, '')
+  await waitUntil(() => !processIsAlive(daemonPid), 'CLI daemon did not stop')
 })

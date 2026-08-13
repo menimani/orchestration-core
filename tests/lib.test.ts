@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import {
   existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs'
@@ -14,9 +14,11 @@ import {
   orchPaths, packageScriptCommand, statusFile, type OrchPaths,
 } from '../src/paths.ts'
 import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
+import { TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
+const testProcesses = new TestProcessRegistry()
 
 function childOutput(child: ChildProcess): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -45,7 +47,8 @@ beforeEach(() => {
   paths = orchPaths(repoRoot)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await testProcesses.cleanup()
   vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
@@ -199,7 +202,7 @@ describe('task ids', () => {
     const idsModule = pathToFileURL(join(process.cwd(), 'src', 'ids.ts')).href
     const pathsModule = pathToFileURL(join(process.cwd(), 'src', 'paths.ts')).href
     const readyFiles = Array.from({ length: 4 }, (_, index) => join(repoRoot, `sequence-ready-${index}`))
-    const children = readyFiles.map((readyFile, index) => spawn(process.execPath, [
+    const children = readyFiles.map((readyFile, index) => testProcesses.spawn(process.execPath, [
       '--input-type=module', '--eval',
       `const [{ writeFileSync }, { newTaskId }, { orchPaths }] = await Promise.all([import('node:fs'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})]); writeFileSync(process.argv[3], ''); console.log(newTaskId(orchPaths(process.argv[1]), process.argv[2], new Date(2026, 7, 8, 9, 30, 5)))`,
       repoRoot, `child-${index}`, readyFile,
@@ -235,7 +238,7 @@ describe('task ids', () => {
     const idsModule = pathToFileURL(join(process.cwd(), 'src', 'ids.ts')).href
     const pathsModule = pathToFileURL(join(process.cwd(), 'src', 'paths.ts')).href
     const readyFiles = Array.from({ length: 4 }, (_, index) => join(repoRoot, `desc-ready-${index}`))
-    const children = readyFiles.map((readyFile) => spawn(process.execPath, [
+    const children = readyFiles.map((readyFile) => testProcesses.spawn(process.execPath, [
       '--input-type=module', '--eval',
       `const [{ writeFileSync }, { join }, { taskIdForDesc }, { orchPaths }] = await Promise.all([import('node:fs'), import('node:path'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})]); writeFileSync(process.argv[3], ''); const paths = orchPaths(process.argv[1]); const id = taskIdForDesc(paths, 'auto', process.argv[2]); writeFileSync(join(paths.tasksDir, id + '.md'), '# spec\\n'); console.log(id)`,
       repoRoot, 'the same concurrent finding', readyFile,
