@@ -1,0 +1,67 @@
+name: Specification site
+
+# `SPEC.md` is the specification the suite pins, so it must stay the single copy: the
+# site is assembled from it at build time rather than from a second file kept in step by
+# hand. Nothing here is checked into the repository except this workflow.
+on:
+  push:
+    branches: [main]
+    paths: ['SPEC.md', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+# `pages` and `id-token` are what the deployment needs; `contents` stays read-only.
+permissions:
+  contents: read
+  id-token: write
+  pages: write
+
+# One deployment at a time, and never cancel one midway: the published site is the
+# artifact of whichever run finishes, so an interrupted deployment leaves the old page.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/configure-pages@v5
+
+      # Jekyll converts a Markdown file only when it carries front matter, and adding
+      # front matter to SPEC.md would put site scaffolding in the specification. The
+      # copy taken here carries it instead.
+      - name: Assemble the site source
+        run: |
+          mkdir site
+          cat > site/_config.yml <<'CONFIG'
+          title: orchestration-core
+          description: The behaviour the suite pins
+          theme: jekyll-theme-primer
+          CONFIG
+          {
+            echo '---'
+            echo 'title: Specification'
+            echo '---'
+            echo
+            echo '[Repository](https://github.com/menimani/orchestration-core)'
+            echo
+            cat SPEC.md
+          } > site/index.md
+
+      - uses: actions/jekyll-build-pages@v1
+        with:
+          source: site
+          destination: site/_site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/_site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
