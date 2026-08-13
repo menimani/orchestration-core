@@ -2,7 +2,6 @@ import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } f
 import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
 
-const MAX_MESSAGE_LENGTH = 80
 const WARN_SUMMARY_INTERVAL_MS = 10 * 60 * 1000
 const LOOP_EVENT_NAME_WIDTH = 10
 
@@ -11,13 +10,17 @@ const EVENT_NAMES = [
   'Decision',
   'Claimed',
   'Started',
+  'Installed',
+  'Running',
+  'Idle',
   'Merging',
   'Merged',
   'Failed',
   'Filed',
+  'Released',
+  'Stopped',
   'Waiting',
   'Status',
-  'Mode',
   'Updated',
   'Restarting',
   'Restarted',
@@ -87,13 +90,8 @@ export class LoopWarningLog {
     existing.repeats += 1
     if (current.getTime() - existing.lastSummaryAt < WARN_SUMMARY_INTERVAL_MS) return
 
-    const suffix = ` repeated ${existing.repeats} times`
-    const available = MAX_MESSAGE_LENGTH - LOOP_EVENT_NAME_WIDTH - 1 - suffix.length
     const existingDisplay = existing.message.split(/\r?\n/, 1)[0] ?? ''
-    const summaryKey = existingDisplay.length > available
-      ? `${existingDisplay.slice(0, Math.max(0, available - 1))}…`
-      : existingDisplay
-    this.write(`WARN ${summaryKey}${suffix}`)
+    this.write(`WARN ${existingDisplay} repeated ${existing.repeats} times`)
     existing.repeats = 0
     existing.lastSummaryAt = current.getTime()
   }
@@ -156,20 +154,15 @@ function splitEvent(message: string): { event: string; subject: string } {
     : { event: content.slice(0, separator), subject: content.slice(separator + 1) }
 }
 
-/** Align every physical daemon-log line under the event that produced the message. */
+/** Format a single-line event for the daemon log; detailed output belongs elsewhere. */
 export function loopLogLines(message: string, context: LoopLogContext): string[] {
   const cycle = String(context.currentCycle).padStart(2, '0')
   const cap = String(context.cycleCap).padStart(2, '0')
   const prefix = `${logTimestamp(context.now ?? new Date())} [loop ${cycle}/${cap}] `
-  const physicalLines = message.split(/\r?\n/)
-  const { event, subject } = splitEvent(physicalLines[0] ?? '')
-  return [subject, ...physicalLines.slice(1)].map((line) => {
-    const content = `${event.padEnd(LOOP_EVENT_NAME_WIDTH)}${line === '' ? '' : ` ${line}`}`
-    const capped = content.length > MAX_MESSAGE_LENGTH
-      ? `${content.slice(0, MAX_MESSAGE_LENGTH - 1)}…`
-      : content
-    return `${prefix}${capped}`
-  })
+  const firstLine = message.split(/\r?\n/, 1)[0] ?? ''
+  const { event, subject } = splitEvent(firstLine)
+  const content = `${event.padEnd(LOOP_EVENT_NAME_WIDTH)}${subject === '' ? '' : ` ${subject}`}`
+  return [`${prefix}${content}`]
 }
 
 /** Prepare the process-wide loop log before the daemon opens it for append. */

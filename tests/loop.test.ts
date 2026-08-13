@@ -202,7 +202,7 @@ describe('daemon startup', () => {
 
     expect(install).toHaveBeenCalledOnce()
     expect(install).toHaveBeenCalledWith(join(repoRoot, 'orchestration', 'ts'))
-    expect(logged).toContain('Installed  orchestration deps  at startup')
+    expect(logged).toContain('Installed at startup')
 
     syncOrchestrationDepsAtStartup(paths, vi.fn(), {
       install,
@@ -556,13 +556,13 @@ describe('forge poll budget', () => {
     current = new Date(2026, 7, 11, 14, 30, 0)
     expect(await loop.poll()).toBe('continue')
     expect(attempts).toBe(1)
-    expect(logged.filter((line) => line.startsWith('Waiting forge  rate limit until')))
-      .toEqual(['Waiting forge  rate limit until 14:40'])
+    expect(logged.filter((line) => line.startsWith('Waiting forge       rate limit until')))
+      .toEqual(['Waiting forge       rate limit until 14:40'])
 
     current = resetAt
     expect(await loop.poll()).toBe('continue')
     expect(attempts).toBe(2)
-    expect(logged.filter((line) => line.startsWith('Waiting forge  rate limit until')))
+    expect(logged.filter((line) => line.startsWith('Waiting forge       rate limit until')))
       .toHaveLength(1)
   })
 })
@@ -1210,7 +1210,7 @@ describe('cycle gate', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(runnerStarts).toHaveLength(1)
-    expect(logText()).toContain('Status Scan=1')
+    expect(logText()).toContain('Running Status      Scan=1  Task=0  Queue=0')
     expect(logText()).not.toContain('Waiting=')
     expect(logText()).not.toContain('LOOP_DONE:')
   })
@@ -1380,7 +1380,7 @@ describe('remote issue queue idle detection', () => {
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logged).toEqual(['Waiting remote  issues #1'])
+    expect(logged).toEqual(['Waiting remote      issues #1'])
 
     await loop.triggerScanIfIdle()
     expect(logged).toHaveLength(1)
@@ -1389,14 +1389,14 @@ describe('remote issue queue idle detection', () => {
       title: 'another pending fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
     await loop.triggerScanIfIdle()
-    expect(logged.at(-1)).toBe('Waiting remote  issues #1 #2')
+    expect(logged.at(-1)).toBe('Waiting remote      issues #1 #2')
 
     current = new Date(2026, 7, 8, 12, 9, 59)
     await loop.triggerScanIfIdle()
     expect(logged).toHaveLength(2)
     current = new Date(2026, 7, 8, 12, 10, 0)
     await loop.triggerScanIfIdle()
-    expect(logged.at(-1)).toBe('Waiting remote  issues #1 #2')
+    expect(logged.at(-1)).toBe('Waiting remote      issues #1 #2')
     expect(logged).toHaveLength(3)
   })
 
@@ -1410,7 +1410,7 @@ describe('remote issue queue idle detection', () => {
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toBe('Waiting remote  issues #1')
+    expect(logText()).toBe('Waiting remote      issues #1')
   })
 
   it('names an open finding as the reason an idle poll keeps waiting', async () => {
@@ -1427,8 +1427,8 @@ describe('remote issue queue idle detection', () => {
 
     expect(await loop.poll()).toBe('continue')
 
-    expect(logged).toContain('Waiting remote  issues #1')
-    expect(logged).toContain('Status Running=0  Queue=0  Idle=0s  Waiting=open finding')
+    expect(logged).toContain('Waiting remote      issues #1')
+    expect(logged).toContain('Idle Status      Task=0  Queue=0  0s  Waiting=open finding')
   })
 
   it('defers the cycle gate and review while a merge-failed issue is open', async () => {
@@ -1441,7 +1441,7 @@ describe('remote issue queue idle detection', () => {
 
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toBe('Waiting remote  issues #1')
+    expect(logText()).toBe('Waiting remote      issues #1')
   })
 
   it('defers the cycle gate and review when remote issue listing fails', async () => {
@@ -1643,7 +1643,7 @@ describe('failure announcement and burst stop (via poll)', () => {
 
     expect(await loop.poll()).toBe('continue')
     expect(logText()).toMatch(
-      /^Status Running=\d+  Queue=\d+  Idle=0s  Waiting=pull request promotion$/m,
+      /^Idle Status      Task=\d+  Queue=\d+  0s  Waiting=pull request promotion$/m,
     )
   })
 
@@ -1661,12 +1661,12 @@ describe('failure announcement and burst stop (via poll)', () => {
       current = new Date(Date.parse('2026-08-08T03:00:00Z') + poll * 30_000)
       const before = logged.length
       expect(await loop.poll()).toBe('continue')
-      const status = logged.slice(before).find((line) => line.startsWith('Status '))
+      const status = logged.slice(before).find((line) => line.startsWith('Idle '))
       if (status !== undefined) idleLines.push({ at: current.getTime(), line: status })
     }
 
     expect(idleLines).toHaveLength(10)
-    expect(idleLines.at(-1)?.line).toContain('Idle=30m')
+    expect(idleLines.at(-1)?.line).toContain('30m')
     for (let index = 1; index < idleLines.length; index += 1) {
       expect(idleLines[index]!.at - idleLines[index - 1]!.at)
         .toBeLessThanOrEqual(5 * 60_000)
@@ -1679,17 +1679,17 @@ describe('failure announcement and burst stop (via poll)', () => {
     await loop.poll()
     current = new Date('2026-08-08T03:31:00Z')
     await loop.poll()
-    expect(logged.slice(activeStart).filter((line) => line.startsWith('Status ')))
+    expect(logged.slice(activeStart).filter((line) => line.startsWith('Running ')))
       .toEqual([
-        'Status Running=1  Queue=0',
-        'Status Running=1  Queue=0',
+        'Running Status      Task=1  Queue=0',
+        'Running Status      Task=1  Queue=0',
       ])
 
     rmSync(statusFile(paths, taskId))
     current = new Date('2026-08-08T03:31:30Z')
     await loop.poll()
     expect(logged.at(-1)).toBe(
-      'Status Running=0  Queue=0  Idle=0s  Waiting=pull request promotion',
+      'Idle Status      Task=0  Queue=0  0s  Waiting=pull request promotion',
     )
   })
 
@@ -1698,7 +1698,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     writeRawStatus('20260809_000000_001_scan', 'running', process.pid)
 
     expect(await loop.poll()).toBe('continue')
-    expect(logged).toContain('Status Scan=1')
+    expect(logged).toContain('Running Status      Scan=1  Task=0  Queue=0')
     expect(logged).not.toContain('Waiting=')
   })
 
@@ -1708,7 +1708,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     writeRawStatus('20260809_000001_002_auto-fix', 'running', process.pid)
 
     expect(await loop.poll()).toBe('continue')
-    expect(logged).toContain('Status Scan=1  Running=1  Queue=0')
+    expect(logged).toContain('Running Status      Scan=1  Task=1  Queue=0')
     expect(logged).not.toContain('Waiting=')
   })
 
@@ -1915,7 +1915,7 @@ describe('completion marker output', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
-    expect(logged.filter((line) => line === 'Started Suite  cycle 1')).toHaveLength(1)
+    expect(logged.filter((line) => line === 'Started Suite       cycle 1')).toHaveLength(1)
     expect(prStatusCalls).toBe(0)
   })
 
@@ -2435,7 +2435,7 @@ describe('completed task merge recovery', () => {
     expect(await loop.poll()).toBe('continue')
     expect(readStatus(paths, taskId)?.status).toBe('completed')
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
-    expect(logged).toContain('Waiting remote  issues #1')
+    expect(logged).toContain('Waiting remote      issues #1')
 
     expect(await loop.poll()).toBe('continue')
     expect(readStatus(paths, taskId)?.status).toBe('merged')
@@ -2561,7 +2561,7 @@ describe('runCycleSuite', () => {
     expect(loop.runCycleSuite(1)).toBe(true)
     expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(true)
     expect(existsSync(stopFile())).toBe(false)
-    expect(logged).toContain('Started Suite  cycle 1')
+    expect(logged).toContain('Started Suite       cycle 1')
   })
 
   it('stops before running suite steps when the Docker probe fails', () => {

@@ -613,10 +613,6 @@ const cmdLoop: Command = async (paths, args) => {
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const log = (message: string, error = false): void => {
     const write = error ? console.error : console.log
-    if (/^(?:CYCLE_COMPLETE|FAILED|LOOP_DONE):/.test(message)) {
-      if (markerOutput === undefined) write(message)
-      else appendFileSync(markerOutput, `${message}\n`)
-    }
     const currentCycle = existsSync(scanCountFile)
       ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
       : 0
@@ -625,8 +621,12 @@ const cmdLoop: Command = async (paths, args) => {
       cycleCap: config.maxScanCycles,
     })) write(line)
   }
+  const marker = (message: string): void => {
+    if (markerOutput === undefined) console.log(message)
+    else appendFileSync(markerOutput, `${message}\n`)
+  }
   try {
-    return await runLoopDaemon(paths, log, config)
+    return await runLoopDaemon(paths, log, marker, config)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log(`ERROR: ${(message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'}`, true)
@@ -669,6 +669,7 @@ const cmdCiWait: Command = async (paths, args) => {
 async function runLoopDaemon(
   paths: OrchPaths,
   log: (line: string) => void,
+  marker: (line: string) => void,
   config: LoopConfig,
 ): Promise<number> {
   const pidFile = join(paths.queueDir, 'loop.pid')
@@ -770,7 +771,7 @@ async function runLoopDaemon(
 
     writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
     log(formatEventLine(
-      'Mode', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
+      'Started', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
     ))
 
     // A stale stop file is cleared only after the PID lock is taken, so another
@@ -781,12 +782,14 @@ async function runLoopDaemon(
 
     syncOrchestrationDepsAtStartup(
       paths,
-      (name, subject) => log(`${name} ${subject}`),
+      (name, subject) => log(name === 'Installed'
+        ? formatEventLine(name, 'orchestration deps', subject)
+        : formatEventLine(name, subject)),
     )
     const forge = await loadForge(config.forge, paths.repoRoot)
     const runner = await loadRunner(config.runner)
     const project = await loadProject(paths.root)
-    const loop = createLoop({ paths, config, forge, runner, project, log, now: () => new Date() })
+    const loop = createLoop({ paths, config, forge, runner, project, log, marker, now: () => new Date() })
 
     if (!loop.validatePushTarget()) return 1
     await loop.initializeIssueQueue()

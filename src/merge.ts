@@ -120,7 +120,7 @@ function installOrchestrationDeps(
       mkdirSync(join(root, 'node_modules'), { recursive: true })
       writeFileSync(hashFile, `${lockHash}\n`)
     }
-    event('Installed', ` orchestration deps  ${subject}`)
+    event('Installed', subject)
   } catch (error) {
     event('WARN', `orchestration deps install ${subject} failed: ${installFailureSummary(error)}`)
   }
