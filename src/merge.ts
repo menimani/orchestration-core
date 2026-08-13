@@ -13,6 +13,7 @@ import {
   branchName, isInspectionTaskId, logFile, packageFile, worktreeDir, PACKAGE_ROOT,
   type OrchPaths,
 } from './paths.ts'
+import { execShellSync } from './shell.ts'
 import { readStatus, writeMergedStatus } from './status.ts'
 import {
   removeWorktreeWithFallback, type WorktreeRemovalRuntime,
@@ -241,15 +242,16 @@ function mergeIo(outputFile?: string): MergeIo {
     if (outputFile !== undefined) {
       const outputFd = openSync(outputFile, 'a')
       try {
-        execSync(command, {
+        execShellSync(command, {
           cwd, stdio: ['ignore', outputFd, outputFd], windowsHide: true,
+          encoding: 'utf8',
         })
       } finally {
         closeSync(outputFd)
       }
     } else {
       try {
-        const result = execSync(command, {
+        const result = execShellSync(command, {
           cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
           stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
         })

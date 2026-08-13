@@ -7,9 +7,13 @@ import { PACKAGE_ROOT } from './paths.ts'
 import {
   processTreeRootPid, startWindowsProcess, type WindowsProcessOptions,
 } from './adapters/windows-process.ts'
+import {
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
+} from './internalEnvironment.ts'
 
-export const LOOP_RESTART_READY_FILE_ENV = 'ORCHESTRATION_LOOP_RESTART_READY_FILE'
-export const LOOP_RESTART_PREDECESSOR_PID_ENV = 'ORCHESTRATION_LOOP_RESTART_PREDECESSOR_PID'
+export {
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
+} from './internalEnvironment.ts'
 
 export interface LoopRestartCommand {
   executable: string
