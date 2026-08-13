@@ -47,10 +47,6 @@ const RUNTIME_DIRECTORIES: ReadonlySet<string> = new Set([
   'orchestration/worktrees',
 ])
 
-// This test proves that the runner transports a multi-byte specification without putting
-// it in the command line. Its Japanese payload is test data, not repository prose.
-const ALLOWED_PATHS: ReadonlySet<string> = new Set(['tests/runner-codex.test.ts'])
-
 const permitted = (character: string): boolean =>
   character.codePointAt(0)! < 128
   || PUNCTUATION.has(character)
@@ -70,10 +66,6 @@ const isGeneratedDirectory = (directory: string): boolean => {
   return GENERATED_DIRECTORY_NAMES.has(repositoryPath.split('/').at(-1) ?? '')
     || RUNTIME_DIRECTORIES.has(repositoryPath)
 }
-
-/** Whether a source path is intentionally excluded from the core language check. */
-export const isEnglishAllowedPath = (file: string): boolean =>
-  ALLOWED_PATHS.has(repositoryRelativePath(file))
 
 export type TextViolation = {
   line: number
@@ -110,7 +102,6 @@ export const main = (): number => {
   let hits = 0
 
   for (const file of walk(PACKAGE_ROOT)) {
-    if (isEnglishAllowedPath(file)) continue
     for (const violation of scanText(readFileSync(file, 'utf8'))) {
       // Name the code points because some offenders, such as zero-width spaces, are
       // invisible in the report too.

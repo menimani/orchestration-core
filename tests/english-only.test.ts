@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isEnglishAllowedPath, scanText } from '../checks/english-only.ts'
+import { scanText } from '../checks/english-only.ts'
 
 describe('English-only source check', () => {
   it('accepts ASCII, English typography, and borrowed Latin letters', () => {
@@ -21,12 +21,5 @@ describe('English-only source check', () => {
     expect(violations[2]?.codePoints).toEqual(['U+FF08', 'U+FF09'])
     expect(violations[3]?.codePoints).toEqual(['U+200B'])
     expect(violations[4]?.codePoints).toEqual(['U+00D7'])
-  })
-
-  it('allows only the runner multi-byte fixture path', () => {
-    expect(isEnglishAllowedPath('tests/runner-codex.test.ts')).toBe(true)
-    expect(isEnglishAllowedPath('tests\\runner-codex.test.ts')).toBe(true)
-    expect(isEnglishAllowedPath('fixtures/runner-codex.test.ts')).toBe(false)
-    expect(isEnglishAllowedPath('tests/another-runner.test.ts')).toBe(false)
   })
 })
