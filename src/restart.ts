@@ -94,6 +94,11 @@ export async function startLoopReplacement(
   try {
     replacement = spawnProcess(command.executable, command.args, {
       cwd: command.cwd,
+      // A replacement daemon must be created the way a daemon is created. Without this
+      // it stayed attached to the predecessor that spawned it and died with it, so on
+      // Windows a consumer's loop ended at the first core auto-update rather than
+      // continuing on the pulled code.
+      detached: true,
       env: {
         ...(runtime.env ?? process.env),
         [LOOP_RESTART_READY_FILE_ENV]: readyFile,

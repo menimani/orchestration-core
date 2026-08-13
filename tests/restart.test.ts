@@ -36,6 +36,9 @@ describe('loop replacement startup', () => {
       const env = options.env as NodeJS.ProcessEnv
       expect(env[LOOP_RESTART_READY_FILE_ENV]).toBe(readyFile)
       expect(env[LOOP_RESTART_PREDECESSOR_PID_ENV]).toBe(`${process.pid}`)
+      // The predecessor exits as soon as this process is ready, and an attached child
+      // dies with it: a Windows consumer's loop ended at its first core auto-update.
+      expect(options.detached).toBe(true)
       expect(readFileSync(pidFile, 'utf8')).toBe(`${process.pid}\n`)
       setTimeout(() => writeFileSync(readyFile, '43210\n'), 0)
       return child
