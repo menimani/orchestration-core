@@ -77,4 +77,12 @@ describe('current branch remote', () => {
 
     expect(currentRemoteDefaultBranch(repoRoot)).toEqual({ branch: 'trunk', remote: 'origin' })
   })
+
+  it('ignores a stale cached remote HEAD after the advertised default changes', () => {
+    git(['init', '--bare', '--initial-branch=main', join(repoRoot, 'origin.git')])
+    git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk'])
+
+    expect(currentRemoteDefaultBranch(repoRoot)).toEqual({ branch: 'main', remote: 'origin' })
+  })
 })

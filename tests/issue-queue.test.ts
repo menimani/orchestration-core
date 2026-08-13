@@ -138,6 +138,29 @@ describe('ready finding groups', () => {
       await forge.getIssue(scan), await forge.getIssue(review),
     ]).map((group) => group.map((issue) => issue.number))).toEqual([[scan], [review]])
   })
+
+  it('keeps inspection and implementation findings for the same file separate', async () => {
+    const implementation = await forge.createIssue({
+      title: '[BUG] `src/shared.ts` implementation finding',
+      body: buildIssueBody(
+        '[BUG] `src/shared.ts` implementation finding', '20260808_000000_001_scan',
+      ),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const inspection = await forge.createIssue({
+      title: '[TEST] `src/shared.ts` inspection finding',
+      body: buildIssueBody(
+        '[TEST] `src/shared.ts` inspection finding', '20260808_000000_001_scan',
+        undefined, undefined, true,
+      ),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(groupReadyFindings([
+      await forge.getIssue(implementation), await forge.getIssue(inspection),
+    ]).map((group) => group.map((issue) => issue.number)))
+      .toEqual([[implementation], [inspection]])
+  })
 })
 
 describe('closed issue lifecycle labels', () => {
@@ -655,6 +678,39 @@ describe('claimIssue', () => {
     writeFileSync(join(paths.logsDir, `${result.taskId}.final`),
       `REQUIREMENT_COMPLETE: #${issueNumbers[0]}\nREQUIREMENT_COMPLETE: #${issueNumbers[1]}\n`)
     expect(missingRequirementCompletionMarkers(paths, result.taskId)).toEqual([])
+  })
+
+  it('rejects a mixed inspection and implementation claim group', async () => {
+    const descriptions = [
+      '[BUG] `src/a/b.ts` requires implementation',
+      '[TEST] `src/a/b.ts` requires inspection',
+    ]
+    const implementation = { issueNumber: await forge.createIssue({
+      title: descriptions[0]!,
+      body: buildIssueBody(descriptions[0]!, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    }) }
+    const inspection = { issueNumber: await forge.createIssue({
+      title: descriptions[1]!,
+      body: buildIssueBody(descriptions[1]!, 'scan-1', undefined, undefined, true),
+      labels: [LABEL_FINDING, LABEL_READY],
+    }) }
+
+    await expect(claimIssueGroup(
+      forge,
+      paths,
+      await Promise.all([implementation, inspection]
+        .map(({ issueNumber }) => forge.getIssue(issueNumber))),
+      'worker-a',
+      () => {},
+    )).rejects.toThrow('cannot mix inspection and implementation')
+
+    for (const { issueNumber } of [implementation, inspection]) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_READY)
+      expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+      expect(issue.assignees).toEqual([])
+    }
   })
 
   it('releases earlier members when a grouped claim loses a later issue', async () => {

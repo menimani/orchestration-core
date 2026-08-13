@@ -71,14 +71,6 @@ export function currentRemoteDefaultBranch(repoRoot: string): {
   remote: string
 } {
   const remote = currentBranchTrackingRemote(repoRoot)
-  const prefix = `${remote}/`
-  const cached = optionalGit(repoRoot, [
-    'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
-  ])
-  if (cached.startsWith(prefix) && cached.length > prefix.length) {
-    return { branch: cached.slice(prefix.length), remote }
-  }
-
   const advertised = git(repoRoot, ['ls-remote', '--symref', remote, 'HEAD'])
   const branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(advertised)?.[1]
   if (branch === undefined || branch === '') {

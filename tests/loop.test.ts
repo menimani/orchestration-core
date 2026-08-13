@@ -10,7 +10,8 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueNumbersForTask, issuePromotionForIssue, recordIssueForTask,
-  recordIssuePromotion, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
+  recordIssuePromotion, recordIssuesForTask,
+  LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
@@ -802,7 +803,7 @@ describe('scan yield', () => {
     writeFinal('20250101_000000_003_scan', 'NEXT_TASK: &lt;description&gt;\n')
     loop.recordScanYield('20250101_000000_003_scan')
     const lines = readFileSync(join(paths.queueDir, 'scan-yield-3'), 'utf8').trim().split('\n')
-    expect(lines[lines.length - 1]).toBe('empty')
+    expect(lines[lines.length - 1]).toBe('20250101_000000_003_scan\tempty')
   })
 
   it('records empty when the final message only reports no findings', () => {
@@ -852,6 +853,23 @@ describe('scan yield', () => {
 
     loop.foldScanYields(5)
     expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('2')
+  })
+
+  it('deduplicates a scan yield recorded again after a crash before its scanned marker', () => {
+    const loop = makeLoop({ maxEmptyScans: 2 })
+    const taskId = '20250101_000000_006_scan'
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '3\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-3'), '1\n')
+    writeFileSync(join(paths.queueDir, 'empty-scan-count.txt'), '0\n')
+    writeFinal(taskId, '')
+
+    loop.recordScanYield(taskId)
+    loop.recordScanYield(taskId)
+    loop.foldScanYields(3)
+
+    expect(readFileSync(join(paths.queueDir, 'empty-scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(existsSync(join(paths.queueDir, 'scan-yield-3'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-3'))).toBe(false)
   })
 })
 
@@ -2256,6 +2274,46 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
+  it('does not merge an abandoned grouped task after the loop restarts', async () => {
+    const taskId = '20260811_120000_064_auto-abandoned-group'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      maxParallel: 0,
+      maxConsecutiveMergeFailures: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumbers = await Promise.all([1, 2].map((number) => fakeForge.createIssue({
+      title: `grouped finding ${number}`,
+      body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })))
+    recordIssuesForTask(paths, taskId, issueNumbers)
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(false)
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+
+    const restartedLoop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      maxParallel: 0,
+      maxConsecutiveMergeFailures: 1,
+    })
+    expect(await restartedLoop.poll()).toBe('stopped')
+    await restartedLoop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+  })
+
   it('rebuilds a lost promotion record from merged status before stale-lease reaping', async () => {
     const taskId = '20260811_120000_065_auto-reconcile-merge'
     initializeGitRepo()
