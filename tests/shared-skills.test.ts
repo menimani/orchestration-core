@@ -46,7 +46,10 @@ describe('shared skill sync', () => {
 
     const result = syncSharedSkills(repoRoot, packageRoot, runner)
 
-    expect(result.installed).toEqual(['git-commit', 'loop-start'])
+    expect(result.installed).toEqual([
+      '.agents/skills/git-commit', '.agents/skills/loop-start',
+      '.claude/skills/git-commit', '.claude/skills/loop-start',
+    ])
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe('npm run -C orchestration/ts loop -- --daemon\n')
     expect(existsSync(join(repoRoot, '.agents', 'skills', 'verify-changes'))).toBe(false)
@@ -75,7 +78,7 @@ describe('shared skill sync', () => {
 
     const result = syncSharedSkills(repoRoot, packageRoot, runner)
 
-    expect(result.updated).toEqual(['loop-start'])
+    expect(result.updated).toEqual(['.agents/skills/loop-start', '.claude/skills/loop-start'])
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe('version two: npm run -C orchestration/ts loop\n')
     expect(readFileSync(localSkill, 'utf8')).toBe('repository gates\n')
@@ -89,8 +92,8 @@ describe('shared skill sync', () => {
 
     const result = syncSharedSkills(repoRoot, packageRoot, runner)
 
-    expect(result.conflicts).toEqual(['loop-start'])
-    expect(result.updated).toEqual([])
+    expect(result.conflicts).toEqual(['.agents/skills/loop-start'])
+    expect(result.updated).toEqual(['.claude/skills/loop-start'])
     expect(readFileSync(installed, 'utf8')).toBe('consumer version\n')
   })
 
@@ -100,7 +103,7 @@ describe('shared skill sync', () => {
 
     const result = syncSharedSkills(repoRoot, packageRoot, runner)
 
-    expect(result.conflicts).toEqual(['loop-start'])
+    expect(result.conflicts).toEqual(['.agents/skills/loop-start'])
     expect(existsSync(join(repoRoot, '.agents', 'skills', 'loop-start'))).toBe(false)
   })
 
@@ -187,8 +190,56 @@ describe('shared skill sync', () => {
       start: async () => process.pid,
     }
 
-    expect(() => syncSharedSkills(repoRoot, packageRoot, runner))
-      .toThrow(`shared skill destination escaped the repository: ${escaped}`)
+    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+
+    expect(result.failures).toEqual([
+      `shared skill destination escaped the repository: ${escaped}`,
+    ])
     expect(existsSync(escaped)).toBe(false)
+    // The unusable runner destination must not cost the interactive agent its workflows.
+    expect(result.installed).toEqual(['.claude/skills/git-commit', '.claude/skills/loop-start'])
+  })
+
+  it('serves the interactive agent in its own format alongside the runner', () => {
+    writeSkill('git-commit', [
+      '---',
+      'name: git-commit',
+      'allowed-tools: Bash',
+      '---',
+      '',
+      'Follow /git-review before committing.',
+      '',
+    ].join('\n'))
+
+    syncSharedSkills(repoRoot, packageRoot, runner)
+
+    const interactive = readFileSync(
+      join(repoRoot, '.claude', 'skills', 'git-commit', 'SKILL.md'), 'utf8',
+    )
+    const forRunner = readFileSync(
+      join(repoRoot, '.agents', 'skills', 'git-commit', 'SKILL.md'), 'utf8',
+    )
+    expect(interactive).toContain('allowed-tools: Bash')
+    expect(interactive).toContain('/git-review')
+    // The runner's rendering rewrites both; serving one directory with the other's form
+    // is what made the shared workflows unusable to whichever agent read them second.
+    expect(forRunner).not.toContain('allowed-tools: Bash')
+    expect(forRunner).not.toContain('/git-review')
+  })
+
+  it('serves a runner that reads the interactive directory exactly once', () => {
+    runner = {
+      sharedSkills: {
+        ...runner.sharedSkills,
+        destinationRoot: (root) => join(root, '.claude', 'skills'),
+      },
+      start: async () => process.pid,
+    }
+
+    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+
+    expect(result.installed).toEqual(['.claude/skills/git-commit', '.claude/skills/loop-start'])
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toBe('npm run -C orchestration/ts loop -- --daemon\n')
   })
 })

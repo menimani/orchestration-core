@@ -87,8 +87,10 @@ function renderSharedSkillFile(
 export function createCodexRunner(): Runner {
   return {
     sharedSkills: {
+      // `.claude/skills` was this runner's former discovery path, but it is not a legacy
+      // root: the interactive agent a person drives reads it, and the core keeps it
+      // filled. Claiming it here emptied it whenever Codex was the selected runner.
       destinationRoot: (repoRoot) => join(repoRoot, '.agents', 'skills'),
-      legacyRoots: (repoRoot) => [join(repoRoot, '.claude', 'skills')],
       renderFile: renderSharedSkillFile,
     },
     start(options: RunnerStartOptions): Promise<number> {

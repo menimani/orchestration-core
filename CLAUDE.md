@@ -6,9 +6,14 @@ TypeScript with no build step.
 
 `README.md` describes what it is and how to run it. `SPEC.md` states the behaviour the
 suite pins — the two must agree, and tests enforce that. Canonical shared workflows live
-under `skills/`. The selected runner renders them into its repository discovery path;
-Codex receives them under `.agents/skills/`. The repository-local `.claude/skills/`
-contains only `verify-changes`, which is not one of the generated shared workflows.
+under `skills/`. They are rendered into every discovery path an agent working here reads:
+the selected runner's — `.agents/skills/` for Codex — and `.claude/skills/`, which the
+interactive agent a person drives reads and which also holds `verify-changes`, a
+repository skill absent from the manifest and never touched by the sync.
+
+Merges, reviews, pull requests, and commits go through those workflows rather than
+hand-composed `gh` and `git` invocations: `git-merge` will not merge a self-PR that has
+no review, and that rule lives in the skill, not in anyone's memory.
 
 This file holds only what the source cannot tell you.
 

@@ -5,9 +5,23 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
-import type { Runner } from './adapters/runner.ts'
+import { packageCommandPrefix } from './paths.ts'
+import type { Runner, RunnerSharedSkillRenderOptions } from './adapters/runner.ts'
 
 const STATE_FILE = '.orchestration-core-sync.json'
+
+/**
+ * One directory a repository-scoped skill is discovered in, with the rendering that
+ * directory's reader expects. The loop's runner is only one such reader: a person drives
+ * an interactive agent in the same repository, and it discovers its own directory. When
+ * only the runner was served, selecting Codex removed every shared workflow from the
+ * interactive agent — including the merge workflow this repository routes merges through.
+ */
+interface SharedSkillTarget {
+  destinationRoot: string
+  legacyRoots: readonly string[]
+  renderFile(contents: Buffer, options: RunnerSharedSkillRenderOptions): Buffer
+}
 
 interface SharedSkillsManifest {
   commandPrefixPlaceholder: string
@@ -32,6 +46,8 @@ export interface SharedSkillsSyncResult {
   removedPaths: string[]
   changedPaths: string[]
   managedPaths: string[]
+  /** One message per target that could not be served at all. */
+  failures: string[]
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -90,7 +106,7 @@ function renderedSkill(
   skill: string,
   placeholder: string,
   repoRoot: string,
-  runner: Runner,
+  target: SharedSkillTarget,
 ): RenderedFile[] {
   const source = join(packageRoot, 'skills', skill)
   if (!existsSync(join(source, 'SKILL.md'))) {
@@ -98,12 +114,43 @@ function renderedSkill(
   }
   return filesIn(source).map((file) => ({
     ...file,
-    contents: runner.sharedSkills.renderFile(file.contents, {
+    contents: target.renderFile(file.contents, {
       repoRoot,
       packageRoot,
       commandPrefixPlaceholder: placeholder,
     }),
   }))
+}
+
+/**
+ * The interactive agent a person drives in the repository. The canonical skills are
+ * authored in its format already — frontmatter, `!`command`` preambles and `/skill`
+ * invocations are its own conventions — so only the command prefix is resolved here.
+ */
+function interactiveAgentTarget(repoRoot: string): SharedSkillTarget {
+  return {
+    destinationRoot: join(repoRoot, '.claude', 'skills'),
+    legacyRoots: [],
+    renderFile: (contents, options) => Buffer.from(contents.toString('utf8').replaceAll(
+      options.commandPrefixPlaceholder,
+      packageCommandPrefix(options.repoRoot, options.packageRoot),
+    )),
+  }
+}
+
+/** Every directory this repository's skills must appear in, each listed once. */
+function skillTargets(repoRoot: string, runner: Runner): SharedSkillTarget[] {
+  const runnerTarget: SharedSkillTarget = {
+    destinationRoot: runner.sharedSkills.destinationRoot(repoRoot),
+    legacyRoots: runner.sharedSkills.legacyRoots?.(repoRoot) ?? [],
+    renderFile: (contents, options) => runner.sharedSkills.renderFile(contents, options),
+  }
+  const interactive = interactiveAgentTarget(repoRoot)
+  // A runner that reads the interactive agent's directory is that agent: rendering the
+  // same directory twice would leave whichever target ran second describing the tree.
+  return relative(runnerTarget.destinationRoot, interactive.destinationRoot) === ''
+    ? [runnerTarget]
+    : [runnerTarget, interactive]
 }
 
 function hashFiles(files: readonly RenderedFile[]): string {
@@ -192,26 +239,28 @@ function migrateLegacySkills(
 }
 
 /**
- * Materialize the package's declared shared skills at the repository root. The state
+ * Materialize the package's declared shared skills into one target directory. The state
  * records the exact rendered tree last written, so later syncs never mistake a person's
  * edit (including an added support file or a deletion) for an old generated copy.
  */
-export function syncSharedSkills(
+function syncTarget(
   repoRoot: string,
   packageRoot: string,
-  runner: Runner,
-  os: OperatingSystem = operatingSystem,
+  target: SharedSkillTarget,
+  os: OperatingSystem,
 ): SharedSkillsSyncResult {
   const manifest = readManifest(packageRoot)
-  const destinationRoot = runner.sharedSkills.destinationRoot(repoRoot)
+  const destinationRoot = target.destinationRoot
   const repositoryPath = relative(repoRoot, destinationRoot)
   if (repositoryPath === '' || repositoryPath === '..'
     || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
     throw new Error(`shared skill destination escaped the repository: ${destinationRoot}`)
   }
+  // Skill names alone cannot say which directory reported them once several are served.
+  const reported = (skill: string): string =>
+    `${repositoryPath.replaceAll('\\', '/')}/${skill}`
   const stateFile = join(destinationRoot, STATE_FILE)
-  const legacyRoots = runner.sharedSkills.legacyRoots?.(repoRoot) ?? []
-  const migration = migrateLegacySkills(legacyRoots, destinationRoot, os)
+  const migration = migrateLegacySkills(target.legacyRoots, destinationRoot, os)
   mkdirSync(destinationRoot, { recursive: true })
   const state = readState(stateFile)
   const nextState: SharedSkillsState = { version: 1, skills: { ...state.skills } }
@@ -224,13 +273,13 @@ export function syncSharedSkills(
   for (const skill of manifest.skills) {
     const destination = join(destinationRoot, skill)
     const desiredFiles = renderedSkill(
-      packageRoot, skill, manifest.commandPrefixPlaceholder, repoRoot, runner,
+      packageRoot, skill, manifest.commandPrefixPlaceholder, repoRoot, target,
     )
     const desiredHash = hashFiles(desiredFiles)
     const previousHash = state.skills[skill]
     if (existsSync(destination)) {
       if (!lstatSync(destination).isDirectory()) {
-        conflicts.push(skill)
+        conflicts.push(reported(skill))
         continue
       }
       const currentHash = hashFiles(filesIn(destination))
@@ -239,23 +288,23 @@ export function syncSharedSkills(
         continue
       }
       if (previousHash === undefined || currentHash !== previousHash) {
-        conflicts.push(skill)
+        conflicts.push(reported(skill))
         continue
       }
       replaceDirectory(destination, desiredFiles, os)
       nextState.skills[skill] = desiredHash
-      updated.push(skill)
+      updated.push(reported(skill))
       changedPaths.push(destination)
       managedPaths.push(destination)
       continue
     }
     if (previousHash !== undefined) {
-      conflicts.push(skill)
+      conflicts.push(reported(skill))
       continue
     }
     replaceDirectory(destination, desiredFiles, os)
     nextState.skills[skill] = desiredHash
-    installed.push(skill)
+    installed.push(reported(skill))
     changedPaths.push(destination)
     managedPaths.push(destination)
   }
@@ -273,5 +322,38 @@ export function syncSharedSkills(
     removedPaths: migration.changedPaths,
     changedPaths,
     managedPaths,
+    failures: [],
   }
+}
+
+/**
+ * Materialize the declared shared skills for every agent that discovers skills in this
+ * repository. A target that fails is reported through its own error rather than leaving
+ * the remaining targets unserved: losing one reader's workflows must not lose the others'.
+ */
+export function syncSharedSkills(
+  repoRoot: string,
+  packageRoot: string,
+  runner: Runner,
+  os: OperatingSystem = operatingSystem,
+): SharedSkillsSyncResult {
+  const combined: SharedSkillsSyncResult = {
+    installed: [], updated: [], conflicts: [], migrationConflicts: [],
+    removedPaths: [], changedPaths: [], managedPaths: [], failures: [],
+  }
+  for (const target of skillTargets(repoRoot, runner)) {
+    let result: SharedSkillsSyncResult
+    try {
+      result = syncTarget(repoRoot, packageRoot, target, os)
+    } catch (error) {
+      // Files another target already wrote are still owed a report: throwing here would
+      // leave them on disk with nothing naming them to the consumer commit path.
+      combined.failures.push(error instanceof Error ? error.message : String(error))
+      continue
+    }
+    for (const key of Object.keys(combined) as (keyof SharedSkillsSyncResult)[]) {
+      combined[key].push(...result[key])
+    }
+  }
+  return combined
 }

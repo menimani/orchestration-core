@@ -64,8 +64,9 @@ describe('createCodexRunner', () => {
 
     expect(sharedSkills.destinationRoot(repoRoot))
       .toBe(join(repoRoot, '.agents', 'skills'))
-    expect(sharedSkills.legacyRoots?.(repoRoot))
-      .toEqual([join(repoRoot, '.claude', 'skills')])
+    // `.claude/skills` is the interactive agent's directory, which the core keeps
+    // filled; claiming it as a legacy root here emptied it whenever Codex was selected.
+    expect(sharedSkills.legacyRoots).toBeUndefined()
     expect(sharedSkills.renderFile(
       Buffer.from('{{COMMAND_PREFIX}} loop\n'),
       { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
