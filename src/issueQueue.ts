@@ -837,6 +837,11 @@ export function issueReleaseIntentForTask(paths: OrchPaths, taskId: string): num
     .map(Number)
 }
 
+/** Cancel a release that did not reach destructive local cleanup. */
+export function removeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
+  rmSync(releaseIntentFile(paths, taskId), { force: true })
+}
+
 export function issueNumberForTask(paths: OrchPaths, taskId: string): number | undefined {
   return issueNumbersForTask(paths, taskId)[0]
 }
@@ -950,7 +955,7 @@ export async function reconcileIssueReleaseIntent(
     : [])
   if (failures.length === 0) {
     dropClaimedTaskMaterialization(paths, taskId)
-    rmSync(releaseIntentFile(paths, taskId), { force: true })
+    removeIssueReleaseIntent(paths, taskId)
   }
   return failures
 }

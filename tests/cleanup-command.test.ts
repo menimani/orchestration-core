@@ -10,7 +10,7 @@ import {
 import {
   issueNumbersForTask, issueReleaseIntentForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON,
   LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
-  reapStaleLeases, recordIssueForTask, recordIssuesForTask,
+  reapStaleLeases, recordIssueForTask, recordIssueReleaseIntent, recordIssuesForTask,
 } from '../src/issueQueue.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
@@ -63,6 +63,48 @@ describe('cleanup command', () => {
     expect(commandRuntime.cleanup).toHaveBeenCalledWith(paths, taskId)
     expect(commandRuntime.loadForge).not.toHaveBeenCalled()
     expect(issueNumbersForTask(paths, taskId)).toEqual([41])
+  })
+
+  it('persists release intent before destructive cleanup', async () => {
+    recordIssuesForTask(paths, taskId, [41, 42])
+    const commandRuntime = runtime({
+      cleanup: vi.fn(() => {
+        expect(issueReleaseIntentForTask(paths, taskId)).toEqual([41, 42])
+      }),
+    })
+
+    await expect(runCleanupCommand(paths, [taskId], commandRuntime)).resolves.toBe(0)
+
+    expect(commandRuntime.cleanup).toHaveBeenCalledWith(paths, taskId)
+  })
+
+  it('rolls back release intent when local cleanup fails', async () => {
+    recordIssuesForTask(paths, taskId, [41, 42])
+    const cleanupError = new Error('cleanup failed')
+    const commandRuntime = runtime({
+      cleanup: vi.fn(() => {
+        expect(issueReleaseIntentForTask(paths, taskId)).toEqual([41, 42])
+        throw cleanupError
+      }),
+    })
+
+    await expect(runCleanupCommand(paths, [taskId], commandRuntime)).rejects.toBe(cleanupError)
+
+    expect(issueNumbersForTask(paths, taskId)).toEqual([41, 42])
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+    expect(commandRuntime.loadForge).not.toHaveBeenCalled()
+  })
+
+  it('restores an earlier release intent when a repeated cleanup fails', async () => {
+    recordIssuesForTask(paths, taskId, [41, 42])
+    recordIssueReleaseIntent(paths, taskId, [41])
+    const cleanupError = new Error('cleanup failed')
+    const commandRuntime = runtime({ cleanup: vi.fn(() => { throw cleanupError }) })
+
+    await expect(runCleanupCommand(paths, [taskId], commandRuntime)).rejects.toBe(cleanupError)
+
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([41])
+    expect(commandRuntime.loadForge).not.toHaveBeenCalled()
   })
 
   it('releases the issue\'s actual assignees even when another operator cleans up', async () => {
