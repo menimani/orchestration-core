@@ -10,7 +10,7 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueNumbersForTask, issuePromotionForIssue, recordIssueForTask,
-  recordIssuePromotion, recordIssuesForTask,
+  recordIssuePromotion, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
@@ -1492,6 +1492,73 @@ describe('remote issue queue idle detection', () => {
       autoReview: true,
     })
   }
+
+  it('records persisted release failures and stops after three consecutive polls', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      workerMode: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'cleanup release', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    recordIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    fakeForge.addLabel = async (_number, label) => {
+      if (label === LABEL_READY) throw new Error('release unavailable')
+    }
+    const failureFile = join(paths.queueDir, 'issue-release-failure-count.txt')
+
+    await loop.poll()
+    expect(readFileSync(failureFile, 'utf8')).toBe('1\n')
+    expect(logText()).toContain(
+      'WARN could not reconcile persisted issue releases (#1: release unavailable); attempt 1/3',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    await loop.poll()
+    await loop.poll()
+    expect(readFileSync(failureFile, 'utf8')).toBe('3\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR 3 consecutive issue release failures for #1; stopping the loop',
+    )
+    expect(logText()).not.toContain('Recovered syncing the issue queue')
+  })
+
+  it('resets the persisted release failure streak after reconciliation succeeds', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      workerMode: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'cleanup release', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    recordIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    const addLabel = fakeForge.addLabel.bind(fakeForge)
+    let unavailable = true
+    fakeForge.addLabel = async (number, label) => {
+      if (label === LABEL_READY && unavailable) throw new Error('release unavailable')
+      await addLabel(number, label)
+    }
+    const failureFile = join(paths.queueDir, 'issue-release-failure-count.txt')
+
+    await loop.poll()
+    unavailable = false
+    await loop.poll()
+
+    expect(readFileSync(failureFile, 'utf8')).toBe('0\n')
+    expect(logText()).toContain('Recovered reconciling persisted issue releases after 0 minutes')
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(false)
+  })
 
   it('logs changed remote work immediately and unchanged work at most every ten minutes', async () => {
     let current = new Date(2026, 7, 8, 12, 0, 0)

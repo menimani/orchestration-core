@@ -47,7 +47,7 @@ import {
   recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
-  unresolvedFindings, type ClaimedRequirement,
+  unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
   LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
@@ -81,6 +81,7 @@ interface FindingDispatch {
 }
 
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
+const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
 
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
@@ -123,6 +124,7 @@ export function createLoop(deps: LoopDeps) {
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
   const mergeFailureFile = join(paths.queueDir, 'merge-failure-count.txt')
+  const issueReleaseFailureFile = join(paths.queueDir, 'issue-release-failure-count.txt')
   const runBranchFile = join(paths.queueDir, 'run-branch.txt')
   const decisionsFile = join(paths.queueDir, 'decisions.txt')
   const prUrlFile = join(paths.queueDir, 'pr-url.txt')
@@ -911,6 +913,25 @@ export function createLoop(deps: LoopDeps) {
       return true
     }
     return false
+  }
+
+  function noteIssueReleaseFailure(error: IssueReleaseReconciliationError): void {
+    const failures = readCount(issueReleaseFailureFile) + 1
+    writeFileSync(issueReleaseFailureFile, `${failures}\n`)
+    const issues = error.failures.map(({ issueNumber }) => `#${issueNumber}`).join(' ')
+    const detail = error.failures
+      .map(({ issueNumber, error: cause }) => `#${issueNumber}: ${errorSummary(cause)}`)
+      .join('; ')
+    if (failures >= MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES) {
+      event('ERROR', `${failures} consecutive issue release failures for ${issues}; stopping the loop (${detail})`)
+      writeFileSync(stopFile, '')
+      return
+    }
+    warning(
+      'issue-release-reconciliation',
+      'reconciling persisted issue releases',
+      `could not reconcile persisted issue releases (${detail}); attempt ${failures}/${MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES}`,
+    )
   }
 
   function isScanRunning(): boolean {
@@ -2052,6 +2073,10 @@ export function createLoop(deps: LoopDeps) {
             openFindings,
             issueHasMergeMarker,
           )
+          if (readCount(issueReleaseFailureFile) > 0) {
+            writeFileSync(issueReleaseFailureFile, '0\n')
+            warningLog.recovered('issue-release-reconciliation')
+          }
           let capacity = config.maxParallel - running - queueLength()
           if (capacity > 0) {
             if (cachedUser === undefined) cachedUser = await forge.currentUser()
@@ -2094,14 +2119,17 @@ export function createLoop(deps: LoopDeps) {
           }
           warningLog.recovered('issue-queue-sync')
         } catch (error) {
-          if (!(error instanceof ForgeRateLimitError)) {
+          if (error instanceof IssueReleaseReconciliationError) {
+            issueReconciliationPending = true
+            noteIssueReleaseFailure(error)
+          } else if (!(error instanceof ForgeRateLimitError)) {
             warning('issue-queue-sync', 'syncing the issue queue',
               `issue queue unreachable: ${errorSummary(error)}`)
           }
         }
       }
 
-      for (;;) {
+      for (; !existsSync(stopFile);) {
         if (running >= config.maxParallel) break
         const entry = dequeueNext(remoteOperationsAvailable)
         if (entry === undefined) break
