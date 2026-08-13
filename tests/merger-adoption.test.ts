@@ -278,7 +278,7 @@ describe('remote task adoption', () => {
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
   })
 
-  it('persists adoption before post-merge dependency synchronization begins', async () => {
+  it('persists adoption and stops when post-merge dependency synchronization fails', async () => {
     const task = pushWorkerBranch('20260809_000000_007_auto-persisted-before-return')
     writeFileSync(join(workerRoot, 'package.json'), '{"private":true}\n')
     git(workerRoot, ['add', 'package.json'])
@@ -288,12 +288,15 @@ describe('remote task adoption', () => {
     const issueNumber = await mergeReadyIssue(task.branch, task.head)
     let promotionDuringSync: ReturnType<typeof issuePromotionForIssue>
 
-    await makeLoop(stubProject, {
+    await expect(makeLoop(stubProject, {
       packageRoot: repoRoot,
       install: () => {
         promotionDuringSync = issuePromotionForIssue(paths, issueNumber)
+        throw new Error('registry unavailable')
       },
-    }).adoptRemoteTasks()
+    }).adoptRemoteTasks()).rejects.toThrow(
+      /registry unavailable.*Run "npm ci --no-audit --no-fund".*then restart the loop/,
+    )
 
     expect(promotionDuringSync).toMatchObject({
       issueNumber,

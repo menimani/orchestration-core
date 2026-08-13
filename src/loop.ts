@@ -16,7 +16,8 @@ import {
   shortTaskId,
 } from './ids.ts'
 import {
-  mergeRemoteTask, mergeTask, MergeError, type OrchestrationDepsRuntime,
+  mergeRemoteTask, mergeTask, MergeError, OrchestrationDepsInstallError,
+  type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
@@ -506,6 +507,7 @@ export function createLoop(deps: LoopDeps) {
         if (error instanceof ForgeRateLimitError) return
         const message = error instanceof Error ? error.message : String(error)
         appendFileSync(mergeLog, `${message}\n`)
+        if (error instanceof OrchestrationDepsInstallError) throw error
         if (adoptionTaskId === undefined) {
           event('WARN', `remote adoption failed for issue #${issue.number}`)
         } else {
@@ -1869,6 +1871,7 @@ export function createLoop(deps: LoopDeps) {
         }
       } catch (error) {
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
+        if (error instanceof OrchestrationDepsInstallError) throw error
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.merge.log`)
         const abandoned = noteMergeFailure(mergeLog)
         if (abandoned && linkedIssues.length > 1 && remoteOperationsAvailable) {

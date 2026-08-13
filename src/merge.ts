@@ -27,6 +27,9 @@ export class MergeError extends Error {
   }
 }
 
+/** A fatal dependency mismatch: continuing would run orchestration on the wrong tree. */
+export class OrchestrationDepsInstallError extends MergeError {}
+
 export interface MergeOptions {
   /** Explicit test command; overrides the project's check selection. */
   testCmd?: string | undefined
@@ -123,7 +126,11 @@ function installOrchestrationDeps(
     }
     event('Installed', subject)
   } catch (error) {
-    event('WARN', `orchestration deps install ${subject} failed: ${installFailureSummary(error)}`)
+    throw new OrchestrationDepsInstallError(
+      `Orchestration dependency installation ${subject} failed in ${root}: `
+      + `${installFailureSummary(error)}. Run "npm ci --no-audit --no-fund" in ${root}, `
+      + 'then restart the loop.',
+    )
   }
 }
 
