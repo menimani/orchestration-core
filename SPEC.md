@@ -109,6 +109,13 @@ non-negative integers, with the narrower bounds stated below.
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
    entry. Light-gate attribution cost (a suite break at the gate names no task) is
    accepted and documented; the gate stops the loop rather than promote a failing tip.
+9a. A merge check runs only where its directory satisfies its own declared dependencies.
+    A worktree sits inside the checkout it was cut from, so Node resolves anything the
+    worktree lacks from the parent's `node_modules`: an install that stopped partway
+    produces a run against a dependency tree nobody assembled, and its verdict describes
+    neither tree. Declared dependencies with no `node_modules`, an npm-owned directory
+    with no completed-install record, or any declared dependency absent from
+    `node_modules` fails the check and names what would have been borrowed.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. Re-claiming completed-but-unmerged work requests that merge instead
