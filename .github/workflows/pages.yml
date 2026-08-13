@@ -1,12 +1,14 @@
-name: Specification site
+name: Documentation site
 
-# `SPEC.md` is the specification the suite pins, so it must stay the single copy: the
-# site is assembled from it at build time rather than from a second file kept in step by
-# hand. Nothing here is checked into the repository except this workflow.
+# `README.md` says what this is and how to run it; `SPEC.md` states the behaviour the
+# suite pins. Both stay the single copy of themselves: the site is assembled from them at
+# build time rather than from second files kept in step by hand. Nothing here is checked
+# into the repository except this workflow, so a documentation change publishes itself
+# and nothing else has to be remembered.
 on:
   push:
     branches: [main]
-    paths: ['SPEC.md', '.github/workflows/pages.yml']
+    paths: ['README.md', 'SPEC.md', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 # `pages` and `id-token` are what the deployment needs; `contents` stays read-only.
@@ -34,8 +36,8 @@ jobs:
       - uses: actions/configure-pages@v5
 
       # Jekyll converts a Markdown file only when it carries front matter, and adding
-      # front matter to SPEC.md would put site scaffolding in the specification. The
-      # copy taken here carries it instead.
+      # front matter to the documents would put site scaffolding in them. The copies
+      # taken here carry it instead.
       - name: Assemble the site source
         run: |
           mkdir site
@@ -46,20 +48,33 @@ jobs:
           # owner does not silently break the assets.
           cat > site/_config.yml <<CONFIG
           title: ${{ github.event.repository.name }}
-          description: The behaviour the suite pins
+          description: An autonomous improvement loop for a software repository
           theme: jekyll-theme-primer
           url: https://${{ github.repository_owner }}.github.io
           baseurl: /${{ github.event.repository.name }}
           CONFIG
-          {
-            echo '---'
-            echo 'title: Specification'
-            echo '---'
-            echo
-            echo "[Repository](${{ github.server_url }}/${{ github.repository }})"
-            echo
-            cat SPEC.md
-          } > site/index.md
+          repository="${{ github.server_url }}/${{ github.repository }}"
+          page() {
+            {
+              echo '---'
+              echo "title: $2"
+              echo '---'
+              echo
+              echo "[Overview](./) · [Specification](spec.html) · [Repository]($repository)"
+              echo
+              cat
+            } > "site/$3"
+          }
+          # README names SPEC.md as a file, in prose and as a link. On the site that file
+          # is a page, so both forms are pointed at it. Other repository paths it names
+          # are left alone: Jekyll publishes no such files, and a link that resolves to
+          # nothing is worse than a path a reader can look up. The specification is
+          # copied unaltered — rewriting its own name there would only produce links to
+          # the page it already is.
+          sed -e 's|(SPEC\.md)|(spec.html)|g' \
+              -e 's|`SPEC\.md`|[`SPEC.md`](spec.html)|g' README.md \
+            | page - Overview index.md
+          page - Specification spec.md < SPEC.md
 
       - uses: actions/jekyll-build-pages@v1
         with:
