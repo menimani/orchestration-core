@@ -19,8 +19,10 @@ from or equivalent to `orchestration/tests/*.sh`.
   it protected — values read from status files compare clean — still holds and is tested).
 - Core subtree updates default on. The daemon logs whether `CORE_AUTO_UPDATE` is on or
   off at startup; `false` skips the pre-cycle check entirely. `UPSTREAM_REMOTE` defaults
-  to the package's `upstreamRepo` value used by `report-upstream`, and
-  `UPSTREAM_BRANCH` defaults to `main`.
+  to the package's `upstreamRepo` value and selects the remote to fetch and subtree-pull;
+  `UPSTREAM_BRANCH` defaults to `main`. Separately, `UPSTREAM_REPO` overrides the
+  package's `upstreamRepo` value as the GitHub repository where `report-upstream` files
+  the report.
 - The public command surface is the runtime entries in the `scripts` block of the
   package's `package.json` (the repository-root manifest here, or
   `orchestration/ts/package.json` when installed as a subtree) — `orchestrate.sh` is not

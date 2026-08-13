@@ -179,6 +179,7 @@ git subtree pull --prefix=orchestration/ts \
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work |
 | `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |
+| `UPSTREAM_REPO` | package `upstreamRepo` | GitHub `owner/repository` where `report-upstream` files the report |
 | `UPSTREAM_BRANCH` | main | Shared-core branch to compare and pull |
 
 ## Shared backlog and workers
