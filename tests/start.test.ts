@@ -14,6 +14,17 @@ import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 
+const statusMocks = vi.hoisted(() => ({
+  actualWriteStatus: null as null | typeof import('../src/status.ts')['writeStatus'],
+  writeStatus: vi.fn<typeof import('../src/status.ts')['writeStatus']>(),
+}))
+
+vi.mock('../src/status.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/status.ts')>()
+  statusMocks.actualWriteStatus = actual.writeStatus
+  return { ...actual, writeStatus: statusMocks.writeStatus }
+})
+
 let repoRoot: string
 let paths: OrchPaths
 
@@ -22,6 +33,9 @@ function git(args: string[]): string {
 }
 
 beforeEach(() => {
+  statusMocks.writeStatus.mockReset().mockImplementation((...args) => (
+    statusMocks.actualWriteStatus!(...args)
+  ))
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-start-'))
   paths = orchPaths(repoRoot)
   git(['init', '-q', '-b', 'main'])
@@ -139,5 +153,52 @@ describe('startTask', () => {
     expect(start).not.toHaveBeenCalled()
     expect(readStatus(paths, taskId)?.status).toBe('failed')
     expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('setup exploded')
+  })
+
+  it('stops and verifies a launched process tree before recording status persistence failure', async () => {
+    const taskId = '20260814_000000_001_status-failure'
+    const pid = 54321
+    writeFileSync(specFile(paths, taskId), '# status failure\n')
+    const terminateProcessTree = vi.spyOn(operatingSystem, 'terminateProcessTree')
+      .mockReturnValue(true)
+    const processTreeIsAlive = vi.spyOn(operatingSystem, 'processTreeIsAlive')
+      .mockReturnValue(false)
+    statusMocks.writeStatus.mockRejectedValueOnce(new Error('status persistence failed'))
+
+    await expect(startTask(paths, {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: vi.fn(async () => pid),
+    }, taskId, { effort: 'medium' })).rejects.toThrow('status persistence failed')
+
+    expect(terminateProcessTree).toHaveBeenCalledWith(pid)
+    expect(processTreeIsAlive).toHaveBeenCalledWith(pid)
+    expect(statusMocks.writeStatus.mock.calls).toEqual([
+      [paths, taskId, 'running', pid],
+      [paths, taskId, 'failed'],
+    ])
+    expect(terminateProcessTree.mock.invocationCallOrder[0])
+      .toBeLessThan(statusMocks.writeStatus.mock.invocationCallOrder[1]!)
+    expect(processTreeIsAlive.mock.invocationCallOrder[0])
+      .toBeLessThan(statusMocks.writeStatus.mock.invocationCallOrder[1]!)
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+  })
+
+  it('does not record startup failure when the launched process tree remains alive', async () => {
+    const taskId = '20260814_000000_002_cleanup-failure'
+    const pid = 54322
+    writeFileSync(specFile(paths, taskId), '# cleanup failure\n')
+    vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
+    statusMocks.writeStatus.mockRejectedValueOnce(new Error('status persistence failed'))
+
+    await expect(startTask(paths, {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: vi.fn(async () => pid),
+    }, taskId, { effort: 'medium' }))
+      .rejects.toThrow(`Task startup failed and process tree ${pid} could not be stopped.`)
+
+    expect(statusMocks.writeStatus).toHaveBeenCalledTimes(1)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('Process tree cleanup failed')
   })
 })
