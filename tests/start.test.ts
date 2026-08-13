@@ -7,6 +7,7 @@ import type { Runner } from '../src/adapters/runner.ts'
 import {
   branchName, logFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
+import { recordTaskProcess } from '../src/processRegistry.ts'
 import { startTask, worktreeAddArgs } from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
@@ -77,6 +78,8 @@ describe('startTask', () => {
     writeFileSync(statusFile(paths, taskId), JSON.stringify({
       task_id: taskId, status: 'running', pid: process.pid,
     }))
+    // A task's process lives in the registry, not in the record.
+    recordTaskProcess(paths, taskId, process.pid)
     const start = vi.fn(async () => process.pid)
 
     await expect(startTask(

@@ -21,6 +21,7 @@ import {
 import {
   branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
+import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { enqueueTask } from '../src/tasks.ts'
@@ -106,6 +107,9 @@ function writeFinal(taskId: string, content: string): void {
 function writeRawStatus(taskId: string, status: string, pid: number | null = null): void {
   writeFileSync(statusFile(paths, taskId),
     JSON.stringify({ task_id: taskId, status, pid }))
+  // A running task's process lives in the registry, not in the record.
+  if (pid === null) forgetTaskProcess(paths, taskId)
+  else recordTaskProcess(paths, taskId, pid)
 }
 
 function logText(): string {

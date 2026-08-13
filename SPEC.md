@@ -109,13 +109,15 @@ non-negative integers, with the narrower bounds stated below.
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
    entry. Light-gate attribution cost (a suite break at the gate names no task) is
    accepted and documented; the gate stops the loop rather than promote a failing tip.
-9a. A merge check runs only where its directory satisfies its own declared dependencies.
-    A worktree sits inside the checkout it was cut from, so Node resolves anything the
-    worktree lacks from the parent's `node_modules`: an install that stopped partway
-    produces a run against a dependency tree nobody assembled, and its verdict describes
-    neither tree. Declared dependencies with no `node_modules`, an npm-owned directory
-    with no completed-install record, or any declared dependency absent from
-    `node_modules` fails the check and names what would have been borrowed.
+9a. A merge check that passes counts only where its directory satisfies its own declared
+    dependencies. A worktree sits inside the checkout it was cut from, so Node resolves
+    anything the worktree lacks from the parent's `node_modules`: an install that stopped
+    partway produces a pass against a dependency tree nobody assembled, and that verdict
+    describes neither tree. Declared dependencies with no `node_modules`, an npm-owned
+    directory with no completed-install record, or any declared dependency absent from
+    `node_modules` turns the pass into a failure that names what was borrowed. The
+    verification follows the check rather than preceding it, because a check may install
+    as its own first step.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. Re-claiming completed-but-unmerged work requests that merge instead
@@ -246,6 +248,14 @@ non-negative integers, with the narrower bounds stated below.
     task status also blocks startup and is reported with an OS-specific handle diagnostic.
     A run which publishes work also refuses to start when its branch has no unambiguous
     push target, logging `ERROR` and writing the stop file before task or issue work.
+24a. A task's runner PID is held in `queue/pids/<task-id>`, not in its status record, so
+    the identifier lasts exactly as long as what it describes. Stopping a task's process
+    tree releases its entry in the same step; a tree that resisted termination keeps
+    its entry, because something still runs under that number. An entry written before
+    the running system booted is not believed and is dropped as it is read: identifiers
+    are reassigned across a restart, and a survivor would otherwise refuse a startup or
+    direct a termination at a stranger. A PID left in an older status record is never
+    read back.
 25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
     /T /F` on Windows and the detached process group on POSIX), retain task state for

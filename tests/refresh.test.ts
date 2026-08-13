@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import { recordTaskProcess } from '../src/processRegistry.ts'
 import { completionMarkerPresent, refreshAll, refreshTask } from '../src/refresh.ts'
 
 let repoRoot: string
@@ -22,6 +23,10 @@ afterEach(() => {
 function writeRawStatus(taskId: string, content: string): string {
   const file = statusFile(paths, taskId)
   writeFileSync(file, content)
+  // A running task's process lives in the registry, not in the record. A fixture that
+  // names one has to put it where the reader looks.
+  const pid = (JSON.parse(content) as { pid?: number | null }).pid
+  if (typeof pid === 'number') recordTaskProcess(paths, taskId, pid)
   return file
 }
 
