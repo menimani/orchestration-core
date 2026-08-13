@@ -1,4 +1,6 @@
 node_modules/
+.node_modules.previous-*/
+.orchestration-npm-ci-*/
 
 # Shared skills are generated from skills/ for this repository too. Keeping the
 # generated root copies untracked prevents them becoming discoverable nested skills

@@ -16,7 +16,17 @@ describe('core project verification', () => {
     expect(coreProject.mergeChecks(gate)[0]?.command).toContain(ENGLISH_ONLY)
   })
 
+  it.each(['light', 'full'] as const)('guards dependency replacement at the %s merge gate', (gate) => {
+    expect(coreProject.mergeChecks(gate)[0]?.command)
+      .toContain('node orchestration/project/safe-npm-ci.ts')
+  })
+
   it('checks source language at the cycle gate', () => {
     expect(coreProject.cycleSuite()[0]?.command).toContain(ENGLISH_ONLY)
+  })
+
+  it('guards dependency replacement at the cycle gate', () => {
+    expect(coreProject.cycleSuite()[0]?.command)
+      .toContain('node orchestration/project/safe-npm-ci.ts')
   })
 })
