@@ -275,6 +275,27 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
+  it('persists and cleans up a merge already applied before status persistence failed', async () => {
+    const taskId = '20260808_000000_022_user-retries-persistence'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    git(repoRoot, [
+      'merge', '--quiet', '--no-ff', branchName(taskId),
+      '-m', `Merge ${taskId} via orchestration`,
+    ])
+    const appliedCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    })).resolves.toBe(appliedCommit)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(appliedCommit)
+    expect(readStatus(paths, taskId)).toMatchObject({
+      status: 'merged', merge_commit: appliedCommit, run_branch: 'main',
+    })
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
+  })
+
   it('stops and verifies a completed runner with a live PID before merging', async () => {
     const taskId = '20260808_000000_017_user-runner-finishes-output-first'
     const worktree = await makeCompletedTask(taskId, { commit: true })
@@ -748,6 +769,38 @@ describe('mergeRemoteTask', () => {
     })).rejects.toThrow(`${branch} has no new commits relative to main.`)
 
     expect(repositoryState()).toEqual(before)
+  })
+
+  it('replays persistence when the prior remote merge callback failed', async () => {
+    const branch = 'task/remote-retries-persistence'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    const onMerged = vi.fn()
+      .mockImplementationOnce(() => { throw new Error('persistence unavailable') })
+    const options = {
+      taskGate: 'light' as const,
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message: string) => message },
+      onMerged,
+    }
+
+    await expect(mergeRemoteTask(
+      paths, 227, 'origin', branch, expectedHead, options,
+    )).rejects.toThrow('persistence unavailable')
+    const appliedCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeRemoteTask(
+      paths, 227, 'origin', branch, expectedHead, options,
+    )).resolves.toBe(appliedCommit)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(appliedCommit)
+    expect(onMerged).toHaveBeenCalledTimes(2)
+    expect(onMerged).toHaveBeenLastCalledWith(appliedCommit)
   })
 
   it('leaves issue-closing syntax to the forge adapter', async () => {
