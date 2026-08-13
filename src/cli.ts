@@ -591,7 +591,13 @@ const cmdLoop: Command = async (paths, args) => {
     const child = spawn(process.execPath, [
       packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
     ], {
-      cwd: packageFile(),
+      // The daemon must work on the repository this launcher was pointed at. Starting it
+      // in the package directory instead made it resolve its own checkout as the
+      // repository, which put the startup dependency install inside the very package the
+      // daemon runs from — `npm ci` deletes node_modules first, so a suite launching a
+      // daemon deleted its own dependencies mid-run. The script path is absolute, so the
+      // working directory is free to be the repository.
+      cwd: paths.repoRoot,
       detached: true,
       stdio: ['ignore', fd, fd],
     })
