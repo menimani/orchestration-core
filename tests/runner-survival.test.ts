@@ -58,7 +58,7 @@ afterEach(async () => {
   for (const root of fixtureRoots.splice(0)) await removeFixture(root)
 })
 
-it('launches the real CLI daemon in the detached console-sharing mode', async () => {
+it('launches the real CLI daemon through the independent hidden-console wrapper', async () => {
   const root = mkdtempSync(join(tmpdir(), 'orch runner-survival-'))
   fixtureRoots.push(root)
   const probeFile = join(root, 'spawn-probe.jsonl')
@@ -121,7 +121,9 @@ it('launches the real CLI daemon in the detached console-sharing mode', async ()
     .map((line) => JSON.parse(line) as SpawnProbe)
   const daemonSpawn = probes.find((probe) => probe.command === process.execPath
     && probe.args.includes('--marker-output'))
-  expect(daemonSpawn).toMatchObject({ detached: true, hasWindowsHide: false })
+  // The wrapper owns the independent hidden console. The daemon is deliberately
+  // attached to it so every console tool in the daemon tree inherits that console.
+  expect(daemonSpawn).toMatchObject({ detached: false, hasWindowsHide: false })
   // The daemon must inherit the repository the launcher was pointed at. Started in the
   // package directory instead, it resolves its own checkout as the repository and the
   // startup dependency install reinstalls the package it is running from.

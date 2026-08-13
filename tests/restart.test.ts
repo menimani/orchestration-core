@@ -4,10 +4,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { OperatingSystem } from '../src/adapters/os.ts'
 import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
-  publishLoopReplacementPid, startLoopReplacement,
+  publishLoopReplacementPid, signalLoopRestartReady, startLoopReplacement,
 } from '../src/restart.ts'
+import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/adapters/windows-process.ts'
 
 const fixtureRoots: string[] = []
 
@@ -82,5 +84,45 @@ describe('loop replacement startup', () => {
     })
     expect(readFileSync(pidFile, 'utf8')).toBe(`${process.pid}\n`)
     expect(child.unref).not.toHaveBeenCalled()
+  })
+
+  it('uses the independent hidden-console launcher for a Windows replacement', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    const outputFile = join(root, 'loop.log')
+    const startWindowsProcess = vi.fn(async (options) => {
+      expect(options.outputFile).toBe(outputFile)
+      expect(options.env[LOOP_RESTART_READY_FILE_ENV]).toBe(readyFile)
+      expect(options.env[LOOP_RESTART_PREDECESSOR_PID_ENV]).toBe(`${process.pid}`)
+      setTimeout(() => writeFileSync(readyFile, '43212\n'), 0)
+      return 43212
+    })
+    const os = {
+      processIsAlive: vi.fn(() => true),
+    } as unknown as OperatingSystem
+
+    await expect(startLoopReplacement(readyFile, {
+      operatingSystem: os,
+      outputFile,
+      packageRoot: root,
+      platform: 'win32',
+      startWindowsProcess,
+      startupTimeoutMs: 1_000,
+    })).resolves.toEqual({ ok: true, pid: 43212 })
+    expect(startWindowsProcess).toHaveBeenCalledOnce()
+  })
+
+  it('signals the wrapper process as the Windows restart owner', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+
+    signalLoopRestartReady({
+      [LOOP_RESTART_READY_FILE_ENV]: readyFile,
+      [WINDOWS_PROCESS_ROOT_PID_ENV]: '43213',
+    })
+
+    expect(readFileSync(readyFile, 'utf8')).toBe('43213\n')
   })
 })
