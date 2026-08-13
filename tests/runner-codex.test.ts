@@ -6,7 +6,7 @@ import type { RunnerStartOptions } from '../src/adapters/runner.ts'
 const mocks = vi.hoisted(() => ({
   closeSync: vi.fn(),
   existsSync: vi.fn((_path: string) => false),
-  openSync: vi.fn(() => 42),
+  openSync: vi.fn((path: string) => path === 'task.log' ? 42 : 43),
   readFileSync: vi.fn((_path: string, _encoding: string) => 'task specification'),
   spawn: vi.fn(),
 }))
@@ -46,7 +46,8 @@ function mockChild(pid: number | undefined = 1234): EventEmitter & {
 beforeEach(() => {
   mocks.closeSync.mockReset()
   mocks.existsSync.mockReset().mockReturnValue(false)
-  mocks.openSync.mockReset().mockReturnValue(42)
+  mocks.openSync.mockReset().mockImplementation((path: string) =>
+    path === 'task.log' ? 42 : 43)
   mocks.readFileSync.mockReset().mockReturnValue('task specification')
   mocks.spawn.mockReset()
 })
@@ -186,9 +187,8 @@ describe('createCodexRunner', () => {
     expect(rendered).toMatchSnapshot()
   })
 
-  it('spawns codex directly on POSIX with the final-message, model, effort, and prompt arguments', async () => {
+  it('spawns codex directly on POSIX with the spec as standard input', async () => {
     setPlatform('linux')
-    mocks.readFileSync.mockReturnValue('first line\nsecond line')
     const child = mockChild(4321)
     mocks.spawn.mockReturnValue(child)
 
@@ -198,19 +198,19 @@ describe('createCodexRunner', () => {
       model: 'gpt-5-codex',
     })
 
-    expect(mocks.readFileSync).toHaveBeenCalledWith('task.md', 'utf8')
-    expect(mocks.openSync).toHaveBeenCalledWith('task.log', 'a')
+    expect(mocks.openSync).toHaveBeenNthCalledWith(1, 'task.log', 'a')
+    expect(mocks.openSync).toHaveBeenNthCalledWith(2, 'task.md', 'r')
     expect(mocks.spawn).toHaveBeenCalledWith('codex', [
       'exec',
       '--dangerously-bypass-approvals-and-sandbox',
       '--output-last-message', 'final-message.txt',
       '--model', 'gpt-5-codex',
       '--config', 'model_reasoning_effort=low',
-      'first line\nsecond line',
+      '-',
     ], {
       cwd: 'worktree',
       detached: true,
-      stdio: ['ignore', 42, 42],
+      stdio: [43, 42, 42],
     })
 
     child.emit('spawn')
@@ -230,18 +230,35 @@ describe('createCodexRunner', () => {
       '--dangerously-bypass-approvals-and-sandbox',
       '--output-last-message', 'final-message.txt',
       '--config', 'model_reasoning_effort=high',
-      'task specification',
+      '-',
     ], {
       cwd: 'worktree',
       detached: true,
-      stdio: ['ignore', 42, 42],
+      stdio: [43, 42, 42],
     })
 
     child.emit('spawn')
     await expect(started).resolves.toBe(5678)
   })
 
-  it('closes the parent log descriptor after the child inherits it', async () => {
+  it('never passes the specification as an argument regardless of its size', async () => {
+    const specification = 'non-ASCII specification 日本語\n'.repeat(1_000)
+    mocks.readFileSync.mockReturnValue(specification)
+    const child = mockChild()
+    mocks.spawn.mockReturnValue(child)
+
+    const started = createCodexRunner().start(options)
+
+    const commandArgs = mocks.spawn.mock.calls[0]?.[1] as string[]
+    expect(commandArgs).not.toContain(specification)
+    expect(commandArgs.at(-1)).toBe('-')
+    expect(mocks.readFileSync).not.toHaveBeenCalledWith('task.md', 'utf8')
+
+    child.emit('spawn')
+    await expect(started).resolves.toBe(1234)
+  })
+
+  it('closes the parent spec and log descriptors after the child inherits them', async () => {
     const child = mockChild()
     mocks.spawn.mockReturnValue(child)
 
@@ -249,12 +266,13 @@ describe('createCodexRunner', () => {
     child.emit('spawn')
 
     await expect(started).resolves.toBe(1234)
-    expect(mocks.closeSync).toHaveBeenCalledOnce()
-    expect(mocks.closeSync).toHaveBeenCalledWith(42)
+    expect(mocks.closeSync).toHaveBeenCalledTimes(2)
+    expect(mocks.closeSync).toHaveBeenNthCalledWith(1, 43)
+    expect(mocks.closeSync).toHaveBeenNthCalledWith(2, 42)
     expect(child.unref).toHaveBeenCalledOnce()
   })
 
-  it('closes the parent log descriptor when spawning fails', async () => {
+  it('closes the parent spec and log descriptors when spawning fails', async () => {
     const child = mockChild()
     const error = new Error('spawn failed')
     mocks.spawn.mockReturnValue(child)
@@ -263,19 +281,34 @@ describe('createCodexRunner', () => {
     child.emit('error', error)
 
     await expect(started).rejects.toBe(error)
-    expect(mocks.closeSync).toHaveBeenCalledOnce()
-    expect(mocks.closeSync).toHaveBeenCalledWith(42)
+    expect(mocks.closeSync).toHaveBeenCalledTimes(2)
+    expect(mocks.closeSync).toHaveBeenNthCalledWith(1, 43)
+    expect(mocks.closeSync).toHaveBeenNthCalledWith(2, 42)
   })
 
-  it('closes the parent log descriptor when spawn throws synchronously', async () => {
+  it('closes the parent spec and log descriptors when spawn throws synchronously', async () => {
     const error = new Error('spawn threw')
     mocks.spawn.mockImplementation(() => {
       throw error
     })
 
     await expect(createCodexRunner().start(options)).rejects.toBe(error)
+    expect(mocks.closeSync).toHaveBeenCalledTimes(2)
+    expect(mocks.closeSync).toHaveBeenNthCalledWith(1, 43)
+    expect(mocks.closeSync).toHaveBeenNthCalledWith(2, 42)
+  })
+
+  it('closes the log descriptor and rejects when the spec cannot be opened', async () => {
+    const error = new Error('spec open failed')
+    mocks.openSync.mockImplementation((path: string) => {
+      if (path === 'task.log') return 42
+      throw error
+    })
+
+    await expect(createCodexRunner().start(options)).rejects.toBe(error)
     expect(mocks.closeSync).toHaveBeenCalledOnce()
     expect(mocks.closeSync).toHaveBeenCalledWith(42)
+    expect(mocks.spawn).not.toHaveBeenCalled()
   })
 
   it('rejects and detaches a spawned child that has no PID', async () => {
@@ -288,6 +321,6 @@ describe('createCodexRunner', () => {
 
     await expect(started).rejects.toThrow('codex spawned without a PID')
     expect(child.unref).toHaveBeenCalledOnce()
-    expect(mocks.closeSync).toHaveBeenCalledOnce()
+    expect(mocks.closeSync).toHaveBeenCalledTimes(2)
   })
 })
