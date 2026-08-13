@@ -118,6 +118,9 @@ contract-valid adapter, project templates, points `core.hooksPath` at the core-o
 hooks, and creates missing `loop:*` labels. It is safe to repeat: missing required adapter
 members are added with marked scaffold defaults, while declared members, other existing
 project files, and a deliberately different hooks setting are reported and never overwritten.
+For `SCAN_PARALLEL` greater than one, keep the scan checklist as uniquely numbered
+Markdown headings outside fenced code blocks; without numbered headings the loop warns
+and runs one full scan, while ambiguous numbering stops the loop before the cycle starts.
 
 Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
 the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,

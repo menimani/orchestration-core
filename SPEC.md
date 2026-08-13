@@ -155,6 +155,12 @@ values must be non-negative integers, with the narrower bounds stated below.
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
     (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
     counter once, at the gate, only when every expected scan completed successfully.
+    For parallel scans, sections in the rendered `scan-template.md` are Markdown ATX
+    headings whose text begins with a number and period (for example, `### 1. Tests`),
+    and every section number must be unique; headings inside fenced code blocks do not
+    count. If the rendered template has no numbered sections, the daemon warns and runs
+    one full scan. If its numbered sections cannot be parsed unambiguously, the daemon
+    logs an error and stops before creating the next cycle's state or starting a scan.
 13. `cycle_is_final` is true when the cycle number reaches `MAX_SCAN_CYCLES`, or when
     the cycle's scans all came back empty and one more empty cycle reaches
     `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
