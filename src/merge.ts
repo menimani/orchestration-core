@@ -365,6 +365,64 @@ function stopCompletedRunner(pid: number): void {
 }
 
 /**
+ * Find a merge this code already applied before its durable state callback failed.
+ * The second parent identifies the exact task head, while the message distinguishes
+ * orchestration's checked merge from an unrelated merge of the same commit.
+ */
+function appliedMergeCommit(
+  repoRoot: string,
+  runRef: string,
+  mergedHead: string,
+  mergeMessage: string,
+): string | undefined {
+  const merges = git(repoRoot, [
+    'rev-list', '--first-parent', '--merges', '--parents', runRef,
+  ]).split(/\r?\n/).filter((line) => line !== '')
+  for (const merge of merges) {
+    const [commit, firstParent, secondParent, ...otherParents] = merge.trim().split(/\s+/)
+    if (commit === undefined || firstParent === undefined || secondParent !== mergedHead
+      || otherParents.length > 0) continue
+    if (git(repoRoot, ['show', '-s', '--format=%B', commit]).trim() === mergeMessage) {
+      return commit
+    }
+  }
+  return undefined
+}
+
+async function finalizeLocalMerge(
+  paths: OrchPaths,
+  taskId: string,
+  currentBranch: string,
+  branch: string,
+  worktree: string,
+  mergeCommit: string,
+  io: MergeIo,
+  depsEvent: OrchestrationDepsEvent,
+  options: MergeOptions,
+): Promise<string> {
+  await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
+  syncOrchestrationDepsAfterMerge(
+    paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+  )
+
+  // Removing the worktree is tidying, not part of the merge. On Windows a handle held
+  // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
+  // once left the merge in place while the task was recorded as failed.
+  removeMergedWorktree(paths, worktree, io.out)
+  try {
+    git(paths.repoRoot, ['branch', '-d', branch])
+  } catch {
+    try {
+      git(paths.repoRoot, ['branch', '-D', branch])
+    } catch {
+      // an inspection task's branch may already be gone
+    }
+  }
+  io.out(`Merged ${taskId} and removed the worktree.`)
+  return mergeCommit
+}
+
+/**
  * Merge a completed task into the current branch.
  * Uncommitted changes or a missing deliverable stop the merge and keep the worktree,
  * because removing it would lose work an agent forgot to commit.
@@ -395,14 +453,6 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     )
   }
 
-  const newCommits = git(worktree, ['log', `${currentBranch}..HEAD`, '--oneline']).trim()
-  if (!isInspectionTaskId(paths, taskId) && newCommits === '') {
-    throw new MergeError(
-      `${taskId} has no new commits relative to ${currentBranch}.\n`
-      + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
-    )
-  }
-
   const baseMergeMessage = `Merge ${taskId} via orchestration`
   const closingIssues = options.closesIssues ?? (options.closesIssue === undefined
     ? []
@@ -414,6 +464,25 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
     (message, issueNumber) => options.forge!.issueClosingCommitMessage(message, issueNumber),
     baseMergeMessage,
   )
+  const newCommits = git(worktree, ['log', `${currentBranch}..HEAD`, '--oneline']).trim()
+  if (newCommits === '') {
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    const appliedCommit = appliedMergeCommit(
+      paths.repoRoot, currentBranch, taskHead, mergeMessage,
+    )
+    if (appliedCommit !== undefined) {
+      return finalizeLocalMerge(
+        paths, taskId, currentBranch, branch, worktree, appliedCommit,
+        io, depsEvent, options,
+      )
+    }
+    if (!isInspectionTaskId(paths, taskId)) {
+      throw new MergeError(
+        `${taskId} has no new commits relative to ${currentBranch}.\n`
+        + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
+      )
+    }
+  }
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
@@ -455,27 +524,10 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   // Publish the merge identity before any post-merge work. If dependency synchronization
   // or later cleanup is interrupted, startup can retry it without attempting to merge
   // commits that are already on the run branch or counting a false merge failure.
-  await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
-
-  syncOrchestrationDepsAfterMerge(
-    paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+  return finalizeLocalMerge(
+    paths, taskId, currentBranch, branch, worktree, mergeCommit,
+    io, depsEvent, options,
   )
-
-  // Removing the worktree is tidying, not part of the merge. On Windows a handle held
-  // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
-  // once left the merge in place while the task was recorded as failed.
-  removeMergedWorktree(paths, worktree, io.out)
-  try {
-    git(paths.repoRoot, ['branch', '-d', branch])
-  } catch {
-    try {
-      git(paths.repoRoot, ['branch', '-D', branch])
-    } catch {
-      // an inspection task's branch may already be gone
-    }
-  }
-  io.out(`Merged ${taskId} and removed the worktree.`)
-  return mergeCommit
 }
 
 /** Merge an already-fetched worker branch through the same selected checks as a local task. */
@@ -507,14 +559,6 @@ export async function mergeRemoteTask(
     )
   }
 
-  const currentBranch = git(paths.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
-  const commitCount = Number(git(paths.repoRoot, [
-    'rev-list', '--count', `${currentBranch}..${remoteRef}`,
-  ]).trim())
-  if (!Number.isInteger(commitCount) || commitCount < 1) {
-    throw new MergeError(`${branch} has no new commits relative to ${currentBranch}.`)
-  }
-
   const taskId = branch.slice('task/'.length)
   const worktree = join(paths.worktreesDir, `.adopt-${issueNumber}-${process.pid}-${Date.now()}`)
   const io = mergeIo(options.outputFile)
@@ -529,6 +573,23 @@ export async function mergeRemoteTask(
     (message, closingIssue) => options.forge!.issueClosingCommitMessage(message, closingIssue),
     baseMergeMessage,
   )
+  const currentBranch = git(paths.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+  const commitCount = Number(git(paths.repoRoot, [
+    'rev-list', '--count', `${currentBranch}..${remoteRef}`,
+  ]).trim())
+  if (!Number.isInteger(commitCount) || commitCount < 1) {
+    const appliedCommit = appliedMergeCommit(
+      paths.repoRoot, currentBranch, expectedHead, mergeMessage,
+    )
+    if (appliedCommit === undefined) {
+      throw new MergeError(`${branch} has no new commits relative to ${currentBranch}.`)
+    }
+    options.onMerged?.(appliedCommit)
+    syncOrchestrationDepsAfterMerge(
+      paths, appliedCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+    )
+    return appliedCommit
+  }
   try {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     try {
