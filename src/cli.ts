@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { operatingSystem } from './adapters/os.ts'
+import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import { cleanupTask } from './cleanup.ts'
 import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
@@ -71,6 +72,7 @@ function repoRoot(): string {
 
 interface RecoveryLockOwner {
   pid: number
+  startIdentity?: string | null
   acquiredAt: string
   token: string
 }
@@ -85,6 +87,8 @@ function recoveryLockOwner(recoveryLock: string): RecoveryLockOwner | undefined 
     if (typeof parsed !== 'object' || parsed === null) return undefined
     const owner = parsed as Partial<RecoveryLockOwner>
     if (!Number.isSafeInteger(owner.pid) || (owner.pid ?? 0) <= 0
+      || (owner.startIdentity !== undefined && owner.startIdentity !== null
+        && (typeof owner.startIdentity !== 'string' || owner.startIdentity === ''))
       || typeof owner.acquiredAt !== 'string' || typeof owner.token !== 'string'
       || owner.token === '') return undefined
     return owner as RecoveryLockOwner
@@ -95,7 +99,7 @@ function recoveryLockOwner(recoveryLock: string): RecoveryLockOwner | undefined 
 
 function reclaimRecoveryLock(recoveryLock: string): boolean {
   const owner = recoveryLockOwner(recoveryLock)
-  if (owner !== undefined && operatingSystem.processIsAlive(owner.pid)) return false
+  if (owner !== undefined && lockOwnerIsCurrent(owner.pid, owner.startIdentity)) return false
   if (owner === undefined) {
     try {
       if (Date.now() - statSync(recoveryLock).mtimeMs < RECOVERY_LOCK_STALE_MS) return false
@@ -121,6 +125,7 @@ function sleep(milliseconds: number): Promise<void> {
 async function acquireRecoveryLock(recoveryLock: string): Promise<() => void> {
   const owner: RecoveryLockOwner = {
     pid: process.pid,
+    startIdentity: currentProcessStartIdentity(),
     acquiredAt: new Date().toISOString(),
     token: randomUUID(),
   }
