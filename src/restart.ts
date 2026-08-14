@@ -147,6 +147,18 @@ export async function startLoopReplacement(
         error: spawnError ?? `replacement exited before becoming ready (${outcome})`,
       })
     }
+    const terminateAndFinish = (result: LoopRestartResult): void => {
+      try {
+        replacement.terminate()
+      } catch (error) {
+        finish({
+          ...result,
+          error: `${result.error ?? 'replacement startup failed'}; replacement cleanup failed: ${errorSummary(error)}`,
+        })
+        return
+      }
+      finish(result)
+    }
     const poll = setInterval(() => {
       if (!existsSync(readyFile)) return
       let owner = ''
@@ -156,8 +168,7 @@ export async function startLoopReplacement(
         return
       }
       if (owner !== `${pid}`) {
-        replacement.terminate()
-        finish({
+        terminateAndFinish({
           ok: false,
           pid,
           error: `replacement published an unexpected PID (${owner || 'empty'})`,
@@ -171,15 +182,13 @@ export async function startLoopReplacement(
       try {
         runtime.onReady?.(pid)
       } catch (error) {
-        replacement.terminate()
-        finish({ ok: false, pid, error: errorSummary(error) })
+        terminateAndFinish({ ok: false, pid, error: errorSummary(error) })
         return
       }
       finish({ ok: true, pid })
     }, 10)
     const timeout = setTimeout(() => {
-      replacement.terminate()
-      finish({
+      terminateAndFinish({
         ok: false,
         pid,
         error: 'replacement did not become ready before the startup timeout',
