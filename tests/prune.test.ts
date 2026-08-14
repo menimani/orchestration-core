@@ -83,6 +83,25 @@ describe('pruneTasks', () => {
     expect(existsSync(join(paths.statusDir, `${OLD_MERGED}.json`))).toBe(true)
   })
 
+  it('aborts without deleting artifacts when tracked-spec discovery fails', () => {
+    makeTask(OLD_MERGED, 'merged', 'old')
+    rmSync(join(repoRoot, '.git'), { recursive: true, force: true })
+
+    expect(() => pruneTasks(paths, { days: 14, dryRun: false }))
+      .toThrow('Failed to discover tracked task specifications; pruning aborted')
+
+    for (const retained of [
+      join(paths.statusDir, `${OLD_MERGED}.json`),
+      join(paths.logsDir, `${OLD_MERGED}.log`),
+      join(paths.logsDir, `${OLD_MERGED}.merge.log`),
+      join(paths.tasksDir, `${OLD_MERGED}.md`),
+      join(paths.queueDir, 'scanned', OLD_MERGED),
+      join(paths.queueDir, 'effort', OLD_MERGED),
+    ]) {
+      expect(existsSync(retained), `artifact should be retained: ${retained}`).toBe(true)
+    }
+  })
+
   it('prunes old finished tasks and keeps everything protected', () => {
     setUpFixtures()
     pruneTasks(paths, { days: 14, dryRun: false })

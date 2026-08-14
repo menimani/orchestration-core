@@ -45,8 +45,10 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
         { cwd: paths.repoRoot, encoding: 'utf8', windowsHide: true })
         .split(/\r?\n/).filter((line) => line !== ''),
     )
-  } catch {
-    trackedSpecs = new Set()
+  } catch (error) {
+    throw new Error('Failed to discover tracked task specifications; pruning aborted', {
+      cause: error,
+    })
   }
 
   for (const name of readdirSync(paths.statusDir)) {
