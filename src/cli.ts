@@ -8,7 +8,7 @@ import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
-import { operatingSystem } from './adapters/os.ts'
+import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import { cleanupTask } from './cleanup.ts'
 import { runCleanupCommand } from './cleanupCommand.ts'
@@ -52,6 +52,7 @@ import {
 import {
   prepareBranchTopology, prepareIntegrationWorktree,
 } from './branchTopology.ts'
+import { LOOP_STARTUP_RESULT_FILE_ENV } from './internalEnvironment.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -83,6 +84,111 @@ interface RecoveryLockOwner {
 const RECOVERY_LOCK_STALE_MS = 10_000
 const RECOVERY_LOCK_TIMEOUT_MS = 10_000
 const RECOVERY_LOCK_POLL_MS = 10
+const LOOP_STARTUP_TIMEOUT_MS = 30_000
+
+interface LoopStartupResult {
+  status: 'ready' | 'error'
+  pid: number
+  error?: string
+}
+
+function errorSummary(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return (message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'
+}
+
+function publishLoopStartupResult(
+  resultFile: string | undefined,
+  result: LoopStartupResult,
+): void {
+  if (resultFile === undefined || resultFile === '') return
+  writeFileSync(resultFile, `${JSON.stringify(result)}\n`, { flag: 'wx' })
+}
+
+async function waitForLoopStartup(
+  daemon: Awaited<ReturnType<OperatingSystem['launchDaemon']>>,
+  resultFile: string,
+): Promise<LoopStartupResult> {
+  const deadline = Date.now() + LOOP_STARTUP_TIMEOUT_MS
+  let spawnError: string | undefined
+  const onError = (error: Error): void => { spawnError = errorSummary(error) }
+  daemon.onError(onError)
+  try {
+    for (;;) {
+      if (existsSync(resultFile)) {
+        try {
+          const result = JSON.parse(readFileSync(resultFile, 'utf8')) as LoopStartupResult
+          if (result.pid !== daemon.pid) {
+            try {
+              daemon.terminate()
+            } catch (error) {
+              return {
+                status: 'error',
+                pid: daemon.pid,
+                error: `daemon published an unexpected PID (${result.pid}); `
+                  + `cleanup failed: ${errorSummary(error)}`,
+              }
+            }
+            return {
+              status: 'error',
+              pid: daemon.pid,
+              error: `daemon published an unexpected PID (${result.pid})`,
+            }
+          }
+          if (result.status === 'ready') return result
+          if (result.status === 'error') {
+            while (daemon.isAlive() && Date.now() < deadline) await sleep(10)
+            if (daemon.isAlive()) {
+              try {
+                daemon.terminate()
+              } catch (error) {
+                return {
+                  ...result,
+                  error: `${result.error ?? 'daemon initialization failed'}; `
+                    + `cleanup failed: ${errorSummary(error)}`,
+                }
+              }
+            }
+            return result
+          }
+        } catch {
+          // The child may still be completing its single status-file write.
+        }
+      }
+      if (spawnError !== undefined) {
+        return { status: 'error', pid: daemon.pid, error: spawnError }
+      }
+      if (!daemon.isAlive()) {
+        return {
+          status: 'error',
+          pid: daemon.pid,
+          error: 'daemon exited before reporting startup readiness',
+        }
+      }
+      if (Date.now() >= deadline) {
+        try {
+          daemon.terminate()
+        } catch (error) {
+          return {
+            status: 'error',
+            pid: daemon.pid,
+            error: 'daemon did not initialize before the startup timeout; '
+              + `cleanup failed: ${errorSummary(error)}`,
+          }
+        }
+        return {
+          status: 'error',
+          pid: daemon.pid,
+          error: 'daemon did not initialize before the startup timeout',
+        }
+      }
+      await sleep(10)
+    }
+  } finally {
+    daemon.offError(onError)
+    rmSync(resultFile, { force: true })
+  }
+}
 
 function recoveryLockOwner(recoveryLock: string): RecoveryLockOwner | undefined {
   try {
@@ -620,6 +726,10 @@ const cmdLoop: Command = async (paths, args) => {
     ).trim()
     prepareLoopLog(paths, { runBranch })
     const markerLog = join(paths.logsDir, 'loop-markers.log')
+    const startupResultFile = join(
+      paths.logsDir,
+      `.loop-startup-${process.pid}-${randomUUID()}.json`,
+    )
     const daemonArgs = [packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog]
     // The daemon must work on the repository this launcher was pointed at. Starting it
     // in the package directory instead made it resolve its own checkout as the
@@ -631,10 +741,17 @@ const cmdLoop: Command = async (paths, args) => {
       args: daemonArgs,
       command: process.execPath,
       cwd: paths.repoRoot,
+      env: { ...process.env, [LOOP_STARTUP_RESULT_FILE_ENV]: startupResultFile },
       outputFile: loopLog,
     })
-    daemon.release()
     const daemonPid = daemon.pid
+    const startup = await waitForLoopStartup(daemon, startupResultFile)
+    if (startup.status === 'error') {
+      console.error(`Could not start the loop: ${startup.error ?? 'unknown error'}`)
+      console.error(`Log: ${loopLog}`)
+      return 1
+    }
+    daemon.release()
     console.log(`Started the loop in the background (PID=${daemonPid})`)
     console.log(`Log: ${loopLog}`)
     console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
@@ -642,16 +759,28 @@ const cmdLoop: Command = async (paths, args) => {
     return 0
   }
   const markerOutput = args[0] === '--marker-output' ? args[1] : undefined
-  const config = loadConfig()
+  const startupResultFile = process.env[LOOP_STARTUP_RESULT_FILE_ENV]
+  delete process.env[LOOP_STARTUP_RESULT_FILE_ENV]
+  let startupReported = false
+  const reportStartup = (result: LoopStartupResult): void => {
+    if (startupReported) return
+    startupReported = true
+    publishLoopStartupResult(startupResultFile, result)
+  }
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+  let config: LoopConfig | undefined
+  let startupError: string | undefined
   const log = (message: string, error = false): void => {
+    if (startupError === undefined && message.startsWith('ERROR:')) {
+      startupError = message.slice('ERROR:'.length).trim()
+    }
     const write = error ? console.error : console.log
     const currentCycle = existsSync(scanCountFile)
       ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
       : 0
     for (const line of loopLogLines(message, {
       currentCycle,
-      cycleCap: config.maxScanCycles,
+      cycleCap: config?.maxScanCycles ?? 0,
     })) write(line)
   }
   const marker = (message: string): void => {
@@ -659,10 +788,29 @@ const cmdLoop: Command = async (paths, args) => {
     else appendFileSync(markerOutput, `${message}\n`)
   }
   try {
-    return await runLoopDaemon(paths, log, marker, config)
+    config = loadConfig()
+    const result = await runLoopDaemon(paths, log, marker, config, () => {
+      reportStartup({
+        status: 'ready',
+        pid: operatingSystem.processTreeRootPid(),
+      })
+    })
+    if (result !== 0) {
+      reportStartup({
+        status: 'error',
+        pid: operatingSystem.processTreeRootPid(),
+        error: startupError ?? 'daemon initialization failed',
+      })
+    }
+    return result
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    log(`ERROR: ${(message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'}`, true)
+    const message = errorSummary(error)
+    log(`ERROR: ${message}`, true)
+    reportStartup({
+      status: 'error',
+      pid: operatingSystem.processTreeRootPid(),
+      error: message,
+    })
     return 1
   }
 }
@@ -704,6 +852,7 @@ async function runLoopDaemon(
   log: (line: string) => void,
   marker: (line: string) => void,
   config: LoopConfig,
+  ready: () => void = () => {},
 ): Promise<number> {
   const daemonPid = operatingSystem.processTreeRootPid()
   const pidFile = join(paths.queueDir, 'loop.pid')
@@ -877,6 +1026,7 @@ async function runLoopDaemon(
 
     loop.initializeSessionStateForBranch()
     signalLoopRestartReady()
+    ready()
 
     for (;;) {
       // Observe first: delegation may append after poll() returns but before this
