@@ -1,7 +1,7 @@
-import { spawn, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync,
   statSync, writeFileSync,
 } from 'node:fs'
 import { join, relative, toNamespacedPath } from 'node:path'
@@ -45,7 +45,6 @@ import {
   loopRestartPredecessorPid, publishLoopReplacementPid, signalLoopRestartReady,
   startLoopReplacement,
 } from './restart.ts'
-import { processTreeRootPid, startWindowsProcess } from './adapters/windows-process.ts'
 import {
   prepareBranchTopology, prepareIntegrationWorktree,
 } from './branchTopology.ts'
@@ -618,28 +617,14 @@ const cmdLoop: Command = async (paths, args) => {
     // daemon runs from — `npm ci` deletes node_modules first, so a suite launching a
     // daemon deleted its own dependencies mid-run. The script path is absolute, so the
     // working directory is free to be the repository.
-    let daemonPid: number
-    if (process.platform === 'win32') {
-      // Measured on Windows: detached launches gave every console descendant its own
-      // visible window. The hidden launcher creates one non-visible console shared by
-      // the daemon tree, and that tree remains alive after this launcher exits.
-      daemonPid = await startWindowsProcess({
-        args: daemonArgs,
-        command: process.execPath,
-        cwd: paths.repoRoot,
-        outputFile: loopLog,
-      })
-    } else {
-      const fd = openSync(loopLog, 'a')
-      const child = spawn(process.execPath, daemonArgs, {
-        cwd: paths.repoRoot,
-        detached: true,
-        stdio: ['ignore', fd, fd],
-        windowsHide: true,
-      })
-      child.unref()
-      daemonPid = child.pid ?? 0
-    }
+    const daemon = await operatingSystem.launchDaemon({
+      args: daemonArgs,
+      command: process.execPath,
+      cwd: paths.repoRoot,
+      outputFile: loopLog,
+    })
+    daemon.release()
+    const daemonPid = daemon.pid
     console.log(`Started the loop in the background (PID=${daemonPid})`)
     console.log(`Log: ${loopLog}`)
     console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
@@ -710,7 +695,7 @@ async function runLoopDaemon(
   marker: (line: string) => void,
   config: LoopConfig,
 ): Promise<number> {
-  const daemonPid = processTreeRootPid()
+  const daemonPid = operatingSystem.processTreeRootPid()
   const pidFile = join(paths.queueDir, 'loop.pid')
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')

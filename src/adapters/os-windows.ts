@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { rmSync } from 'node:fs'
 import { win32 } from 'node:path'
 import type { OperatingSystem } from './os.ts'
+import { processTreeRootPid, startWindowsProcess } from './windows-process.ts'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
@@ -17,6 +18,7 @@ export interface WindowsOperatingSystemRuntime {
   }): void
   now(): number
   sleep(milliseconds: number): void
+  startDaemon?: typeof startWindowsProcess
 }
 
 export interface WindowsProcess {
@@ -128,29 +130,44 @@ export function createOperatingSystem(
   const processTreeIsAlive = (pid: number): boolean => (
     anyProcessIsAlive(runtime, processTreePids(runtime, pid))
   )
+  const terminateProcessTree = (pid: number): boolean => {
+    const trackedPids = processTreePids(runtime, pid)
+    if (!anyProcessIsAlive(runtime, trackedPids)) return false
+
+    try {
+      runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
+    } catch {
+      // The command result is not authoritative: verify the process tree below.
+    }
+
+    const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
+    while (anyProcessIsAlive(runtime, trackedPids) && runtime.now() < deadline) {
+      runtime.sleep(PROCESS_EXIT_POLL_MS)
+    }
+    if (anyProcessIsAlive(runtime, trackedPids)) {
+      throw new Error(`Could not stop process tree ${pid}.`)
+    }
+    return true
+  }
 
   return {
+    async launchDaemon(options) {
+      const pid = await (runtime.startDaemon ?? startWindowsProcess)(options)
+      return {
+        pid,
+        isAlive: () => isAlive(runtime, pid),
+        terminate: () => { terminateProcessTree(pid) },
+        release: () => {},
+        onError: () => {},
+        offError: () => {},
+        onExit: () => {},
+        offExit: () => {},
+      }
+    },
+    processTreeRootPid,
     processIsAlive: (pid) => isAlive(runtime, pid),
     processTreeIsAlive,
-    terminateProcessTree(pid): boolean {
-      const trackedPids = processTreePids(runtime, pid)
-      if (!anyProcessIsAlive(runtime, trackedPids)) return false
-
-      try {
-        runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
-      } catch {
-        // The command result is not authoritative: verify the process tree below.
-      }
-
-      const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
-      while (anyProcessIsAlive(runtime, trackedPids) && runtime.now() < deadline) {
-        runtime.sleep(PROCESS_EXIT_POLL_MS)
-      }
-      if (anyProcessIsAlive(runtime, trackedPids)) {
-        throw new Error(`Could not stop process tree ${pid}.`)
-      }
-      return true
-    },
+    terminateProcessTree,
     removeDirectory(path): void {
       if (path.startsWith('\\\\?\\')) {
         runtime.remove(path, { recursive: true, force: true, maxRetries: 3 })

@@ -1,11 +1,75 @@
+import type { ChildProcess, spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
+import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/internalEnvironment.ts'
 
 describe('operating-system adapters', () => {
   it('exposes behavior without a platform field', () => {
     expect(createWindowsOperatingSystem()).not.toHaveProperty('platform')
     expect(createPosixOperatingSystem()).not.toHaveProperty('platform')
+  })
+
+  it('launches a POSIX daemon without exposing the platform choice to callers', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-os-'))
+    const child = Object.assign(new EventEmitter(), {
+      pid: 43210,
+      exitCode: null,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    }) as unknown as ChildProcess
+    const spawnDaemon = vi.fn(() => child) as unknown as typeof spawn
+    const os = createPosixOperatingSystem({
+      signalProcessGroup: () => {}, probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, groupHasRunningMember: () => undefined,
+      spawnDaemon,
+    })
+
+    try {
+      const daemon = await os.launchDaemon({
+        args: ['src/cli.ts', 'loop'],
+        command: process.execPath,
+        cwd: root,
+        outputFile: join(root, 'loop.log'),
+      })
+      daemon.release()
+
+      expect(daemon.pid).toBe(43210)
+      expect(spawnDaemon).toHaveBeenCalledWith(
+        process.execPath,
+        ['src/cli.ts', 'loop'],
+        expect.objectContaining({ cwd: root, detached: true, windowsHide: true }),
+      )
+      expect(child.unref).toHaveBeenCalledOnce()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('uses the hidden process launcher for a Windows daemon', async () => {
+    const startDaemon = vi.fn(async () => 43211)
+    const os = createWindowsOperatingSystem({
+      spawn: () => {}, listProcesses: () => [], probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, startDaemon,
+    })
+    const options = {
+      args: ['src/cli.ts', 'loop'], command: process.execPath, cwd: 'C:\\repo',
+      outputFile: 'C:\\repo\\loop.log',
+    }
+
+    await expect(os.launchDaemon(options)).resolves.toMatchObject({ pid: 43211 })
+    expect(startDaemon).toHaveBeenCalledWith(options)
+  })
+
+  it('owns process-tree root selection inside each adapter', () => {
+    const env = { [WINDOWS_PROCESS_ROOT_PID_ENV]: '43212' }
+
+    expect(createWindowsOperatingSystem().processTreeRootPid(env)).toBe(43212)
+    expect(createPosixOperatingSystem().processTreeRootPid(env)).toBe(process.pid)
   })
 
   it('retries an ordinary Windows directory with its extended-length path', () => {
