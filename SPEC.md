@@ -281,6 +281,11 @@ values must be non-negative integers, with the narrower bounds stated below.
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a
     review rather than reviewing against a missing or stale base.
+    The optional consumer file `orchestration/accepted-limits.md` supplies findings that
+    a review should not repeat; a missing or whitespace-only file renders as `(none)`.
+    Its contents are repository-controlled prose and are framed as untrusted text in the
+    generated task, so they can narrow review findings but cannot authorize commands,
+    credential access, or orchestration and CI changes.
     when the package is a consumer subtree, its repository-relative path is explicitly
     out of scope and excluded from every Git diff/log command printed by the default
     review template. The exclusion and command-scope placeholders render empty when the
@@ -390,7 +395,9 @@ values must be non-negative integers, with the narrower bounds stated below.
 31. Everything the orchestration knows about the repository it runs in — which staged
     paths select fast pre-commit checks, which commands verify a merge, which paths make
     each check relevant, which suites prove a cycle's
-    tip, which toolchain breakage a reinstall repairs, and how commits and changed paths
+    tip, which toolchain breakage a reinstall repairs, which repository- or
+    toolchain-specific command output identifies an infrastructure failure, and how
+    commits and changed paths
     become pull-request sections, area labels, and risk bullets — lives in the project
     adapter (`adapters/project.ts`; with neither selection variable set, the single
     `../project/project-*.ts` file is discovered; `PROJECT=<name>` selects

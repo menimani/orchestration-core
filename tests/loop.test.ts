@@ -3062,11 +3062,27 @@ describe('noteMergeFailure', () => {
     expect(logText()).not.toMatch(/fixture service is unavailable|unreachable/)
   })
 
-  it('recognises the unreachable-registry signature', () => {
+  it('delegates toolchain-specific registry failures to the project adapter', () => {
+    const mavenProject: ProjectAdapter = {
+      ...stubProject,
+      classifyInfrastructureFailure: (output) => output.includes('Could not transfer artifact')
+        ? {
+            diagnosis: 'the Maven repository is unreachable',
+            remediation: 'restore access to the Maven repository and restart the loop',
+          }
+        : undefined,
+    }
+    const loop = makeLoop({}, mavenProject)
+    writeFileSync(mergeLog(), 'Could not transfer artifact org.example:thing from central\n')
+    loop.noteMergeFailure(mergeLog())
+    expect(logText()).toContain('the Maven repository is unreachable')
+  })
+
+  it('does not classify a toolchain-specific registry failure without an adapter rule', () => {
     const loop = makeLoop()
     writeFileSync(mergeLog(), 'Could not transfer artifact org.example:thing from central\n')
     loop.noteMergeFailure(mergeLog())
-    expect(logText()).toContain('unreachable')
+    expect(logText()).not.toContain('unreachable')
   })
 })
 

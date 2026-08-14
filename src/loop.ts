@@ -951,7 +951,7 @@ export function createLoop(deps: LoopDeps) {
       const infrastructureFailure = project.classifyInfrastructureFailure?.(text)
       if (infrastructureFailure !== undefined) {
         diagnosis = infrastructureFailure.diagnosis
-      } else if (/Could not resolve host|Connection refused|Could not transfer artifact/.test(text)) {
+      } else if (/Could not resolve host|Connection refused/.test(text)) {
         diagnosis = 'the network or a package registry is unreachable'
       }
     }
