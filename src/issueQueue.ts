@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import {
   descSlug, existingTaskIdForDesc, forgetTaskId, newTaskId, recordTaskIdForDesc, taskIdForDesc,
@@ -786,8 +786,16 @@ function releaseIntentDir(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-release-intent')
 }
 
+function releasePreparationDir(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-release-preparation')
+}
+
 function releaseIntentFile(paths: OrchPaths, taskId: string): string {
   return join(releaseIntentDir(paths), taskId)
+}
+
+function releasePreparationFile(paths: OrchPaths, taskId: string): string {
+  return join(releasePreparationDir(paths), taskId)
 }
 
 export function recordIssueForTask(paths: OrchPaths, taskId: string, issueNumber: number): void {
@@ -811,15 +819,10 @@ export function issueNumbersForTask(paths: OrchPaths, taskId: string): number[] 
     .map(Number)
 }
 
-/** Record release work durably before cleanup removes the task-to-issue mapping. */
-export function recordIssueReleaseIntent(
-  paths: OrchPaths,
-  taskId: string,
-  issueNumbers: readonly number[],
-): void {
-  const directory = releaseIntentDir(paths)
+function writeIssueNumbers(file: string, issueNumbers: readonly number[]): void {
+  const directory = dirname(file)
   mkdirSync(directory, { recursive: true })
-  const file = releaseIntentFile(paths, taskId)
+  const taskId = file.split(/[\\/]/).at(-1)!
   const temporaryFile = join(directory, `.${taskId}.${process.pid}.tmp`)
   try {
     writeFileSync(temporaryFile, `${[...new Set(issueNumbers)].join('\n')}\n`)
@@ -827,6 +830,30 @@ export function recordIssueReleaseIntent(
   } finally {
     rmSync(temporaryFile, { force: true })
   }
+}
+
+/** Record release work whose local cleanup is already complete. */
+export function recordIssueReleaseIntent(
+  paths: OrchPaths,
+  taskId: string,
+  issueNumbers: readonly number[],
+): void {
+  writeIssueNumbers(releaseIntentFile(paths, taskId), issueNumbers)
+}
+
+/** Persist cleanup release work without making it visible to daemon reconciliation. */
+export function prepareIssueReleaseIntent(
+  paths: OrchPaths,
+  taskId: string,
+  issueNumbers: readonly number[],
+): void {
+  writeIssueNumbers(releasePreparationFile(paths, taskId), issueNumbers)
+}
+
+/** Atomically make a prepared release visible after local cleanup completes. */
+export function completeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
+  mkdirSync(releaseIntentDir(paths), { recursive: true })
+  renameSync(releasePreparationFile(paths, taskId), releaseIntentFile(paths, taskId))
 }
 
 export function issueReleaseIntentForTask(paths: OrchPaths, taskId: string): number[] {
@@ -837,7 +864,20 @@ export function issueReleaseIntentForTask(paths: OrchPaths, taskId: string): num
     .map(Number)
 }
 
-/** Cancel a release that did not reach destructive local cleanup. */
+export function issueReleasePreparationForTask(paths: OrchPaths, taskId: string): number[] {
+  const file = releasePreparationFile(paths, taskId)
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8').split(/\r?\n/)
+    .filter((line) => /^\d+$/.test(line))
+    .map(Number)
+}
+
+/** Cancel a release preparation that did not reach completed local cleanup. */
+export function removeIssueReleasePreparation(paths: OrchPaths, taskId: string): void {
+  rmSync(releasePreparationFile(paths, taskId), { force: true })
+}
+
+/** Remove release work after it has reconciled successfully. */
 export function removeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
   rmSync(releaseIntentFile(paths, taskId), { force: true })
 }

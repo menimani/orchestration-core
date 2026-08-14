@@ -333,7 +333,7 @@ describe('pre-cycle core update', () => {
     )
   })
 
-  it('checks staged skill conflicts before changing generated files', async () => {
+  it('skips a staged skill destination while syncing and committing the other destination', async () => {
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     const generated = readFileSync(installed)
     writeFileSync(join(packageRoot, 'skills', 'loop-start', 'SKILL.md'), 'version two\n')
@@ -346,9 +346,17 @@ describe('pre-cycle core update', () => {
     expect(await loop.poll(), events.join('\n')).toBe('continue')
     expect(readFileSync(installed, 'utf8').replaceAll('\r', ''))
       .toBe('version one: npm run -C orchestration/ts loop\n')
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe('version two\n')
     expect(git(repoRoot, ['show', ':.agents/skills/loop-start/SKILL.md'])
       .replaceAll('\r', ''))
       .toBe('staged consumer command')
+    expect(git(repoRoot, ['show', 'HEAD:.claude/skills/loop-start/SKILL.md'])
+      .replaceAll('\r', ''))
+      .toBe('version two')
+    expect(git(repoRoot, ['status', '--short']))
+      .toBe('MM .agents/skills/loop-start/SKILL.md')
     expect(events.some((line) => line.startsWith(
       'WARN shared skill sync could not be committed: staged changes exist at',
     )), events.join('\n')).toBe(true)

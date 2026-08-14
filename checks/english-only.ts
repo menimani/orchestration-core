@@ -12,10 +12,12 @@ import { fileURLToPath } from 'node:url'
 
 const PACKAGE_ROOT = resolve(import.meta.dirname, '..')
 
-// Letters English borrows for proper nouns, such as Sao Paulo with a tilde or cafe with
-// an acute accent. The script property admits no CJK, Cyrillic, or Greek letters.
-const LATIN_LETTER = /\p{Script=Latin}/u
-const COMBINING_DIACRITICS = /[̀-ͯ]/
+// Accented forms admitted by the repository's English examples. Keep these explicit:
+// script-wide ranges also admit non-English Latin orthographies such as Vietnamese.
+const ENGLISH_LATIN: ReadonlySet<string> = new Set([
+  '\u00e9', // e with acute, as in cafe
+  '\u0301', // combining acute accent, for the decomposed spelling of the same word
+])
 
 // Typography and symbols the core's sources use. Each is explicit so adding a new
 // non-ASCII character remains a decision instead of silently widening the rule.
@@ -50,8 +52,7 @@ const RUNTIME_DIRECTORIES: ReadonlySet<string> = new Set([
 const permitted = (character: string): boolean =>
   character.codePointAt(0)! < 128
   || PUNCTUATION.has(character)
-  || LATIN_LETTER.test(character)
-  || COMBINING_DIACRITICS.test(character)
+  || ENGLISH_LATIN.has(character)
 
 const normalizedPath = (file: string): string => file.replaceAll('\\', '/')
 
