@@ -92,8 +92,13 @@ describe('integration branch topology', () => {
   })
 
   it('cuts tasks from integration, merges them back there, and never moves the daemon', async () => {
+    const daemonPackageRoot = join(repoRoot, 'orchestration', 'ts')
+    mkdirSync(daemonPackageRoot, { recursive: true })
+    writeFileSync(join(daemonPackageRoot, 'package.json'), '{"private":true}\n')
+    git(repoRoot, ['add', 'orchestration/ts/package.json'])
+    git(repoRoot, ['commit', '-qm', 'chore: add orchestration package'])
     const daemonHead = git(repoRoot, ['rev-parse', 'HEAD'])
-    const topology = prepareBranchTopology(paths, 'integration/run')
+    const topology = prepareBranchTopology(paths, 'integration/run', daemonPackageRoot)
     const integrationRoot = topology.paths.repoRoot
     const integrationBase = commit(
       integrationRoot, 'integration.txt', 'available to tasks\n', 'feat: integration input',
@@ -111,13 +116,19 @@ describe('integration branch topology', () => {
       .toBe('available to tasks\n')
     expect(git(taskRoot, ['merge-base', branchName(taskId), integrationBase])).toBe(integrationBase)
     commit(taskRoot, 'task.txt', 'task result\n', 'feat: task result')
+    commit(
+      taskRoot, 'orchestration/ts/package.json', '{"private":true,"dependencies":{}}\n',
+      'chore: update orchestration package',
+    )
     const taskHead = git(taskRoot, ['rev-parse', 'HEAD'])
     await writeStatus(paths, taskId, 'completed')
+    const install = vi.fn()
 
     await mergeTask(topology.paths, taskId, {
       taskGate: 'light',
       project: stubProject,
       outputFile: join(paths.logsDir, 'topology.merge.log'),
+      orchestrationDepsRuntime: { install, packageRoot: topology.packageRoot },
     })
 
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(daemonHead)
@@ -125,6 +136,8 @@ describe('integration branch topology', () => {
       .toBe('')
     expect(git(integrationRoot, ['branch', '--show-current'])).toBe('integration/run')
     expect(git(integrationRoot, ['rev-parse', 'HEAD'])).not.toBe(integrationBase)
+    expect(topology.packageRoot).toBe(join(integrationRoot, 'orchestration', 'ts'))
+    expect(install).toHaveBeenCalledWith(topology.packageRoot)
   })
 
   it('uses the integration branch for PR updates and final promotion', async () => {

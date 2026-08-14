@@ -21,7 +21,10 @@ import {
   closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, issueNumbersForTask,
   missingRequirementCompletionMarkers, recordIssuePromotions,
 } from './issueQueue.ts'
-import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
+import {
+  mergeTask, MergeError, orchestrationDepsRuntimeForPackage,
+  syncOrchestrationDepsAtStartup,
+} from './merge.ts'
 import { deploy } from './deploy.ts'
 import {
   isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
@@ -852,6 +855,7 @@ async function runLoopDaemon(
       runner,
       project: monitoredProject.project,
       projectAdapterChanged: monitoredProject.sourceChanged,
+      orchestrationDepsRuntime: orchestrationDepsRuntimeForPackage(topology.packageRoot),
       branchGuard: topology.validateDaemonCheckout,
       prepareIntegrationWorktree: topology.integrationBranch === undefined
         ? undefined
