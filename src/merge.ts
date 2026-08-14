@@ -13,6 +13,7 @@ import {
   branchName, isInspectionTaskId, logFile, packageFile, worktreeDir, PACKAGE_ROOT,
   type OrchPaths,
 } from './paths.ts'
+import { forgetTaskProcess } from './processRegistry.ts'
 import { execShellSync } from './shell.ts'
 import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
@@ -59,6 +60,8 @@ export interface MergeOptions {
   onOrchestrationDepsEvent?: OrchestrationDepsEvent | undefined
   /** Close or otherwise reconcile linked work before accepting a no-change verdict. */
   onNoChange?: (() => Promise<void>) | undefined
+  /** Worktree cleanup implementation; tests replace it to exercise retained cleanup state. */
+  worktreeRemovalRuntime?: WorktreeRemovalRuntime | undefined
 }
 
 export interface RemoteMergeOptions extends MergeOptions {
@@ -69,6 +72,8 @@ export interface RemoteMergeOptions extends MergeOptions {
 export interface NoChangeOptions {
   outputFile?: string | undefined
   onNoChange?: (() => Promise<void>) | undefined
+  /** Worktree cleanup implementation; tests replace it to exercise retained cleanup state. */
+  worktreeRemovalRuntime?: WorktreeRemovalRuntime | undefined
 }
 
 export type MergeTaskResult =
@@ -236,14 +241,15 @@ function removeFinishedWorktree(
   log: (text: string) => void,
   runtime: WorktreeRemovalRuntime,
   completion: string,
-): void {
+): boolean {
   const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
-  if (result.fallback === undefined) return
+  if (result.fallback === undefined) return true
   if (result.fallbackFailure !== undefined) {
     log(`WARN: ${completion}, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
-    return
+    return false
   }
   log(`Worktree removal needed the ${result.fallback}: ${worktree} (${result.gitFailure})`)
+  return true
 }
 
 export function removeMergedWorktree(
@@ -251,8 +257,8 @@ export function removeMergedWorktree(
   worktree: string,
   log: (text: string) => void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
-): void {
-  removeFinishedWorktree(paths, worktree, log, runtime, 'merged')
+): boolean {
+  return removeFinishedWorktree(paths, worktree, log, runtime, 'merged')
 }
 
 function git(cwd: string, args: string[]): string {
@@ -385,12 +391,13 @@ export function removeTemporaryWorktree(
   )
 }
 
-function stopCompletedRunner(pid: number): void {
+function stopCompletedRunner(paths: OrchPaths, taskId: string, pid: number): void {
   try {
     operatingSystem.terminateProcessTree(pid)
     if (operatingSystem.processTreeIsAlive(pid)) {
       throw new Error(`Process tree ${pid} is still alive.`)
     }
+    forgetTaskProcess(paths, taskId)
   } catch {
     throw new MergeError(`Could not stop completed runner ${pid}; task state was retained.`)
   }
@@ -440,7 +447,9 @@ async function finalizeLocalMerge(
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
   // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
   // once left the merge in place while the task was recorded as failed.
-  removeMergedWorktree(paths, worktree, io.out)
+  const worktreeRemoved = removeMergedWorktree(
+    paths, worktree, io.out, options.worktreeRemovalRuntime,
+  )
   try {
     git(paths.repoRoot, ['branch', '-d', branch])
   } catch {
@@ -450,7 +459,9 @@ async function finalizeLocalMerge(
       // an inspection task's branch may already be gone
     }
   }
-  io.out(`Merged ${taskId} and removed the worktree.`)
+  io.out(worktreeRemoved
+    ? `Merged ${taskId} and removed the worktree.`
+    : `Merged ${taskId}; manual worktree cleanup remains: ${worktree}`)
   return mergeCommit
 }
 
@@ -470,8 +481,9 @@ async function finalizeNoChange(
     )
   }
   await writeStatus(paths, taskId, 'no-change')
-  removeFinishedWorktree(
-    paths, worktree, io.out, worktreeRemovalRuntime, 'task completed without changes',
+  const worktreeRemoved = removeFinishedWorktree(
+    paths, worktree, io.out, options.worktreeRemovalRuntime ?? worktreeRemovalRuntime,
+    'task completed without changes',
   )
   try {
     git(paths.repoRoot, ['branch', '-d', branch])
@@ -482,7 +494,9 @@ async function finalizeNoChange(
       // The task branch may already be gone after an interrupted cleanup.
     }
   }
-  io.out(`Completed ${taskId} without changes.`)
+  io.out(worktreeRemoved
+    ? `Completed ${taskId} without changes and removed the worktree.`
+    : `Completed ${taskId} without changes; manual worktree cleanup remains: ${worktree}`)
 }
 
 /**
@@ -503,7 +517,7 @@ export async function completeTaskWithoutChanges(
   if (!noChangeMarkerPresent(paths, taskId)) {
     throw new MergeError(`${taskId} did not report NO_CHANGE_WARRANTED.`)
   }
-  if (status.pid !== null) stopCompletedRunner(status.pid)
+  if (status.pid !== null) stopCompletedRunner(paths, taskId, status.pid)
 
   const worktree = worktreeDir(paths, taskId)
   if (git(worktree, ['status', '--porcelain']).trim() !== '') {
@@ -539,7 +553,7 @@ export async function mergeTask(
   if (status.status !== 'completed') {
     throw new MergeError(`Task status is not 'completed' (current: ${status.status}).`)
   }
-  if (status.pid !== null) stopCompletedRunner(status.pid)
+  if (status.pid !== null) stopCompletedRunner(paths, taskId, status.pid)
 
   const worktree = worktreeDir(paths, taskId)
   const branch = branchName(taskId)
