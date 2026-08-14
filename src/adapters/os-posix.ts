@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { closeSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { OperatingSystem } from './os.ts'
 
@@ -13,6 +14,7 @@ export interface PosixOperatingSystemRuntime {
   sleep(milliseconds: number): void
   /** Whether a group has a running member, or undefined where the host cannot say. */
   groupHasRunningMember(processGroupId: number): boolean | undefined
+  spawnDaemon?: typeof spawn
 }
 
 /**
@@ -88,6 +90,37 @@ export function createOperatingSystem(
   const processTreeIsAlive = (pid: number): boolean => groupIsAlive(runtime, pid)
 
   return {
+    async launchDaemon(options) {
+      const output = openSync(options.outputFile, 'a')
+      let child
+      try {
+        child = (runtime.spawnDaemon ?? spawn)(options.command, [...options.args], {
+          cwd: options.cwd,
+          detached: true,
+          env: options.env,
+          stdio: ['ignore', output, output],
+          windowsHide: true,
+        })
+      } finally {
+        closeSync(output)
+      }
+      const pid = child.pid
+      if (pid === undefined) {
+        child.kill()
+        throw new Error('daemon process did not receive a PID')
+      }
+      return {
+        pid,
+        isAlive: () => child.exitCode === null,
+        terminate: () => { child.kill() },
+        release: () => { child.unref() },
+        onError: (listener) => { child.on('error', listener) },
+        offError: (listener) => { child.off('error', listener) },
+        onExit: (listener) => { child.on('exit', listener) },
+        offExit: (listener) => { child.off('exit', listener) },
+      }
+    },
+    processTreeRootPid: () => process.pid,
     processIsAlive: (pid) => processIsAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree(pid): boolean {
