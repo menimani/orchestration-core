@@ -12,19 +12,28 @@ import type { OrchPaths } from './paths.ts'
 // tree that belongs to a stranger.
 //
 // So a PID lives here instead, in a store whose lifetime matches what it describes: the
-// entry is removed when the process is stopped, and an entry is believed only while both
-// its boot and process-start identities still match. Nothing migrates — a PID left in an
-// old status record is simply no longer read, which is the same verdict this store gives.
+// entry is removed when the process is stopped, and a confirmed process-start identity
+// mismatch invalidates it. A temporarily unavailable identity probe leaves ownership in
+// place until a later probe can decide. Nothing migrates — a PID left in an old status
+// record is simply no longer read, which is the same verdict this store gives.
 
 /** Clock granularity between a recorded time and the boot time derived from uptime. */
 const BOOT_COMPARISON_TOLERANCE_MS = 5_000
 
-interface ProcessRegistryEntry {
+interface VerifiedProcessRegistryEntry {
   pid: number
   startIdentity: string
 }
 
+interface UnverifiedProcessRegistryEntry {
+  pid: number
+  startIdentity: null
+}
+
+type ProcessRegistryEntry = VerifiedProcessRegistryEntry | UnverifiedProcessRegistryEntry
+
 export type ProcessStartIdentity = (pid: number) => string | undefined
+export type ProcessIsAlive = (pid: number) => boolean
 
 function registryDir(paths: OrchPaths): string {
   return join(paths.queueDir, 'pids')
@@ -45,6 +54,7 @@ export function recordTaskProcess(
   taskId: string,
   pid: number,
   processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
+  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
 ): void {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
     forgetTaskProcess(paths, taskId)
@@ -57,11 +67,21 @@ export function recordTaskProcess(
     startIdentity = undefined
   }
   if (startIdentity === undefined) {
-    forgetTaskProcess(paths, taskId)
-    return
+    let alive = true
+    try {
+      alive = processIsAlive(pid)
+    } catch {
+      // An unavailable liveness probe does not prove that the process stopped.
+    }
+    if (!alive) {
+      forgetTaskProcess(paths, taskId)
+      return
+    }
   }
   mkdirSync(registryDir(paths), { recursive: true })
-  writeFileSync(registryFile(paths, taskId), `${JSON.stringify({ pid, startIdentity })}\n`)
+  writeFileSync(registryFile(paths, taskId), `${JSON.stringify({
+    pid, startIdentity: startIdentity ?? null,
+  })}\n`)
 }
 
 /** Forget the process for `taskId`. Safe to call when nothing was recorded. */
@@ -70,14 +90,16 @@ export function forgetTaskProcess(paths: OrchPaths, taskId: string): void {
 }
 
 /**
- * The process recorded for `taskId`, or undefined when none is or its boot/start identity
- * is stale. A stale entry is dropped as it is read, so the answer does not change again.
+ * The process recorded for `taskId`, or undefined when none is or it is confirmed stale.
+ * An unverifiable identity keeps the recorded ownership for a later retry. A confirmed
+ * stale entry is dropped as it is read, so the answer does not change again.
  */
 export function taskProcessPid(
   paths: OrchPaths,
   taskId: string,
   boot: () => number = bootedAt,
   processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
+  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
 ): number | undefined {
   const file = registryFile(paths, taskId)
   let recorded: string
@@ -97,7 +119,8 @@ export function taskProcessPid(
   }
 
   if (entry === null || typeof entry !== 'object'
-    || !Number.isSafeInteger(entry.pid) || entry.pid <= 0 || typeof entry.startIdentity !== 'string'
+    || !Number.isSafeInteger(entry.pid) || entry.pid <= 0
+    || (typeof entry.startIdentity !== 'string' && entry.startIdentity !== null)
     || entry.startIdentity === '') {
     forgetTaskProcess(paths, taskId)
     return undefined
@@ -112,9 +135,25 @@ export function taskProcessPid(
   } catch {
     currentStartIdentity = undefined
   }
-  if (currentStartIdentity !== entry.startIdentity) {
+  if (currentStartIdentity === undefined) {
+    let alive = true
+    try {
+      alive = processIsAlive(entry.pid)
+    } catch {
+      // An unavailable liveness probe does not prove that the process stopped.
+    }
+    if (alive) return entry.pid
     forgetTaskProcess(paths, taskId)
     return undefined
+  }
+  if (entry.startIdentity !== null && currentStartIdentity !== entry.startIdentity) {
+    forgetTaskProcess(paths, taskId)
+    return undefined
+  }
+  if (entry.startIdentity === null) {
+    writeFileSync(file, `${JSON.stringify({
+      pid: entry.pid, startIdentity: currentStartIdentity,
+    })}\n`)
   }
   return entry.pid
 }

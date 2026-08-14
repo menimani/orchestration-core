@@ -1,4 +1,6 @@
-import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -66,24 +68,40 @@ describe('task process registry', () => {
     expect(taskProcessPid(paths, taskId, bootedAnHourAgo, identity)).toBe(4321)
   })
 
-  it('drops a PID that now belongs to a different process', () => {
+  it('keeps an unavailable probe but drops a later confirmed identity mismatch', () => {
     recordTaskProcess(paths, taskId, 4321, identity)
 
+    expect(taskProcessPid(paths, taskId, undefined, () => undefined, () => true)).toBe(4321)
+    expect(existsSync(registryFile())).toBe(true)
     expect(taskProcessPid(paths, taskId, undefined, () => 'started:replacement'))
       .toBeUndefined()
     expect(existsSync(registryFile())).toBe(false)
   })
 
-  it('drops a PID whose process-start identity cannot be verified', () => {
+  it('keeps ownership when the identity probe is unavailable, then verifies on recovery', () => {
     recordTaskProcess(paths, taskId, 4321, identity)
 
-    expect(taskProcessPid(paths, taskId, undefined, () => undefined)).toBeUndefined()
-    expect(existsSync(registryFile())).toBe(false)
+    expect(taskProcessPid(paths, taskId, undefined, () => undefined, () => true)).toBe(4321)
+    expect(existsSync(registryFile())).toBe(true)
+    expect(taskProcessPid(paths, taskId, undefined, identity, () => true)).toBe(4321)
+    expect(existsSync(registryFile())).toBe(true)
   })
 
-  it('does not record a PID whose process-start identity cannot be read', () => {
-    recordTaskProcess(paths, taskId, 4321, () => undefined)
+  it('records unverifiable ownership and adds the identity when the probe recovers', () => {
+    recordTaskProcess(paths, taskId, 4321, () => undefined, () => true)
 
+    expect(existsSync(registryFile())).toBe(true)
+    expect(taskProcessPid(paths, taskId, undefined, identity, () => true)).toBe(4321)
+    expect(JSON.parse(readFileSync(registryFile(), 'utf8'))).toEqual({
+      pid: 4321, startIdentity: 'started:4321',
+    })
+  })
+
+  it('drops unverifiable ownership only when the process is confirmed gone', () => {
+    recordTaskProcess(paths, taskId, 4321, identity)
+
+    expect(taskProcessPid(paths, taskId, undefined, () => undefined, () => false))
+      .toBeUndefined()
     expect(existsSync(registryFile())).toBe(false)
   })
 
