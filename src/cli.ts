@@ -7,14 +7,13 @@ import {
 import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
-import { loadProject } from './adapters/project.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { operatingSystem } from './adapters/os.ts'
 import { cleanupTask } from './cleanup.ts'
+import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
 import { loadConfig, type LoopConfig } from './config.ts'
 import { createLoop, formatEventLine } from './loop.ts'
-import { initializeRepository } from './initialize.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
@@ -32,7 +31,6 @@ import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
 import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
-import { verifyRepositorySetup } from './setup.ts'
 import {
   liveTaskProcesses, orphanedWorktreeDirectories, terminateLiveTaskProcesses,
   worktreeHolderHint, type TaskProcessTermination,
@@ -47,6 +45,10 @@ import {
   loopRestartPredecessorPid, publishLoopReplacementPid, signalLoopRestartReady,
   startLoopReplacement,
 } from './restart.ts'
+import { processTreeRootPid, startWindowsProcess } from './adapters/windows-process.ts'
+import {
+  prepareBranchTopology, prepareIntegrationWorktree,
+} from './branchTopology.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -55,6 +57,11 @@ import {
 type Command = (paths: OrchPaths, args: string[]) => Promise<number>
 
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high'])
+
+async function loadProject(pathsRoot: string) {
+  const projectModule = await import('./adapters/project.ts')
+  return projectModule.loadProject(pathsRoot)
+}
 
 function repoRoot(): string {
   return execFileSync('git', ['rev-parse', '--show-toplevel'], {
@@ -177,6 +184,7 @@ const cmdInit: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const forge = await loadForge(config.forge, paths.repoRoot)
+  const { initializeRepository } = await import('./initialize.ts')
   const result = await initializeRepository(paths, forge, args[0])
   return result.ok ? 0 : 1
 }
@@ -199,6 +207,7 @@ const cmdVerifySetup: Command = async (paths, args) => {
   }
   const config = loadConfig()
   const forge = await loadForge(config.forge, paths.repoRoot)
+  const { verifyRepositorySetup } = await import('./setup.ts')
   return await verifyRepositorySetup(paths, forge, { env: process.env }) ? 0 : 1
 }
 
@@ -454,6 +463,9 @@ const cmdMerge: Command = async (paths, args) => {
       closesIssues: linkedIssues,
       forge,
     })
+    // A completed manual merge proves the previous failures are no longer consecutive.
+    // Clear the durable streak immediately, before optional forge bookkeeping can fail.
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
     if (linkedIssues.length > 0) {
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
         cwd: paths.repoRoot,
@@ -482,13 +494,14 @@ const cmdMerge: Command = async (paths, args) => {
 }
 
 const cmdCleanup: Command = async (paths, args) => {
-  const taskId = args[0]
-  if (taskId === undefined) {
-    console.error('Usage: cleanup <task-id>')
-    return 1
-  }
-  cleanupTask(paths, taskId)
-  return 0
+  let config: LoopConfig | undefined
+  const cleanupConfig = (): LoopConfig => config ??= loadConfig()
+  return runCleanupCommand(paths, args, {
+    issueQueueEnabled: () => cleanupConfig().issueQueueEnabled,
+    loadForge: () => loadForge(cleanupConfig().forge, paths.repoRoot),
+    cleanup: cleanupTask,
+    error: (message) => console.error(message),
+  })
 }
 
 const cmdPrune: Command = async (paths, args) => {
@@ -582,30 +595,46 @@ const cmdLoop: Command = async (paths, args) => {
   if (args[0] === '--daemon' || args[0] === '-d') {
     // run-branch.txt is updated by the child after this descriptor is opened. Use the
     // branch it is about to record so a new run rotates immediately, not on its restart.
-    const runBranch = execFileSync('git', ['branch', '--show-current'], {
-      cwd: paths.repoRoot,
-      encoding: 'utf8',
-      windowsHide: true,
-    }).trim()
+    const configuredIntegrationBranch = loadConfig().integrationBranch
+    const runBranch = configuredIntegrationBranch || execFileSync(
+      'git', ['branch', '--show-current'], {
+        cwd: paths.repoRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+      },
+    ).trim()
     prepareLoopLog(paths, { runBranch })
-    const fd = openSync(loopLog, 'a')
     const markerLog = join(paths.logsDir, 'loop-markers.log')
-    // Match runner launches: the detached Windows tree needs one shared hidden console.
-    const child = spawn(process.execPath, [
-      packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
-    ], {
-      // The daemon must work on the repository this launcher was pointed at. Starting it
-      // in the package directory instead made it resolve its own checkout as the
-      // repository, which put the startup dependency install inside the very package the
-      // daemon runs from — `npm ci` deletes node_modules first, so a suite launching a
-      // daemon deleted its own dependencies mid-run. The script path is absolute, so the
-      // working directory is free to be the repository.
-      cwd: paths.repoRoot,
-      detached: true,
-      stdio: ['ignore', fd, fd],
-    })
-    child.unref()
-    console.log(`Started the loop in the background (PID=${child.pid})`)
+    const daemonArgs = [packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog]
+    // The daemon must work on the repository this launcher was pointed at. Starting it
+    // in the package directory instead made it resolve its own checkout as the
+    // repository, which put the startup dependency install inside the very package the
+    // daemon runs from — `npm ci` deletes node_modules first, so a suite launching a
+    // daemon deleted its own dependencies mid-run. The script path is absolute, so the
+    // working directory is free to be the repository.
+    let daemonPid: number
+    if (process.platform === 'win32') {
+      // Measured on Windows: detached launches gave every console descendant its own
+      // visible window. The hidden launcher creates one non-visible console shared by
+      // the daemon tree, and that tree remains alive after this launcher exits.
+      daemonPid = await startWindowsProcess({
+        args: daemonArgs,
+        command: process.execPath,
+        cwd: paths.repoRoot,
+        outputFile: loopLog,
+      })
+    } else {
+      const fd = openSync(loopLog, 'a')
+      const child = spawn(process.execPath, daemonArgs, {
+        cwd: paths.repoRoot,
+        detached: true,
+        stdio: ['ignore', fd, fd],
+        windowsHide: true,
+      })
+      child.unref()
+      daemonPid = child.pid ?? 0
+    }
+    console.log(`Started the loop in the background (PID=${daemonPid})`)
     console.log(`Log: ${loopLog}`)
     console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
     console.log(`Stop: ${packageScriptCommand(paths.repoRoot, 'stop')}`)
@@ -675,6 +704,7 @@ async function runLoopDaemon(
   marker: (line: string) => void,
   config: LoopConfig,
 ): Promise<number> {
+  const daemonPid = processTreeRootPid()
   const pidFile = join(paths.queueDir, 'loop.pid')
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
@@ -688,7 +718,7 @@ async function runLoopDaemon(
   // PID lock: one loop per repository.
   for (;;) {
     try {
-      writeFileSync(pidFile, `${process.pid}\n`, { flag: 'wx' })
+      writeFileSync(pidFile, `${daemonPid}\n`, { flag: 'wx' })
       break
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
@@ -722,12 +752,12 @@ async function runLoopDaemon(
   const releaseDaemonState = (): void => {
     if (!ownsDaemonState) return
     try {
-      removeIssueModeMarker(paths, process.pid)
+      removeIssueModeMarker(paths, daemonPid)
     } catch {
       // nothing to release
     }
     try {
-      if (readFileSync(pidFile, 'utf8').trim() === `${process.pid}`) {
+      if (readFileSync(pidFile, 'utf8').trim() === `${daemonPid}`) {
         rmSync(pidFile, { force: true })
       }
     } catch {
@@ -786,7 +816,7 @@ async function runLoopDaemon(
     // process has completed initialization. The predecessor publishes this PID as one
     // atomic handover after observing the ready signal.
     if (!usesRestartReservation) {
-      writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+      writeIssueModeMarker(paths, config.issueQueueEnabled, daemonPid)
     }
     log(formatEventLine(
       'Started', 'core', config.coreAutoUpdate ? 'auto-update on' : 'auto-update off',
@@ -804,10 +834,38 @@ async function runLoopDaemon(
         ? formatEventLine(name, 'orchestration deps', subject)
         : formatEventLine(name, subject)),
     )
-    const forge = await loadForge(config.forge, paths.repoRoot)
+    const topology = prepareBranchTopology(paths, config.integrationBranch)
+    const loopPaths = topology.paths
+    const forge = await loadForge(config.forge, loopPaths.repoRoot)
     const runner = await loadRunner(config.runner)
-    const project = await loadProject(paths.root)
-    const loop = createLoop({ paths, config, forge, runner, project, log, marker, now: () => new Date() })
+    const projectModule = await import('./adapters/project.ts')
+    const monitoredProject = await projectModule.loadMonitoredProject(paths.root)
+    if (topology.integrationBranch !== undefined) {
+      prepareIntegrationWorktree(
+        loopPaths,
+        monitoredProject.project.integrationWorktreeSetup ?? [],
+        (line) => log(formatEventLine('Preparing', 'integration', line)),
+      )
+    }
+    const loop = createLoop({
+      paths: loopPaths,
+      config,
+      forge,
+      runner,
+      project: monitoredProject.project,
+      projectAdapterChanged: monitoredProject.sourceChanged,
+      branchGuard: topology.validateDaemonCheckout,
+      prepareIntegrationWorktree: topology.integrationBranch === undefined
+        ? undefined
+        : () => prepareIntegrationWorktree(
+            loopPaths,
+            monitoredProject.project.integrationWorktreeSetup ?? [],
+            (line) => log(formatEventLine('Preparing', 'integration', line)),
+          ),
+      log,
+      marker,
+      now: () => new Date(),
+    })
 
     if (!loop.validatePushTarget()) return 1
     await loop.initializeIssueQueue()
@@ -838,7 +896,7 @@ async function runLoopDaemon(
           // explicit ready signal.
           const readyFile = join(
             paths.queueDir,
-            `loop.restart-${process.pid}-${Date.now()}.ready`,
+            `loop.restart-${daemonPid}-${Date.now()}.ready`,
           )
           const replacement = await startLoopReplacement(readyFile, {
             onReady: (replacementPid) => {
@@ -847,17 +905,18 @@ async function runLoopDaemon(
               process.off('exit', releaseDaemonState)
               try {
                 writeIssueModeMarker(paths, config.issueQueueEnabled, replacementPid)
-                publishLoopReplacementPid(pidFile, process.pid, replacementPid)
+                publishLoopReplacementPid(pidFile, daemonPid, replacementPid)
                 ownsDaemonState = false
               } catch (error) {
                 try {
-                  writeIssueModeMarker(paths, config.issueQueueEnabled, process.pid)
+                  writeIssueModeMarker(paths, config.issueQueueEnabled, daemonPid)
                 } finally {
                   process.on('exit', releaseDaemonState)
                 }
                 throw error
               }
             },
+            outputFile: join(paths.logsDir, 'loop.log'),
           })
           if (!replacement.ok) {
             log(formatEventLine(
@@ -865,7 +924,9 @@ async function runLoopDaemon(
             ))
             return 1
           }
-          log(formatEventLine('Restarted', 'core', `replacement PID ${replacement.pid}`))
+          log(formatEventLine(
+            'Restarted', loop.restartSubject(), `replacement PID ${replacement.pid}`,
+          ))
         }
         return 0
       }
@@ -885,11 +946,28 @@ const cmdShipped: Command = async (paths, args) => {
     console.error('Usage: shipped <pr-number-or-url>')
     return 1
   }
+  const isPositiveNumber = /^#?\d+$/.test(pr) && BigInt(pr.replace(/^#/, '')) > 0n
+  let reference = isPositiveNumber ? `#${pr.replace(/^#/, '')}` : undefined
+  if (reference === undefined && !/[\u0000-\u001f\u007f]/.test(pr)) {
+    try {
+      const url = new URL(pr)
+      if (/^https?:\/\//i.test(pr)
+        && (url.protocol === 'http:' || url.protocol === 'https:')
+        && url.hostname !== '') {
+        reference = url.href
+      }
+    } catch {
+      // A non-URL may still be a valid numeric reference, handled above.
+    }
+  }
+  if (reference === undefined) {
+    console.error('A shipped reference must be a positive PR number or absolute HTTP(S) URL.')
+    return 1
+  }
   if (isLoopRunning(paths)) {
     console.error('The loop is running and records its own ending; shipped is for runs promoted by hand.')
     return 1
   }
-  const reference = /^#?\d+$/.test(pr) ? `#${pr.replace(/^#/, '')}` : pr
   const config = loadConfig()
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
@@ -905,7 +983,7 @@ const cmdShipped: Command = async (paths, args) => {
     cycleCap,
   })
   appendFileSync(join(paths.logsDir, 'loop.log'), `${lines.join('\n')}\n`)
-  appendFileSync(join(paths.logsDir, 'loop-markers.log'), `LOOP_DONE: ${pr}\n`)
+  appendFileSync(join(paths.logsDir, 'loop-markers.log'), `LOOP_DONE: ${reference}\n`)
   console.log(`Recorded: Completed Loop PR ${reference}`)
   return 0
 }

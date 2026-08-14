@@ -16,7 +16,8 @@ import {
   shortTaskId,
 } from './ids.ts'
 import {
-  mergeRemoteTask, mergeTask, MergeError, type OrchestrationDepsRuntime,
+  mergeRemoteTask, mergeTask, MergeError, OrchestrationDepsInstallError,
+  type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
@@ -29,6 +30,7 @@ import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
   frameUntrustedText, frameVerifiedRequirement, readTemplate, repositoryInspectionPreamble,
+  reviewScopeTemplateValues,
 } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { currentBranchPushRemote, currentBranchTrackingRemote } from './gitRemote.ts'
@@ -37,16 +39,17 @@ import { execShellSync } from './shell.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
+import { absorbDefaultBranch } from './branchTopology.ts'
 import {
   claimIssueGroup, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
-  issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
   recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
-  unresolvedFindings, type ClaimedRequirement,
+  unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
   LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
@@ -66,6 +69,9 @@ export interface LoopDeps {
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   enqueueTask?: typeof enqueueTask
   updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
+  projectAdapterChanged?: () => boolean
+  branchGuard?: (() => string | undefined) | undefined
+  prepareIntegrationWorktree?: (() => void) | undefined
 }
 
 interface QueueEntry {
@@ -80,6 +86,7 @@ interface FindingDispatch {
 }
 
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
+const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
 
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
@@ -122,6 +129,7 @@ export function createLoop(deps: LoopDeps) {
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
   const mergeFailureFile = join(paths.queueDir, 'merge-failure-count.txt')
+  const issueReleaseFailureFile = join(paths.queueDir, 'issue-release-failure-count.txt')
   const runBranchFile = join(paths.queueDir, 'run-branch.txt')
   const decisionsFile = join(paths.queueDir, 'decisions.txt')
   const prUrlFile = join(paths.queueDir, 'pr-url.txt')
@@ -169,6 +177,10 @@ export function createLoop(deps: LoopDeps) {
       cycle,
       (name, subject, detail = '') => event(name, subject, detail),
     ))
+  const projectAdapterChanged = deps.projectAdapterChanged ?? (() => false)
+  const branchGuard = deps.branchGuard ?? (() => undefined)
+  const prepareIntegration = deps.prepareIntegrationWorktree ?? (() => undefined)
+  let restartSubject = 'core'
 
   function rateLimitTime(resetAt: Date): string {
     return new Intl.DateTimeFormat('en-GB', {
@@ -401,7 +413,8 @@ export function createLoop(deps: LoopDeps) {
         return
       }
     }
-    const issues = findings.filter((issue) => issue.labels.includes(LABEL_MERGE_READY))
+    const issues = findings.filter((issue) =>
+      issueHasExactlyLifecycleLabel(issue, LABEL_MERGE_READY))
     const processedIssues = new Set<number>()
 
     for (const issue of issues) {
@@ -504,6 +517,7 @@ export function createLoop(deps: LoopDeps) {
         if (error instanceof ForgeRateLimitError) return
         const message = error instanceof Error ? error.message : String(error)
         appendFileSync(mergeLog, `${message}\n`)
+        if (error instanceof OrchestrationDepsInstallError) throw error
         if (adoptionTaskId === undefined) {
           event('WARN', `remote adoption failed for issue #${issue.number}`)
         } else {
@@ -911,6 +925,25 @@ export function createLoop(deps: LoopDeps) {
     return false
   }
 
+  function noteIssueReleaseFailure(error: IssueReleaseReconciliationError): void {
+    const failures = readCount(issueReleaseFailureFile) + 1
+    writeFileSync(issueReleaseFailureFile, `${failures}\n`)
+    const issues = error.failures.map(({ issueNumber }) => `#${issueNumber}`).join(' ')
+    const detail = error.failures
+      .map(({ issueNumber, error: cause }) => `#${issueNumber}: ${errorSummary(cause)}`)
+      .join('; ')
+    if (failures >= MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES) {
+      event('ERROR', `${failures} consecutive issue release failures for ${issues}; stopping the loop (${detail})`)
+      writeFileSync(stopFile, '')
+      return
+    }
+    warning(
+      'issue-release-reconciliation',
+      'reconciling persisted issue releases',
+      `could not reconcile persisted issue releases (${detail}); attempt ${failures}/${MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES}`,
+    )
+  }
+
   function isScanRunning(): boolean {
     return listTaskIds(paths).some((taskId) =>
       isScanTaskId(taskId) && readStatus(paths, taskId)?.status === 'running')
@@ -1023,11 +1056,6 @@ export function createLoop(deps: LoopDeps) {
     return groups
   }
 
-  function generateScanTask(scanId: string, scope: string): boolean {
-    writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
-    return true
-  }
-
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
     let remote: string
     try {
@@ -1041,20 +1069,20 @@ export function createLoop(deps: LoopDeps) {
     let baseBranch = git([
       'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
     ]).trim()
-    if (baseBranch.startsWith(remotePrefix)
-      && git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
-      const branch = baseBranch.slice(remotePrefix.length)
-      git(['fetch', '--quiet', remote,
-        `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
-    }
     if (!baseBranch.startsWith(remotePrefix)
       || git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
       const advertised = git(['ls-remote', '--symref', remote, 'HEAD'])
       const branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(advertised)?.[1] ?? ''
       baseBranch = branch === '' ? '' : `${remote}/${branch}`
-      if (branch !== '') {
-        git(['fetch', '--quiet', remote,
+    }
+    if (baseBranch.startsWith(remotePrefix)) {
+      const branch = baseBranch.slice(remotePrefix.length)
+      try {
+        gitIn(paths.repoRoot, ['fetch', '--quiet', remote,
           `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
+      } catch (error) {
+        event('WARN', `could not refresh review base ${baseBranch}: ${errorSummary(error)}`)
+        return false
       }
     }
     if (!baseBranch.startsWith(remotePrefix)
@@ -1072,6 +1100,7 @@ export function createLoop(deps: LoopDeps) {
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       BASE_BRANCH: baseBranch,
       ACCEPTED_LIMITS: frameUntrustedText(acceptedLimits),
+      ...reviewScopeTemplateValues(paths.repoRoot),
     })
     writeFileSync(specFile(paths, reviewId), text)
     return true
@@ -1175,6 +1204,11 @@ export function createLoop(deps: LoopDeps) {
     }
     writeFileSync(scanCountFile, '0\n')
     writeFileSync(totalTaskCountFile, '0\n')
+    if (!preserveTaskMarkers && config.integrationBranch !== '') {
+      for (const name of ['daemon-branch.txt', 'daemon-head.txt', 'integration-branch.txt']) {
+        rmSync(join(paths.queueDir, name), { force: true })
+      }
+    }
   }
 
   /**
@@ -1184,14 +1218,19 @@ export function createLoop(deps: LoopDeps) {
    */
   function initializeSessionStateForBranch(): void {
     const currentBranch = git(['branch', '--show-current']).trim()
-    if (existsSync(runBranchFile)) {
-      const previous = readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
-      if (previous !== currentBranch) {
-        // Status files span branches, so their announcement markers must span branches
-        // too; explicit task cleanup removes a marker when a retry is wanted.
-        cleanupSessionState(true)
-      }
+    const previousBranch = existsSync(runBranchFile)
+      ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
+      : undefined
+    if (previousBranch === currentBranch) {
+      writeFileSync(runBranchFile, `${currentBranch}\n`)
+      return
     }
+    if (previousBranch !== undefined) {
+      // Status files span branches, so their announcement markers must span branches
+      // too; explicit task cleanup removes a marker when a retry is wanted.
+      cleanupSessionState(true)
+    }
+    writeFileSync(mergeFailureFile, '0\n')
     writeFileSync(runBranchFile, `${currentBranch}\n`)
   }
 
@@ -1704,7 +1743,19 @@ export function createLoop(deps: LoopDeps) {
     const nextCycle = currentScans + 1
     // This is the only safe restart boundary: the previous gate is closed, no task is
     // running, and the next cycle has not yet consumed its number or started a scan.
+    // Restarting the whole daemon here is safer than hot-swapping the project adapter:
+    // every closure and adapter consumer changes atomically before any new work exists.
+    if (projectAdapterChanged()) {
+      restartSubject = 'adapter'
+      event('Restarting', 'adapter', `for cycle ${nextCycle}`)
+      return 'restart'
+    }
+    restartSubject = 'core'
     if (await updateCore(nextCycle) === 'restart') return 'restart'
+    if (config.integrationBranch !== '') {
+      absorbDefaultBranch(paths, (name, subject, detail = '') => event(name, subject, detail))
+      prepareIntegration()
+    }
     const requestedScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
     let nScans = requestedScans
     let sectionGroups: number[][] = []
@@ -1734,17 +1785,16 @@ export function createLoop(deps: LoopDeps) {
       const scope = nScans === 1
         ? 'Perform the full scan described below.'
         : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
-      if (generateScanTask(scanId, scope)) {
-        try {
-          await startTask(paths, runner, scanId, {
-            effort: config.scanEffort as 'high',
-            model: config.scanModel === '' ? undefined : config.scanModel,
-            setup: project.scanWorktreeSetup,
-          })
-          event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
-        } catch (error) {
-          event('WARN', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))})`)
-        }
+      writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
+      try {
+        await startTask(paths, runner, scanId, {
+          effort: config.scanEffort as 'high',
+          model: config.scanModel === '' ? undefined : config.scanModel,
+          setup: project.scanWorktreeSetup,
+        })
+        event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
+      } catch (error) {
+        event('WARN', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))})`)
       }
     }
     return 'continue'
@@ -1753,6 +1803,12 @@ export function createLoop(deps: LoopDeps) {
   /** One poll iteration. Returns 'stopped' | 'done' | 'continue' | 'restart'. */
   async function poll(): Promise<'stopped' | 'done' | 'continue' | 'restart'> {
     gateWaitTarget = undefined
+    const daemonProblem = branchGuard()
+    if (daemonProblem !== undefined) {
+      event('ERROR', daemonProblem)
+      writeFileSync(stopFile, '')
+      return 'stopped'
+    }
     const currentBranch = git(['branch', '--show-current']).trim()
     const recordedBranch = existsSync(runBranchFile)
       ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
@@ -1857,6 +1913,7 @@ export function createLoop(deps: LoopDeps) {
         }
       } catch (error) {
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
+        if (error instanceof OrchestrationDepsInstallError) throw error
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.merge.log`)
         const abandoned = noteMergeFailure(mergeLog)
         if (abandoned && linkedIssues.length > 1 && remoteOperationsAvailable) {
@@ -2040,11 +2097,15 @@ export function createLoop(deps: LoopDeps) {
             openFindings,
             issueHasMergeMarker,
           )
+          if (readCount(issueReleaseFailureFile) > 0) {
+            writeFileSync(issueReleaseFailureFile, '0\n')
+            warningLog.recovered('issue-release-reconciliation')
+          }
           let capacity = config.maxParallel - running - queueLength()
           if (capacity > 0) {
             if (cachedUser === undefined) cachedUser = await forge.currentUser()
             const readyIssues = openFindings.filter((candidate) =>
-              candidate.labels.includes(LABEL_READY)
+              issueHasExactlyLifecycleLabel(candidate, LABEL_READY)
                 && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR)
                 && candidate.assignees.length === 0
                 && issuePromotionForIssue(paths, candidate.number) === undefined)
@@ -2082,14 +2143,17 @@ export function createLoop(deps: LoopDeps) {
           }
           warningLog.recovered('issue-queue-sync')
         } catch (error) {
-          if (!(error instanceof ForgeRateLimitError)) {
+          if (error instanceof IssueReleaseReconciliationError) {
+            issueReconciliationPending = true
+            noteIssueReleaseFailure(error)
+          } else if (!(error instanceof ForgeRateLimitError)) {
             warning('issue-queue-sync', 'syncing the issue queue',
               `issue queue unreachable: ${errorSummary(error)}`)
           }
         }
       }
 
-      for (;;) {
+      for (; !existsSync(stopFile);) {
         if (running >= config.maxParallel) break
         const entry = dequeueNext(remoteOperationsAvailable)
         if (entry === undefined) break
@@ -2235,6 +2299,7 @@ export function createLoop(deps: LoopDeps) {
     validatePushTarget,
     initializeSessionStateForBranch,
     cleanupSessionState,
+    restartSubject: () => restartSubject,
     // exported for tests
     actionableFindings,
     recordScanYield,

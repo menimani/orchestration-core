@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process'
-import { isAbsolute, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
 import type { Runner } from './adapters/runner.ts'
-import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
-import { syncSharedSkills } from './sharedSkills.ts'
+import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
+import { sharedSkillManagedTargets, syncSharedSkills } from './sharedSkills.ts'
 
 export type CoreUpdateOutcome = 'continue' | 'restart'
 
@@ -38,13 +38,6 @@ function summary(error: unknown): string {
     .replaceAll(/\s+/g, ' ')
 }
 
-function subtreePrefix(repoRoot: string, packageRoot: string): string | undefined {
-  const prefix = relative(repoRoot, packageRoot)
-  if (prefix === '' || prefix === '..' || prefix.startsWith(`..${sep}`)
-    || isAbsolute(prefix)) return undefined
-  return prefix.replaceAll('\\', '/')
-}
-
 function importSplit(message: string, prefix: string): string | undefined {
   const dir = /^git-subtree-dir:\s*(.+?)\s*$/im.exec(message)?.[1]
   const split = /^git-subtree-split:\s*([0-9a-f]{7,64})\s*$/im.exec(message)?.[1]
@@ -55,6 +48,17 @@ function warn(event: CoreUpdateEvent, message: string): void {
   event('WARN', message)
 }
 
+function repositoryPaths(repoRoot: string, paths: string[]): string[] {
+  return paths.map((path) => {
+    const repositoryPath = relative(repoRoot, path)
+    if (repositoryPath === '' || repositoryPath === '..'
+      || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
+      throw new Error(`shared skill output escaped the repository: ${path}`)
+    }
+    return repositoryPath.replaceAll('\\', '/')
+  })
+}
+
 function syncSkills(
   repoRoot: string,
   packageRoot: string,
@@ -63,9 +67,29 @@ function syncSkills(
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime,
 ): void {
+  const skippedDestinations: string[] = []
+  if (isConsumer) {
+    try {
+      for (const target of sharedSkillManagedTargets(repoRoot, packageRoot, runner)) {
+        const managedPaths = repositoryPaths(repoRoot, target.managedPaths)
+        const alreadyStaged = runtime.git(repoRoot, [
+          'diff', '--cached', '--name-only', '--', ...managedPaths,
+        ]).trim()
+        if (alreadyStaged !== '') {
+          event('WARN',
+            `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
+          skippedDestinations.push(target.destinationRoot)
+        }
+      }
+    } catch (error) {
+      event('WARN', `shared skill sync could not be committed: ${summary(error)}`)
+      return
+    }
+  }
+
   let result: ReturnType<typeof syncSharedSkills>
   try {
-    result = syncSharedSkills(repoRoot, packageRoot, runner)
+    result = syncSharedSkills(repoRoot, packageRoot, runner, undefined, skippedDestinations)
   } catch (error) {
     event('WARN', `shared skill sync failed: ${summary(error)}`)
     return
@@ -81,16 +105,8 @@ function syncSkills(
       `legacy shared skill ${relative(repoRoot, path).replaceAll('\\', '/')} differs from the last synced copy; left unchanged`)
   }
   if (isConsumer) {
-    const repositoryPaths = (paths: string[]): string[] => paths.map((path) => {
-      const repositoryPath = relative(repoRoot, path)
-      if (repositoryPath === '' || repositoryPath === '..'
-        || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
-        throw new Error(`shared skill output escaped the repository: ${path}`)
-      }
-      return repositoryPath.replaceAll('\\', '/')
-    })
-    const managed = repositoryPaths(result.managedPaths)
-    const removed = repositoryPaths(result.removedPaths)
+    const managed = repositoryPaths(repoRoot, result.managedPaths)
+    const removed = repositoryPaths(repoRoot, result.removedPaths)
     try {
       const scope = [...managed, ...removed]
       if (scope.length > 0) {
@@ -140,7 +156,8 @@ function syncSkills(
  */
 export async function updateCoreBeforeCycle(
   paths: OrchPaths,
-  config: Pick<LoopConfig, 'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch'>,
+  config: Pick<LoopConfig,
+    'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch' | 'integrationBranch'>,
   forge: Forge,
   runner: Runner,
   cycle: number,
@@ -149,8 +166,11 @@ export async function updateCoreBeforeCycle(
 ): Promise<CoreUpdateOutcome> {
   if (!config.coreAutoUpdate) return 'continue'
 
-  const packageRoot = runtime.packageRoot ?? PACKAGE_ROOT
-  const prefix = subtreePrefix(paths.repoRoot, packageRoot)
+  const stateRepoRoot = dirname(paths.root)
+  const packageRoot = runtime.packageRoot ?? (config.integrationBranch === ''
+    ? PACKAGE_ROOT
+    : join(paths.repoRoot, relative(stateRepoRoot, PACKAGE_ROOT)))
+  const prefix = packageSubtreePrefix(paths.repoRoot, packageRoot)
   // The core repository itself and a CLI aimed at another checkout are not subtree
   // consumers. Only the owning repository receives local, ignored generated copies.
   if (prefix === undefined) {
@@ -234,6 +254,10 @@ export async function updateCoreBeforeCycle(
   if (changed === '') return 'continue'
 
   event('Updated', 'core', `${imported.slice(0, 8)}..${upstream.slice(0, 8)}`)
+  // The updated source belongs to the integration branch. This daemon deliberately
+  // keeps executing the fixed source it started with; the update becomes active only
+  // when a later run starts from the promoted result.
+  if (config.integrationBranch !== '') return 'continue'
   event('Restarting', 'core', `for cycle ${cycle}`)
   return 'restart'
 }

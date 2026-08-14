@@ -100,6 +100,46 @@ describe('setup verification', () => {
     expect(reports).toContain('PASS: all 0 adapter-referenced paths exist')
   })
 
+  it('fails when an integration worktree setup cwd is missing', async () => {
+    const repository = mkdtempSync(join(tmpdir(), 'orchestration-verify-integration-'))
+    repositories.push(repository)
+    const packageRoot = join(repository, 'orchestration', 'ts')
+    mkdirSync(join(packageRoot, '.githooks'), { recursive: true })
+    const projectDirectory = join(repository, 'orchestration', 'project')
+    mkdirSync(projectDirectory, { recursive: true })
+    const adapter = renderProjectAdapter('consumer', '../ts/src/adapters/project.ts')
+      .replace('preCommitChecks: [],', `preCommitChecks: [],
+
+  integrationWorktreeSetup: [{
+    label: 'Install integration dependencies',
+    cwd: 'missing-integration-project',
+    command: 'npm install',
+  }],`)
+    writeFileSync(join(projectDirectory, 'project-consumer.ts'), adapter)
+    const forge = makeFakeForge()
+    for (const label of QUEUE_LABELS) forge.labels.add(label.name)
+    const reports: string[] = []
+    const git = (args: string[]): string => {
+      if (args.includes('@{upstream}')) return 'origin/topic'
+      if (args.includes('core.hooksPath')) return 'orchestration/ts/.githooks'
+      if (args.includes('--dry-run')) return ''
+      throw new Error(`unexpected git call: ${args.join(' ')}`)
+    }
+
+    const ok = await verifyRepositorySetup(orchPaths(repository), forge, {
+      packageRoot,
+      env: {},
+      report: (line) => reports.push(line),
+      git,
+      run: () => true,
+    })
+
+    expect(ok).toBe(false)
+    expect(reports).toContain(
+      'FAIL: adapter-referenced paths are missing or outside the repository: missing-integration-project',
+    )
+  })
+
   it('uses PROJECT to select one of multiple supported adapters', async () => {
     const repository = mkdtempSync(join(tmpdir(), 'orchestration-verify-project-'))
     repositories.push(repository)

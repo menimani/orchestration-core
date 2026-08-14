@@ -4,10 +4,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { OperatingSystem } from '../src/adapters/os.ts'
 import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
-  publishLoopReplacementPid, startLoopReplacement,
+  publishLoopReplacementPid, signalLoopRestartReady, startLoopReplacement,
 } from '../src/restart.ts'
+import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/adapters/windows-process.ts'
 
 const fixtureRoots: string[] = []
 
@@ -22,6 +24,18 @@ function fakeChild(pid: number): ChildProcess {
     kill: vi.fn(() => true),
     unref: vi.fn(),
   }) as unknown as ChildProcess
+}
+
+/**
+ * A daemon started through the hidden-console wrapper identifies itself by the wrapper's
+ * PID, and every descendant inherits the variable that says so. The suite runs as one of
+ * those descendants at a merge gate, where inheriting it made these tests assert the
+ * daemon's PID against their own. The premise is stated here instead of inherited.
+ */
+function environmentWithoutWrapper(): NodeJS.ProcessEnv {
+  const { [WINDOWS_PROCESS_ROOT_PID_ENV]: wrapper, ...rest } = process.env
+  void wrapper
+  return rest
 }
 
 describe('loop replacement startup', () => {
@@ -45,6 +59,7 @@ describe('loop replacement startup', () => {
     }) as unknown as typeof spawn
 
     await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
       packageRoot: root,
       onReady: (pid) => publishLoopReplacementPid(pidFile, process.pid, pid),
       spawn: spawnProcess,
@@ -70,6 +85,7 @@ describe('loop replacement startup', () => {
     }) as unknown as typeof spawn
 
     await expect(startLoopReplacement(join(root, 'ready'), {
+      env: environmentWithoutWrapper(),
       packageRoot: root,
       onReady: (pid) => publishLoopReplacementPid(pidFile, process.pid, pid),
       spawn: spawnProcess,
@@ -82,5 +98,46 @@ describe('loop replacement startup', () => {
     })
     expect(readFileSync(pidFile, 'utf8')).toBe(`${process.pid}\n`)
     expect(child.unref).not.toHaveBeenCalled()
+  })
+
+  it('uses the independent hidden-console launcher for a Windows replacement', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    const outputFile = join(root, 'loop.log')
+    const startWindowsProcess = vi.fn(async (options) => {
+      expect(options.outputFile).toBe(outputFile)
+      expect(options.env[LOOP_RESTART_READY_FILE_ENV]).toBe(readyFile)
+      expect(options.env[LOOP_RESTART_PREDECESSOR_PID_ENV]).toBe(`${process.pid}`)
+      setTimeout(() => writeFileSync(readyFile, '43212\n'), 0)
+      return 43212
+    })
+    const os = {
+      processIsAlive: vi.fn(() => true),
+    } as unknown as OperatingSystem
+
+    await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile,
+      packageRoot: root,
+      platform: 'win32',
+      startWindowsProcess,
+      startupTimeoutMs: 1_000,
+    })).resolves.toEqual({ ok: true, pid: 43212 })
+    expect(startWindowsProcess).toHaveBeenCalledOnce()
+  })
+
+  it('signals the wrapper process as the Windows restart owner', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+
+    signalLoopRestartReady({
+      [LOOP_RESTART_READY_FILE_ENV]: readyFile,
+      [WINDOWS_PROCESS_ROOT_PID_ENV]: '43213',
+    })
+
+    expect(readFileSync(readyFile, 'utf8')).toBe('43213\n')
   })
 })

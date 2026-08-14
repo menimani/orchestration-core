@@ -14,14 +14,15 @@ Changed paths:
 
 | Touched | Run | From |
 |---------|-----|------|
-| `src/`, `tests/`, `orchestration/` | `npm run typecheck`, `npm test` | repository root |
+| Any source or documentation | `node checks/english-only.ts` | repository root |
+| `src/`, `tests/`, `checks/`, `orchestration/` | `npm run typecheck`, `npm test` | repository root |
 | `templates/`, `orchestration/templates/` | `npm test` | repository root |
 | `SPEC.md` | `npm test` | repository root |
 | `.github/workflows/` | nothing local — the run itself is the check | — |
 
-There is no build step: the core runs as TypeScript, so the type checker is the compile
-gate and the suite is everything else. `SPEC.md` is pinned by tests, so editing it
-without running them leaves the description and the behaviour disagreeing.
+There is no build step: the core runs as TypeScript, so the language check, type checker,
+and suite are its gates. `SPEC.md` is pinned by tests, so editing it without running them
+leaves the description and the behaviour disagreeing.
 
 Run the checks that apply, not all of them: a README change does not need the suite.
 

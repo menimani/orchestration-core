@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { OrchPaths } from '../src/paths.ts'
 import {
   frameUntrustedText, frameVerifiedRequirement, readTemplate, repositoryInspectionPreamble,
-  templateFile,
+  reviewScopeTemplateValues, templateFile,
 } from '../src/templates.ts'
 
 let root: string
@@ -58,6 +58,47 @@ describe('template resolution', () => {
     const expected = join(paths.root, 'templates', 'scan-template.md')
 
     expect(() => readTemplate(paths, 'scan-template.md')).toThrow(`Template not found: ${expected}`)
+  })
+})
+
+describe('review scope', () => {
+  function renderReview(repoRoot: string, packageRoot: string): string {
+    let template = readTemplate(paths, 'review-template.md')
+    for (const [key, value] of Object.entries(
+      reviewScopeTemplateValues(repoRoot, packageRoot),
+    )) {
+      template = template.replaceAll(`{{${key}}}`, value)
+    }
+    return template.replaceAll('{{BASE_BRANCH}}', 'origin/main')
+  }
+
+  it('excludes a consumed core subtree from the instructions and every Git command', () => {
+    const repoRoot = join(root, 'consumer')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+
+    const review = renderReview(repoRoot, packageRoot)
+
+    expect(review).toContain(
+      'Changes under `orchestration/ts/` belong to the vendored core repository',
+    )
+    expect(review).toContain('out of scope for this review')
+    expect(review).toContain("report defects there to the core's upstream repository instead")
+    expect(review.match(/':\(top,exclude,literal\)orchestration\/ts'/g)).toHaveLength(3)
+    expect(review).not.toContain('{{REVIEW_SCOPE_EXCLUSION}}')
+    expect(review).not.toContain('{{REVIEW_DIFF_SCOPE}}')
+  })
+
+  it('does not exclude anything when the package owns the repository', () => {
+    const repoRoot = join(root, 'core')
+
+    const review = renderReview(repoRoot, repoRoot)
+
+    expect(review).not.toContain('vendored core repository')
+    expect(review).not.toContain('out of scope for this review')
+    expect(review).not.toContain(':(top,exclude,literal)')
+    expect(review).toContain('git diff origin/main...HEAD --stat\n')
+    expect(review).toContain('git log origin/main..HEAD --oneline\n')
+    expect(review).toContain('git diff origin/main...HEAD\n')
   })
 })
 

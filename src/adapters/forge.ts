@@ -10,7 +10,7 @@ export type CheckConclusion = 'success' | 'failure' | 'pending' | 'skipped'
 export interface PrCheck {
   name: string
   conclusion: CheckConclusion
-  /** ISO timestamp used to distinguish reruns with the same check name. */
+  /** ISO timestamp used to distinguish reruns, or an empty string when unavailable. */
   startedAt: string
 }
 

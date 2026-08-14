@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   openSync: vi.fn((path: string) => path === 'task.log' ? 42 : 43),
   readFileSync: vi.fn((_path: string, _encoding: string) => 'task specification'),
   spawn: vi.fn(),
+  startWindowsProcess: vi.fn(),
 }))
 
 vi.mock('node:fs', () => ({
@@ -19,6 +20,9 @@ vi.mock('node:fs', () => ({
 }))
 
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
+vi.mock('../src/adapters/windows-process.ts', () => ({
+  startWindowsProcess: mocks.startWindowsProcess,
+}))
 
 import { createCodexRunner } from '../src/adapters/runner-codex.ts'
 
@@ -50,6 +54,8 @@ beforeEach(() => {
     path === 'task.log' ? 42 : 43)
   mocks.readFileSync.mockReset().mockReturnValue('task specification')
   mocks.spawn.mockReset()
+  mocks.startWindowsProcess.mockReset().mockResolvedValue(5678)
+  setPlatform('linux')
 })
 
 afterEach(() => {
@@ -212,6 +218,7 @@ describe('createCodexRunner', () => {
       cwd: 'worktree',
       detached: true,
       stdio: [43, 42, 42],
+      windowsHide: true,
     })
 
     child.emit('spawn')
@@ -220,30 +227,30 @@ describe('createCodexRunner', () => {
 
   it('routes through Bash on Windows without adding an empty model argument', async () => {
     setPlatform('win32')
-    const child = mockChild(5678)
-    mocks.spawn.mockReturnValue(child)
-
     const started = createCodexRunner().start({ ...options, model: '' })
 
-    expect(mocks.spawn).toHaveBeenCalledWith('bash', [
-      '-c', 'exec codex "$@"', 'codex',
-      'exec',
-      '--dangerously-bypass-approvals-and-sandbox',
-      '--output-last-message', 'final-message.txt',
-      '--config', 'model_reasoning_effort=high',
-      '-',
-    ], {
+    expect(mocks.startWindowsProcess).toHaveBeenCalledWith({
+      args: [
+        '-c', 'exec codex "$@"', 'codex',
+        'exec',
+        '--dangerously-bypass-approvals-and-sandbox',
+        '--output-last-message', 'final-message.txt',
+        '--config', 'model_reasoning_effort=high',
+        '-',
+      ],
+      command: 'bash',
       cwd: 'worktree',
-      detached: true,
-      stdio: [43, 42, 42],
+      inputFile: 'task.md',
+      outputFile: 'task.log',
     })
 
-    child.emit('spawn')
     await expect(started).resolves.toBe(5678)
+    expect(mocks.spawn).not.toHaveBeenCalled()
+    expect(mocks.openSync).not.toHaveBeenCalled()
   })
 
   it('never passes the specification as an argument regardless of its size', async () => {
-    const specification = 'non-ASCII specification 日本語\n'.repeat(1_000)
+    const specification = 'non-ASCII specification \u65e5\u672c\u8a9e\n'.repeat(1_000)
     mocks.readFileSync.mockReturnValue(specification)
     const child = mockChild()
     mocks.spawn.mockReturnValue(child)

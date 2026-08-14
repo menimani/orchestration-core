@@ -33,16 +33,30 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
+When the core is installed as a subtree, the default review template excludes that
+vendored path from both the review instructions and every printed Git command. Defects in
+the vendored core belong upstream, not in a consumer finding. A custom
+`orchestration/templates/review-template.md` must retain both
+`{{REVIEW_SCOPE_EXCLUSION}}` and `{{REVIEW_DIFF_SCOPE}}`; omitting either placeholder opts
+out of the corresponding prose or command protection. Both render as empty strings when
+this package owns the repository, so this repository's review still covers its own source.
+
 Immediately before each cycle starts, the daemon fetches the configured shared-core
 upstream and compares it with the last import of this package's subtree. If the subtree
-is behind, it runs `git subtree pull --squash`; when package files change, it replaces
-itself from the package's absolute CLI path so the new cycle uses the pulled code while
-retaining the arguments, environment, and run branch. The parent reports success only
-after the replacement daemon finishes startup. This happens only after the prior gate
-has closed and while no task is running.
-A daemon otherwise runs the code it started with. A dirty working tree or conflicting
-pull is left for the consumer to resolve: the daemon warns and starts the cycle on the
-old code instead of merging local divergence.
+is behind, it runs `git subtree pull --squash`. In direct layout, when package files
+change, the daemon replaces itself from the package's absolute CLI path so the new cycle
+uses the pulled code while retaining the arguments, environment, and run branch. The
+parent reports success only after the replacement daemon finishes startup. In integration
+mode, the fixed daemon continues without restarting; the pulled core becomes executable
+only in a later run. The update happens only after the prior gate has closed and while no
+task is running.
+A project adapter is watched at that same boundary. If its loaded source has changed or
+can no longer be read, the daemon replaces itself before starting the next cycle. The
+replacement loads the adapter afresh, so gate and presentation behavior cannot remain
+silently pinned to an adapter the repository has replaced.
+The daemon otherwise runs the core code it started with. A dirty working tree or
+conflicting pull is left for the consumer to resolve: the daemon warns and starts the
+cycle on the old core instead of merging local divergence.
 
 That same boundary syncs the skills declared in `skills/manifest.json` into every
 directory an agent working in the repository reads them from. The selected runner adapter
@@ -118,6 +132,9 @@ contract-valid adapter, project templates, points `core.hooksPath` at the core-o
 hooks, and creates missing `loop:*` labels. It is safe to repeat: missing required adapter
 members are added with marked scaffold defaults, while declared members, other existing
 project files, and a deliberately different hooks setting are reported and never overwritten.
+For `SCAN_PARALLEL` greater than one, keep the scan checklist as uniquely numbered
+Markdown headings outside fenced code blocks; without numbered headings the loop warns
+and runs one full scan, while ambiguous numbering stops the loop before the cycle starts.
 
 Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
 the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,
@@ -141,11 +158,45 @@ $env:AUTO_REVIEW = 'true'
 node orchestration/ts/src/cli.ts loop --daemon
 ```
 
+The default branch layout remains direct: the topic branch where the daemon starts is
+also the branch tasks derive from, merge into, and promote. That keeps the existing
+single-worktree shape for consumers whose source is not the loop. Repositories where the
+loop runs its own source can freeze the daemon checkout by naming a separate run branch:
+
+```bash
+INTEGRATION_BRANCH=feature/current-run node src/cli.ts loop --daemon
+```
+
+With `INTEGRATION_BRANCH` set, the original repository checkout is the daemon worktree
+and stays on its exact starting commit until the run ends. The loop creates or resumes
+the integration worktree at `orchestration/worktrees/.integration`; task worktrees remain at
+`orchestration/worktrees/<id>`, but Git cuts them from the integration checkout so they
+include every earlier merge. Merges, cycle suites, the pull request, and `LOOP_DONE`
+promotion all use the integration branch. The project adapter's
+`integrationWorktreeSetup` commands install dependencies in that fresh checkout; the
+operator does not prepare it by hand. Human fixes made during the run should branch from
+and merge into the integration branch as well, where the next task can see them.
+
+A stopped daemon retains both branch identities and the daemon commit. Restarting is a
+resume of the same run: integration commits made while it was down remain available to
+later tasks, but a changed daemon branch or commit is rejected instead of silently
+running different machinery. Immediately before each new cycle, the integration branch
+fetches and merges the remote's advertised default branch. A conflict is aborted and
+warned about for a person to resolve, and the cycle proceeds without that merge. The
+daemon branch is never updated at this boundary.
+
 `node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
 the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
 head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's
 checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
 and verifies the revision that actually came up.
+
+If you promote a run's pull request by hand, record that completed run with
+`npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
+subtree installation). The command requires exactly one positive PR number, optionally
+prefixed with `#`, or one absolute HTTP(S) URL. It refuses to run while the loop is active,
+performs no forge operation, records the completion in `logs/loop.log`, and emits the exact
+standalone `LOOP_DONE: <pr-number-or-url>` marker to `logs/loop-markers.log`.
 
 Automatic pulls are enabled by default. To pull later improvements manually, or when
 `CORE_AUTO_UPDATE=false` pins the consumed version, use:
@@ -160,7 +211,8 @@ git subtree pull --prefix=orchestration/ts \
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |
-| `MAX_PARALLEL` | 3 | Agent processes at once |
+| `MAX_PARALLEL` | 3 | Ordinary task agent processes at once; scan agents use `SCAN_PARALLEL` independently |
+| `SCAN_PARALLEL` | 2 | Scan agent processes started together per scan cycle (1-4), independent of `MAX_PARALLEL` |
 | `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle |
 | `AUTO_REVIEW` | false | Enable agent review of cycle diffs and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
@@ -168,17 +220,20 @@ git subtree pull --prefix=orchestration/ts \
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work |
 | `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
+| `INTEGRATION_BRANCH` | empty | Empty keeps the direct single-worktree layout; a branch name freezes the daemon checkout and makes this separate branch the task base, merge target, gate target, and PR source |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |
+| `UPSTREAM_REPO` | package `upstreamRepo` | GitHub `owner/repository` where `report-upstream` files the report |
 | `UPSTREAM_BRANCH` | main | Shared-core branch to compare and pull |
 
 ## Shared backlog and workers
 
 With `ISSUE_QUEUE_ENABLED=true` the backlog moves to forge issues: findings are filed once
 per fingerprint, workers claim by self-assignment, quiet claims are reaped after a lease,
-and the merge commit closes the issue. Ready titles naming the same primary file are claimed
-in groups of up to four; no-path titles remain singletons, and failed groups retry as
-individual findings. Each grouped requirement needs its own completion marker before the
-branch can merge and close every linked issue. A second machine runs execution-only with
+and merged work stays open until promotion reaches the default branch and closes the issue.
+Ready titles naming the same primary file are claimed in groups of up to four; no-path titles
+remain singletons, and failed groups retry as individual findings. Each grouped requirement
+needs its own completion marker before the branch can merge; promotion then closes every
+linked issue. A second machine runs execution-only with
 `worker <base-ref>` — it claims and executes, pushes finished branches, and never scans,
 reviews, or merges. Exactly one ordinary daemon owns the branch and adopts those pushes.
 

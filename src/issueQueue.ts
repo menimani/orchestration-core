@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import {
   descSlug, existingTaskIdForDesc, forgetTaskId, newTaskId, recordTaskIdForDesc, taskIdForDesc,
@@ -45,6 +45,7 @@ export const QUEUE_LABELS = [
 const LIFECYCLE_LABELS = [
   LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
 ] as const
+type LifecycleLabel = typeof LIFECYCLE_LABELS[number]
 const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
 export const MAX_CLAIM_GROUP_SIZE = 4
 
@@ -55,6 +56,15 @@ const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
 // the middle of the other. The final claim read below remains necessary because a
 // different orchestration process does not share this coordinator.
 const issueCoordination = new WeakMap<Forge, Map<number, Promise<void>>>()
+
+/** A claimable or actionable issue occupies one and only one lifecycle state. */
+export function issueHasExactlyLifecycleLabel(
+  issue: ForgeIssue,
+  expected: LifecycleLabel,
+): boolean {
+  return LIFECYCLE_LABELS.filter((label) => issue.labels.includes(label)).length === 1
+    && issue.labels.includes(expected)
+}
 
 /** Remove queue-position labels after a direct close while preserving finding metadata. */
 export async function closeIssueAndRemoveLifecycleLabels(
@@ -447,15 +457,13 @@ function isReadyToClose(issue: ForgeIssue, fingerprints: string[]): boolean {
     && isTrustedFingerprintOwner(issue)
     && hasExactFingerprints(issue, fingerprints)
     && issue.assignees.length === 0
-    && issue.labels.includes(LABEL_READY)
-    && !issue.labels.includes(LABEL_IN_PROGRESS)
+    && issueHasExactlyLifecycleLabel(issue, LABEL_READY)
 }
 
 function isReadyToClaim(issue: ForgeIssue): boolean {
   return issue.state === 'open'
     && issue.assignees.length === 0
-    && issue.labels.includes(LABEL_READY)
-    && !issue.labels.includes(LABEL_IN_PROGRESS)
+    && issueHasExactlyLifecycleLabel(issue, LABEL_READY)
     && !issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)
 }
 
@@ -774,6 +782,22 @@ function issueMapFile(paths: OrchPaths, taskId: string): string {
   return join(paths.queueDir, 'issue-map', taskId)
 }
 
+function releaseIntentDir(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-release-intent')
+}
+
+function releasePreparationDir(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-release-preparation')
+}
+
+function releaseIntentFile(paths: OrchPaths, taskId: string): string {
+  return join(releaseIntentDir(paths), taskId)
+}
+
+function releasePreparationFile(paths: OrchPaths, taskId: string): string {
+  return join(releasePreparationDir(paths), taskId)
+}
+
 export function recordIssueForTask(paths: OrchPaths, taskId: string, issueNumber: number): void {
   recordIssuesForTask(paths, taskId, [issueNumber])
 }
@@ -795,6 +819,69 @@ export function issueNumbersForTask(paths: OrchPaths, taskId: string): number[] 
     .map(Number)
 }
 
+function writeIssueNumbers(file: string, issueNumbers: readonly number[]): void {
+  const directory = dirname(file)
+  mkdirSync(directory, { recursive: true })
+  const taskId = file.split(/[\\/]/).at(-1)!
+  const temporaryFile = join(directory, `.${taskId}.${process.pid}.tmp`)
+  try {
+    writeFileSync(temporaryFile, `${[...new Set(issueNumbers)].join('\n')}\n`)
+    renameSync(temporaryFile, file)
+  } finally {
+    rmSync(temporaryFile, { force: true })
+  }
+}
+
+/** Record release work whose local cleanup is already complete. */
+export function recordIssueReleaseIntent(
+  paths: OrchPaths,
+  taskId: string,
+  issueNumbers: readonly number[],
+): void {
+  writeIssueNumbers(releaseIntentFile(paths, taskId), issueNumbers)
+}
+
+/** Persist cleanup release work without making it visible to daemon reconciliation. */
+export function prepareIssueReleaseIntent(
+  paths: OrchPaths,
+  taskId: string,
+  issueNumbers: readonly number[],
+): void {
+  writeIssueNumbers(releasePreparationFile(paths, taskId), issueNumbers)
+}
+
+/** Atomically make a prepared release visible after local cleanup completes. */
+export function completeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
+  mkdirSync(releaseIntentDir(paths), { recursive: true })
+  renameSync(releasePreparationFile(paths, taskId), releaseIntentFile(paths, taskId))
+}
+
+export function issueReleaseIntentForTask(paths: OrchPaths, taskId: string): number[] {
+  const file = releaseIntentFile(paths, taskId)
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8').split(/\r?\n/)
+    .filter((line) => /^\d+$/.test(line))
+    .map(Number)
+}
+
+export function issueReleasePreparationForTask(paths: OrchPaths, taskId: string): number[] {
+  const file = releasePreparationFile(paths, taskId)
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8').split(/\r?\n/)
+    .filter((line) => /^\d+$/.test(line))
+    .map(Number)
+}
+
+/** Cancel a release preparation that did not reach completed local cleanup. */
+export function removeIssueReleasePreparation(paths: OrchPaths, taskId: string): void {
+  rmSync(releasePreparationFile(paths, taskId), { force: true })
+}
+
+/** Remove release work after it has reconciled successfully. */
+export function removeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
+  rmSync(releaseIntentFile(paths, taskId), { force: true })
+}
+
 export function issueNumberForTask(paths: OrchPaths, taskId: string): number | undefined {
   return issueNumbersForTask(paths, taskId)[0]
 }
@@ -813,11 +900,15 @@ export function missingRequirementCompletionMarkers(paths: OrchPaths, taskId: st
 }
 
 /** Remove the local files that make a released issue resolve to the failed task id. */
-export function dropClaimedTaskMaterialization(paths: OrchPaths, taskId: string): void {
+export function dropClaimedTaskMaterialization(
+  paths: OrchPaths,
+  taskId: string,
+  preserveIssueMapping = false,
+): void {
   const errors: unknown[] = []
   for (const file of [
     specFile(paths, taskId),
-    issueMapFile(paths, taskId),
+    ...(preserveIssueMapping ? [] : [issueMapFile(paths, taskId)]),
     join(paths.queueDir, 'effort', taskId),
     join(paths.queueDir, 'inspect', taskId),
     join(paths.queueDir, 'heartbeat', taskId),
@@ -845,9 +936,15 @@ export async function releaseIssueClaim(
   assignee: string,
 ): Promise<void> {
   await withIssueCoordination(forge, issueNumber, async () => {
+    await forge.unassignIssue(issueNumber, assignee)
     await forge.addLabel(issueNumber, LABEL_READY)
     await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
-    await forge.unassignIssue(issueNumber, assignee)
+    const released = await forge.getIssue(issueNumber)
+    if (released.state === 'open'
+      && (released.assignees.length !== 0
+        || !issueHasExactlyLifecycleLabel(released, LABEL_READY))) {
+      throw new Error(`Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`)
+    }
   })
 }
 
@@ -860,15 +957,75 @@ export async function returnIssueToReady(
   await withIssueCoordination(forge, issueNumber, async () => {
     const issue = await forge.getIssue(issueNumber)
     if (issue.state !== 'open') return
+    for (const assignee of issue.assignees) await forge.unassignIssue(issueNumber, assignee)
     if (keepSingleton && !issue.labels.includes(LABEL_GROUP_SINGLETON)) {
       await forge.addLabel(issueNumber, LABEL_GROUP_SINGLETON)
     }
     if (!issue.labels.includes(LABEL_READY)) await forge.addLabel(issueNumber, LABEL_READY)
-    for (const label of [LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED]) {
+    for (const label of [LABEL_MERGE_READY, LABEL_MERGE_FAILED, LABEL_IN_PROGRESS]) {
       if (issue.labels.includes(label)) await forge.removeLabel(issueNumber, label)
     }
-    for (const assignee of issue.assignees) await forge.unassignIssue(issueNumber, assignee)
+    const released = await forge.getIssue(issueNumber)
+    if (released.state === 'open'
+      && (released.assignees.length !== 0
+        || !issueHasExactlyLifecycleLabel(released, LABEL_READY))) {
+      throw new Error(`Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`)
+    }
   })
+}
+
+export interface IssueReleaseFailure {
+  issueNumber: number
+  error: unknown
+}
+
+export class IssueReleaseReconciliationError extends AggregateError {
+  readonly failures: readonly IssueReleaseFailure[]
+
+  constructor(failures: readonly IssueReleaseFailure[]) {
+    const issues = failures.map(({ issueNumber }) => `#${issueNumber}`).join(' ')
+    super(
+      failures.map(({ error }) => error),
+      `Could not reconcile persisted issue releases for ${issues}`,
+    )
+    this.name = 'IssueReleaseReconciliationError'
+    this.failures = failures
+  }
+}
+
+/** Retry one durable cleanup release, removing the intent only after every issue verifies. */
+export async function reconcileIssueReleaseIntent(
+  forge: Forge,
+  paths: OrchPaths,
+  taskId: string,
+): Promise<IssueReleaseFailure[]> {
+  const issueNumbers = issueReleaseIntentForTask(paths, taskId)
+  if (issueNumbers.length === 0) return []
+  const keepSingleton = issueNumbers.length > 1
+  const results = await Promise.allSettled(issueNumbers.map((issueNumber) =>
+    returnIssueToReady(forge, issueNumber, keepSingleton)))
+  const failures = results.flatMap((result, index) => result.status === 'rejected'
+    ? [{ issueNumber: issueNumbers[index]!, error: result.reason }]
+    : [])
+  if (failures.length === 0) {
+    dropClaimedTaskMaterialization(paths, taskId)
+    removeIssueReleaseIntent(paths, taskId)
+  }
+  return failures
+}
+
+/** Reconcile cleanup releases left by earlier commands or interrupted daemon polls. */
+export async function reconcileIssueReleaseIntents(
+  forge: Forge,
+  paths: OrchPaths,
+): Promise<IssueReleaseFailure[]> {
+  const directory = releaseIntentDir(paths)
+  if (!existsSync(directory)) return []
+  const failures: IssueReleaseFailure[] = []
+  for (const taskId of readdirSync(directory).filter((name) => !name.startsWith('.'))) {
+    failures.push(...await reconcileIssueReleaseIntent(forge, paths, taskId))
+  }
+  return failures
 }
 
 export interface IssuePromotion {
@@ -1125,8 +1282,7 @@ async function claimRemoteIssue(
   const afterAssignment = await forge.getIssue(issue.number)
   const winner = [...afterAssignment.assignees].sort()[0]
   if (afterAssignment.state !== 'open'
-    || !afterAssignment.labels.includes(LABEL_READY)
-    || afterAssignment.labels.includes(LABEL_IN_PROGRESS)
+    || !issueHasExactlyLifecycleLabel(afterAssignment, LABEL_READY)
     || winner !== me) {
     await forge.unassignIssue(issue.number, me)
     return { outcome: 'lost-race', issueNumber: issue.number }
@@ -1148,8 +1304,7 @@ async function claimRemoteIssue(
 
   const claimed = await forge.getIssue(issue.number)
   if (claimed.state !== 'open'
-    || claimed.labels.includes(LABEL_READY)
-    || !claimed.labels.includes(LABEL_IN_PROGRESS)
+    || !issueHasExactlyLifecycleLabel(claimed, LABEL_IN_PROGRESS)
     || [...claimed.assignees].sort()[0] !== me) {
     await forge.unassignIssue(issue.number, me)
     return { outcome: 'lost-race', issueNumber: issue.number }
@@ -1324,11 +1479,16 @@ export async function reapStaleLeases(
     (await forge.listIssueComments(issue.number)).some((comment) =>
       comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
 ): Promise<number[]> {
+  const releaseFailures = await reconcileIssueReleaseIntents(forge, paths)
+  if (releaseFailures.length > 0) {
+    throw new IssueReleaseReconciliationError(releaseFailures)
+  }
   const reaped: number[] = []
   const openIssues = knownOpenFindings ?? await forge.listOpenIssues(LABEL_IN_PROGRESS)
   for (const issue of openIssues.filter((candidate) =>
     candidate.labels.includes(LABEL_IN_PROGRESS)
-      && !candidate.labels.includes(LABEL_MERGE_FAILED))) {
+      && (!candidate.labels.includes(LABEL_MERGE_FAILED)
+        || (candidate.labels.includes(LABEL_READY) && candidate.assignees.length === 0)))) {
     if (locallyRunningIssues.has(issue.number)) continue
     // An interrupted reap has already removed every assignee. Its last mutation
     // refreshed updatedAt, but no worker remains to heartbeat it, so finish that
@@ -1358,17 +1518,14 @@ export async function reapStaleLeases(
     const currentAgeMs = now.getTime() - new Date(current.updatedAt).getTime()
     if (current.state !== 'open'
       || !current.labels.includes(LABEL_IN_PROGRESS)
-      || current.labels.includes(LABEL_MERGE_FAILED)
+      || (current.labels.includes(LABEL_MERGE_FAILED)
+        && (!current.labels.includes(LABEL_READY) || current.assignees.length !== 0))
       || (!currentlyPartiallyReaped && currentAgeMs < leaseHours * 3600 * 1000)
       || current.assignees.length !== issue.assignees.length
       || current.assignees.some((assignee) => !issue.assignees.includes(assignee))) {
       continue
     }
-    for (const assignee of current.assignees) {
-      await forge.unassignIssue(issue.number, assignee)
-    }
-    if (!current.labels.includes(LABEL_READY)) await forge.addLabel(issue.number, LABEL_READY)
-    await forge.removeLabel(issue.number, LABEL_IN_PROGRESS)
+    await returnIssueToReady(forge, issue.number)
     reaped.push(issue.number)
   }
   await removeClosedPromotionRecords(forge, paths)

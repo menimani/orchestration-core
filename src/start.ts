@@ -1,10 +1,11 @@
-import { execFileSync, execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { appendFileSync, closeSync, existsSync, openSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
+import { execShellSync } from './shell.ts'
 import { readStatus, writeStatus } from './status.ts'
 import { specFile } from './tasks.ts'
 
@@ -66,6 +67,7 @@ export async function startTask(
   const finalMessage = finalMessageFile(paths, taskId)
   writeFileSync(log, '')
   rmSync(finalMessage, { force: true })
+  let launchedPid: number | undefined
 
   try {
     options.report?.(`Creating worktree: ${worktree} (branch: ${branch})`)
@@ -80,8 +82,9 @@ export async function startTask(
       options.report?.(`Preparing worktree: ${step.label}`)
       const setupLogFd = openSync(log, 'a')
       try {
-        execSync(step.command, {
+        execShellSync(step.command, {
           cwd: join(worktree, step.cwd),
+          encoding: 'utf8',
           stdio: ['ignore', setupLogFd, setupLogFd],
           windowsHide: true,
         })
@@ -101,11 +104,32 @@ export async function startTask(
       effort: options.effort,
       model: options.model,
     })
+    launchedPid = pid
     await writeStatus(paths, taskId, 'running', pid)
     options.report?.(`Started. task_id=${taskId} pid=${pid} log=${log}`)
     return { outcome: 'started', pid }
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error)
+    if (launchedPid !== undefined) {
+      try {
+        operatingSystem.terminateProcessTree(launchedPid)
+        if (operatingSystem.processTreeIsAlive(launchedPid)) {
+          throw new Error(`Process tree ${launchedPid} is still alive.`)
+        }
+      } catch (terminationError) {
+        const terminationDetail = terminationError instanceof Error
+          ? terminationError.stack ?? terminationError.message
+          : String(terminationError)
+        appendFileSync(
+          log,
+          `Task startup failed:\n${detail}\nProcess tree cleanup failed:\n${terminationDetail}\n`,
+        )
+        throw new AggregateError(
+          [error, terminationError],
+          `Task startup failed and process tree ${launchedPid} could not be stopped.`,
+        )
+      }
+    }
     appendFileSync(log, `Task startup failed:\n${detail}\n`)
     await writeStatus(paths, taskId, 'failed')
     throw error

@@ -19,13 +19,18 @@ from or equivalent to `orchestration/tests/*.sh`.
   it protected — values read from status files compare clean — still holds and is tested).
 - Core subtree updates default on. The daemon logs whether `CORE_AUTO_UPDATE` is on or
   off at startup; `false` skips the pre-cycle check entirely. `UPSTREAM_REMOTE` defaults
-  to the package's `upstreamRepo` value used by `report-upstream`, and
-  `UPSTREAM_BRANCH` defaults to `main`.
-- The command surface is the `scripts` block of the package's `package.json` (the
-  repository-root manifest here, or `orchestration/ts/package.json` when installed as a
-  subtree) — `orchestrate.sh` is not kept (decided 2026-08-08; supersedes the
-  frozen-wrapper plan). Runtime commands map to same-name entries in the command registry
-  in `src/cli.ts`; those two files are the authoritative command list. The skills
+  to the package's `upstreamRepo` value and selects the remote to fetch and subtree-pull;
+  `UPSTREAM_BRANCH` defaults to `main`. Separately, `UPSTREAM_REPO` overrides the
+  package's `upstreamRepo` value as the GitHub repository where `report-upstream` files
+  the report.
+- The public command surface is the runtime entries in the `scripts` block of the
+  package's `package.json` (the repository-root manifest here, or
+  `orchestration/ts/package.json` when installed as a subtree) — `orchestrate.sh` is not
+  kept (decided 2026-08-08; supersedes the frozen-wrapper plan). Those entries map to
+  same-name dispatches in the command registry in `src/cli.ts`. The manifest also owns
+  the check-only `test`, `test:linux`, and `typecheck` scripts, which are not CLI
+  dispatches; the registry additionally owns the hook-only `pre-commit` dispatch, which
+  is invoked by the generated Git hook rather than exposed as a package script. The skills
   (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
   the npm form as part of the cutover. A background launch prints status and stop
   commands for the package's actual location: direct `npm run` commands at the repository
@@ -66,6 +71,7 @@ values must be non-negative integers, with the narrower bounds stated below.
 | `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
 | `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
 | `SKIP_AUTO_TEST` | `false` | When `true` and no `TEST_CMD` or `--test-cmd` is set, skip the project adapter's automatic merge checks. It does not skip the explicit test command. |
+| `INTEGRATION_BRANCH` | empty | Empty retains the direct layout where the daemon checkout is also the run branch. A non-empty branch uses a separate integration worktree as the task base, merge and cycle-gate target, and pull-request source. |
 
 ## Task lifecycle
 
@@ -83,14 +89,39 @@ values must be non-negative integers, with the narrower bounds stated below.
    non-advisory finding returns after that task has merged, it creates a fresh task and
    updates the index; merged advisories remain deduplicated.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
-   `task/<id>`.
+   `task/<id>`. The direct layout is the default because a consumer whose source lives
+   outside the loop gains no safety from another checkout. With `INTEGRATION_BRANCH`
+   set, the checkout where the daemon started is the daemon worktree and its branch,
+   exact commit, and clean source tree are fixed through `LOOP_DONE`. The integration
+   branch has its own worktree at `orchestration/worktrees/.integration`; task branches are cut
+   from that checkout, not the daemon checkout, because they must see every prior task
+   merge. Task merges, cycle gates, pull-request description and promotion all operate
+   there, so no loop operation merges into the daemon branch during the run.
+4a. Integration mode records the daemon branch and commit as durable run identity. A
+    stop retains them. A restart resumes the same run and refuses a daemon checkout that
+    moved or became dirty; commits added to the integration branch while the daemon was
+    down remain work for the same run and never become executing daemon code. Project
+    adapter `integrationWorktreeSetup` commands prepare the fresh integration checkout,
+    including its dependencies, at startup and before each new cycle.
+4b. At the idle pre-cycle boundary used for core updates, integration mode fetches the
+    tracking remote's advertised default branch and merges it into the integration
+    branch. The result is verified by ancestry. A fetch failure, dirty checkout, or
+    conflict is warned about; a conflict is aborted and left for a person, and the cycle
+    proceeds. The daemon branch is never an update target. A core subtree update made
+    on the integration branch likewise becomes executable only in a later run.
 5. Failure handling: emit `FAILED: <id>` with the log path to the machine-marker sink,
    with a separately formatted copy in `loop.log`; record the loss against the
    current cycle (`queue/failed-<cycle>`, once per task), never retry automatically.
    `cleanup` clears the announce markers so a manual retry is watched, not silent, but
    only after verifying that the task process stopped, the worktree directory and Git
    registration were removed, and the task branch was deleted; a failed cleanup returns
-   non-zero and retains the task state for a safe retry.
+   non-zero and retains the task state for a safe retry. In issue-queue mode, a successful
+   operator cleanup also returns linked issues to `loop:ready` and removes their local
+   task mapping. A forge failure is warned about without undoing the local cleanup; the
+   cleanup leaves a durable release intent and retains the task mapping until the daemon
+   retries the release successfully. Reconciliation runs on each poll before stale-lease
+   reaping; three consecutive failed polls stop the loop, while a successful poll clears
+   the failure streak.
 
 ## Growth and decisions
 
@@ -128,6 +159,10 @@ values must be non-negative integers, with the narrower bounds stated below.
     `node_modules` turns the pass into a failure that names what was borrowed. The
     verification follows the check rather than preceding it, because a check may install
     as its own first step.
+9b. The core project's merge and cycle gates build `node_modules` with `npm ci` in a
+    staging directory, then activate the complete tree. The working dependency tree is
+    never npm's cleanup target: a failed install leaves it untouched, a failed activation
+    restores it, and a busy backup left after successful activation is only warned about.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. Re-claiming completed-but-unmerged work requests that merge instead
@@ -144,8 +179,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     missing. Startup synchronization is limited to the package copy inside the repository
     being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
     it is running from. Install output is captured; a failure logs a summarized `WARN`
-    but does not undo the merge or stop startup. Because failure does not update the
-    recorded hash or restore a missing dependency, the next daemon restart retries it.
+    and stops the loop or startup without undoing an already persisted merge. The next
+    daemon restart retries synchronization, and work resumes only after dependencies are
+    repaired and the install succeeds.
 
 ## Scans and cycles
 
@@ -155,6 +191,12 @@ values must be non-negative integers, with the narrower bounds stated below.
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
     (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
     counter once, at the gate, only when every expected scan completed successfully.
+    For parallel scans, sections in the rendered `scan-template.md` are Markdown ATX
+    headings whose text begins with a number and period (for example, `### 1. Tests`),
+    and every section number must be unique; headings inside fenced code blocks do not
+    count. If the rendered template has no numbered sections, the daemon warns and runs
+    one full scan. If its numbered sections cannot be parsed unambiguously, the daemon
+    logs an error and stops before creating the next cycle's state or starting a scan.
 13. `cycle_is_final` is true when the cycle number reaches `MAX_SCAN_CYCLES`, or when
     the cycle's scans all came back empty and one more empty cycle reaches
     `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
@@ -166,16 +208,22 @@ values must be non-negative integers, with the narrower bounds stated below.
     respective defaults; `SCAN_MODEL` and `TASK_MODEL` override the runner model, and
     `delegate --effort` overrides effort per task.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
-    previous cycle gate has closed and while no task is running, the daemon fetches the
+    previous cycle gate has closed and while no task is running, the daemon first compares
+    the selected project adapter with the exact source loaded at startup. A changed,
+    missing, or unreadable adapter logs `Restarting adapter     for cycle <n>` and replaces
+    the daemon before continuing, so every adapter consumer changes atomically at the same
+    restart-safe boundary. The daemon then fetches the
     configured core upstream and compares its tip with the last `git-subtree-split` for
     this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
-    A package-file change logs aligned `Updated    core        <old8>..<new8>` and
-    `Restarting core        for cycle <n>` events, releases daemon ownership, and starts
-    the package's absolute CLI entry point from the package directory, retaining the
-    remaining arguments, environment, and run branch. The parent waits for the replacement
-    to finish daemon initialization and logs `Restarted`; a failed replacement restores
-    ownership, logs `ERROR`, and makes the parent exit nonzero. A daemon otherwise runs the
-    code it started with. The check never runs mid-cycle. A dirty
+    A package-file change logs an aligned `Updated    core        <old8>..<new8>` event.
+    In direct layout only, it also logs `Restarting core        for cycle <n>`, releases
+    daemon ownership, and starts the package's absolute CLI entry point from the package
+    directory, retaining the remaining arguments, environment, and run branch. The parent
+    waits for the replacement to finish daemon initialization and logs `Restarted`; a
+    failed replacement restores ownership, logs `ERROR`, and makes the parent exit nonzero.
+    In integration mode, the fixed daemon continues without restarting and the pulled core
+    becomes executable only in a later run, as specified in 4b. A daemon otherwise runs
+    the core code it started with. Neither check ever runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
     At the same boundary, the package manifest's skills are rendered into every
@@ -223,6 +271,14 @@ values must be non-negative integers, with the narrower bounds stated below.
     zero checks remains unknown regardless of its age unless the project adapter
     explicitly sets `ciChecksExpected: false`.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
+    before dispatch, the loop resolves the tracked remote's default branch and refreshes
+    its remote ref. If either operation fails, the loop stops without dispatching a
+    review rather than reviewing against a missing or stale base.
+    when the package is a consumer subtree, its repository-relative path is explicitly
+    out of scope and excluded from every Git diff/log command printed by the default
+    review template. The exclusion and command-scope placeholders render empty when the
+    package owns the repository. Consumer review-template overrides must retain both
+    placeholders to retain both protections.
     findings come back as `NEXT_TASK` lines that become fix tasks and clear the cycle
     flag (the gate re-verifies before the next round reads the corrected diff). A clean
     round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle.
@@ -235,6 +291,14 @@ values must be non-negative integers, with the narrower bounds stated below.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
     `LOOP_DONE: <PR URL>` is emitted to the machine-marker sink and as a formatted
     `loop.log` copy, session state is cleaned up, and the loop exits.
+18a. `shipped <pr-number-or-url>` records the equivalent ending for a run whose PR was
+     promoted by hand. It requires exactly one positive PR number (with an optional `#`)
+     or absolute HTTP(S) URL
+     and refuses to run while the loop is active, because an active loop records its own
+     ending. It performs no forge operation: it appends a cycle-aware `Completed Loop`
+     event to `logs/loop.log`, appends the exact standalone marker
+     `LOOP_DONE: <pr-number-or-url>` to `logs/loop-markers.log`, and confirms the record
+     on stdout.
 
 ## Failure containment
 
@@ -248,9 +312,10 @@ values must be non-negative integers, with the narrower bounds stated below.
 ## The generated pull request
 
 21. The title reports `cycle <n>/<max>` while running and category counts when finished.
-    The body is rebuilt each cycle from commit classification into fixed sections
-    (Features, Bug Fixes, Security, Project Operations, Risks), `- None` where empty.
-    Title and body come from the same classification, so they cannot disagree.
+    The body is rebuilt each cycle from commit classification into the sections defined
+    by `ProjectAdapter.pullRequest.categories` (generated adapters default to `Changes`),
+    followed by the core-owned Risks section; every empty section says `- None`. Title
+    and body come from the same classification, so they cannot disagree.
 22. An HTML comment on the first body line marks the text as generated; a hand-edited
     body (marker gone) is never overwritten again. Body ownership does not freeze the
     generated title, which is still updated through the adapter's title-only field.
@@ -297,8 +362,12 @@ values must be non-negative integers, with the narrower bounds stated below.
 
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; gitea/gitlab implementations can be added without touching the
-    core). The interface returns normalized values only: PR state plus `name:conclusion`
-    check lines; draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
+    core). The interface returns normalized values only: PR state plus check records with
+    `name`, `conclusion`, and `startedAt`, which is an ISO timestamp when the forge reports
+    one and otherwise an empty string. CI waiting uses the newest available `startedAt`
+    record for each check name so timestamped reruns supersede earlier attempts; when a
+    forge omits timestamps, repeated names cannot be reliably ordered.
+    Draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
     likewise normalizes issues, comments, and author write-access verdicts. It exposes
     current-user and label discovery/creation; issue creation, lookup, open/closed
     listing, and comments; assignment and label mutation; direct closure; and merge
@@ -433,8 +502,10 @@ so authorship and verified ancestry must both hold.
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
     stale-lease reaping recognizes its linked locally merged task and repeats the merge
     comment instead of unassigning or relabeling the issue. That refreshes `updatedAt`
-    again, keeping the issue claimed until promotion closes it. A forge outage degrades a
-    poll to local-only work; it never stops the loop. Labels are ensured at loop startup.
+    again, keeping the issue claimed until promotion closes it. An ordinary forge outage
+    degrades a poll to local-only work. Persisted cleanup release failures are retried each
+    poll and stop the loop after three consecutive failures. Labels are ensured at loop
+    startup.
     The daemon lists open `loop:finding` issues once per poll and partitions that snapshot
     locally for adoption, reconciliation, lease reaping, claiming, and cycle-gate idle
     detection. MERGED-marker comment reads are cached by issue number and `updatedAt`.

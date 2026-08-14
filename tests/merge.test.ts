@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -16,9 +16,11 @@ import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { stubProject } from './stubProject.ts'
+import { TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
+const testProcesses = new TestProcessRegistry()
 
 const installProject: ProjectAdapter = {
   ...stubProject,
@@ -108,7 +110,8 @@ beforeEach(async () => {
   git(repoRoot, ['commit', '-qm', 'chore: initial commit'])
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await testProcesses.cleanup()
   vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
 })
@@ -272,10 +275,31 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
+  it('persists and cleans up a merge already applied before status persistence failed', async () => {
+    const taskId = '20260808_000000_022_user-retries-persistence'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    git(repoRoot, [
+      'merge', '--quiet', '--no-ff', branchName(taskId),
+      '-m', `Merge ${taskId} via orchestration`,
+    ])
+    const appliedCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    })).resolves.toBe(appliedCommit)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(appliedCommit)
+    expect(readStatus(paths, taskId)).toMatchObject({
+      status: 'merged', merge_commit: appliedCommit, run_branch: 'main',
+    })
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
+  })
+
   it('stops and verifies a completed runner with a live PID before merging', async () => {
     const taskId = '20260808_000000_017_user-runner-finishes-output-first'
     const worktree = await makeCompletedTask(taskId, { commit: true })
-    const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    const runner = testProcesses.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
@@ -285,18 +309,12 @@ describe('mergeTask', () => {
     runner.unref()
     await writeStatus(paths, taskId, 'completed', runnerPid)
 
-    try {
-      await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
+    await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
 
-      expect(operatingSystem.processTreeIsAlive(runnerPid)).toBe(false)
-      expect(existsSync(worktree)).toBe(false)
-      expect(readStatus(paths, taskId)?.status).toBe('merged')
-      expect(readStatus(paths, taskId)?.pid).toBeNull()
-    } finally {
-      if (operatingSystem.processTreeIsAlive(runnerPid)) {
-        operatingSystem.terminateProcessTree(runnerPid)
-      }
-    }
+    expect(operatingSystem.processTreeIsAlive(runnerPid)).toBe(false)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(readStatus(paths, taskId)?.pid).toBeNull()
   })
 
   it('keeps completed task state when the runner cannot be verified stopped', async () => {
@@ -373,6 +391,59 @@ describe('mergeTask', () => {
     await makeCompletedTask(taskId, { commit: true })
     await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject, testCmd: 'node -e "process.exit(1)"' }))
       .rejects.toThrow(/Tests failed/)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('rejects a successful explicit test that borrowed dependencies', async () => {
+    const taskId = '20260808_000000_019_user-test-borrows-dependencies'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
+      name: 'fixture', devDependencies: { 'fixture-dependency': '^1.0.0' },
+    }, null, 2)}\n`)
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'test: declare an uninstalled test dependency'])
+    const outputFile = join(repoRoot, 'merge-check.log')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: installProject, outputFile,
+      testCmd: 'node -e "process.exit(0)"',
+    })).rejects.toThrow('Tests passed against borrowed dependencies. Aborting merge.')
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain('the worktree: passed on dependencies it does not have')
+    expect(output).toContain('fixture-dependency')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('bypasses automatic checks when they are disabled', async () => {
+    const taskId = '20260808_000000_020_user-skips-automatic-checks'
+    await makeCompletedTask(taskId, { commit: true })
+    const mergeChecks = vi.fn(() => [{
+      label: 'Failing automatic check', cwd: '', command: 'node -e "process.exit(1)"',
+    }])
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'skipped-checks',
+      mergeChecks,
+    }
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project, skipAutoTest: true,
+    })
+
+    expect(mergeChecks).not.toHaveBeenCalled()
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('runs an explicit test command even when automatic checks are disabled', async () => {
+    const taskId = '20260808_000000_021_user-explicit-test-takes-precedence'
+    await makeCompletedTask(taskId, { commit: true })
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, skipAutoTest: true,
+      testCmd: 'node -e "process.exit(1)"',
+    })).rejects.toThrow(/Tests failed/)
+
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
@@ -589,7 +660,7 @@ describe('mergeTask', () => {
     expect(install).not.toHaveBeenCalled()
   })
 
-  it('warns without failing the merge when orchestration dependency installation fails', async () => {
+  it('persists the merge and stops when orchestration dependency installation fails', async () => {
     const taskId = '20260808_000000_012_user-adds-broken-dependency'
     const worktree = await makeCompletedTask(taskId)
     mkdirSync(join(worktree, 'orchestration', 'ts'), { recursive: true })
@@ -606,11 +677,11 @@ describe('mergeTask', () => {
         packageRoot: join(repoRoot, 'orchestration', 'ts'),
       },
       onOrchestrationDepsEvent: event,
-    })).resolves.toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
-
-    expect(event).toHaveBeenCalledWith(
-      'WARN', expect.stringContaining('registry unavailable'),
+    })).rejects.toThrow(
+      `Orchestration dependency installation after 012_user failed in ${join(repoRoot, 'orchestration', 'ts')}: registry unavailable. Run "npm ci --no-audit --no-fund" in ${join(repoRoot, 'orchestration', 'ts')}, then restart the loop.`,
     )
+
+    expect(event).not.toHaveBeenCalled()
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 })
@@ -698,6 +769,38 @@ describe('mergeRemoteTask', () => {
     })).rejects.toThrow(`${branch} has no new commits relative to main.`)
 
     expect(repositoryState()).toEqual(before)
+  })
+
+  it('replays persistence when the prior remote merge callback failed', async () => {
+    const branch = 'task/remote-retries-persistence'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    const onMerged = vi.fn()
+      .mockImplementationOnce(() => { throw new Error('persistence unavailable') })
+    const options = {
+      taskGate: 'light' as const,
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message: string) => message },
+      onMerged,
+    }
+
+    await expect(mergeRemoteTask(
+      paths, 227, 'origin', branch, expectedHead, options,
+    )).rejects.toThrow('persistence unavailable')
+    const appliedCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeRemoteTask(
+      paths, 227, 'origin', branch, expectedHead, options,
+    )).resolves.toBe(appliedCommit)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(appliedCommit)
+    expect(onMerged).toHaveBeenCalledTimes(2)
+    expect(onMerged).toHaveBeenLastCalledWith(appliedCommit)
   })
 
   it('leaves issue-closing syntax to the forge adapter', async () => {

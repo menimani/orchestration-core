@@ -51,6 +51,8 @@ export interface LoopConfig {
   upstreamRemote: string
   /** Branch fetched and pulled into the shared-core subtree. */
   upstreamBranch: string
+  /** Optional merge and promotion branch kept in a separate worktree. */
+  integrationBranch: string
 }
 
 interface PackageMetadata {
@@ -156,5 +158,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     coreAutoUpdate: bool(env, 'CORE_AUTO_UPDATE', true),
     upstreamRemote: str(env, 'UPSTREAM_REMOTE', defaultUpstreamRemote()),
     upstreamBranch: str(env, 'UPSTREAM_BRANCH', 'main'),
+    integrationBranch: str(env, 'INTEGRATION_BRANCH', ''),
   }
 }

@@ -50,6 +50,32 @@ export interface SharedSkillsSyncResult {
   failures: string[]
 }
 
+export interface SharedSkillManagedTarget {
+  destinationRoot: string
+  managedPaths: string[]
+}
+
+/** Managed paths grouped by the destination that must be synced as one unit. */
+export function sharedSkillManagedTargets(
+  repoRoot: string,
+  packageRoot: string,
+  runner: Runner,
+): SharedSkillManagedTarget[] {
+  const manifest = readManifest(packageRoot)
+  return skillTargets(repoRoot, runner).map((target) => {
+    const paths = [join(target.destinationRoot, STATE_FILE)]
+    paths.push(...manifest.skills.map((skill) => join(target.destinationRoot, skill)))
+    for (const legacyRoot of target.legacyRoots) {
+      const stateFile = join(legacyRoot, STATE_FILE)
+      if (!existsSync(stateFile)) continue
+      const state = readState(stateFile)
+      paths.push(stateFile)
+      paths.push(...Object.keys(state.skills).map((skill) => join(legacyRoot, skill)))
+    }
+    return { destinationRoot: target.destinationRoot, managedPaths: [...new Set(paths)] }
+  })
+}
+
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -336,12 +362,16 @@ export function syncSharedSkills(
   packageRoot: string,
   runner: Runner,
   os: OperatingSystem = operatingSystem,
+  skippedDestinationRoots: readonly string[] = [],
 ): SharedSkillsSyncResult {
   const combined: SharedSkillsSyncResult = {
     installed: [], updated: [], conflicts: [], migrationConflicts: [],
     removedPaths: [], changedPaths: [], managedPaths: [], failures: [],
   }
   for (const target of skillTargets(repoRoot, runner)) {
+    if (skippedDestinationRoots.some((root) => relative(root, target.destinationRoot) === '')) {
+      continue
+    }
     let result: SharedSkillsSyncResult
     try {
       result = syncTarget(repoRoot, packageRoot, target, os)

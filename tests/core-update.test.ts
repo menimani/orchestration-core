@@ -150,18 +150,73 @@ afterEach(() => {
 })
 
 describe('pre-cycle core update', () => {
+  it('restarts for a changed project adapter before checking core or starting a cycle', async () => {
+    const coreConfig = config({ CORE_AUTO_UPDATE: 'false' })
+    const updateCore = vi.fn(async () => 'continue' as const)
+    const adapterChanged = vi.fn(() => true)
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const loop = createLoop({
+      paths,
+      config: coreConfig,
+      forge: makeFakeForge(),
+      runner: {
+        sharedSkills: fakeRunnerSharedSkills,
+        start: async () => {
+          throw new Error('a scan must not start before the adapter restart')
+        },
+      },
+      project: stubProject,
+      log: (line) => events.push(line),
+      now: () => new Date(2026, 7, 12, 0, 0, 0),
+      updateCoreBeforeCycle: updateCore,
+      projectAdapterChanged: adapterChanged,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('restart')
+    expect(loop.restartSubject()).toBe('adapter')
+    expect(adapterChanged).toHaveBeenCalledOnce()
+    expect(updateCore).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(events).toContain('Restarting adapter     for cycle 1')
+  })
+
   it('pulls a behind subtree and requests re-exec before starting the cycle', async () => {
     const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
     const newCore = advanceUpstream('version two\n')
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
+    expect(loop.restartSubject()).toBe('core')
     expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
       .toBe('version two\n')
     expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
     expect(runnerStarts).toHaveLength(0)
     expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
     expect(events).toContain('Restarting core for cycle 1')
+  })
+
+  it('updates integration source without restarting the fixed daemon', async () => {
+    const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    const newCore = advanceUpstream('version two\n')
+    const coreConfig = config({ INTEGRATION_BRANCH: 'integration/run' })
+
+    const outcome = await updateCoreBeforeCycle(
+      paths,
+      coreConfig,
+      makeFakeForge(),
+      { sharedSkills: fakeRunnerSharedSkills, start: async () => process.pid },
+      2,
+      event as CoreUpdateEvent,
+      { packageRoot, git },
+    )
+
+    expect(outcome).toBe('continue')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+      .toBe('version two\n')
+    expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
+    expect(events.some((line) => line.startsWith('Restarting core'))).toBe(false)
   })
 
   it('lets the forge adapter resolve repository shorthand for Git', async () => {
@@ -278,22 +333,57 @@ describe('pre-cycle core update', () => {
     )
   })
 
-  it('never replaces a consumer version already staged in the index', async () => {
+  it('skips a staged skill destination while syncing and committing the other destination', async () => {
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     const generated = readFileSync(installed)
+    writeFileSync(join(packageRoot, 'skills', 'loop-start', 'SKILL.md'), 'version two\n')
+    commit(repoRoot, 'test: update bundled skill fixture')
     writeFileSync(installed, 'staged consumer command\n')
     git(repoRoot, ['add', '--', '.agents/skills/loop-start/SKILL.md'])
     writeFileSync(installed, generated)
-    advanceUpstream('version two\n')
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
+    expect(readFileSync(installed, 'utf8').replaceAll('\r', ''))
+      .toBe('version one: npm run -C orchestration/ts loop\n')
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe('version two\n')
     expect(git(repoRoot, ['show', ':.agents/skills/loop-start/SKILL.md'])
       .replaceAll('\r', ''))
       .toBe('staged consumer command')
+    expect(git(repoRoot, ['show', 'HEAD:.claude/skills/loop-start/SKILL.md'])
+      .replaceAll('\r', ''))
+      .toBe('version two')
+    expect(git(repoRoot, ['status', '--short']))
+      .toBe('MM .agents/skills/loop-start/SKILL.md')
     expect(events.some((line) => line.startsWith(
       'WARN shared skill sync could not be committed: staged changes exist at',
     )), events.join('\n')).toBe(true)
+  })
+
+  it('syncs managed skills while preserving an unrelated staged repository skill', async () => {
+    const bundled = join(packageRoot, 'skills', 'loop-start', 'SKILL.md')
+    writeFileSync(bundled, 'version two: {{ORCHESTRATION_COMMAND_PREFIX}} loop-status\n')
+    commit(repoRoot, 'test: update bundled skill fixture')
+    const unrelated = join(repoRoot, '.claude', 'skills', 'verify-changes', 'SKILL.md')
+    mkdirSync(join(unrelated, '..'), { recursive: true })
+    writeFileSync(unrelated, 'repository-owned skill\n')
+    git(repoRoot, ['add', '--', '.claude/skills/verify-changes/SKILL.md'])
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('continue')
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe('version two: npm run -C orchestration/ts loop-status\n')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
+    expect(git(repoRoot, ['show', ':.claude/skills/verify-changes/SKILL.md'])
+      .replaceAll('\r', ''))
+      .toBe('repository-owned skill')
+    expect(git(repoRoot, ['status', '--short']))
+      .toBe('A  .claude/skills/verify-changes/SKILL.md')
+    expect(events.some((line) => line.includes('staged changes exist at'))).toBe(false)
   })
 
   it('warns on a dirty tree and starts the cycle without changing the subtree', async () => {

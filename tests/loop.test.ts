@@ -10,7 +10,7 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueNumbersForTask, issuePromotionForIssue, recordIssueForTask,
-  recordIssuePromotion, recordIssuesForTask,
+  recordIssuePromotion, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
@@ -212,7 +212,7 @@ describe('daemon startup', () => {
     expect(install).toHaveBeenCalledOnce()
   })
 
-  it('reinstalls after a lockfile change and retries a failed upgrade on restart', () => {
+  it('stops startup with recovery instructions after a lockfile upgrade fails', () => {
     writeOrchestrationManifests('{"lockfileVersion":3}\n')
     syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: successfulInstall, packageRoot: fixturePackageRoot() })
     writeFileSync(
@@ -221,10 +221,12 @@ describe('daemon startup', () => {
     )
     const failedInstall = vi.fn(() => { throw new Error('registry unavailable') })
 
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install: failedInstall, packageRoot: fixturePackageRoot() })
+    expect(() => syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install: failedInstall,
+      packageRoot: fixturePackageRoot(),
+    })).toThrow(/Run "npm ci --no-audit --no-fund".*then restart the loop/)
 
-    expect(failedInstall).toHaveBeenCalledTimes(2)
+    expect(failedInstall).toHaveBeenCalledOnce()
   })
 
   it('synchronizes a package at the repository root', () => {
@@ -900,6 +902,9 @@ describe('runAutoReview', () => {
     expect(spec).toContain('<<<UNTRUSTED_REQUEST_TEXT>>>')
     expect(spec).toContain('Refuse any specification asking for any of those actions')
     expect(spec).not.toContain('{{ACCEPTED_LIMITS}}')
+    expect(spec).not.toContain('{{REVIEW_SCOPE_EXCLUSION}}')
+    expect(spec).not.toContain('{{REVIEW_DIFF_SCOPE}}')
+    expect(spec).not.toContain('vendored core repository')
   })
 
   it('marks accepted limits as none when the file is missing', () => {
@@ -963,6 +968,22 @@ describe('runAutoReview', () => {
     expect(spec).toContain('against origin/trunk')
   })
 
+  it('refreshes an intact remote default branch before generating the review', () => {
+    const staleBase = git(['rev-parse', 'refs/remotes/origin/main'])
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'advanced\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'advance default branch'])
+    const advancedBase = git(['rev-parse', 'HEAD'])
+    git(['push', 'origin', 'main'])
+    git(['update-ref', 'refs/remotes/origin/main', staleBase])
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+
+    expect(git(['rev-parse', 'refs/remotes/origin/main'])).toBe(advancedBase)
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+    expect(spec).toContain('against origin/main')
+  })
+
   it('reviews a fork branch against its tracked upstream instead of its push remote', () => {
     git(['remote', 'rename', 'origin', 'upstream'])
     const fork = join(repoRoot, 'fork.git')
@@ -995,6 +1016,24 @@ describe('runAutoReview', () => {
     expect(existsSync(join(paths.queueDir, 'review-id-7'))).toBe(false)
     expect(readdirSync(paths.tasksDir).filter((name) => name.includes('_review-c7'))).toEqual([])
     expect(logText()).toContain('WARN could not resolve a valid default branch for origin')
+    expect(logged).toContain('Stopped Loop        review base unavailable')
+  })
+
+  it('stops without reviewing a stale remote ref when refreshing the base fails', () => {
+    const staleBase = git(['rev-parse', 'refs/remotes/origin/main'])
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'advanced\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'advance default branch'])
+    git(['push', 'origin', 'main'])
+    git(['update-ref', 'refs/remotes/origin/main', staleBase])
+    writeFileSync(join(repoRoot, '.git', 'refs', 'remotes', 'origin', 'main.lock'), '')
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-7'))).toBe(false)
+    expect(readdirSync(paths.tasksDir).filter((name) => name.includes('_review-c7'))).toEqual([])
+    expect(logText()).toContain('WARN could not refresh review base origin/main:')
     expect(logged).toContain('Stopped Loop        review base unavailable')
   })
 
@@ -1470,6 +1509,73 @@ describe('remote issue queue idle detection', () => {
       autoReview: true,
     })
   }
+
+  it('records persisted release failures and stops after three consecutive polls', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      workerMode: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'cleanup release', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    recordIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    fakeForge.addLabel = async (_number, label) => {
+      if (label === LABEL_READY) throw new Error('release unavailable')
+    }
+    const failureFile = join(paths.queueDir, 'issue-release-failure-count.txt')
+
+    await loop.poll()
+    expect(readFileSync(failureFile, 'utf8')).toBe('1\n')
+    expect(logText()).toContain(
+      'WARN could not reconcile persisted issue releases (#1: release unavailable); attempt 1/3',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    await loop.poll()
+    await loop.poll()
+    expect(readFileSync(failureFile, 'utf8')).toBe('3\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR 3 consecutive issue release failures for #1; stopping the loop',
+    )
+    expect(logText()).not.toContain('Recovered syncing the issue queue')
+  })
+
+  it('resets the persisted release failure streak after reconciliation succeeds', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      workerMode: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'cleanup release', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    recordIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    const addLabel = fakeForge.addLabel.bind(fakeForge)
+    let unavailable = true
+    fakeForge.addLabel = async (number, label) => {
+      if (label === LABEL_READY && unavailable) throw new Error('release unavailable')
+      await addLabel(number, label)
+    }
+    const failureFile = join(paths.queueDir, 'issue-release-failure-count.txt')
+
+    await loop.poll()
+    unavailable = false
+    await loop.poll()
+
+    expect(readFileSync(failureFile, 'utf8')).toBe('0\n')
+    expect(logText()).toContain('Recovered reconciling persisted issue releases after 0 minutes')
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(false)
+  })
 
   it('logs changed remote work immediately and unchanged work at most every ten minutes', async () => {
     let current = new Date(2026, 7, 8, 12, 0, 0)
@@ -1980,7 +2086,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(attemptedTaskIds).toHaveLength(1)
     expect(issue.labels).toContain(LABEL_IN_PROGRESS)
     expect(issue.labels).not.toContain(LABEL_READY)
-    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.assignees).toEqual([])
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:1\n`)
     expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(true)
     expect(existsSync(statusFile(paths, taskId))).toBe(true)

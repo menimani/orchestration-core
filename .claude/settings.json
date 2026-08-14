@@ -1,0 +1,26 @@
+{
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run typecheck:*)"
+    ]
+  },
+  "autoMode": {
+    "soft_deny": [
+      "$defaults",
+      "Deleting files or directories recursively, including rm -rf and equivalents",
+      "Force-pushing, deleting a remote branch other than the head branch of a pull request in the same command that merges it, git reset --hard, git clean, or deleting a branch with git branch -D",
+      "Publishing to npm or changing the package version",
+      "Repeating or extending an approved action beyond what was approved: a second or third run, a wider scope, or the same operation applied to something the user did not name",
+      "Acting on the user's environment for the assistant's own convenience — starting a service to measure it, stopping one to free a port — when the user asked only for information"
+    ]
+  }
+}
