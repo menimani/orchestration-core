@@ -257,7 +257,8 @@ values must be non-negative integers, with the narrower bounds stated below.
     suite logs its `Started Suite` event before invoking the blocking commands. Its
     passing verdict is retained for that commit while PR setup retries, and is discarded
     as soon as the branch tip changes. Repeated gate failures remain visible with a
-    count; a repeated push failure logs `ERROR`, writes the stop file, and stops retrying.
+    count; any repeated non-rate-limit PR-setup failure logs `ERROR`, writes the stop
+    file, and stops retrying.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot

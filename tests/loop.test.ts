@@ -2148,6 +2148,31 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(readStatus(paths, taskId)).toBeUndefined()
     expect(runnerStarts).toHaveLength(0)
     expect(logText()).toContain("startup failed: effort must be minimal, low, medium or high")
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:2\n`)
+    expect(logText()).toContain(
+      "ERROR 003_auto startup failed: effort must be minimal, low, medium or high, got 'impossible' (repeated 2 times)",
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('stops cleanly when a statusless startup failure cannot be requeued', async () => {
+    initializeGitRepo()
+    const taskId = '20260809_000003_004_auto-missing-spec'
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 1 })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:1\n`)
+
+    await expect(loop.poll()).resolves.toBe('continue')
+
+    expect(runnerStarts).toHaveLength(0)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR 004_auto startup failed: Task specification not found:',
+    )
+    expect(logText()).toContain('; could not requeue: Task specification not found:')
   })
 
   it('releases a claimed issue immediately when task startup fails', async () => {
