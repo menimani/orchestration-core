@@ -324,6 +324,18 @@ export function createLoop(deps: LoopDeps) {
     }
   }
 
+  function requeueAfterStartupFailure(taskId: string, depth: number, error: unknown): void {
+    const failure = `${shortTaskId(taskId)} startup failed: ${errorSummary(error)}`
+    try {
+      enqueueTaskImpl(paths, taskId, depth)
+    } catch (requeueError) {
+      event('ERROR', `${failure}; could not requeue: ${errorSummary(requeueError)}`)
+      writeFileSync(stopFile, '')
+      return
+    }
+    reportGateFailure(failure, true, `task-startup-${taskId}`)
+  }
+
   function readCount(file: string): number {
     if (!existsSync(file)) return 0
     const raw = readFileSync(file, 'utf8').replace(/[\s\r\n]/g, '')
@@ -366,6 +378,12 @@ export function createLoop(deps: LoopDeps) {
     const commits = gitIn(worktree, ['log', `${baseSha}..HEAD`, '--format=%H'])
       .trim().split(/\r?\n/).filter((line) => line !== '')
     if (commits.length === 0) {
+      if (isInspectionTaskId(paths, taskId)) {
+        await Promise.all(issueNumbers.map((issueNumber) =>
+          closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
+            `Inspection task ${taskId} completed without commits.`)))
+        return
+      }
       if (noChangeMarkerPresent(paths, taskId)) {
         await completeTaskWithoutChanges(paths, taskId, baseSha, {
           outputFile: join(paths.logsDir, `${taskId}.merge.log`),
@@ -377,13 +395,7 @@ export function createLoop(deps: LoopDeps) {
         })
         return
       }
-      if (!isInspectionTaskId(paths, taskId)) {
-        throw new Error(`${taskId} has no commits and is not an inspection task`)
-      }
-      await Promise.all(issueNumbers.map((issueNumber) =>
-        closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
-          `Inspection task ${taskId} completed without commits.`)))
-      return
+      throw new Error(`${taskId} has no commits and is not an inspection task`)
     }
 
     const branch = branchName(taskId)
@@ -2223,6 +2235,7 @@ export function createLoop(deps: LoopDeps) {
           } else {
             event('Started', shortTaskId(entry.taskId), `effort ${effort}`)
           }
+          previousGateFailures.delete(`task-startup-${entry.taskId}`)
           running += 1
         } catch (error) {
           const issueNumbers = issueNumbersForTask(paths, entry.taskId)
@@ -2253,19 +2266,19 @@ export function createLoop(deps: LoopDeps) {
                 event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)
               }
             } else {
-              enqueueTask(paths, entry.taskId, entry.depth)
+              requeueAfterStartupFailure(entry.taskId, entry.depth, error)
               // Do not dequeue the same retained materialization again in this poll.
               // The next poll retries the release while keeping the forge claim linked.
               break
             }
           } else {
-            event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)
             if (readStatus(paths, entry.taskId) === undefined) {
-              enqueueTask(paths, entry.taskId, entry.depth)
+              requeueAfterStartupFailure(entry.taskId, entry.depth, error)
               // A deterministic preflight error would otherwise be dequeued again in
               // this poll. Preserve it for a later poll after the input is repaired.
               break
             }
+            event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)
           }
         }
       }
