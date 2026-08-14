@@ -118,7 +118,10 @@ values must be non-negative integers, with the narrower bounds stated below.
    non-zero and retains the task state for a safe retry. In issue-queue mode, a successful
    operator cleanup also returns linked issues to `loop:ready` and removes their local
    task mapping. A forge failure is warned about without undoing the local cleanup; the
-   issues return when their leases expire.
+   cleanup leaves a durable release intent and retains the task mapping until the daemon
+   retries the release successfully. Reconciliation runs on each poll before stale-lease
+   reaping; three consecutive failed polls stop the loop, while a successful poll clears
+   the failure streak.
 
 ## Growth and decisions
 
@@ -497,8 +500,10 @@ so authorship and verified ancestry must both hold.
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
     stale-lease reaping recognizes its linked locally merged task and repeats the merge
     comment instead of unassigning or relabeling the issue. That refreshes `updatedAt`
-    again, keeping the issue claimed until promotion closes it. A forge outage degrades a
-    poll to local-only work; it never stops the loop. Labels are ensured at loop startup.
+    again, keeping the issue claimed until promotion closes it. An ordinary forge outage
+    degrades a poll to local-only work. Persisted cleanup release failures are retried each
+    poll and stop the loop after three consecutive failures. Labels are ensured at loop
+    startup.
     The daemon lists open `loop:finding` issues once per poll and partitions that snapshot
     locally for adoption, reconciliation, lease reaping, claiming, and cycle-gate idle
     detection. MERGED-marker comment reads are cached by issue number and `updatedAt`.
