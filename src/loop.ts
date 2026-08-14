@@ -7,7 +7,7 @@ import {
   ForgeRateLimitError, type Forge, type ForgeIssue, type ForgeIssueComment,
 } from './adapters/forge.ts'
 import { dequeueBacklog, ensureBacklog } from './backlog.ts'
-import type { ProjectAdapter } from './adapters/project.ts'
+import type { ProjectAdapter, SuiteStep } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import { cleanupTask } from './cleanup.ts'
 import type { LoopConfig } from './config.ts'
@@ -1511,13 +1511,20 @@ export function createLoop(deps: LoopDeps) {
     return true
   }
 
-  /**
-   * With light task gates each merge proved only that the tree builds, so the full
-   * suites run here, once per gate entry, against the tip the cycle actually produced.
-   * On failure the loop stops rather than promote a failing tip.
-   */
+  function cycleSuiteStepsForTaskGate(): SuiteStep[] {
+    return project.cycleSuite().filter((step) =>
+      config.taskGate === 'light' || step.runAtEveryTaskGate === true)
+  }
+
+  function cycleSuiteEnabledForTaskGate(): boolean {
+    return config.taskGate === 'light'
+      || cycleSuiteStepsForTaskGate().length > 0
+  }
+
+  /** Run the applicable suites once per gate entry against the cycle's resulting tip. */
   function runCycleSuite(cycle: number): boolean {
-    if (config.taskGate !== 'light') return true
+    const configuredSteps = cycleSuiteStepsForTaskGate()
+    if (config.taskGate !== 'light' && configuredSteps.length === 0) return true
     event('Started', 'Suite', `cycle ${cycle}`)
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
     writeFileSync(suiteLog, '')
@@ -1537,7 +1544,7 @@ export function createLoop(deps: LoopDeps) {
       }
     }
 
-    const steps = project.cycleSuite().filter((step) =>
+    const steps = configuredSteps.filter((step) =>
       step.requires === undefined || existsSync(join(paths.repoRoot, step.requires)))
     if (steps.some((step) => step.needsDocker)) {
       const probe = project.cycleSuiteDockerProbe
@@ -1689,13 +1696,14 @@ export function createLoop(deps: LoopDeps) {
           }
 
           const currentTip = git(['rev-parse', 'HEAD']).trim()
-          const suitePassedForTip = config.taskGate === 'light'
+          const cycleSuiteEnabled = cycleSuiteEnabledForTaskGate()
+          const suitePassedForTip = cycleSuiteEnabled
             && currentTip !== ''
             && existsSync(suiteTipFile)
             && readFileSync(suiteTipFile, 'utf8').trim() === currentTip
           if (!suitePassedForTip) {
             if (!runCycleSuite(currentScans)) return 'continue'
-            if (config.taskGate === 'light' && currentTip !== '') {
+            if (cycleSuiteEnabled && currentTip !== '') {
               writeFileSync(suiteTipFile, `${currentTip}\n`)
             }
           }

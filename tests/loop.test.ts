@@ -2368,6 +2368,28 @@ describe('completion marker output', () => {
     expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\nrun\n')
   })
 
+  it('retains an opted-in full-gate suite verdict for the branch tip', async () => {
+    configureLocalRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Browser smoke', cwd: '', runAtEveryTaskGate: true,
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+      }],
+    }
+    const loop = makeLoop({ autoPr: true, taskGate: 'full' }, suiteProject)
+    fakeForge.prBody = async () => { throw new Error('body read failed') }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(readFileSync(join(paths.queueDir, 'cycle-suite-tip-1'), 'utf8').trim())
+      .toBe(git(['rev-parse', 'HEAD']).trim())
+    expect(logged.filter((line) => line === 'Started Suite       cycle 1')).toHaveLength(1)
+  })
+
   it('retries the cycle gate when the existing PR body cannot be read', async () => {
     configureLocalRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
@@ -3078,6 +3100,30 @@ describe('runCycleSuite', () => {
     const loop = makeLoop({ taskGate: 'full' }, suiteProject)
     expect(loop.runCycleSuite(1)).toBe(true)
     expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(false)
+  })
+
+  it('runs only opted-in project suite steps under full task gates', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [
+        {
+          label: 'Light only', cwd: '',
+          command: `node -e "require('node:fs').writeFileSync('light-suite-ran', '')"`,
+        },
+        {
+          label: 'Every gate', cwd: '', runAtEveryTaskGate: true,
+          command: `node -e "require('node:fs').writeFileSync('every-gate-suite-ran', '')"`,
+        },
+      ],
+    }
+    const loop = makeLoop({ taskGate: 'full' }, suiteProject)
+
+    expect(loop.runCycleSuite(1)).toBe(true)
+
+    expect(existsSync(join(repoRoot, 'light-suite-ran'))).toBe(false)
+    expect(existsSync(join(repoRoot, 'every-gate-suite-ran'))).toBe(true)
+    expect(existsSync(stopFile())).toBe(false)
+    expect(logged).toContain('Started Suite       cycle 1')
   })
 
   it('runs the project suite under light gates and continues on a pass', () => {
