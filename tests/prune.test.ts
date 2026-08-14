@@ -66,10 +66,13 @@ describe('pruneTasks', () => {
 
     const orphan = join(paths.logsDir, 'orphan-task.log')
     writeFileSync(orphan, 'orphan\n')
+    const orphanFinal = join(paths.logsDir, 'orphan-task.final')
+    writeFileSync(orphanFinal, 'final message\n')
     const loopLog = join(paths.logsDir, 'loop.log')
     writeFileSync(loopLog, 'loop\n')
     const past = (Date.now() - 30 * 24 * 3600 * 1000) / 1000
     utimesSync(orphan, past, past)
+    utimesSync(orphanFinal, past, past)
     utimesSync(loopLog, past, past)
   }
 
@@ -116,7 +119,8 @@ describe('pruneTasks', () => {
     expect(existsSync(join(paths.statusDir, '20250101_000000_003_user-old-worktree.json'))).toBe(true)
     expect(existsSync(join(paths.tasksDir, 'manual-task.md'))).toBe(true)
     expect(existsSync(join(paths.statusDir, 'manual-task.json'))).toBe(false)
-    expect(existsSync(join(paths.logsDir, 'orphan-task.log'))).toBe(false)
+    expect(existsSync(join(paths.logsDir, 'orphan-task.log'))).toBe(true)
+    expect(existsSync(join(paths.logsDir, 'orphan-task.final'))).toBe(true)
     expect(existsSync(join(paths.logsDir, 'loop.log'))).toBe(true)
   })
 })

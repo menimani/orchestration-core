@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { logFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
+import { logFile, worktreeDir, type OrchPaths } from './paths.ts'
 
 // Deletes what finished tasks leave behind: logs, status files, generated specs, and
 // queue markers. What it never touches: tasks that are neither merged nor no-change
@@ -83,18 +83,6 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
       ...(specTracked ? [] : [spec]),
     )
     report.prunedTasks += 1
-  }
-
-  // Logs whose task has no status file at all — left by crashes or by a cleanup that
-  // removed the status but not the log.
-  for (const name of readdirSync(paths.logsDir)) {
-    if (!name.endsWith('.log') && !name.endsWith('.final')) continue
-    if (name === 'loop.log') continue
-    const file = join(paths.logsDir, name)
-    if (!olderThan(file, options.days)) continue
-    const taskId = name.replace(/\.merge\.log$/, '').replace(/\.log$/, '').replace(/\.final$/, '')
-    if (existsSync(statusFile(paths, taskId))) continue
-    remove(file)
   }
 
   // Description-index entries whose spec is gone would only mint fresh ids anyway.
