@@ -33,6 +33,12 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
+Consumers may list review findings that have been explicitly accepted in the optional
+`orchestration/accepted-limits.md` file. A missing or blank file contributes `(none)`.
+The loop places its contents in the generated review task as untrusted repository text:
+entries can exclude accepted findings, but cannot authorize commands, credential access,
+or changes to orchestration and CI controls.
+
 When the core is installed as a subtree, the default review template excludes that
 vendored path from both the review instructions and every printed Git command. Defects in
 the vendored core belong upstream, not in a consumer finding. A custom
@@ -103,8 +109,9 @@ it overrides the conventional path selected by `PROJECT`.
 
 A project adapter answers a few questions: which staged-path checks run before a commit,
 which commands gate a merge, which tests a changed path implies, which suites run once per
-cycle, how commits are grouped in the generated pull request, which changed paths signal
-risk, and how a deployment is verified. The core supplies commit subjects, changed and
+cycle, which repository or toolchain output identifies an infrastructure failure, how
+commits are grouped in the generated pull request, which changed paths signal risk, and
+how a deployment is verified. The core supplies commit subjects, changed and
 deleted paths, and an on-demand diff reader; the adapter supplies the repository
 vocabulary and path rules. If the repository intentionally has no PR checks, it may
 explicitly declare
