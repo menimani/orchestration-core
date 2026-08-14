@@ -88,6 +88,27 @@ export function createOperatingSystem(
   runtime: PosixOperatingSystemRuntime = systemRuntime,
 ): OperatingSystem {
   const processTreeIsAlive = (pid: number): boolean => groupIsAlive(runtime, pid)
+  const terminateProcessTree = (pid: number): boolean => {
+    if (!processTreeIsAlive(pid)) {
+      if (processIsAlive(runtime, pid)) {
+        throw new Error(`Process ${pid} is alive but its detached process group cannot be found.`)
+      }
+      return false
+    }
+
+    try {
+      runtime.signalProcessGroup(pid)
+    } catch {
+      // The signal result is not authoritative: verify the process tree below.
+    }
+
+    const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
+    while (processTreeIsAlive(pid) && runtime.now() < deadline) {
+      runtime.sleep(PROCESS_EXIT_POLL_MS)
+    }
+    if (processTreeIsAlive(pid)) throw new Error(`Could not stop process tree ${pid}.`)
+    return true
+  }
 
   return {
     async launchDaemon(options) {
@@ -112,7 +133,7 @@ export function createOperatingSystem(
       return {
         pid,
         isAlive: () => child.exitCode === null,
-        terminate: () => { child.kill() },
+        terminate: () => { terminateProcessTree(pid) },
         release: () => { child.unref() },
         onError: (listener) => { child.on('error', listener) },
         offError: (listener) => { child.off('error', listener) },
@@ -123,27 +144,7 @@ export function createOperatingSystem(
     processTreeRootPid: () => process.pid,
     processIsAlive: (pid) => processIsAlive(runtime, pid),
     processTreeIsAlive,
-    terminateProcessTree(pid): boolean {
-      if (!processTreeIsAlive(pid)) {
-        if (processIsAlive(runtime, pid)) {
-          throw new Error(`Process ${pid} is alive but its detached process group cannot be found.`)
-        }
-        return false
-      }
-
-      try {
-        runtime.signalProcessGroup(pid)
-      } catch {
-        // The signal result is not authoritative: verify the process tree below.
-      }
-
-      const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
-      while (processTreeIsAlive(pid) && runtime.now() < deadline) {
-        runtime.sleep(PROCESS_EXIT_POLL_MS)
-      }
-      if (processTreeIsAlive(pid)) throw new Error(`Could not stop process tree ${pid}.`)
-      return true
-    },
+    terminateProcessTree,
     removeDirectory(path): void {
       runtime.remove(path, { recursive: true, force: true })
     },
