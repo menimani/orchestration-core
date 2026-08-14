@@ -2691,7 +2691,7 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
-  it('terminalizes an explicit no-change task and closes its issue without merge failures', async () => {
+  it('terminalizes a no-change task while preserving failures and invalidating the cycle', async () => {
     const taskId = '20260814_144959_066_auto-already-resolved'
     const initialHead = initializeGitRepo()
     writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
@@ -2708,6 +2708,9 @@ describe('completed task merge recovery', () => {
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
     recordIssueForTask(paths, taskId, issueNumber)
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
 
     expect(await loop.poll()).toBe('continue')
 
@@ -2717,7 +2720,8 @@ describe('completed task merge recovery', () => {
       .toContain('no change was warranted')
     expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
     expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
-    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logged).toContain('No-change 066_auto    no change warranted')
     expect(logged.some((line) => line.startsWith('Failed 066_auto'))).toBe(false)
@@ -2739,6 +2743,7 @@ describe('completed task merge recovery', () => {
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
     recordIssueForTask(paths, taskId, issueNumber)
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
     const getIssue = fakeForge.getIssue.bind(fakeForge)
     let unavailable = true
     fakeForge.getIssue = async (number) => {
@@ -2752,7 +2757,7 @@ describe('completed task merge recovery', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(readStatus(paths, taskId)?.status).toBe('completed')
-    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logText()).toContain('could not reconcile no-change task 067_auto')
     expect(logged.some((line) => line.startsWith('Failed 067_auto'))).toBe(false)
@@ -2761,7 +2766,7 @@ describe('completed task merge recovery', () => {
 
     expect(readStatus(paths, taskId)?.status).toBe('no-change')
     expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
-    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
   })
 
   it('does not merge an abandoned grouped task after the loop restarts', async () => {

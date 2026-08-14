@@ -1946,7 +1946,12 @@ export function createLoop(deps: LoopDeps) {
         })
         if (mergeResult.outcome === 'no-change') {
           event('No-change', shortTaskId(taskId), 'no change warranted')
-          writeFileSync(mergeFailureFile, '0\n')
+          if (!isInspectionTaskId(paths, taskId)) {
+            const cycle = readCount(scanCountFile)
+            if (cycle > 0) {
+              rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+            }
+          }
           return
         }
         const mergeCommit = mergeResult.mergeCommit

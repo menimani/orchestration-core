@@ -467,9 +467,11 @@ const cmdMerge: Command = async (paths, args) => {
             `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
       },
     })
-    // A completed manual merge proves the previous failures are no longer consecutive.
-    // Clear the durable streak immediately, before optional forge bookkeeping can fail.
-    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+    if (mergeResult.outcome === 'merged') {
+      // A completed manual merge proves the previous failures are no longer consecutive.
+      // Clear the durable streak immediately, before optional forge bookkeeping can fail.
+      writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+    }
     if (mergeResult.outcome === 'merged' && linkedIssues.length > 0) {
       const mergeCommit = mergeResult.mergeCommit
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
