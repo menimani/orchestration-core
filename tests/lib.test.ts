@@ -123,6 +123,22 @@ describe('status files', () => {
     expect(readStatus(paths, 'adapter-lock')?.status).toBe('completed')
   })
 
+  it('reclaims a status lock when its live PID belongs to a different process start', async () => {
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue('current-start')
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const lockDir = join(paths.statusDir, '.reused-pid-lock.lock')
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'pid'), `${process.pid}\n`)
+    writeFileSync(join(lockDir, 'start-identity'), `${JSON.stringify('previous-start')}\n`)
+
+    await writeStatus(paths, 'reused-pid-lock', 'completed')
+
+    expect(processStartIdentity).toHaveBeenCalledWith(process.pid)
+    expect(processIsAlive).not.toHaveBeenCalledWith(process.pid)
+    expect(readStatus(paths, 'reused-pid-lock')?.status).toBe('completed')
+  })
+
   it('reclaims an aged lock that never published a pid', async () => {
     const lockDir = join(paths.statusDir, '.task-pidless.lock')
     mkdirSync(lockDir)

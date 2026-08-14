@@ -717,6 +717,32 @@ describe('loop daemon ownership', () => {
     expect(existsSync(recovery)).toBe(false)
   })
 
+  it('reclaims a recovery lock when its live PID belongs to a different process start', () => {
+    const paths = orchPaths(repoRoot)
+    const recovery = `${daemonFile('loop.pid')}.recovery`
+    writeFileSync(daemonFile('loop.pid'), '999999999\n')
+    mkdirSync(recovery)
+    writeFileSync(join(recovery, 'owner.json'), JSON.stringify({
+      pid: process.pid,
+      startIdentity: 'not-the-current-process',
+      acquiredAt: new Date().toISOString(),
+      token: 'reused-pid-owner',
+    }))
+    mkdirSync(join(paths.worktreesDir, 'orphan-after-reused-pid-recovery'))
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('Removing stale PID file')
+    expect(existsSync(recovery)).toBe(false)
+  })
+
   it('prints a failed-task marker and preserves a same-branch merge streak', async () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260810_010203_031_auto-failed-task'

@@ -5,6 +5,10 @@ import {
 } from 'node:fs'
 import { dirname, join, toNamespacedPath } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
+import {
+  currentProcessStartIdentity, decodeProcessStartIdentity, encodeProcessStartIdentity,
+  lockOwnerIsCurrent,
+} from './processOwner.ts'
 
 const LOCK_RETRY_MS = 10
 const OWNER_GRACE_MS = 30_000
@@ -29,7 +33,7 @@ function lockOwnerIsStale(lockDir: string): boolean {
   }
   // The creator may still be between mkdir and publishing its owner metadata. The
   // token is optional so locks created by an older installed core remain readable.
-  const [pidRaw, createdRaw, _token, ...extra] = ownerText(lockDir).split(/\s+/)
+  const [pidRaw, createdRaw, token, ...extra] = ownerText(lockDir).split(/\s+/)
   const pid = Number(pidRaw)
   const created = Number(createdRaw)
   if (
@@ -41,12 +45,17 @@ function lockOwnerIsStale(lockDir: string): boolean {
   ) {
     return lockIsAged()
   }
-  if (operatingSystem.processIsAlive(pid)) return false
+  // Keep the legacy three-field format: older cores treat the third field as opaque.
+  const startIdentity = token?.startsWith('v2.')
+    ? decodeProcessStartIdentity(token.split('.')[2])
+    : undefined
+  if (lockOwnerIsCurrent(pid, startIdentity)) return false
   return Date.now() - created >= OWNER_GRACE_MS
 }
 
 function ownedLock(lockDir: string): string {
-  const token = randomUUID()
+  const identity = encodeProcessStartIdentity(currentProcessStartIdentity())
+  const token = `v2.${randomUUID()}.${identity}`
   mkdirSync(lockDir)
   try {
     writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()} ${token}\n`)
