@@ -50,16 +50,20 @@ export interface SharedSkillsSyncResult {
   failures: string[]
 }
 
-/** Paths a consumer sync owns before it mutates any generated skill tree. */
-export function sharedSkillManagedPaths(
+export interface SharedSkillManagedTarget {
+  destinationRoot: string
+  managedPaths: string[]
+}
+
+/** Managed paths grouped by the destination that must be synced as one unit. */
+export function sharedSkillManagedTargets(
   repoRoot: string,
   packageRoot: string,
   runner: Runner,
-): string[] {
+): SharedSkillManagedTarget[] {
   const manifest = readManifest(packageRoot)
-  const paths: string[] = []
-  for (const target of skillTargets(repoRoot, runner)) {
-    paths.push(join(target.destinationRoot, STATE_FILE))
+  return skillTargets(repoRoot, runner).map((target) => {
+    const paths = [join(target.destinationRoot, STATE_FILE)]
     paths.push(...manifest.skills.map((skill) => join(target.destinationRoot, skill)))
     for (const legacyRoot of target.legacyRoots) {
       const stateFile = join(legacyRoot, STATE_FILE)
@@ -68,7 +72,18 @@ export function sharedSkillManagedPaths(
       paths.push(stateFile)
       paths.push(...Object.keys(state.skills).map((skill) => join(legacyRoot, skill)))
     }
-  }
+    return { destinationRoot: target.destinationRoot, managedPaths: [...new Set(paths)] }
+  })
+}
+
+/** Paths a consumer sync owns before it mutates any generated skill tree. */
+export function sharedSkillManagedPaths(
+  repoRoot: string,
+  packageRoot: string,
+  runner: Runner,
+): string[] {
+  const paths = sharedSkillManagedTargets(repoRoot, packageRoot, runner)
+    .flatMap((target) => target.managedPaths)
   return [...new Set(paths)]
 }
 
@@ -358,12 +373,16 @@ export function syncSharedSkills(
   packageRoot: string,
   runner: Runner,
   os: OperatingSystem = operatingSystem,
+  skippedDestinationRoots: readonly string[] = [],
 ): SharedSkillsSyncResult {
   const combined: SharedSkillsSyncResult = {
     installed: [], updated: [], conflicts: [], migrationConflicts: [],
     removedPaths: [], changedPaths: [], managedPaths: [], failures: [],
   }
   for (const target of skillTargets(repoRoot, runner)) {
+    if (skippedDestinationRoots.some((root) => relative(root, target.destinationRoot) === '')) {
+      continue
+    }
     let result: SharedSkillsSyncResult
     try {
       result = syncTarget(repoRoot, packageRoot, target, os)

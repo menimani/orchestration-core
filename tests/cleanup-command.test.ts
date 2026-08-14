@@ -8,9 +8,11 @@ import {
   CLEANUP_USAGE, runCleanupCommand, type CleanupCommandRuntime,
 } from '../src/cleanupCommand.ts'
 import {
-  issueNumbersForTask, issueReleaseIntentForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON,
-  LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
-  reapStaleLeases, recordIssueForTask, recordIssueReleaseIntent, recordIssuesForTask,
+  completeIssueReleaseIntent, issueNumbersForTask, issueReleaseIntentForTask,
+  issueReleasePreparationForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
+  LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY, prepareIssueReleaseIntent,
+  reapStaleLeases, reconcileIssueReleaseIntents, recordIssueForTask, recordIssueReleaseIntent,
+  recordIssuesForTask,
 } from '../src/issueQueue.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
@@ -65,11 +67,12 @@ describe('cleanup command', () => {
     expect(issueNumbersForTask(paths, taskId)).toEqual([41])
   })
 
-  it('persists release intent before destructive cleanup', async () => {
+  it('keeps prepared release intent hidden from reconciliation until cleanup completes', async () => {
     recordIssuesForTask(paths, taskId, [41, 42])
     const commandRuntime = runtime({
       cleanup: vi.fn(() => {
-        expect(issueReleaseIntentForTask(paths, taskId)).toEqual([41, 42])
+        expect(issueReleasePreparationForTask(paths, taskId)).toEqual([41, 42])
+        expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
       }),
     })
 
@@ -78,12 +81,38 @@ describe('cleanup command', () => {
     expect(commandRuntime.cleanup).toHaveBeenCalledWith(paths, taskId)
   })
 
-  it('rolls back release intent when local cleanup fails', async () => {
+  it('does not release a claim while local cleanup has only prepared its intent', async () => {
+    const forge = makeFakeForge('worker-a')
+    const issueNumber = await forge.createIssue({
+      title: 'concurrent cleanup',
+      body: 'claimed work',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [forge.user],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+    prepareIssueReleaseIntent(paths, taskId, [issueNumber])
+
+    await expect(reconcileIssueReleaseIntents(forge, paths)).resolves.toEqual([])
+
+    const claimed = await forge.getIssue(issueNumber)
+    expect(claimed.labels).toContain(LABEL_IN_PROGRESS)
+    expect(claimed.labels).not.toContain(LABEL_READY)
+    expect(claimed.assignees).toEqual([forge.user])
+
+    completeIssueReleaseIntent(paths, taskId)
+    await expect(reconcileIssueReleaseIntents(forge, paths)).resolves.toEqual([])
+    const released = await forge.getIssue(issueNumber)
+    expect(released.labels).toContain(LABEL_READY)
+    expect(released.assignees).toEqual([])
+  })
+
+  it('removes release preparation when local cleanup fails', async () => {
     recordIssuesForTask(paths, taskId, [41, 42])
     const cleanupError = new Error('cleanup failed')
     const commandRuntime = runtime({
       cleanup: vi.fn(() => {
-        expect(issueReleaseIntentForTask(paths, taskId)).toEqual([41, 42])
+        expect(issueReleasePreparationForTask(paths, taskId)).toEqual([41, 42])
+        expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
         throw cleanupError
       }),
     })
@@ -91,6 +120,7 @@ describe('cleanup command', () => {
     await expect(runCleanupCommand(paths, [taskId], commandRuntime)).rejects.toBe(cleanupError)
 
     expect(issueNumbersForTask(paths, taskId)).toEqual([41, 42])
+    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
     expect(commandRuntime.loadForge).not.toHaveBeenCalled()
   })
@@ -104,6 +134,7 @@ describe('cleanup command', () => {
     await expect(runCleanupCommand(paths, [taskId], commandRuntime)).rejects.toBe(cleanupError)
 
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([41])
+    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
     expect(commandRuntime.loadForge).not.toHaveBeenCalled()
   })
 

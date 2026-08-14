@@ -4,7 +4,7 @@ import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
 import type { Runner } from './adapters/runner.ts'
 import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
-import { sharedSkillManagedPaths, syncSharedSkills } from './sharedSkills.ts'
+import { sharedSkillManagedTargets, syncSharedSkills } from './sharedSkills.ts'
 
 export type CoreUpdateOutcome = 'continue' | 'restart'
 
@@ -67,19 +67,19 @@ function syncSkills(
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime,
 ): void {
+  const skippedDestinations: string[] = []
   if (isConsumer) {
     try {
-      const managedPaths = repositoryPaths(
-        repoRoot,
-        sharedSkillManagedPaths(repoRoot, packageRoot, runner),
-      )
-      const alreadyStaged = runtime.git(repoRoot, [
-        'diff', '--cached', '--name-only', '--', ...managedPaths,
-      ]).trim()
-      if (alreadyStaged !== '') {
-        event('WARN',
-          `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
-        return
+      for (const target of sharedSkillManagedTargets(repoRoot, packageRoot, runner)) {
+        const managedPaths = repositoryPaths(repoRoot, target.managedPaths)
+        const alreadyStaged = runtime.git(repoRoot, [
+          'diff', '--cached', '--name-only', '--', ...managedPaths,
+        ]).trim()
+        if (alreadyStaged !== '') {
+          event('WARN',
+            `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
+          skippedDestinations.push(target.destinationRoot)
+        }
       }
     } catch (error) {
       event('WARN', `shared skill sync could not be committed: ${summary(error)}`)
@@ -89,7 +89,7 @@ function syncSkills(
 
   let result: ReturnType<typeof syncSharedSkills>
   try {
-    result = syncSharedSkills(repoRoot, packageRoot, runner)
+    result = syncSharedSkills(repoRoot, packageRoot, runner, undefined, skippedDestinations)
   } catch (error) {
     event('WARN', `shared skill sync failed: ${summary(error)}`)
     return

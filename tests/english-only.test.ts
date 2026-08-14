@@ -34,6 +34,15 @@ describe('English-only source check', () => {
     expect(violations[5]?.codePoints).toEqual(['U+1F4A1', 'U+FE0F'])
   })
 
+  it('rejects non-English Latin letters and combining marks', () => {
+    const violations = scanText('Ti\u1ebfng Vi\u1ec7t va\u0300 tie\u0302ng')
+
+    expect(violations).toHaveLength(1)
+    expect(violations[0]?.codePoints).toEqual([
+      'U+1EBF', 'U+1EC7', 'U+0300', 'U+0302',
+    ])
+  })
+
   it('checks every repository source during the normal test suite', () => {
     expect(main()).toBe(0)
   })

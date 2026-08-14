@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { basename, resolve } from 'node:path'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { basename, dirname, extname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import ts from 'typescript'
 
@@ -513,7 +513,53 @@ async function importProject(adapterPath: string, name?: string): Promise<Projec
   throw new Error(`Project adapter '${adapterPath}' does not export ${expected}`)
 }
 
-/** Load an adapter and retain the exact source the daemon must stop using if it changes. */
+const LOCAL_MODULE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs', '.json']
+
+function resolveLocalModule(importer: string, specifier: string): string | undefined {
+  if (!specifier.startsWith('./') && !specifier.startsWith('../')) return undefined
+  const imported = resolve(dirname(importer), specifier)
+  const candidates = extname(imported) === ''
+    ? [imported, ...LOCAL_MODULE_EXTENSIONS.map((extension) => `${imported}${extension}`),
+        ...LOCAL_MODULE_EXTENSIONS.map((extension) => resolve(imported, `index${extension}`))]
+    : [imported]
+  return candidates.find((candidate) => {
+    try {
+      return statSync(candidate).isFile()
+    } catch {
+      return false
+    }
+  })
+}
+
+function projectSources(adapterPath: string): Map<string, Buffer> {
+  const sources = new Map<string, Buffer>()
+  const pending = [adapterPath]
+  while (pending.length > 0) {
+    const path = pending.pop()!
+    if (sources.has(path)) continue
+    const source = readFileSync(path)
+    sources.set(path, source)
+    const imports = ts.preProcessFile(source.toString('utf8'), true, true).importedFiles
+    for (const imported of imports) {
+      const dependency = resolveLocalModule(path, imported.fileName)
+      if (dependency !== undefined && !sources.has(dependency)) pending.push(dependency)
+    }
+  }
+  return sources
+}
+
+function projectSourcesChanged(expected: ReadonlyMap<string, Buffer>, adapterPath: string): boolean {
+  try {
+    const current = projectSources(adapterPath)
+    return current.size !== expected.size
+      || [...expected].some(([path, source]) => !current.get(path)?.equals(source))
+  } catch {
+    // A missing or unreadable dependency is as stale as a missing adapter.
+    return true
+  }
+}
+
+/** Load an adapter and retain every local source the daemon must stop using if it changes. */
 export async function loadMonitoredProject(
   orchestrationRoot: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -523,23 +569,16 @@ export async function loadMonitoredProject(
     throw new Error(`Project adapter not found: ${resolved.path}`)
   }
 
-  const sourceBeforeImport = readFileSync(resolved.path)
+  const sourcesBeforeImport = projectSources(resolved.path)
   const project = await importProject(resolved.path, resolved.name)
-  const source = readFileSync(resolved.path)
-  if (!source.equals(sourceBeforeImport)) {
+  const sources = projectSources(resolved.path)
+  if (projectSourcesChanged(sourcesBeforeImport, resolved.path)) {
     throw new Error(`Project adapter changed while it was loading: ${resolved.path}`)
   }
   return {
     project,
     path: resolved.path,
-    sourceChanged: () => {
-      try {
-        return !readFileSync(resolved.path).equals(source)
-      } catch {
-        // Missing and unreadable adapters must both fail closed through a restart.
-        return true
-      }
-    },
+    sourceChanged: () => projectSourcesChanged(sources, resolved.path),
   }
 }
 

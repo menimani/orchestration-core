@@ -1,4 +1,6 @@
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -159,6 +161,28 @@ describe('project adapter loading', () => {
     expect(monitored.sourceChanged()).toBe(true)
 
     rmSync(adapterPath)
+    expect(monitored.sourceChanged()).toBe(true)
+  })
+
+  it('detects when a locally imported adapter helper changes', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    const projectDirectory = join(orchestrationRoot, 'project')
+    const adapterPath = join(projectDirectory, 'project-fixture.ts')
+    const helperPath = join(projectDirectory, 'adapter-helper.ts')
+    mkdirSync(projectDirectory, { recursive: true })
+    writeFileSync(helperPath, "export const workflow = 'first.yml'\n")
+    writeFixtureAdapter(adapterPath, "${workflow}")
+    const adapterSource = readFileSync(adapterPath, 'utf8')
+    writeFileSync(adapterPath, `import { workflow } from './adapter-helper.ts'\n${
+      adapterSource.replace("workflow: '${workflow}',", 'workflow,')
+    }`)
+    const monitored = await loadMonitoredProject(orchestrationRoot, {})
+
+    expect(monitored.project.deployment?.workflow).toBe('first.yml')
+    expect(monitored.sourceChanged()).toBe(false)
+
+    writeFileSync(helperPath, "export const workflow = 'second.yml'\n")
     expect(monitored.sourceChanged()).toBe(true)
   })
 
