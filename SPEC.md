@@ -212,13 +212,15 @@ values must be non-negative integers, with the narrower bounds stated below.
     restart-safe boundary. The daemon then fetches the
     configured core upstream and compares its tip with the last `git-subtree-split` for
     this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
-    A package-file change logs aligned `Updated    core        <old8>..<new8>` and
-    `Restarting core        for cycle <n>` events, releases daemon ownership, and starts
-    the package's absolute CLI entry point from the package directory, retaining the
-    remaining arguments, environment, and run branch. The parent waits for the replacement
-    to finish daemon initialization and logs `Restarted`; a failed replacement restores
-    ownership, logs `ERROR`, and makes the parent exit nonzero. A daemon otherwise runs the
-    core code it started with. Neither check ever runs mid-cycle. A dirty
+    A package-file change logs an aligned `Updated    core        <old8>..<new8>` event.
+    In direct layout only, it also logs `Restarting core        for cycle <n>`, releases
+    daemon ownership, and starts the package's absolute CLI entry point from the package
+    directory, retaining the remaining arguments, environment, and run branch. The parent
+    waits for the replacement to finish daemon initialization and logs `Restarted`; a
+    failed replacement restores ownership, logs `ERROR`, and makes the parent exit nonzero.
+    In integration mode, the fixed daemon continues without restarting and the pulled core
+    becomes executable only in a later run, as specified in 4b. A daemon otherwise runs
+    the core code it started with. Neither check ever runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
     At the same boundary, the package manifest's skills are rendered into every

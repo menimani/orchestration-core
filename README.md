@@ -43,11 +43,13 @@ this package owns the repository, so this repository's review still covers its o
 
 Immediately before each cycle starts, the daemon fetches the configured shared-core
 upstream and compares it with the last import of this package's subtree. If the subtree
-is behind, it runs `git subtree pull --squash`; when package files change, it replaces
-itself from the package's absolute CLI path so the new cycle uses the pulled code while
-retaining the arguments, environment, and run branch. The parent reports success only
-after the replacement daemon finishes startup. This happens only after the prior gate
-has closed and while no task is running.
+is behind, it runs `git subtree pull --squash`. In direct layout, when package files
+change, the daemon replaces itself from the package's absolute CLI path so the new cycle
+uses the pulled code while retaining the arguments, environment, and run branch. The
+parent reports success only after the replacement daemon finishes startup. In integration
+mode, the fixed daemon continues without restarting; the pulled core becomes executable
+only in a later run. The update happens only after the prior gate has closed and while no
+task is running.
 A project adapter is watched at that same boundary. If its loaded source has changed or
 can no longer be read, the daemon replaces itself before starting the next cycle. The
 replacement loads the adapter afresh, so gate and presentation behavior cannot remain
