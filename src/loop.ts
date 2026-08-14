@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import {
   appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import {
   ForgeRateLimitError, type Forge, type ForgeIssue, type ForgeIssueComment,
 } from './adapters/forge.ts'
@@ -23,7 +23,7 @@ import {
 } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
-  branchName, worktreeDir, type OrchPaths,
+  branchName, PACKAGE_ROOT, worktreeDir, type OrchPaths,
 } from './paths.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
@@ -564,7 +564,7 @@ export function createLoop(deps: LoopDeps) {
         if (adoptionTaskId === undefined) {
           event('WARN', `remote adoption failed for issue #${issue.number}`)
         } else {
-          event('Failed', shortTaskId(adoptionTaskId), `log ${shortTaskId(adoptionTaskId)}.merge.log`)
+          event('Failed', shortTaskId(adoptionTaskId), `log ${shortLogPath(mergeLog)}`)
         }
         try {
           await Promise.all(adoptionIssues.map((candidate) =>
@@ -1151,7 +1151,12 @@ export function createLoop(deps: LoopDeps) {
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       BASE_BRANCH: baseBranch,
       ACCEPTED_LIMITS: frameUntrustedText(acceptedLimits),
-      ...reviewScopeTemplateValues(paths.repoRoot),
+      ...reviewScopeTemplateValues(
+        paths.repoRoot,
+        config.integrationBranch === ''
+          ? PACKAGE_ROOT
+          : join(paths.repoRoot, relative(dirname(paths.root), PACKAGE_ROOT)),
+      ),
     })
     writeFileSync(specFile(paths, reviewId), text)
     return true
@@ -1996,7 +2001,7 @@ export function createLoop(deps: LoopDeps) {
         }
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
         if (error instanceof OrchestrationDepsInstallError) throw error
-        event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.merge.log`)
+        event('Failed', shortTaskId(taskId), `log ${shortLogPath(mergeLog)}`)
         const abandoned = noteMergeFailure(mergeLog)
         if (abandoned && linkedIssues.length > 1 && remoteOperationsAvailable) {
           try {

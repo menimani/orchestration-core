@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
@@ -21,7 +21,8 @@ import {
   syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
 import {
-  branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
+  branchName, finalMessageFile, orchPaths, PACKAGE_ROOT, statusFile, worktreeDir,
+  type OrchPaths,
 } from '../src/paths.ts'
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
@@ -942,6 +943,25 @@ describe('runAutoReview', () => {
     expect(spec).toContain('## Accepted limits')
     expect(spec).toContain('(none)')
     expect(spec).not.toContain('{{ACCEPTED_LIMITS}}')
+  })
+
+  it('maps the vendored package scope into the integration worktree', () => {
+    rmSync(join(paths.root, 'templates', 'review-template.md'))
+    const stateRepoRoot = dirname(PACKAGE_ROOT)
+    paths = {
+      ...paths,
+      root: join(stateRepoRoot, 'orchestration'),
+    }
+    const packagePrefix = relative(stateRepoRoot, PACKAGE_ROOT).replaceAll('\\', '/')
+
+    expect(makeLoop({ integrationBranch: 'integration/run' }).runAutoReview(7, false))
+      .toBe(false)
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+
+    expect(spec).toContain(
+      `Changes under \`${packagePrefix}/\` belong to the vendored core repository`,
+    )
+    expect(spec).toContain(` -- . ':(top,exclude,literal)${packagePrefix}'`)
   })
 
   it('dispatches a review on first entry and resumes after a clean one', () => {
@@ -2848,6 +2868,9 @@ describe('completed task merge recovery', () => {
     await loop.poll()
 
     expect(readStatus(paths, taskId)?.status).toBe('failed')
+    const failedLogPath = `logs/${taskId}.merge.log`
+    expect(logged).toContain(`Failed 064_auto    log ${failedLogPath}`)
+    expect(existsSync(join(paths.root, failedLogPath))).toBe(true)
     expect(issueNumbersForTask(paths, taskId)).toEqual([])
     expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(false)
     expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)

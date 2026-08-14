@@ -216,7 +216,9 @@ describe('remote task adoption', () => {
     )
     expect(git(repoRoot, ['rev-list', '--parents', '-n', '1', 'HEAD']).trim().split(' ')).toHaveLength(3)
     expect(logged.join('\n')).toMatch(/Merged 003_auto    commit [0-9a-f]{8}/)
-    expect(logged).toContain('Failed 004_auto    log 004_auto.merge.log')
+    const failedLogPath = `logs/issue-${failedIssueNumber}.merge.log`
+    expect(logged).toContain(`Failed 004_auto    log ${failedLogPath}`)
+    expect(existsSync(join(paths.root, failedLogPath))).toBe(true)
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
     expect(forge.issueComments.get(issueNumber)).toContain(
       `MERGED: 20260809_000000_003_auto-remote-fix\nMerged as ${git(repoRoot, ['rev-parse', 'HEAD']).trim()} into run branch main. This issue closes on promotion.`,
