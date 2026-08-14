@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { loadProject } from '../src/adapters/project.ts'
+import { loadMonitoredProject, loadProject } from '../src/adapters/project.ts'
 
 const fixture = resolve(import.meta.dirname, 'fixtures', 'project-loader-fixture.ts')
 const loaderSource = resolve(import.meta.dirname, '..', 'src', 'adapters', 'project.ts')
@@ -143,6 +143,23 @@ describe('project adapter loading', () => {
     })
 
     expect(project.deployment?.workflow).toBe('relative.yml')
+  })
+
+  it('detects when the adapter source loaded by a daemon is replaced or removed', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    const adapterPath = join(orchestrationRoot, 'project', 'project-fixture.ts')
+    writeFixtureAdapter(adapterPath, 'first.yml')
+    const monitored = await loadMonitoredProject(orchestrationRoot, {})
+
+    expect(monitored.path).toBe(adapterPath)
+    expect(monitored.sourceChanged()).toBe(false)
+
+    writeFixtureAdapter(adapterPath, 'second.yml')
+    expect(monitored.sourceChanged()).toBe(true)
+
+    rmSync(adapterPath)
+    expect(monitored.sourceChanged()).toBe(true)
   })
 
   it('names the resolved path when the adapter is absent', async () => {

@@ -48,9 +48,13 @@ itself from the package's absolute CLI path so the new cycle uses the pulled cod
 retaining the arguments, environment, and run branch. The parent reports success only
 after the replacement daemon finishes startup. This happens only after the prior gate
 has closed and while no task is running.
-A daemon otherwise runs the code it started with. A dirty working tree or conflicting
-pull is left for the consumer to resolve: the daemon warns and starts the cycle on the
-old code instead of merging local divergence.
+A project adapter is watched at that same boundary. If its loaded source has changed or
+can no longer be read, the daemon replaces itself before starting the next cycle. The
+replacement loads the adapter afresh, so gate and presentation behavior cannot remain
+silently pinned to an adapter the repository has replaced.
+The daemon otherwise runs the core code it started with. A dirty working tree or
+conflicting pull is left for the consumer to resolve: the daemon warns and starts the
+cycle on the old core instead of merging local divergence.
 
 That same boundary syncs the skills declared in `skills/manifest.json` into every
 directory an agent working in the repository reads them from. The selected runner adapter

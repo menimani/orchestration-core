@@ -184,7 +184,11 @@ values must be non-negative integers, with the narrower bounds stated below.
     respective defaults; `SCAN_MODEL` and `TASK_MODEL` override the runner model, and
     `delegate --effort` overrides effort per task.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
-    previous cycle gate has closed and while no task is running, the daemon fetches the
+    previous cycle gate has closed and while no task is running, the daemon first compares
+    the selected project adapter with the exact source loaded at startup. A changed,
+    missing, or unreadable adapter logs `Restarting adapter     for cycle <n>` and replaces
+    the daemon before continuing, so every adapter consumer changes atomically at the same
+    restart-safe boundary. The daemon then fetches the
     configured core upstream and compares its tip with the last `git-subtree-split` for
     this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
     A package-file change logs aligned `Updated    core        <old8>..<new8>` and
@@ -193,7 +197,7 @@ values must be non-negative integers, with the narrower bounds stated below.
     remaining arguments, environment, and run branch. The parent waits for the replacement
     to finish daemon initialization and logs `Restarted`; a failed replacement restores
     ownership, logs `ERROR`, and makes the parent exit nonzero. A daemon otherwise runs the
-    code it started with. The check never runs mid-cycle. A dirty
+    core code it started with. Neither check ever runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
     At the same boundary, the package manifest's skills are rendered into every
