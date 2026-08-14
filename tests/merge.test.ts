@@ -15,8 +15,10 @@ import {
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
+import { taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
+import type { WorktreeRemovalRuntime } from '../src/worktree.ts'
 import { stubProject } from './stubProject.ts'
 import { TestProcessRegistry } from './testProcess.ts'
 
@@ -83,6 +85,18 @@ function posixOperatingSystem(remove: (path: string, options: {
     signalProcessGroup: () => {}, probeProcess: () => {}, remove,
     now: Date.now, sleep: () => {}, groupHasRunningMember: () => undefined,
   })
+}
+
+function failedWorktreeRemovalRuntime(): WorktreeRemovalRuntime {
+  return {
+    os: posixOperatingSystem(() => { throw new Error('Direct removal failed') }),
+    git: (_cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') {
+        throw new Error('Git removal failed')
+      }
+      return ''
+    },
+  }
 }
 
 async function makeCompletedTask(taskId: string, options: { commit?: boolean; dirty?: boolean } = {}): Promise<string> {
@@ -177,10 +191,11 @@ describe('removeMergedWorktree', () => {
     })
     const log = vi.fn()
 
-    removeMergedWorktree(paths, worktree, log, {
+    const removed = removeMergedWorktree(paths, worktree, log, {
       os: posixOperatingSystem(remove), git: gitRuntime,
     })
 
+    expect(removed).toBe(true)
     expect(remove).toHaveBeenCalledWith(worktree, { recursive: true, force: true })
     expect(gitRuntime).toHaveBeenNthCalledWith(
       2, paths.repoRoot, ['worktree', 'prune'],
@@ -203,11 +218,12 @@ describe('removeMergedWorktree', () => {
     })
     const log = vi.fn()
 
-    removeMergedWorktree(paths, worktree, log, {
+    const removed = removeMergedWorktree(paths, worktree, log, {
       os: windowsOperatingSystem(() => { throw new Error('Filename too long') }),
       git: gitRuntime,
     })
 
+    expect(removed).toBe(false)
     expect(log).toHaveBeenCalledOnce()
     expect(log).toHaveBeenCalledWith(
       `WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (error: failed to delete: Filename too long)`,
@@ -300,6 +316,26 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
   })
 
+  it('reports manual cleanup when a merged worktree could not be removed', async () => {
+    const taskId = '20260808_000000_026_user-retained-merged-worktree'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const outputFile = join(repoRoot, 'merge-output.log')
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+      worktreeRemovalRuntime: failedWorktreeRemovalRuntime(),
+    })
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain(
+      `WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`,
+    )
+    expect(output).toContain(`Merged ${taskId}; manual worktree cleanup remains: ${worktree}`)
+    expect(output).not.toContain(`Merged ${taskId} and removed the worktree.`)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
   it('stops and verifies a completed runner with a live PID before merging', async () => {
     const taskId = '20260808_000000_017_user-runner-finishes-output-first'
     const worktree = await makeCompletedTask(taskId, { commit: true })
@@ -337,6 +373,29 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).not.toBe('')
     expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
     expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
+  })
+
+  it('forgets a stopped runner before a failed-check merge is retried', async () => {
+    const taskId = '20260808_000000_027_user-failed-check-retry'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runnerPid = 12345
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(false)
+    const options = {
+      taskGate: 'light' as const,
+      project: stubProject,
+      testCmd: 'node -e "process.exit(1)"',
+    }
+
+    await expect(mergeTask(paths, taskId, options)).rejects.toThrow('Tests failed')
+
+    expect(taskProcessPid(paths, taskId)).toBeUndefined()
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: null })
+    expect(existsSync(worktree)).toBe(true)
+
+    await expect(mergeTask(paths, taskId, options)).rejects.toThrow('Tests failed')
+    expect(terminate).toHaveBeenCalledTimes(1)
   })
 
   it('leaves linked-issue closing syntax to the forge adapter', async () => {
@@ -391,6 +450,30 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
     expect(existsSync(worktree)).toBe(false)
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+  })
+
+  it('reports manual cleanup when a no-change worktree could not be removed', async () => {
+    const taskId = '20260808_000000_028_user-retained-no-change-worktree'
+    const worktree = await makeCompletedTask(taskId)
+    const outputFile = join(repoRoot, 'no-change-output.log')
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The reported problem is already fixed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, outputFile,
+      worktreeRemovalRuntime: failedWorktreeRemovalRuntime(),
+    })
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain(
+      `WARN: task completed without changes, but the worktree is still there and has to go by hand: ${worktree}`,
+    )
+    expect(output).toContain(
+      `Completed ${taskId} without changes; manual worktree cleanup remains: ${worktree}`,
+    )
+    expect(output).not.toContain(`Completed ${taskId} without changes and removed the worktree.`)
+    expect(existsSync(worktree)).toBe(true)
     expect(readStatus(paths, taskId)?.status).toBe('no-change')
   })
 
