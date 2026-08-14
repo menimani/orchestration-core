@@ -50,6 +50,52 @@ describe('operating-system adapters', () => {
     }
   })
 
+  it('terminates and verifies the entire POSIX daemon process group', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-os-'))
+    const child = Object.assign(new EventEmitter(), {
+      pid: 43210,
+      exitCode: null,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    }) as unknown as ChildProcess
+    const spawnDaemon = vi.fn(() => child) as unknown as typeof spawn
+    let now = 0
+    let probesAfterSignal = 0
+    let signalled = false
+    const signalProcessGroup = vi.fn((_pid: number, signal?: NodeJS.Signals | number) => {
+      if (signal === undefined) signalled = true
+    })
+    const os = createPosixOperatingSystem({
+      signalProcessGroup,
+      probeProcess: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
+      remove: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+      // The first probe after SIGTERM represents a surviving descendant. The second
+      // proves that the full group has stopped, independently of the detached leader.
+      groupHasRunningMember: () => !signalled || probesAfterSignal++ === 0,
+      spawnDaemon,
+    })
+
+    try {
+      const daemon = await os.launchDaemon({
+        args: ['src/cli.ts', 'loop'],
+        command: process.execPath,
+        cwd: root,
+        outputFile: join(root, 'loop.log'),
+      })
+
+      daemon.terminate()
+
+      expect(signalProcessGroup).toHaveBeenCalledWith(43210)
+      expect(signalProcessGroup).toHaveBeenCalledWith(43210, 0)
+      expect(child.kill).not.toHaveBeenCalled()
+      expect(now).toBe(50)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('uses the hidden process launcher for a Windows daemon', async () => {
     const startDaemon = vi.fn(async () => 43211)
     const os = createWindowsOperatingSystem({
