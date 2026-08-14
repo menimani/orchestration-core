@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { recordIssueForTask } from '../src/issueQueue.ts'
+import { issueCompletionForIssue, recordIssueForTask } from '../src/issueQueue.ts'
 import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { writeStatus } from '../src/status.ts'
@@ -335,6 +335,83 @@ describe('manual merge', () => {
 
     expect(result.status).toBe(0)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('3\n')
+  })
+
+  it('records durable completion for a linked no-change outcome', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260815_074127_029_user-linked-no-change'
+    const issueNumber = 218
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The requested behavior is already present.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    await writeStatus(paths, taskId, 'completed')
+    recordIssueForTask(paths, taskId, issueNumber)
+
+    let issueState: 'open' | 'closed' = 'open'
+    const forge = {
+      issueClosingCommitMessage: (message: string) => message,
+      getIssue: async () => ({
+        number: issueNumber,
+        state: issueState,
+        title: 'Linked task',
+        body: '',
+        author: { login: 'maintainer', hasWriteAccess: true },
+        labels: [],
+        assignees: [],
+        updatedAt: '2026-08-15T00:00:00Z',
+      }),
+      closeIssue: async () => { issueState = 'closed' },
+      removeLabel: async () => {},
+    }
+    vi.doMock('../src/adapters/forge.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/adapters/forge.ts')>(),
+      loadForge: async () => forge,
+    }))
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    try {
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV)
+      process.argv = [process.execPath, CLI, 'merge', taskId, '--yes']
+
+      await import('../src/cli.ts')
+
+      expect(process.exitCode).toBe(0)
+      expect(issueState).toBe('closed')
+      expect(issueCompletionForIssue(paths, issueNumber)).toEqual({
+        taskId, issueNumber, outcome: 'no-change',
+      })
+    } finally {
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      vi.doUnmock('../src/adapters/forge.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
   })
 
   it('forwards failed check output before reporting the merge failure', async () => {

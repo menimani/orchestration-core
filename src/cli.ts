@@ -19,7 +19,7 @@ import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
   closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, issueNumbersForTask,
-  missingRequirementCompletionMarkers, recordIssuePromotions,
+  missingRequirementCompletionMarkers, recordIssueCompletions, recordIssuePromotions,
 } from './issueQueue.ts'
 import {
   mergeTask, MergeError, orchestrationDepsRuntimeForPackage,
@@ -479,6 +479,9 @@ const cmdMerge: Command = async (paths, args) => {
       // A completed manual merge proves the previous failures are no longer consecutive.
       // Clear the durable streak immediately, before optional forge bookkeeping can fail.
       writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+    }
+    if (mergeResult.outcome === 'no-change') {
+      recordIssueCompletions(paths, taskId, 'no-change')
     }
     if (mergeResult.outcome === 'merged' && linkedIssues.length > 0) {
       const mergeCommit = mergeResult.mergeCommit
