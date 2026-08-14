@@ -1,12 +1,20 @@
 import { execFileSync, spawn } from 'node:child_process'
 import {
-  mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const fixtures: string[] = []
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
 
 function run(command: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv): Promise<{
   status: number | null
@@ -55,7 +63,7 @@ describe('test suite wrapper', () => {
       "const active = join(root, 'active')",
       "try { mkdirSync(active) } catch { appendFileSync(join(root, 'overlap'), 'overlap\\n') }",
       "appendFileSync(join(root, 'args'), `${JSON.stringify(process.argv.slice(2))}\\n`)",
-      'await new Promise((resolve) => setTimeout(resolve, 400))',
+      'await new Promise((resolve) => setTimeout(resolve, Number(process.env.ORCHESTRATION_TEST_DELAY_MS ?? 400)))',
       'rmSync(active, { recursive: true, force: true })',
       '',
     ].join('\n'))
@@ -102,5 +110,69 @@ describe('test suite wrapper', () => {
     expect(invocations).toContainEqual(['run', '--pool=threads'])
     expect(invocations).toContainEqual(['run', '--poolOptions.threads.singleThread'])
     expect(results.some(({ stdout }) => stdout.includes('waiting for its repository lock'))).toBe(true)
+  })
+
+  it('rejects a live PID when its process identity does not match', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-owner-'))
+    fixtures.push(fixture)
+    const scripts = join(fixture, 'scripts')
+    const vitest = join(fixture, 'node_modules', 'vitest')
+    mkdirSync(scripts, { recursive: true })
+    mkdirSync(vitest, { recursive: true })
+    writeFileSync(join(scripts, 'run-tests.mjs'), readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')))
+    writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+    writeFileSync(join(vitest, 'vitest.mjs'), '')
+    const lock = join(fixture, '.orchestration-test-suite-lock')
+    mkdirSync(lock)
+    writeFileSync(join(lock, 'owner.json'), `${JSON.stringify({
+      pid: process.pid,
+      token: 'previous-owner',
+      processIdentity: 'not-the-current-process',
+      acquiredAt: new Date().toISOString(),
+      cwd: fixture,
+    })}\n`)
+
+    const result = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, process.env)
+
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+  })
+
+  it('stops waiting at the configured deadline and reports the owner', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-timeout-'))
+    fixtures.push(fixture)
+    const scripts = join(fixture, 'scripts')
+    const vitest = join(fixture, 'node_modules', 'vitest')
+    const sharedRoot = join(fixture, 'shared')
+    mkdirSync(scripts, { recursive: true })
+    mkdirSync(vitest, { recursive: true })
+    mkdirSync(sharedRoot)
+    writeFileSync(join(scripts, 'run-tests.mjs'), readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')))
+    writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+    writeFileSync(join(vitest, 'vitest.mjs'), [
+      "import { mkdirSync, rmSync } from 'node:fs'",
+      "import { join } from 'node:path'",
+      "const active = join(process.env.ORCHESTRATION_TEST_SHARED_ROOT, 'active')",
+      'mkdirSync(active)',
+      'await new Promise((resolve) => setTimeout(resolve, 1_500))',
+      'rmSync(active, { recursive: true, force: true })',
+      '',
+    ].join('\n'))
+    const owner = run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
+      ...process.env,
+      ORCHESTRATION_TEST_SHARED_ROOT: sharedRoot,
+    })
+    await waitForPath(join(sharedRoot, 'active'))
+
+    const waiter = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
+      ...process.env,
+      ORCHESTRATION_TEST_LOCK_TIMEOUT_MS: '100',
+    })
+    const ownerResult = await owner
+
+    expect(ownerResult.status).toBe(0)
+    expect(waiter.status).toBe(1)
+    expect(waiter.stdout).toMatch(/waiting for its repository lock \(PID \d+, acquired .+, cwd .+\)/)
+    expect(waiter.stderr).toMatch(/Timed out after 100ms.+Lock owner: PID \d+, acquired .+, cwd .+/s)
   })
 })
