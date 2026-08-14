@@ -100,6 +100,13 @@ const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
   },
 }
 
+/** Use the standard installer against the package copy in the selected merge checkout. */
+export function orchestrationDepsRuntimeForPackage(
+  packageRoot: string,
+): OrchestrationDepsRuntime {
+  return { ...orchestrationDepsRuntime, packageRoot }
+}
+
 const ORCHESTRATION_MANIFESTS = new Set([
   packageFile('package.json'),
   packageFile('package-lock.json'),

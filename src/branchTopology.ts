@@ -1,13 +1,14 @@
 import { execFileSync } from 'node:child_process'
 import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import { currentBranchTrackingRemote } from './gitRemote.ts'
-import { integrationWorktreeDir, type OrchPaths } from './paths.ts'
+import { integrationWorktreeDir, PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
 
 export interface BranchTopology {
   paths: OrchPaths
+  packageRoot: string
   daemonBranch: string
   daemonHead: string
   integrationBranch?: string
@@ -57,10 +58,12 @@ function checkoutProblem(repoRoot: string, branch: string, head: string): string
 export function prepareBranchTopology(
   paths: OrchPaths,
   integrationBranch: string,
+  packageRoot = PACKAGE_ROOT,
 ): BranchTopology {
   if (integrationBranch === '') {
     return {
       paths,
+      packageRoot,
       daemonBranch: '',
       daemonHead: '',
       validateDaemonCheckout: () => undefined,
@@ -135,6 +138,7 @@ export function prepareBranchTopology(
   writeFileSync(marker(paths, 'integration-branch.txt'), `${integrationBranch}\n`)
   return {
     paths: { ...paths, repoRoot: worktree },
+    packageRoot: join(worktree, relative(paths.repoRoot, packageRoot)),
     daemonBranch,
     daemonHead,
     integrationBranch,
