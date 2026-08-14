@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -156,6 +156,85 @@ describe('integration branch topology', () => {
       { kind: 'branch', value: 'integration/run' },
     ])
     expect(markers).toContain('LOOP_DONE: https://example.test/pull/1')
+  })
+
+  it('refreshes and prepares integration before starting the next scan cycle', async () => {
+    const topology = prepareBranchTopology(paths, 'integration/run')
+    pushRemoteDefaultChange('default-change.txt', 'default work\n')
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const lifecycle: string[] = []
+    const loop = createLoop({
+      paths: topology.paths,
+      config: {
+        ...loadConfig({}),
+        integrationBranch: 'integration/run',
+        scanParallel: 1,
+        autoPr: false,
+        reviewEnabled: false,
+      },
+      forge: makeFakeForge(),
+      runner: {
+        sharedSkills: fakeRunnerSharedSkills,
+        start: async () => {
+          lifecycle.push('start scan')
+          return process.pid
+        },
+      },
+      project: stubProject,
+      log: vi.fn(),
+      now: () => new Date('2026-08-14T12:00:00Z'),
+      updateCoreBeforeCycle: async () => {
+        lifecycle.push('update core')
+        return 'continue'
+      },
+      prepareIntegrationWorktree: () => {
+        expect(readFileSync(join(topology.paths.repoRoot, 'default-change.txt'), 'utf8')
+          .replaceAll('\r', '')).toBe('default work\n')
+        lifecycle.push('prepare integration')
+      },
+    })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(lifecycle).toEqual(['update core', 'prepare integration', 'start scan'])
+    expect(readFileSync(join(topology.paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+  })
+
+  it('stops before cycle work when the fixed daemon checkout changes', async () => {
+    const topology = prepareBranchTopology(paths, 'integration/run')
+    const updateCoreBeforeCycle = vi.fn(async () => 'continue' as const)
+    const prepareIntegration = vi.fn()
+    const start = vi.fn(async () => process.pid)
+    const events: string[] = []
+    const loop = createLoop({
+      paths: topology.paths,
+      config: {
+        ...loadConfig({}),
+        integrationBranch: 'integration/run',
+        scanParallel: 1,
+        autoPr: false,
+        reviewEnabled: false,
+      },
+      forge: makeFakeForge(),
+      runner: { sharedSkills: fakeRunnerSharedSkills, start },
+      project: stubProject,
+      log: (line) => events.push(line),
+      now: () => new Date('2026-08-14T12:00:00Z'),
+      branchGuard: topology.validateDaemonCheckout,
+      updateCoreBeforeCycle,
+      prepareIntegrationWorktree: prepareIntegration,
+    })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(repoRoot, 'unexpected-change.txt'), 'dirty daemon checkout\n')
+
+    expect(await loop.poll()).toBe('stopped')
+
+    expect(events).toContain('ERROR daemon checkout daemon/run has uncommitted changes')
+    expect(updateCoreBeforeCycle).not.toHaveBeenCalled()
+    expect(prepareIntegration).not.toHaveBeenCalled()
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(join(topology.paths.queueDir, 'scan-count.txt'))).toBe(false)
   })
 
   it('keeps the daemon commit fixed across a resume while retaining integration work', () => {
