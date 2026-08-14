@@ -4,12 +4,14 @@ import {
   mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve, toNamespacedPath } from 'node:path'
+import { performance } from 'node:perf_hooks'
 
 const packageRoot = resolve(import.meta.dirname, '..')
 const lockName = '.orchestration-test-suite-lock'
 const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
 const retryMilliseconds = 250
 const unpublishedOwnerGraceMilliseconds = 30_000
+const maximumWaitMilliseconds = 10 * 60_000
 
 function commonGitDirectory() {
   try {
@@ -36,15 +38,68 @@ function processIsAlive(pid) {
   }
 }
 
-function lockOwnerIsAlive() {
+function processIdentity(pid) {
+  try {
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const closingParenthesis = stat.lastIndexOf(')')
+      const fields = stat.slice(closingParenthesis + 2).split(' ')
+      if (closingParenthesis < 0 || fields[19] === undefined) return null
+      return `linux:${fields[19]}`
+    }
+    if (process.platform === 'win32') {
+      const command = [
+        '& { param([int]$TargetPid)',
+        '(Get-Process -Id $TargetPid -ErrorAction Stop).StartTime.ToUniversalTime().Ticks',
+        '}',
+      ].join(' ')
+      const started = execFileSync(
+        'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command, String(pid)],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      ).trim()
+      return started === '' ? null : `windows:${started}`
+    }
+    const started = execFileSync(
+      'ps', ['-p', String(pid), '-o', 'lstart='],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim()
+    return started === '' ? null : `${process.platform}:${started}`
+  } catch {
+    return null
+  }
+}
+
+function readLockOwner() {
   try {
     const owner = JSON.parse(readFileSync(ownerFile, 'utf8'))
-    return Number.isSafeInteger(owner.pid) && owner.pid > 0 && processIsAlive(owner.pid)
+    if (
+      !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+      || typeof owner.token !== 'string' || owner.token === ''
+    ) return { alive: false, diagnostic: 'invalid owner record' }
+    if (owner.processIdentity === undefined) {
+      return {
+        alive: processIsAlive(owner.pid),
+        diagnostic: `legacy owner PID ${owner.pid}`,
+      }
+    }
+    if (
+      typeof owner.processIdentity !== 'string' || owner.processIdentity === ''
+      || typeof owner.acquiredAt !== 'string' || Number.isNaN(Date.parse(owner.acquiredAt))
+      || typeof owner.cwd !== 'string' || owner.cwd === ''
+    ) return { alive: false, diagnostic: 'invalid owner record' }
+    const currentIdentity = processIdentity(owner.pid)
+    return {
+      alive: processIsAlive(owner.pid) && currentIdentity === owner.processIdentity,
+      diagnostic: `PID ${owner.pid}, acquired ${owner.acquiredAt}, cwd ${owner.cwd}`,
+    }
   } catch {
     try {
-      return Date.now() - statSync(lockDirectory).mtimeMs < unpublishedOwnerGraceMilliseconds
+      return {
+        alive: Date.now() - statSync(lockDirectory).mtimeMs < unpublishedOwnerGraceMilliseconds,
+        diagnostic: 'owner record not yet available',
+      }
     } catch {
-      return false
+      return { alive: false, diagnostic: 'owner record unavailable' }
     }
   }
 }
@@ -71,11 +126,24 @@ function reclaimAbandonedLock() {
 
 async function acquireLock() {
   let announced = false
+  const waitStartedAt = performance.now()
+  const configuredMaximumWait = Number(process.env.ORCHESTRATION_TEST_LOCK_TIMEOUT_MS)
+  const waitLimit = Number.isSafeInteger(configuredMaximumWait) && configuredMaximumWait > 0
+    ? Math.min(configuredMaximumWait, maximumWaitMilliseconds)
+    : maximumWaitMilliseconds
   for (;;) {
     try {
       mkdirSync(lockDirectory)
       try {
-        writeFileSync(ownerFile, `${JSON.stringify({ pid: process.pid, token })}\n`)
+        const identity = processIdentity(process.pid)
+        if (identity === null) throw new Error('Unable to determine the test lock process identity.')
+        writeFileSync(ownerFile, `${JSON.stringify({
+          pid: process.pid,
+          token,
+          processIdentity: identity,
+          acquiredAt: new Date().toISOString(),
+          cwd: packageRoot,
+        })}\n`)
       } catch (error) {
         removeDirectory(lockDirectory)
         throw error
@@ -85,13 +153,17 @@ async function acquireLock() {
       if (error?.code !== 'EEXIST') throw error
     }
 
-    if (!lockOwnerIsAlive()) {
+    const owner = readLockOwner()
+    if (!owner.alive) {
       reclaimAbandonedLock()
       continue
     }
     if (!announced) {
-      console.log('Another worktree is running the test suite; waiting for its repository lock.')
+      console.log(`Another worktree is running the test suite; waiting for its repository lock (${owner.diagnostic}).`)
       announced = true
+    }
+    if (performance.now() - waitStartedAt >= waitLimit) {
+      throw new Error(`Timed out after ${waitLimit}ms waiting for the repository test lock. Lock owner: ${owner.diagnostic}.`)
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, retryMilliseconds))
   }
