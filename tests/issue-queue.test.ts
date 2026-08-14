@@ -899,6 +899,46 @@ describe('claimIssue', () => {
     expect(issueNumberForTask(paths, second.taskId)).toBe(secondIssueNumber)
   })
 
+  it.each(['merged', 'no-change'])(
+    'closes a duplicate advisory instead of attaching it to a %s task',
+    async (status) => {
+      const description = '[SECURITY] GHSA-qwww-vcr4-c8h2 affects a dependency'
+      const firstIssueNumber = await readyIssue(description)
+      const first = await claimIssue(
+        forge, paths, await forge.getIssue(firstIssueNumber), 'worker-a', appendRequirement,
+      )
+      if (first.outcome !== 'claimed') throw new Error(`expected a claim, got ${first.outcome}`)
+      writeFileSync(join(paths.statusDir, `${first.taskId}.json`),
+        JSON.stringify({ task_id: first.taskId, status }))
+      writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+
+      const duplicate = await forge.createIssue({
+        title: description,
+        body: buildIssueBody(description, 'scan-2'),
+        labels: [LABEL_FINDING, LABEL_READY],
+      })
+      const result = await claimIssue(
+        forge, paths, await forge.getIssue(duplicate), 'worker-a', appendRequirement,
+      )
+
+      expect(result).toEqual({
+        outcome: 'already-processed',
+        taskId: first.taskId,
+        issueNumber: duplicate,
+        issueNumbers: [duplicate],
+      })
+      const after = await forge.getIssue(duplicate)
+      expect(after.state).toBe('closed')
+      expect(after.assignees).toEqual([])
+      expect(after.labels).not.toContain(LABEL_READY)
+      expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
+      expect(issueNumbersForTask(paths, first.taskId)).toEqual([firstIssueNumber])
+      expect(forge.issueComments.get(duplicate)).toEqual([
+        `Duplicate advisory already processed by task ${first.taskId} (${status}).`,
+      ])
+    },
+  )
+
   it('settles a simultaneous claim deterministically — first login wins, loser backs off', async () => {
     const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks')
     const issue = await forge.getIssue(issueNumber)

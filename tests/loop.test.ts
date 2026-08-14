@@ -755,6 +755,20 @@ describe('checkPrCiStatus', () => {
     expect(await loop.checkPrCiStatus()).toBe('success')
   })
 
+  it.each([
+    ['without timestamps', ''],
+    ['with tied timestamps', '2026-08-14T02:00:00Z'],
+  ])('does not let an arbitrarily ordered success hide a same-name failure %s',
+    async (_description, startedAt) => {
+      const loop = makeLoop()
+      forgeStatus.checks = [
+        { name: 'frontend', conclusion: 'failure', startedAt },
+        { name: 'frontend', conclusion: 'success', startedAt },
+      ]
+
+      expect(await loop.checkPrCiStatus()).toBe('failure')
+    })
+
   it('does not clear the gate for an old PR head with no checks', async () => {
     const headSha = initializeGitRepo()
     forgeStatus = { ...forgeStatus, headSha, checks: [] }

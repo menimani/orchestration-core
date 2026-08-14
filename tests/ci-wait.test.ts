@@ -58,6 +58,21 @@ describe('CI wait', () => {
     expect(wait.output).toEqual(['optional: skipped', 'test: success'])
   })
 
+  it.each([
+    ['without timestamps', ''],
+    ['with tied timestamps', '2026-08-09T01:00:00Z'],
+  ])('preserves a same-name failure when a success follows it %s',
+    async (_description, startedAt) => {
+      const checks = status([
+        ['test', 'failure', startedAt],
+        ['test', 'success', startedAt],
+      ])
+      const wait = scriptedWait([checks, checks])
+
+      await expect(wait.run()).resolves.toBe(1)
+      expect(wait.output).toEqual(['test: failure', 'test: success'])
+    })
+
   it('delays the verdict until check names are stable across two polls', async () => {
     const wait = scriptedWait([
       status([['test', 'success', '2026-08-09T01:00:00Z']]),
