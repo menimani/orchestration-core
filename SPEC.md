@@ -221,7 +221,8 @@ values must be non-negative integers, with the narrower bounds stated below.
     the selected project adapter with the exact source loaded at startup. A changed,
     missing, or unreadable adapter logs `Restarting adapter     for cycle <n>` and replaces
     the daemon before continuing, so every adapter consumer changes atomically at the same
-    restart-safe boundary. The daemon then fetches the
+    restart-safe boundary. In integration mode the monitored source is the adapter in the
+    integration worktree. The daemon then fetches the
     configured core upstream and compares its tip with the last `git-subtree-split` for
     this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
     A package-file change logs an aligned `Updated    core        <old8>..<new8>` event.
@@ -231,8 +232,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     waits for the replacement to finish daemon initialization and logs `Restarted`; a
     failed replacement restores ownership, logs `ERROR`, and makes the parent exit nonzero.
     In integration mode, the fixed daemon continues without restarting and the pulled core
-    becomes executable only in a later run, as specified in 4b. A daemon otherwise runs
-    the core code it started with. Neither check ever runs mid-cycle. A dirty
+    becomes executable only in a later run, as specified in 4b. It then absorbs the default
+    branch and compares the adapter again before integration setup or scan dispatch. A daemon
+    otherwise runs the core code it started with. Neither check ever runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
     At the same boundary, the package manifest's skills are rendered into every

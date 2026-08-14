@@ -837,7 +837,10 @@ async function runLoopDaemon(
     const forge = await loadForge(config.forge, loopPaths.repoRoot)
     const runner = await loadRunner(config.runner)
     const projectModule = await import('./adapters/project.ts')
-    const monitoredProject = await projectModule.loadMonitoredProject(paths.root)
+    const projectRoot = topology.integrationBranch === undefined
+      ? paths.root
+      : join(loopPaths.repoRoot, relative(paths.repoRoot, paths.root))
+    const monitoredProject = await projectModule.loadMonitoredProject(projectRoot)
     if (topology.integrationBranch !== undefined) {
       prepareIntegrationWorktree(
         loopPaths,
