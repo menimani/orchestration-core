@@ -99,6 +99,23 @@ describe('refreshTask', () => {
     expect(after?.status).toBe('running')
   })
 
+  it('defers failure while identity is unavailable and keeps ownership after recovery', async () => {
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue('started:protected')
+    writeRawStatus(
+      'probe-task',
+      '{"task_id":"probe-task","status":"running","pid":2147483647}\n',
+    )
+    processStartIdentity.mockReturnValue(undefined)
+
+    expect((await refreshTask(paths, 'probe-task'))?.status).toBe('running')
+
+    processStartIdentity.mockReturnValue('started:protected')
+    expect((await refreshTask(paths, 'probe-task'))?.status).toBe('running')
+    expect(processIsAlive).toHaveBeenCalledWith(2147483647)
+  })
+
   it('completes a live task once the marker appears', async () => {
     writeRawStatus('live-done', `{"task_id":"live-done","status":"running","pid":${process.pid}}\n`)
     writeFileSync(finalMessageFile(paths, 'live-done'), 'TASK_COMPLETE\n')

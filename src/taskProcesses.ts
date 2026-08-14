@@ -21,7 +21,9 @@ export function liveTaskProcesses(
 ): TaskProcess[] {
   const live: TaskProcess[] = []
   for (const taskId of listTaskIds(paths)) {
-    const pid = taskProcessPid(paths, taskId, bootedAt, os.processStartIdentity)
+    const pid = taskProcessPid(
+      paths, taskId, bootedAt, os.processStartIdentity, os.processIsAlive,
+    )
     if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue
     // Detection asks whether that process is running, not whether it leads a group. A
     // recorded PID that is not a group leader answered "gone" on POSIX, so this waved
