@@ -1,0 +1,42 @@
+name: Documentation site
+
+# `docs/` is the published site: hand-written HTML, uploaded as it stands. It is a short
+# front door, not a copy of the repository's documents — `README.md` and `SPEC.md` remain
+# the full text and the site links to them, so there is nothing here to keep in step with
+# them line by line.
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+# `pages` and `id-token` are what the deployment needs; `contents` stays read-only.
+permissions:
+  contents: read
+  id-token: write
+  pages: write
+
+# One deployment at a time, and never cancel one midway: the published site is the
+# artifact of whichever run finishes, so an interrupted deployment leaves the old page.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
