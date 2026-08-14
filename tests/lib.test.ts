@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
-  branchName, finalMessageFile, isInspectionTaskId, isReviewFixTaskId, isReviewTaskId,
+  branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId,
   isScanTaskId,
   orchPaths, packageScriptCommand, statusFile, type OrchPaths,
 } from '../src/paths.ts'
@@ -289,10 +289,8 @@ describe('task id classes', () => {
     expect(isReviewTaskId('20260808_093005_001_auto-review-page')).toBe(false)
   })
 
-  it('matches review-fix ids without classifying them as inspections', () => {
+  it('does not classify review-fix ids as inspections', () => {
     const id = '20260808_093005_001_fix-preserve-zero'
-    expect(isReviewFixTaskId(id)).toBe(true)
-    expect(isReviewFixTaskId('20260808_093005_001_auto-preserve-zero')).toBe(false)
     expect(isReviewTaskId(id)).toBe(false)
     expect(isScanTaskId(id)).toBe(false)
     expect(isInspectionTaskId(paths, id)).toBe(false)
