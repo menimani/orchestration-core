@@ -354,6 +354,7 @@ Settings go in front of the command:
 | \`REVIEW_EVERY_N_CYCLES\` | 1 | Review every Nth cycle (the final cycle is always reviewed) |
 | \`MAX_FINAL_REVIEW_ROUNDS\` | 4 | Final-cycle rounds before the loop stops instead of promoting unresolved findings |
 | \`MAX_BURST_FAILURES\` | 3 | Task failures in one poll before the loop stops and blames the environment |
+| \`INTEGRATION_BRANCH\` | empty | Separate task/merge/PR branch; when set, the daemon checkout stays fixed for the run |
 | \`ISSUE_QUEUE_ENABLED\` | false | Findings become claimable forge issues instead of local queue entries (each concurrent worker requires a distinct forge account) |
 | \`ISSUE_LEASE_HOURS\` | 3 | Hours a claimed issue may sit untouched before its lease is reaped back to ready |
 | \`CI_GATE_ENABLED\` | false | Whether the gate waits for CI — a draft PR has no checks, so waiting would hang |

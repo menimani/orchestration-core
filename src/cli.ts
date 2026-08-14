@@ -46,6 +46,9 @@ import {
   startLoopReplacement,
 } from './restart.ts'
 import { processTreeRootPid, startWindowsProcess } from './adapters/windows-process.ts'
+import {
+  prepareBranchTopology, prepareIntegrationWorktree,
+} from './branchTopology.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -592,11 +595,14 @@ const cmdLoop: Command = async (paths, args) => {
   if (args[0] === '--daemon' || args[0] === '-d') {
     // run-branch.txt is updated by the child after this descriptor is opened. Use the
     // branch it is about to record so a new run rotates immediately, not on its restart.
-    const runBranch = execFileSync('git', ['branch', '--show-current'], {
-      cwd: paths.repoRoot,
-      encoding: 'utf8',
-      windowsHide: true,
-    }).trim()
+    const configuredIntegrationBranch = loadConfig().integrationBranch
+    const runBranch = configuredIntegrationBranch || execFileSync(
+      'git', ['branch', '--show-current'], {
+        cwd: paths.repoRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+      },
+    ).trim()
     prepareLoopLog(paths, { runBranch })
     const markerLog = join(paths.logsDir, 'loop-markers.log')
     const daemonArgs = [packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog]
@@ -828,17 +834,34 @@ async function runLoopDaemon(
         ? formatEventLine(name, 'orchestration deps', subject)
         : formatEventLine(name, subject)),
     )
-    const forge = await loadForge(config.forge, paths.repoRoot)
+    const topology = prepareBranchTopology(paths, config.integrationBranch)
+    const loopPaths = topology.paths
+    const forge = await loadForge(config.forge, loopPaths.repoRoot)
     const runner = await loadRunner(config.runner)
     const projectModule = await import('./adapters/project.ts')
     const monitoredProject = await projectModule.loadMonitoredProject(paths.root)
+    if (topology.integrationBranch !== undefined) {
+      prepareIntegrationWorktree(
+        loopPaths,
+        monitoredProject.project.integrationWorktreeSetup ?? [],
+        (line) => log(formatEventLine('Preparing', 'integration', line)),
+      )
+    }
     const loop = createLoop({
-      paths,
+      paths: loopPaths,
       config,
       forge,
       runner,
       project: monitoredProject.project,
       projectAdapterChanged: monitoredProject.sourceChanged,
+      branchGuard: topology.validateDaemonCheckout,
+      prepareIntegrationWorktree: topology.integrationBranch === undefined
+        ? undefined
+        : () => prepareIntegrationWorktree(
+            loopPaths,
+            monitoredProject.project.integrationWorktreeSetup ?? [],
+            (line) => log(formatEventLine('Preparing', 'integration', line)),
+          ),
       log,
       marker,
       now: () => new Date(),

@@ -34,6 +34,7 @@ describe('loadConfig', () => {
       coreAutoUpdate: true,
       upstreamRemote: 'menimani/orchestration-core',
       upstreamBranch: 'main',
+      integrationBranch: '',
     })
   })
 
@@ -49,6 +50,7 @@ describe('loadConfig', () => {
       CORE_AUTO_UPDATE: 'false',
       UPSTREAM_REMOTE: 'shared-core',
       UPSTREAM_BRANCH: 'stable',
+      INTEGRATION_BRANCH: 'integration/run',
     })
     expect(config.maxParallel).toBe(12)
     expect(config.reviewEveryNCycles).toBe(3)
@@ -60,6 +62,7 @@ describe('loadConfig', () => {
     expect(config.coreAutoUpdate).toBe(false)
     expect(config.upstreamRemote).toBe('shared-core')
     expect(config.upstreamBranch).toBe('stable')
+    expect(config.integrationBranch).toBe('integration/run')
   })
 
   it.each([

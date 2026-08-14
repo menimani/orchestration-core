@@ -39,6 +39,7 @@ import { execShellSync } from './shell.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
+import { absorbDefaultBranch } from './branchTopology.ts'
 import {
   claimIssueGroup, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
@@ -69,6 +70,8 @@ export interface LoopDeps {
   enqueueTask?: typeof enqueueTask
   updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
   projectAdapterChanged?: () => boolean
+  branchGuard?: (() => string | undefined) | undefined
+  prepareIntegrationWorktree?: (() => void) | undefined
 }
 
 interface QueueEntry {
@@ -175,6 +178,8 @@ export function createLoop(deps: LoopDeps) {
       (name, subject, detail = '') => event(name, subject, detail),
     ))
   const projectAdapterChanged = deps.projectAdapterChanged ?? (() => false)
+  const branchGuard = deps.branchGuard ?? (() => undefined)
+  const prepareIntegration = deps.prepareIntegrationWorktree ?? (() => undefined)
   let restartSubject = 'core'
 
   function rateLimitTime(resetAt: Date): string {
@@ -1199,6 +1204,11 @@ export function createLoop(deps: LoopDeps) {
     }
     writeFileSync(scanCountFile, '0\n')
     writeFileSync(totalTaskCountFile, '0\n')
+    if (!preserveTaskMarkers && config.integrationBranch !== '') {
+      for (const name of ['daemon-branch.txt', 'daemon-head.txt', 'integration-branch.txt']) {
+        rmSync(join(paths.queueDir, name), { force: true })
+      }
+    }
   }
 
   /**
@@ -1742,6 +1752,10 @@ export function createLoop(deps: LoopDeps) {
     }
     restartSubject = 'core'
     if (await updateCore(nextCycle) === 'restart') return 'restart'
+    if (config.integrationBranch !== '') {
+      absorbDefaultBranch(paths, (name, subject, detail = '') => event(name, subject, detail))
+      prepareIntegration()
+    }
     const requestedScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
     let nScans = requestedScans
     let sectionGroups: number[][] = []
@@ -1789,6 +1803,12 @@ export function createLoop(deps: LoopDeps) {
   /** One poll iteration. Returns 'stopped' | 'done' | 'continue' | 'restart'. */
   async function poll(): Promise<'stopped' | 'done' | 'continue' | 'restart'> {
     gateWaitTarget = undefined
+    const daemonProblem = branchGuard()
+    if (daemonProblem !== undefined) {
+      event('ERROR', daemonProblem)
+      writeFileSync(stopFile, '')
+      return 'stopped'
+    }
     const currentBranch = git(['branch', '--show-current']).trim()
     const recordedBranch = existsSync(runBranchFile)
       ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
