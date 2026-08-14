@@ -872,8 +872,14 @@ describe('claimIssue', () => {
   it('settles a simultaneous claim deterministically — first login wins, loser backs off', async () => {
     const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks')
     const issue = await forge.getIssue(issueNumber)
+    const assignIssue = forge.assignIssue.bind(forge)
+    forge.assignIssue = async (number, assignee) => {
+      await assignIssue(number, assignee)
+      if (number === issueNumber && assignee === 'worker-z') {
+        await assignIssue(number, 'worker-b')
+      }
+    }
     // worker-b arrives between worker-z's assign and its re-read: both are assignees.
-    await forge.assignIssue(issueNumber, 'worker-b')
     const result = await claimIssue(forge, paths, issue, 'worker-z', appendRequirement)
     expect(result.outcome).toBe('lost-race')
     const after = await forge.getIssue(issueNumber)
