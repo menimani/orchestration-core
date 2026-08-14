@@ -14,7 +14,8 @@ import {
   type OrchPaths,
 } from './paths.ts'
 import { execShellSync } from './shell.ts'
-import { readStatus, writeMergedStatus } from './status.ts'
+import { noChangeMarkerPresent } from './refresh.ts'
+import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import {
   removeWorktreeWithFallback, type WorktreeRemovalRuntime,
 } from './worktree.ts'
@@ -26,6 +27,9 @@ export class MergeError extends Error {
     this.keepWorktree = keepWorktree
   }
 }
+
+/** Remote bookkeeping for a valid no-change verdict failed and should be retried. */
+export class NoChangeReconciliationError extends MergeError {}
 
 /** A fatal dependency mismatch: continuing would run orchestration on the wrong tree. */
 export class OrchestrationDepsInstallError extends MergeError {}
@@ -53,12 +57,23 @@ export interface MergeOptions {
   outputFile?: string | undefined
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   onOrchestrationDepsEvent?: OrchestrationDepsEvent | undefined
+  /** Close or otherwise reconcile linked work before accepting a no-change verdict. */
+  onNoChange?: (() => Promise<void>) | undefined
 }
 
 export interface RemoteMergeOptions extends MergeOptions {
   /** Persist adoption before post-merge work begins or this function returns. */
   onMerged?: ((mergeCommit: string) => void) | undefined
 }
+
+export interface NoChangeOptions {
+  outputFile?: string | undefined
+  onNoChange?: (() => Promise<void>) | undefined
+}
+
+export type MergeTaskResult =
+  | { outcome: 'merged'; mergeCommit: string }
+  | { outcome: 'no-change' }
 
 export interface OrchestrationDepsRuntime {
   install: (cwd: string) => void
@@ -215,19 +230,29 @@ const worktreeRemovalRuntime: WorktreeRemovalRuntime = {
   git,
 }
 
+function removeFinishedWorktree(
+  paths: OrchPaths,
+  worktree: string,
+  log: (text: string) => void,
+  runtime: WorktreeRemovalRuntime,
+  completion: string,
+): void {
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+  if (result.fallback === undefined) return
+  if (result.fallbackFailure !== undefined) {
+    log(`WARN: ${completion}, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
+    return
+  }
+  log(`Worktree removal needed the ${result.fallback}: ${worktree} (${result.gitFailure})`)
+}
+
 export function removeMergedWorktree(
   paths: OrchPaths,
   worktree: string,
   log: (text: string) => void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
-  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
-  if (result.fallback === undefined) return
-  if (result.fallbackFailure !== undefined) {
-    log(`WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
-    return
-  }
-  log(`Worktree removal needed the ${result.fallback}: ${worktree} (${result.gitFailure})`)
+  removeFinishedWorktree(paths, worktree, log, runtime, 'merged')
 }
 
 function git(cwd: string, args: string[]): string {
@@ -429,12 +454,80 @@ async function finalizeLocalMerge(
   return mergeCommit
 }
 
+async function finalizeNoChange(
+  paths: OrchPaths,
+  taskId: string,
+  branch: string,
+  worktree: string,
+  io: MergeIo,
+  options: NoChangeOptions,
+): Promise<void> {
+  try {
+    await options.onNoChange?.()
+  } catch (error) {
+    throw new NoChangeReconciliationError(
+      `Could not reconcile the no-change verdict: ${installFailureSummary(error)}`,
+    )
+  }
+  await writeStatus(paths, taskId, 'no-change')
+  removeFinishedWorktree(
+    paths, worktree, io.out, worktreeRemovalRuntime, 'task completed without changes',
+  )
+  try {
+    git(paths.repoRoot, ['branch', '-d', branch])
+  } catch {
+    try {
+      git(paths.repoRoot, ['branch', '-D', branch])
+    } catch {
+      // The task branch may already be gone after an interrupted cleanup.
+    }
+  }
+  io.out(`Completed ${taskId} without changes.`)
+}
+
+/**
+ * Accept an explicit no-change verdict against a caller-selected base. Worker mode may
+ * run detached, so its known base SHA is authoritative rather than a branch name.
+ */
+export async function completeTaskWithoutChanges(
+  paths: OrchPaths,
+  taskId: string,
+  baseRef: string,
+  options: NoChangeOptions = {},
+): Promise<void> {
+  const status = readStatus(paths, taskId)
+  if (status === undefined) throw new MergeError(`Task not found: ${taskId}`)
+  if (status.status !== 'completed') {
+    throw new MergeError(`Task status is not 'completed' (current: ${status.status}).`)
+  }
+  if (!noChangeMarkerPresent(paths, taskId)) {
+    throw new MergeError(`${taskId} did not report NO_CHANGE_WARRANTED.`)
+  }
+  if (status.pid !== null) stopCompletedRunner(status.pid)
+
+  const worktree = worktreeDir(paths, taskId)
+  if (git(worktree, ['status', '--porcelain']).trim() !== '') {
+    throw new MergeError(`The worktree has uncommitted changes: ${worktree}`)
+  }
+  if (git(worktree, ['log', `${baseRef}..HEAD`, '--oneline']).trim() !== '') {
+    throw new MergeError(`${taskId} has commits and cannot complete without changes.`)
+  }
+
+  await finalizeNoChange(
+    paths, taskId, branchName(taskId), worktree, mergeIo(options.outputFile), options,
+  )
+}
+
 /**
  * Merge a completed task into the current branch.
  * Uncommitted changes or a missing deliverable stop the merge and keep the worktree,
  * because removing it would lose work an agent forgot to commit.
  */
-export async function mergeTask(paths: OrchPaths, taskId: string, options: MergeOptions): Promise<string> {
+export async function mergeTask(
+  paths: OrchPaths,
+  taskId: string,
+  options: MergeOptions,
+): Promise<MergeTaskResult> {
   const io = mergeIo(options.outputFile)
   const depsEvent = options.onOrchestrationDepsEvent
     ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
@@ -478,10 +571,20 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
       paths.repoRoot, currentBranch, taskHead, mergeMessage,
     )
     if (appliedCommit !== undefined) {
-      return finalizeLocalMerge(
+      const mergeCommit = await finalizeLocalMerge(
         paths, taskId, currentBranch, branch, worktree, appliedCommit,
         io, depsEvent, options,
       )
+      return { outcome: 'merged', mergeCommit }
+    }
+    if (!isInspectionTaskId(paths, taskId) && noChangeMarkerPresent(paths, taskId)) {
+      if (closingIssues.length > 0 && options.onNoChange === undefined) {
+        throw new NoChangeReconciliationError(
+          'A linked no-change task requires issue reconciliation.',
+        )
+      }
+      await finalizeNoChange(paths, taskId, branch, worktree, io, options)
+      return { outcome: 'no-change' }
     }
     if (!isInspectionTaskId(paths, taskId)) {
       throw new MergeError(
@@ -531,10 +634,11 @@ export async function mergeTask(paths: OrchPaths, taskId: string, options: Merge
   // Publish the merge identity before any post-merge work. If dependency synchronization
   // or later cleanup is interrupted, startup can retry it without attempting to merge
   // commits that are already on the run branch or counting a false merge failure.
-  return finalizeLocalMerge(
+  const finalizedCommit = await finalizeLocalMerge(
     paths, taskId, currentBranch, branch, worktree, mergeCommit,
     io, depsEvent, options,
   )
+  return { outcome: 'merged', mergeCommit: finalizedCommit }
 }
 
 /** Merge an already-fetched worker branch through the same selected checks as a local task. */

@@ -43,10 +43,12 @@ afterEach(() => {
 
 describe('pruneTasks', () => {
   const OLD_MERGED = '20250101_000000_001_user-old-merged'
+  const OLD_NO_CHANGE = '20250101_000000_005_user-old-no-change'
   const OLD_FAILED = '20250101_000000_004_user-old-failed'
 
   function setUpFixtures(): void {
     makeTask(OLD_MERGED, 'merged', 'old')
+    makeTask(OLD_NO_CHANGE, 'no-change', 'old')
     mkdirSync(join(paths.queueDir, 'desc-index'), { recursive: true })
     writeFileSync(join(paths.queueDir, 'desc-index', 'user-deadbeef'), `${OLD_MERGED}\n`)
 
@@ -78,7 +80,7 @@ describe('pruneTasks', () => {
     expect(existsSync(join(paths.statusDir, `${OLD_MERGED}.json`))).toBe(true)
   })
 
-  it('prunes old merged tasks and keeps everything protected', () => {
+  it('prunes old finished tasks and keeps everything protected', () => {
     setUpFixtures()
     pruneTasks(paths, { days: 14, dryRun: false })
 
@@ -89,6 +91,9 @@ describe('pruneTasks', () => {
       join(paths.tasksDir, `${OLD_MERGED}.md`),
       join(paths.queueDir, 'scanned', OLD_MERGED),
       join(paths.queueDir, 'effort', OLD_MERGED),
+      join(paths.statusDir, `${OLD_NO_CHANGE}.json`),
+      join(paths.logsDir, `${OLD_NO_CHANGE}.log`),
+      join(paths.tasksDir, `${OLD_NO_CHANGE}.md`),
       join(paths.queueDir, 'desc-index', 'user-deadbeef'),
     ]) {
       expect(existsSync(gone), `should be pruned: ${gone}`).toBe(false)

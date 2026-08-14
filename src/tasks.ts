@@ -22,7 +22,11 @@ Commit prefixes: feat: / fix: / refactor: / test: / docs: / chore:
 
 ## Completion Marker
 
-After committing, output the following as the final standalone line:
+If investigation proves that no change is warranted, do not create an empty commit.
+Explain why and output \`NO_CHANGE_WARRANTED\` on its own line.
+
+After committing, or after reporting that no change is warranted, output the following
+as the final standalone line:
 TASK_COMPLETE
 `
 
@@ -67,7 +71,8 @@ export function enqueueTask(paths: OrchPaths, taskId: string, depth = 0): Enqueu
   const status = existsSync(statusFile(paths, taskId))
     ? readStatus(paths, taskId)?.status
     : undefined
-  if (status === 'merged' || status === 'running' || status === 'completed') {
+  if (status === 'merged' || status === 'no-change'
+    || status === 'running' || status === 'completed') {
     return { outcome: 'already-processed', taskId, status }
   }
   const appended = appendBacklogUnless(

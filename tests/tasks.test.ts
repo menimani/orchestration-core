@@ -50,7 +50,7 @@ describe('enqueueTask', () => {
     expect(queueLines()).toEqual(['duplicate-task:0'])
   })
 
-  it.each(['merged', 'running', 'completed'])('skips a task whose status is %s', (status) => {
+  it.each(['merged', 'no-change', 'running', 'completed'])('skips a task whose status is %s', (status) => {
     const taskId = `${status}-task`
     createSpec(taskId)
     writeTestStatus(taskId, status)
@@ -94,6 +94,7 @@ describe('delegateTask', () => {
     expect(spec).toMatch(/^## Before reporting this done$/m)
     const lines = spec.trimEnd().split('\n')
     expect(lines[lines.length - 1]).toBe('TASK_COMPLETE')
+    expect(spec).toContain('NO_CHANGE_WARRANTED')
   })
 
   it('resolves the same description to the one existing task and spec', () => {

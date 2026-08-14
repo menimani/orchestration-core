@@ -233,7 +233,9 @@ and merged work stays open until promotion reaches the default branch and closes
 Ready titles naming the same primary file are claimed in groups of up to four; no-path titles
 remain singletons, and failed groups retry as individual findings. Each grouped requirement
 needs its own completion marker before the branch can merge; promotion then closes every
-linked issue. A second machine runs execution-only with
+linked issue. When investigation proves an ordinary task needs no implementation, an exact
+`NO_CHANGE_WARRANTED` final-message marker terminalizes its clean, commit-free task and closes
+the linked issue directly instead of entering merge retries. A second machine runs execution-only with
 `worker <base-ref>` — it claims and executes, pushes finished branches, and never scans,
 reviews, or merges. Exactly one ordinary daemon owns the branch and adopts those pushes.
 

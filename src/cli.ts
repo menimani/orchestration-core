@@ -17,8 +17,8 @@ import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
-  commentOnIssueMerge, issueNumbersForTask, missingRequirementCompletionMarkers,
-  recordIssuePromotions,
+  closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, issueNumbersForTask,
+  missingRequirementCompletionMarkers, recordIssuePromotions,
 } from './issueQueue.ts'
 import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
 import { deploy } from './deploy.ts'
@@ -455,18 +455,24 @@ const cmdMerge: Command = async (paths, args) => {
     const forge = linkedIssues.length === 0
       ? undefined
       : await loadForge(config.forge, paths.repoRoot)
-    const mergeCommit = await mergeTask(paths, taskId, {
+    const mergeResult = await mergeTask(paths, taskId, {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(paths.root),
       closesIssues: linkedIssues,
       forge,
+      onNoChange: linkedIssues.length === 0 ? undefined : async () => {
+        await Promise.all(linkedIssues.map((linkedIssue) =>
+          closeIssueAndRemoveLifecycleLabels(forge!, linkedIssue,
+            `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+      },
     })
     // A completed manual merge proves the previous failures are no longer consecutive.
     // Clear the durable streak immediately, before optional forge bookkeeping can fail.
     writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
-    if (linkedIssues.length > 0) {
+    if (mergeResult.outcome === 'merged' && linkedIssues.length > 0) {
+      const mergeCommit = mergeResult.mergeCommit
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
         cwd: paths.repoRoot,
         encoding: 'utf8',

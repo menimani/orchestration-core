@@ -38,4 +38,7 @@ CI is failing. Find why and fix it.
 - Every test that was failing now passes, and the build succeeds.
 - The report states how you reproduced the failure, and what the same-shape search found.
 
+If the failure is stale and no change is warranted, do not create an empty commit. Explain
+why and output `NO_CHANGE_WARRANTED` on its own line before the completion marker.
+
 TASK_COMPLETE

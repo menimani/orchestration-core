@@ -16,7 +16,9 @@ import {
   shortTaskId,
 } from './ids.ts'
 import {
-  mergeRemoteTask, mergeTask, MergeError, OrchestrationDepsInstallError,
+  completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError,
+  NoChangeReconciliationError,
+  OrchestrationDepsInstallError,
   type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
@@ -24,7 +26,7 @@ import {
   branchName, worktreeDir, type OrchPaths,
 } from './paths.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
-import { refreshTask, listTaskIds } from './refresh.ts'
+import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, transitionStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
@@ -347,6 +349,17 @@ export function createLoop(deps: LoopDeps) {
     const commits = gitIn(worktree, ['log', `${baseSha}..HEAD`, '--format=%H'])
       .trim().split(/\r?\n/).filter((line) => line !== '')
     if (commits.length === 0) {
+      if (noChangeMarkerPresent(paths, taskId)) {
+        await completeTaskWithoutChanges(paths, taskId, baseSha, {
+          outputFile: join(paths.logsDir, `${taskId}.merge.log`),
+          onNoChange: async () => {
+            await Promise.all(issueNumbers.map((issueNumber) =>
+              closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
+                `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+          },
+        })
+        return
+      }
       if (!isInspectionTaskId(paths, taskId)) {
         throw new Error(`${taskId} has no commits and is not an inspection task`)
       }
@@ -790,7 +803,7 @@ export function createLoop(deps: LoopDeps) {
           const queued = existsSync(queueFile)
             && readFileSync(queueFile, 'utf8').split(/\r?\n/)
               .some((line) => line.startsWith(`${existing}:`))
-          const mergedAdvisory = status === 'merged'
+          const mergedAdvisory = (status === 'merged' || status === 'no-change')
             && fingerprintOf(finding).startsWith('advisory:')
           if (queued || status === 'running' || status === 'completed' || mergedAdvisory) {
             destinations.push(shortTaskId(existing))
@@ -810,7 +823,7 @@ export function createLoop(deps: LoopDeps) {
       if (!hasTaskCapacity(taskId)) continue
       const existing = existingFindingTask(desc)
       const needsFreshTask = existing !== undefined
-        && readStatus(paths, existing)?.status === 'merged'
+        && ['merged', 'no-change'].includes(readStatus(paths, existing)?.status ?? '')
         && !fingerprintOf(desc).startsWith('advisory:')
       const newId = needsFreshTask
         ? newTaskId(paths, `${findingOrigin}-${descSlug(desc)}`)
@@ -1887,7 +1900,7 @@ export function createLoop(deps: LoopDeps) {
         if (missingMarkers.length > 0) {
           throw new MergeError(`Grouped task is missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}.`)
         }
-        const mergeCommit = await mergeTask(paths, taskId, {
+        const mergeResult = await mergeTask(paths, taskId, {
           taskGate: config.taskGate,
           testCmd: config.testCmd === '' ? undefined : config.testCmd,
           skipAutoTest: config.skipAutoTest,
@@ -1897,7 +1910,18 @@ export function createLoop(deps: LoopDeps) {
           outputFile: mergeLog,
           orchestrationDepsRuntime,
           onOrchestrationDepsEvent: orchestrationDepsEvent,
+          onNoChange: linkedIssues.length === 0 ? undefined : async () => {
+            await Promise.all(linkedIssues.map((issueNumber) =>
+              closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
+                `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+          },
         })
+        if (mergeResult.outcome === 'no-change') {
+          event('No-change', shortTaskId(taskId), 'no change warranted')
+          writeFileSync(mergeFailureFile, '0\n')
+          return
+        }
+        const mergeCommit = mergeResult.mergeCommit
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
         writeFileSync(mergeFailureFile, '0\n')
         if (linkedIssues.length > 0) {
@@ -1912,6 +1936,11 @@ export function createLoop(deps: LoopDeps) {
           if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
         }
       } catch (error) {
+        if (error instanceof NoChangeReconciliationError) {
+          event('WARN', `could not reconcile no-change task ${shortTaskId(taskId)}: ${error.message}`)
+          issueReconciliationPending = true
+          return
+        }
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
         if (error instanceof OrchestrationDepsInstallError) throw error
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.merge.log`)

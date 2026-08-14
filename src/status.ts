@@ -7,13 +7,14 @@ import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { forgetTaskProcess, recordTaskProcess, taskProcessPid } from './processRegistry.ts'
 
 // A task reads `running` while its runner process is alive, `completed` once the
-// completion marker appears in its final-message file, and `failed` when the process is
-// gone without it. Status refresh and merge can run at the same time — the loop daemon
+// completion marker appears in its final-message file, `no-change` after its explicit
+// no-change verdict is accepted, and `failed` when the process is gone without completion.
+// Status refresh and merge can run at the same time — the loop daemon
 // and a CLI invocation are separate processes — so every writer takes the same on-disk
 // lock and compare-and-swap transitions refuse to overwrite a state another writer
 // already changed.
 
-export type TaskState = 'running' | 'completed' | 'failed' | 'merged' | string
+export type TaskState = 'running' | 'completed' | 'failed' | 'merged' | 'no-change' | string
 
 export interface TaskStatus {
   task_id: string
