@@ -7,8 +7,16 @@ import { describe, expect, it, vi } from 'vitest'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/internalEnvironment.ts'
+import { operatingSystem } from '../src/adapters/os.ts'
 
 describe('operating-system adapters', () => {
+  it('returns a stable start identity for the current process', () => {
+    const identity = operatingSystem.processStartIdentity(process.pid)
+
+    expect(identity).toBeTruthy()
+    expect(operatingSystem.processStartIdentity(process.pid)).toBe(identity)
+  })
+
   it('exposes behavior without a platform field', () => {
     expect(createWindowsOperatingSystem()).not.toHaveProperty('platform')
     expect(createPosixOperatingSystem()).not.toHaveProperty('platform')

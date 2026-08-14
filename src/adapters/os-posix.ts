@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { OperatingSystem } from './os.ts'
@@ -14,6 +14,7 @@ export interface PosixOperatingSystemRuntime {
   sleep(milliseconds: number): void
   /** Whether a group has a running member, or undefined where the host cannot say. */
   groupHasRunningMember(processGroupId: number): boolean | undefined
+  processStartIdentity?(pid: number): string | undefined
   spawnDaemon?: typeof spawn
 }
 
@@ -63,6 +64,29 @@ const systemRuntime: PosixOperatingSystemRuntime = {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
   },
   groupHasRunningMember,
+  processStartIdentity: (pid) => {
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return undefined
+    }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      // `comm` may contain spaces and parentheses. starttime is field 22, or the
+      // twentieth field after the final parenthesis.
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+      const startTime = fields[19]
+      if (/^\d+$/.test(startTime ?? '')) return `linux:${startTime}`
+    } catch {
+      // Hosts without procfs use the portable process listing below.
+    }
+    const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const startTime = result.status === 0 ? result.stdout.trim() : ''
+    return startTime === '' ? undefined : `${process.platform}:${startTime}`
+  },
 }
 
 function processIsAlive(runtime: PosixOperatingSystemRuntime, pid: number): boolean {
@@ -142,6 +166,7 @@ export function createOperatingSystem(
       }
     },
     processTreeRootPid: () => process.pid,
+    processStartIdentity: runtime.processStartIdentity ?? systemRuntime.processStartIdentity!,
     processIsAlive: (pid) => processIsAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree,

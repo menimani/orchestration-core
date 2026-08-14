@@ -361,6 +361,7 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_018_user-runner-resists-stop'
     const worktree = await makeCompletedTask(taskId, { commit: true })
     const runnerPid = 12345
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('started:runner')
     await writeStatus(paths, taskId, 'completed', runnerPid)
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
     vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
@@ -379,6 +380,7 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_027_user-failed-check-retry'
     const worktree = await makeCompletedTask(taskId, { commit: true })
     const runnerPid = 12345
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('started:runner')
     await writeStatus(paths, taskId, 'completed', runnerPid)
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
     vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(false)
