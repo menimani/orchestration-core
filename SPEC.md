@@ -380,9 +380,12 @@ values must be non-negative integers, with the narrower bounds stated below.
     `forge-github.ts`; gitea/gitlab implementations can be added without touching the
     core). The interface returns normalized values only: PR state plus check records with
     `name`, `conclusion`, and `startedAt`, which is an ISO timestamp when the forge reports
-    one and otherwise an empty string. CI waiting uses the newest available `startedAt`
-    record for each check name so timestamped reruns supersede earlier attempts; when a
-    forge omits timestamps, repeated names cannot be reliably ordered.
+    one and otherwise an empty string. For each check name, CI waiting discards only
+    timestamped records older than the newest `startedAt`: it retains every record tied
+    at that newest timestamp and every record whose timestamp is absent or invalid,
+    because those records cannot be reliably ordered. This fails closed when retained
+    results conflict: a pending result keeps the gate waiting, and otherwise any failure
+    prevents success.
     Draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
     likewise normalizes issues, comments, and author write-access verdicts. It exposes
     current-user and label discovery/creation; issue creation, lookup, open/closed
