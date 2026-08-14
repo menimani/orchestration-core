@@ -7,23 +7,35 @@ import {
   processTreeRootPid, quoteWindowsArgument, startWindowsProcess,
   WINDOWS_PROCESS_ROOT_PID_ENV,
 } from '../src/adapters/windows-process.ts'
+import { PROCESS_TEST_TIMEOUT_MS } from './testProcess.ts'
 
 const fixtureRoots: string[] = []
 const processRoots: number[] = []
 
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + PROCESS_TEST_TIMEOUT_MS
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(message)
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
 
-afterEach(() => {
+async function removeWhenReleased(root: string): Promise<void> {
+  await waitUntil(() => {
+    try {
+      operatingSystem.removeDirectory(root)
+      return true
+    } catch {
+      return false
+    }
+  }, `Windows did not release fixture directory ${root}`)
+}
+
+afterEach(async () => {
   for (const pid of processRoots.splice(0)) {
     if (operatingSystem.processIsAlive(pid)) operatingSystem.terminateProcessTree(pid)
   }
-  for (const root of fixtureRoots.splice(0)) operatingSystem.removeDirectory(root)
+  for (const root of fixtureRoots.splice(0)) await removeWhenReleased(root)
 })
 
 describe('Windows process arguments', () => {
@@ -54,6 +66,7 @@ it.runIf(process.platform === 'win32')(
     const inputFile = join(root, 'input.txt')
     const outputFile = join(root, 'output.log')
     const resultBase = join(root, 'console')
+    const resultsReadyFile = join(root, 'console.ready')
     const targetPidFile = join(root, 'target.pid')
     const rootPidFile = join(root, 'root.pid')
 
@@ -86,6 +99,7 @@ it.runIf(process.platform === 'win32')(
       '    process.env.ORCH_TEST_CONSOLE_PROBE,',
       "  ], { env, stdio: 'ignore' })",
       '}',
+      "writeFileSync(process.env.ORCH_TEST_RESULTS_READY, '')",
       'setInterval(() => {}, 1_000)',
       '',
     ].join('\n'))
@@ -99,6 +113,7 @@ it.runIf(process.platform === 'win32')(
         ...process.env,
         ORCH_TEST_CONSOLE_PROBE: encodedProbe,
         ORCH_TEST_RESULT_BASE: resultBase,
+        ORCH_TEST_RESULTS_READY: resultsReadyFile,
         ORCH_TEST_ROOT_PID: rootPidFile,
         ORCH_TEST_TARGET_PID: targetPidFile,
       },
@@ -108,7 +123,7 @@ it.runIf(process.platform === 'win32')(
     processRoots.push(pid)
 
     await waitUntil(
-      () => existsSync(`${resultBase}.1`) && existsSync(`${resultBase}.2`),
+      () => existsSync(resultsReadyFile),
       'console descendants did not publish their observations',
     )
     const first = JSON.parse(readFileSync(`${resultBase}.1`, 'utf8')) as {

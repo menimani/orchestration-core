@@ -13,7 +13,7 @@ import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { writeStatus } from '../src/status.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
-import { TestProcessRegistry } from './testProcess.ts'
+import { PROCESS_TEST_TIMEOUT_MS, TestProcessRegistry } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'src', 'cli.ts')
@@ -83,12 +83,14 @@ function childCompletion(child: ChildProcess): Promise<{ code: number | null; ou
     child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString() })
     child.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString() })
     child.on('error', reject)
-    child.on('exit', (code) => resolve({ code, output }))
+    // `exit` can precede the final stdout/stderr data events. `close` proves that the
+    // process and its stdio handles have all finished before assertions inspect output.
+    child.on('close', (code) => resolve({ code, output }))
   })
 }
 
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + PROCESS_TEST_TIMEOUT_MS
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(message)
     await new Promise((resolve) => setTimeout(resolve, 10))

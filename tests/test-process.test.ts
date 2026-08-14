@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
+import { PROCESS_TEST_TIMEOUT_MS } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const TEST_PROCESS_MODULE = join(HERE, 'testProcess.ts')
@@ -12,7 +13,7 @@ const fixturePids: number[] = []
 let fixtureRoot = ''
 
 function waitUntil(predicate: () => boolean, message: string): void {
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + PROCESS_TEST_TIMEOUT_MS
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(message)
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
@@ -50,7 +51,7 @@ it('stops an eval fixture when its Vitest-like parent exits without cleanup', ()
 
   const result = spawnSync(process.execPath, [supervisor], {
     encoding: 'utf8',
-    timeout: 10_000,
+    timeout: PROCESS_TEST_TIMEOUT_MS,
     windowsHide: true,
   })
   expect(result.status, result.stderr).toBe(0)
@@ -65,4 +66,7 @@ it('stops an eval fixture when its Vitest-like parent exits without cleanup', ()
       && !operatingSystem.processIsAlive(fixturePid),
     'fixture process tree survived its test worker',
   )
+  // The contract is now proven and these numeric PIDs may be reused immediately on a
+  // busy host. Do not let afterEach mistake their next owners for leaked fixtures.
+  fixturePids.length = 0
 })
