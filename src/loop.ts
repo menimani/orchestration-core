@@ -1819,6 +1819,13 @@ export function createLoop(deps: LoopDeps) {
     if (await updateCore(nextCycle) === 'restart') return 'restart'
     if (config.integrationBranch !== '') {
       absorbDefaultBranch(paths, (name, subject, detail = '') => event(name, subject, detail))
+      // The default branch may carry a new adapter into the integration worktree. Check
+      // again before using the loaded adapter to prepare or start the next cycle.
+      if (projectAdapterChanged()) {
+        restartSubject = 'adapter'
+        event('Restarting', 'adapter', `for cycle ${nextCycle}`)
+        return 'restart'
+      }
       prepareIntegration()
     }
     const requestedScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2

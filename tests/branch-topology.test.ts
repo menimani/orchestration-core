@@ -214,6 +214,43 @@ describe('integration branch topology', () => {
     expect(readFileSync(join(topology.paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
   })
 
+  it('rechecks the adapter after absorbing the default branch', async () => {
+    const topology = prepareBranchTopology(paths, 'integration/run')
+    pushRemoteDefaultChange('adapter-change.txt', 'new adapter source\n')
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const prepareIntegration = vi.fn()
+    const start = vi.fn(async () => process.pid)
+    const adapterChanged = vi.fn(() =>
+      existsSync(join(topology.paths.repoRoot, 'adapter-change.txt')))
+    const loop = createLoop({
+      paths: topology.paths,
+      config: {
+        ...loadConfig({}),
+        integrationBranch: 'integration/run',
+        scanParallel: 1,
+        autoPr: false,
+        reviewEnabled: false,
+      },
+      forge: makeFakeForge(),
+      runner: { sharedSkills: fakeRunnerSharedSkills, start },
+      project: stubProject,
+      projectAdapterChanged: adapterChanged,
+      log: vi.fn(),
+      now: () => new Date('2026-08-14T12:00:00Z'),
+      updateCoreBeforeCycle: async () => 'continue',
+      prepareIntegrationWorktree: prepareIntegration,
+    })
+
+    expect(await loop.triggerScanIfIdle()).toBe('restart')
+
+    expect(loop.restartSubject()).toBe('adapter')
+    expect(adapterChanged).toHaveBeenCalledTimes(2)
+    expect(prepareIntegration).not.toHaveBeenCalled()
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(join(topology.paths.queueDir, 'scan-count.txt'))).toBe(false)
+  })
+
   it.each([
     {
       state: 'dirty',

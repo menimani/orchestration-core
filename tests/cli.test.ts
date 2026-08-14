@@ -463,6 +463,73 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('loads and prepares the project adapter from the integration worktree', () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    const projectDirectory = join(repoRoot, 'orchestration', 'project')
+    const adapter = join(projectDirectory, 'project-test.ts')
+    mkdirSync(projectDirectory, { recursive: true })
+    writeFileSync(join(repoRoot, '.gitignore'), [
+      'orchestration/logs/',
+      'orchestration/queue/',
+      'orchestration/status/',
+      'orchestration/tasks/',
+      'orchestration/worktrees/',
+      '',
+    ].join('\n'))
+    const adapterSource = (withSetup: boolean) => [
+      'export const project = {',
+      "  name: 'test',",
+      '  preCommitChecks: [],',
+      "  pullRequest: { categories: [{ label: 'Changes' }], titleFallback: 'changes',",
+      "    classifyCommit: () => ({ category: 'Changes' }), detectRisks: () => [] },",
+      '  mergeChecks: () => [],',
+      '  cycleSuite: () => [],',
+      ...(withSetup ? [
+        '  integrationWorktreeSetup: [{',
+        "    label: 'Integration adapter', cwd: '',",
+        `    command: ${JSON.stringify(
+          "node -e \"require('node:fs').writeFileSync('integration-adapter-loaded', 'ready')\"",
+        )},`,
+        '  }],',
+      ] : []),
+      '}',
+      '',
+    ].join('\n')
+    writeFileSync(adapter, adapterSource(false))
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: add daemon adapter'])
+    git(['switch', '-q', '-c', 'integration/run'])
+    writeFileSync(adapter, adapterSource(true))
+    git(['add', '-A'])
+    git(['commit', '-qm', 'fix: update integration adapter'])
+    git(['switch', '-q', '-c', 'daemon/run', 'HEAD~1'])
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: {
+        ...INHERITED_ENV,
+        PROJECT: 'test',
+        PROJECT_ADAPTER: '',
+        INTEGRATION_BRANCH: 'integration/run',
+        CORE_AUTO_UPDATE: 'false',
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_SCAN_CYCLES: '0',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(join(
+      repoRoot, 'orchestration', 'worktrees', '.integration',
+      'integration-adapter-loaded',
+    ), 'utf8')).toBe('ready')
+    expect(existsSync(join(repoRoot, 'integration-adapter-loaded'))).toBe(false)
+  })
+
   it('repairs incomplete orchestration dependencies before loading the project adapter', () => {
     const packageRoot = join(repoRoot, 'orchestration', 'ts')
     const packageModules = join(packageRoot, 'node_modules')
