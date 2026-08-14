@@ -9,7 +9,7 @@ export interface CiWaitOptions {
   print?: (line: string) => void
 }
 
-function newestChecksByName(checks: PrCheck[]): PrCheck[] {
+export function newestChecksByName(checks: PrCheck[]): PrCheck[] {
   const newest = new Map<string, PrCheck>()
   for (const check of checks) {
     const previous = newest.get(check.name)
