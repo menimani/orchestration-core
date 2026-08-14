@@ -201,7 +201,34 @@ describe('integration branch topology', () => {
     expect(readFileSync(join(topology.paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
   })
 
-  it('stops before cycle work when the fixed daemon checkout changes', async () => {
+  it.each([
+    {
+      state: 'dirty',
+      changeCheckout: () => {
+        writeFileSync(join(repoRoot, 'unexpected-change.txt'), 'dirty daemon checkout\n')
+        return 'daemon checkout daemon/run has uncommitted changes'
+      },
+    },
+    {
+      state: 'switched branch',
+      changeCheckout: () => {
+        git(repoRoot, ['switch', '-q', '-c', 'unexpected/branch'])
+        return 'daemon checkout unexpected/branch does not match fixed branch daemon/run'
+      },
+    },
+    {
+      state: 'moved HEAD',
+      changeCheckout: (daemonHead: string) => {
+        const currentHead = commit(
+          repoRoot, 'daemon-change.txt', 'moved\n', 'feat: move daemon branch',
+        )
+        return `daemon branch daemon/run moved from fixed commit ${daemonHead.slice(0, 8)} `
+          + `to ${currentHead.slice(0, 8)}`
+      },
+    },
+  ])('stops before cycle work when the fixed daemon checkout is $state', async ({
+    changeCheckout,
+  }) => {
     const topology = prepareBranchTopology(paths, 'integration/run')
     const updateCoreBeforeCycle = vi.fn(async () => 'continue' as const)
     const prepareIntegration = vi.fn()
@@ -226,11 +253,11 @@ describe('integration branch topology', () => {
       prepareIntegrationWorktree: prepareIntegration,
     })
     loop.initializeSessionStateForBranch()
-    writeFileSync(join(repoRoot, 'unexpected-change.txt'), 'dirty daemon checkout\n')
+    const problem = changeCheckout(topology.daemonHead)
 
     expect(await loop.poll()).toBe('stopped')
 
-    expect(events).toContain('ERROR daemon checkout daemon/run has uncommitted changes')
+    expect(events).toContain(`ERROR ${problem}`)
     expect(updateCoreBeforeCycle).not.toHaveBeenCalled()
     expect(prepareIntegration).not.toHaveBeenCalled()
     expect(start).not.toHaveBeenCalled()
