@@ -109,6 +109,13 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ MAX_PARALLEL: '0' })).toThrow(/MAX_PARALLEL must be at least 1/)
   })
 
+  it('rejects REVIEW_EVERY_N_CYCLES below one', () => {
+    expect(loadConfig({ REVIEW_EVERY_N_CYCLES: '1' }).reviewEveryNCycles).toBe(1)
+    expect(() => loadConfig({ REVIEW_EVERY_N_CYCLES: '0' })).toThrow(
+      /REVIEW_EVERY_N_CYCLES must be at least 1/,
+    )
+  })
+
   it('rejects a poll interval longer than the issue heartbeat interval', () => {
     expect(loadConfig({ POLL_INTERVAL: '1800' }).pollIntervalSeconds).toBe(1800)
     expect(() => loadConfig({ POLL_INTERVAL: '1801' })).toThrow(
