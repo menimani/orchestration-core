@@ -80,8 +80,10 @@ describe('orphanedWorktreeDirectories', () => {
   it('reports only directories that have no corresponding status file', () => {
     const owned = join(paths.worktreesDir, 'owned-task')
     const orphan = join(paths.worktreesDir, 'orphan-task')
+    const integration = join(paths.worktreesDir, '.integration')
     mkdirSync(owned)
     mkdirSync(orphan)
+    mkdirSync(integration)
     writeRunningTask('owned-task', 123)
 
     expect(orphanedWorktreeDirectories(paths)).toEqual([orphan])

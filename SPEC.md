@@ -71,6 +71,7 @@ values must be non-negative integers, with the narrower bounds stated below.
 | `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
 | `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
 | `SKIP_AUTO_TEST` | `false` | When `true` and no `TEST_CMD` or `--test-cmd` is set, skip the project adapter's automatic merge checks. It does not skip the explicit test command. |
+| `INTEGRATION_BRANCH` | empty | Empty retains the direct layout where the daemon checkout is also the run branch. A non-empty branch uses a separate integration worktree as the task base, merge and cycle-gate target, and pull-request source. |
 
 ## Task lifecycle
 
@@ -88,7 +89,26 @@ values must be non-negative integers, with the narrower bounds stated below.
    non-advisory finding returns after that task has merged, it creates a fresh task and
    updates the index; merged advisories remain deduplicated.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
-   `task/<id>`.
+   `task/<id>`. The direct layout is the default because a consumer whose source lives
+   outside the loop gains no safety from another checkout. With `INTEGRATION_BRANCH`
+   set, the checkout where the daemon started is the daemon worktree and its branch,
+   exact commit, and clean source tree are fixed through `LOOP_DONE`. The integration
+   branch has its own worktree at `orchestration/worktrees/.integration`; task branches are cut
+   from that checkout, not the daemon checkout, because they must see every prior task
+   merge. Task merges, cycle gates, pull-request description and promotion all operate
+   there, so no loop operation merges into the daemon branch during the run.
+4a. Integration mode records the daemon branch and commit as durable run identity. A
+    stop retains them. A restart resumes the same run and refuses a daemon checkout that
+    moved or became dirty; commits added to the integration branch while the daemon was
+    down remain work for the same run and never become executing daemon code. Project
+    adapter `integrationWorktreeSetup` commands prepare the fresh integration checkout,
+    including its dependencies, at startup and before each new cycle.
+4b. At the idle pre-cycle boundary used for core updates, integration mode fetches the
+    tracking remote's advertised default branch and merges it into the integration
+    branch. The result is verified by ancestry. A fetch failure, dirty checkout, or
+    conflict is warned about; a conflict is aborted and left for a person, and the cycle
+    proceeds. The daemon branch is never an update target. A core subtree update made
+    on the integration branch likewise becomes executable only in a later run.
 5. Failure handling: emit `FAILED: <id>` with the log path to the machine-marker sink,
    with a separately formatted copy in `loop.log`; record the loss against the
    current cycle (`queue/failed-<cycle>`, once per task), never retry automatically.

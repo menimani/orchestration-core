@@ -57,7 +57,8 @@ export function terminateLiveTaskProcesses(
 
 export function orphanedWorktreeDirectories(paths: OrchPaths): string[] {
   return readdirSync(paths.worktreesDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && !existsSync(join(paths.statusDir, `${entry.name}.json`)))
+    .filter((entry) => entry.name !== '.integration' && entry.isDirectory()
+      && !existsSync(join(paths.statusDir, `${entry.name}.json`)))
     .map((entry) => join(paths.worktreesDir, entry.name))
     .sort()
 }

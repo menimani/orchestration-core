@@ -89,6 +89,11 @@ export function worktreeDir(paths: OrchPaths, taskId: string): string {
   return join(paths.worktreesDir, taskId)
 }
 
+/** The merge target used when the daemon checkout is frozen for a run. */
+export function integrationWorktreeDir(paths: OrchPaths): string {
+  return join(paths.worktreesDir, '.integration')
+}
+
 export function branchName(taskId: string): string {
   return `task/${taskId}`
 }

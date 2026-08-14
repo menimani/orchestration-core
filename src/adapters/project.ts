@@ -118,6 +118,8 @@ export interface ProjectAdapter {
   classifyInfrastructureFailure?: (output: string) => InfrastructureFailure | undefined
   /** Repository-specific preparation required before a scan can inspect a fresh worktree. */
   scanWorktreeSetup?: WorktreeSetupStep[]
+  /** Preparation required in the integration worktree before the loop uses it. */
+  integrationWorktreeSetup?: WorktreeSetupStep[]
   /** Repository-specific classification and risk signals for the generated pull request. */
   pullRequest: PullRequestPresentation
 }

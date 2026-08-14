@@ -156,6 +156,33 @@ $env:AUTO_REVIEW = 'true'
 node orchestration/ts/src/cli.ts loop --daemon
 ```
 
+The default branch layout remains direct: the topic branch where the daemon starts is
+also the branch tasks derive from, merge into, and promote. That keeps the existing
+single-worktree shape for consumers whose source is not the loop. Repositories where the
+loop runs its own source can freeze the daemon checkout by naming a separate run branch:
+
+```bash
+INTEGRATION_BRANCH=feature/current-run node src/cli.ts loop --daemon
+```
+
+With `INTEGRATION_BRANCH` set, the original repository checkout is the daemon worktree
+and stays on its exact starting commit until the run ends. The loop creates or resumes
+the integration worktree at `orchestration/worktrees/.integration`; task worktrees remain at
+`orchestration/worktrees/<id>`, but Git cuts them from the integration checkout so they
+include every earlier merge. Merges, cycle suites, the pull request, and `LOOP_DONE`
+promotion all use the integration branch. The project adapter's
+`integrationWorktreeSetup` commands install dependencies in that fresh checkout; the
+operator does not prepare it by hand. Human fixes made during the run should branch from
+and merge into the integration branch as well, where the next task can see them.
+
+A stopped daemon retains both branch identities and the daemon commit. Restarting is a
+resume of the same run: integration commits made while it was down remain available to
+later tasks, but a changed daemon branch or commit is rejected instead of silently
+running different machinery. Immediately before each new cycle, the integration branch
+fetches and merges the remote's advertised default branch. A conflict is aborted and
+warned about for a person to resolve, and the cycle proceeds without that merge. The
+daemon branch is never updated at this boundary.
+
 `node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
 the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
 head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's
@@ -191,6 +218,7 @@ git subtree pull --prefix=orchestration/ts \
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work |
 | `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
+| `INTEGRATION_BRANCH` | empty | Empty keeps the direct single-worktree layout; a branch name freezes the daemon checkout and makes this separate branch the task base, merge target, gate target, and PR source |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |
 | `UPSTREAM_REPO` | package `upstreamRepo` | GitHub `owner/repository` where `report-upstream` files the report |
 | `UPSTREAM_BRANCH` | main | Shared-core branch to compare and pull |

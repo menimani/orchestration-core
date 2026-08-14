@@ -197,6 +197,28 @@ describe('pre-cycle core update', () => {
     expect(events).toContain('Restarting core for cycle 1')
   })
 
+  it('updates integration source without restarting the fixed daemon', async () => {
+    const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    const newCore = advanceUpstream('version two\n')
+    const coreConfig = config({ INTEGRATION_BRANCH: 'integration/run' })
+
+    const outcome = await updateCoreBeforeCycle(
+      paths,
+      coreConfig,
+      makeFakeForge(),
+      { sharedSkills: fakeRunnerSharedSkills, start: async () => process.pid },
+      2,
+      event as CoreUpdateEvent,
+      { packageRoot, git },
+    )
+
+    expect(outcome).toBe('continue')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+      .toBe('version two\n')
+    expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
+    expect(events.some((line) => line.startsWith('Restarting core'))).toBe(false)
+  })
+
   it('lets the forge adapter resolve repository shorthand for Git', async () => {
     advanceUpstream('version two\n')
     const forge = makeFakeForge()

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { isAbsolute, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
 import type { Runner } from './adapters/runner.ts'
@@ -156,7 +156,8 @@ function syncSkills(
  */
 export async function updateCoreBeforeCycle(
   paths: OrchPaths,
-  config: Pick<LoopConfig, 'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch'>,
+  config: Pick<LoopConfig,
+    'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch' | 'integrationBranch'>,
   forge: Forge,
   runner: Runner,
   cycle: number,
@@ -165,7 +166,10 @@ export async function updateCoreBeforeCycle(
 ): Promise<CoreUpdateOutcome> {
   if (!config.coreAutoUpdate) return 'continue'
 
-  const packageRoot = runtime.packageRoot ?? PACKAGE_ROOT
+  const stateRepoRoot = dirname(paths.root)
+  const packageRoot = runtime.packageRoot ?? (config.integrationBranch === ''
+    ? PACKAGE_ROOT
+    : join(paths.repoRoot, relative(stateRepoRoot, PACKAGE_ROOT)))
   const prefix = packageSubtreePrefix(paths.repoRoot, packageRoot)
   // The core repository itself and a CLI aimed at another checkout are not subtree
   // consumers. Only the owning repository receives local, ignored generated copies.
@@ -250,6 +254,10 @@ export async function updateCoreBeforeCycle(
   if (changed === '') return 'continue'
 
   event('Updated', 'core', `${imported.slice(0, 8)}..${upstream.slice(0, 8)}`)
+  // The updated source belongs to the integration branch. This daemon deliberately
+  // keeps executing the fixed source it started with; the update becomes active only
+  // when a later run starts from the promoted result.
+  if (config.integrationBranch !== '') return 'continue'
   event('Restarting', 'core', `for cycle ${cycle}`)
   return 'restart'
 }
