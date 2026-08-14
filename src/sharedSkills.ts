@@ -76,17 +76,6 @@ export function sharedSkillManagedTargets(
   })
 }
 
-/** Paths a consumer sync owns before it mutates any generated skill tree. */
-export function sharedSkillManagedPaths(
-  repoRoot: string,
-  packageRoot: string,
-  runner: Runner,
-): string[] {
-  const paths = sharedSkillManagedTargets(repoRoot, packageRoot, runner)
-    .flatMap((target) => target.managedPaths)
-  return [...new Set(paths)]
-}
-
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
