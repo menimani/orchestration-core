@@ -266,6 +266,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     zero checks remains unknown regardless of its age unless the project adapter
     explicitly sets `ciChecksExpected: false`.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
+    before dispatch, the loop resolves the tracked remote's default branch and refreshes
+    its remote ref. If either operation fails, the loop stops without dispatching a
+    review rather than reviewing against a missing or stale base.
     when the package is a consumer subtree, its repository-relative path is explicitly
     out of scope and excluded from every Git diff/log command printed by the default
     review template. The exclusion and command-scope placeholders render empty when the
