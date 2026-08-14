@@ -211,6 +211,36 @@ describe('closed issue lifecycle labels', () => {
     expect(issue.state).toBe('closed')
     expect(issue.labels).toEqual([LABEL_FINDING])
   })
+
+  it('retains lifecycle state and retries when the forge does not close the issue', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'inspection', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY],
+    })
+    const closeIssue = forge.closeIssue.bind(forge)
+    let closeAttempts = 0
+    forge.closeIssue = async (number, comment) => {
+      closeAttempts++
+      if (closeAttempts > 1) await closeIssue(number, comment)
+    }
+
+    await expect(closeIssueAndRemoveLifecycleLabels(
+      forge, issueNumber, 'Inspection completed.',
+    )).rejects.toThrow(`Issue #${issueNumber} is still open after closure`)
+
+    expect(await forge.getIssue(issueNumber)).toMatchObject({
+      state: 'open',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY],
+    })
+
+    await closeIssueAndRemoveLifecycleLabels(forge, issueNumber, 'Inspection completed.')
+
+    expect(closeAttempts).toBe(2)
+    expect(await forge.getIssue(issueNumber)).toMatchObject({
+      state: 'closed',
+      labels: [LABEL_FINDING],
+    })
+  })
 })
 
 describe('issue body round-trip', () => {
