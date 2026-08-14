@@ -1164,6 +1164,29 @@ describe('cycleIsFinal', () => {
 })
 
 describe('cycle gate', () => {
+  it('keeps lifecycle reconciliation pending when a cycle attempt fails', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: false,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    let attempts = 0
+    fakeForge.listClosedIssues = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('cycle reconciliation failed')
+      return []
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(attempts).toBe(2)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+  })
+
   it.each([
     { sectionCount: 5, scanParallel: 2 },
     { sectionCount: 8, scanParallel: 3 },
@@ -1552,6 +1575,24 @@ describe('cycle gate', () => {
 })
 
 describe('remote issue queue idle detection', () => {
+  it('retries closed-issue lifecycle reconciliation during queue initialization', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    let attempts = 0
+    fakeForge.listClosedIssues = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('closed issue lookup failed')
+      return []
+    }
+
+    expect(await loop.initializeIssueQueue()).toBe(false)
+    expect(await loop.initializeIssueQueue()).toBe(true)
+
+    expect(attempts).toBe(2)
+    expect(logText()).toContain(
+      'could not reconcile closed issue labels: closed issue lookup failed',
+    )
+  })
+
   beforeEach(() => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
@@ -1924,11 +1965,12 @@ describe('failure announcement and burst stop (via poll)', () => {
   it('ages and backs off idle status lines, then resets when work appears', async () => {
     let current = new Date('2026-08-08T03:00:00Z')
     const loop = makeLoop(
-      { scanEnabled: false, maxScanCycles: 6 },
+      { scanEnabled: false, autoPr: false, issueQueueEnabled: true, maxScanCycles: 6 },
       stubProject,
       undefined,
       () => current,
     )
+    fakeForge.listOpenIssues = async () => { throw new Error('remote status unavailable') }
     const idleLines: Array<{ at: number; line: string }> = []
 
     for (let poll = 0; poll <= 60; poll += 1) {
@@ -1963,7 +2005,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     current = new Date('2026-08-08T03:31:30Z')
     await loop.poll()
     expect(logged.at(-1)).toBe(
-      'Idle Status      Task=0  Queue=0  0s  Waiting=pull request promotion',
+      'Idle Status      Task=0  Queue=0  0s  Waiting=finding status',
     )
   })
 
@@ -2057,6 +2099,24 @@ describe('failure announcement and burst stop (via poll)', () => {
     await loop.poll()
     expect(runnerStarts).toHaveLength(0)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain('queued-task')
+  })
+
+  it('requeues a local task when startup fails before a status can be persisted', async () => {
+    initializeGitRepo()
+    const taskId = '20260809_000002_003_auto-invalid-effort'
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 1 })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+    writeFileSync(join(paths.queueDir, 'effort', taskId), 'impossible\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:2\n`)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:2\n`)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(runnerStarts).toHaveLength(0)
+    expect(logText()).toContain("startup failed: effort must be minimal, low, medium or high")
   })
 
   it('releases a claimed issue immediately when task startup fails', async () => {
@@ -2210,7 +2270,8 @@ describe('completion marker output', () => {
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
     expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
-    expect(logText()).toContain('WARN could not read PR body: body read failed (repeated 2 times)')
+    expect(logText()).toContain('ERROR could not read PR body: body read failed (repeated 2 times)')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
 
     writeFileSync(join(repoRoot, 'tip-change.txt'), 'new tip\n')
     git(['add', 'tip-change.txt'])
@@ -2302,6 +2363,12 @@ describe('completion marker output', () => {
     expect(await loop.ensureDraftPr('cycle')).toBe(false)
     expect(logText()).toContain('WARN could not update PR body: body update failed')
     expect(existsSync(join(paths.queueDir, 'pr-url.txt'))).toBe(false)
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(logText()).toContain(
+      'ERROR could not update PR body: body update failed (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
   it('accepts a confirmed hand-edited PR body without overwriting it', async () => {
@@ -3389,6 +3456,27 @@ describe('scanForNextTasks', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
     expect(git(['rev-parse', 'HEAD'])).not.toBe(initialHead)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+  })
+
+  it('logs and stops after repeated local finding enqueue failures', async () => {
+    const loop = makeLoop(
+      {}, stubProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
+      () => { throw new Error('persistent local queue failure') },
+    )
+    const taskId = '20250101_000000_025_scan'
+    writeFinal(taskId, 'NEXT_TASK: [BUG] preserve a failed completion scan\n')
+
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+    expect(logText()).toContain(
+      'WARN could not enqueue finding from 025_scan: persistent local queue failure',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+    expect(logText()).toContain(
+      'ERROR could not enqueue finding from 025_scan: persistent local queue failure (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {
