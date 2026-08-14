@@ -637,9 +637,13 @@ async function findExistingFinding(
     try {
       recordedIssue = await forge.getIssue(recorded.issueNumber)
     } catch {
-      // A missing issue is stale in the same way as a closed one.
+      // A missing issue cannot validate even a durable advisory ledger entry.
     }
-    if (recordedIssue?.state === 'open'
+    const durableClosedAdvisory = recordedIssue?.state === 'closed'
+      && isAdvisoryFingerprint(fingerprint)
+      && issueHasMergedFix(paths, recordedIssue)
+    if (recordedIssue !== undefined
+      && (recordedIssue.state === 'open' || durableClosedAdvisory)
       && isTrustedFingerprintOwner(recordedIssue)
       && recordedIssue.labels.includes(LABEL_FINDING)
       && hasIssueFingerprint(recordedIssue, fingerprint)
@@ -647,6 +651,7 @@ async function findExistingFinding(
       // Advisory identifiers are deliberately durable because the same advisory
       // recurs with different prose.
       && issueSuppressesFingerprint(paths, recordedIssue, fingerprint)) {
+      if (durableClosedAdvisory) return recorded.issueNumber
       const fingerprints = issueFingerprints(recordedIssue)
       const survivor = (await reconcileOpenFindings(
         forge, paths, fingerprints, recorded.issueNumber, undefined, onMutation,
@@ -692,8 +697,8 @@ export async function unresolvedFindings(
 
 /**
  * File a finding as a ready issue unless an open issue already carries its
- * fingerprint. The check reads open findings only: a closed issue's fix already
- * landed, and a finding that genuinely resurfaces deserves a fresh issue.
+ * fingerprint. Ordinary closed findings can recur as fresh work; advisory identifiers
+ * remain durable after their promoted issue closes.
  */
 export async function publishFinding(
   forge: Forge,
@@ -1291,7 +1296,20 @@ async function claimRemoteIssue(
   }
 
   await forge.assignIssue(issue.number, me)
-  const afterAssignment = await forge.getIssue(issue.number)
+  let afterAssignment: ForgeIssue
+  try {
+    afterAssignment = await forge.getIssue(issue.number)
+  } catch (error) {
+    try {
+      await forge.unassignIssue(issue.number, me)
+    } catch (releaseError) {
+      throw new AggregateError(
+        [error, releaseError],
+        `Claim verification and compensation both failed for issue #${issue.number}`,
+      )
+    }
+    throw error
+  }
   const winner = [...afterAssignment.assignees].sort()[0]
   if (afterAssignment.state !== 'open'
     || !issueHasExactlyLifecycleLabel(afterAssignment, LABEL_READY)

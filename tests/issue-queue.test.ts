@@ -622,6 +622,24 @@ describe('publishFinding', () => {
       .toBe(`advisory:GHSA-QWWW-VCR4-C8H2 ${first.issueNumber}\n`)
   })
 
+  it('keeps advisory identifier deduplication after its promoted issue closes', async () => {
+    const first = await publishFinding(
+      forge, paths, '[SECURITY] GHSA-qwww-vcr4-c8h2 affects a dependency', 'scan-1',
+    )
+    recordIssueForTask(paths, 'task-advisory-fix', first.issueNumber)
+    recordIssuePromotion(paths, 'task-advisory-fix', 'a'.repeat(40), 'chore/run-branch')
+    await forge.closeIssue(first.issueNumber, 'Promoted')
+
+    const second = await publishFinding(
+      forge, paths, '[SECURITY] A differently worded recurrence of GHSA-QWWW-VCR4-C8H2', 'scan-2',
+    )
+
+    expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
+    expect(forge.issues.size).toBe(1)
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`advisory:GHSA-QWWW-VCR4-C8H2 ${first.issueNumber}\n`)
+  })
+
   it('drops a ledger entry for a closed issue and files the finding again', async () => {
     const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
     await forge.closeIssue(first.issueNumber, 'fixed')
@@ -955,6 +973,27 @@ describe('claimIssue', () => {
     const after = await forge.getIssue(issueNumber)
     expect(after.assignees).toEqual(['worker-b'])
     expect(after.labels).toContain(LABEL_READY)
+  })
+
+  it('releases the assignment when the first post-assignment read fails', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks during claim verification')
+    const issue = await forge.getIssue(issueNumber)
+    const getIssue = forge.getIssue.bind(forge)
+    let reads = 0
+    forge.getIssue = async (number) => {
+      if (number === issueNumber && ++reads === 2) {
+        throw new Error('getIssue failed after assignment')
+      }
+      return getIssue(number)
+    }
+
+    await expect(claimIssue(forge, paths, issue, 'worker-a', appendRequirement))
+      .rejects.toThrow('getIssue failed after assignment')
+
+    const after = await getIssue(issueNumber)
+    expect(after.assignees).toEqual([])
+    expect(after.labels).toContain(LABEL_READY)
+    expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
   it.each([
