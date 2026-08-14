@@ -110,12 +110,6 @@ export function isReviewTaskId(taskId: string): boolean {
   return taskId.includes('_review-c')
 }
 
-// Review-fix ids are <timestamp>_<seq>_fix-<slug>. They remain ordinary executable
-// work; the distinct kind carries their review origin through every task event.
-export function isReviewFixTaskId(taskId: string): boolean {
-  return /^\d{8}_\d{6}_\d{3}_fix-/.test(taskId)
-}
-
 // A task that only inspects reports findings and never commits: an empty worktree is
 // its expected result, not work an agent forgot to commit. A delegated task says the
 // same of itself through the queue/inspect marker, because its id carries the
