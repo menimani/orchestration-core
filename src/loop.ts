@@ -141,6 +141,21 @@ export function createLoop(deps: LoopDeps) {
   mkdirSync(scannedDir, { recursive: true })
   ensureBacklog(queueFile)
 
+  // A graceful daemon shutdown terminates its in-flight process trees and removes
+  // their ephemeral PID records, while their durable task status remains running.
+  // The next daemon must still report those tasks as failed, but they are not fresh
+  // evidence of a broken environment and therefore must not trip the burst guard.
+  const tasksDeadAtStartup = new Set(listTaskIds(paths).filter((taskId) => {
+    try {
+      const status = readStatus(paths, taskId)
+      return status?.status === 'running' && status.pid === null
+    } catch {
+      // The poll owns malformed-status reporting; startup classification must not move
+      // that failure outside its existing error boundary.
+      return false
+    }
+  }))
+
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
   const warningLog = new LoopWarningLog(paths, log, now)
@@ -1966,6 +1981,7 @@ export function createLoop(deps: LoopDeps) {
         ? (await refreshTask(paths, taskId))?.status
         : before.status
       if (status === undefined) continue
+      const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
 
       if (status === 'merged' && config.issueQueueEnabled) {
         const mergedStatus = readStatus(paths, taskId)
@@ -2022,7 +2038,7 @@ export function createLoop(deps: LoopDeps) {
           rmSync(join(paths.queueDir, `cycle-complete-${cycleNow}`), { force: true })
         }
         writeFileSync(failedFlag, '')
-        burstFailures += 1
+        if (!wasDeadAtStartup) burstFailures += 1
       }
 
       const scannedFlag = join(scannedDir, taskId)
