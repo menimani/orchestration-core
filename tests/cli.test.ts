@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { recordIssueForTask } from '../src/issueQueue.ts'
-import { branchName, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
+import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { writeStatus } from '../src/status.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -306,6 +306,33 @@ describe('manual merge', () => {
       mergeCommit,
       runBranch,
     })
+  })
+
+  it('preserves the merge failure streak for a no-change outcome', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260814_180935_082_user-no-change'
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The requested behavior is already present.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    await writeStatus(paths, taskId, 'completed')
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '3\n')
+
+    const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('3\n')
   })
 
   it('forwards failed check output before reporting the merge failure', async () => {
