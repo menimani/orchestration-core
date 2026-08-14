@@ -147,6 +147,26 @@ describe('loop replacement startup', () => {
     expect(launchDaemon).toHaveBeenCalledOnce()
   })
 
+  it('returns replacement cleanup failures after the startup timeout', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const child = fakeChild(43213)
+    child.kill = vi.fn(() => { throw new Error('access denied while stopping replacement') })
+
+    await expect(startLoopReplacement(join(root, 'ready'), {
+      env: environmentWithoutWrapper(),
+      operatingSystem: fakeOperatingSystem(child),
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      startupTimeoutMs: 1,
+    })).resolves.toEqual({
+      ok: false,
+      pid: 43213,
+      error: 'replacement did not become ready before the startup timeout; '
+        + 'replacement cleanup failed: access denied while stopping replacement',
+    })
+  })
+
   it('signals the wrapper process as the Windows restart owner', () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
     fixtureRoots.push(root)
