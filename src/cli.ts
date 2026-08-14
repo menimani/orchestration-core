@@ -830,8 +830,19 @@ async function runLoopDaemon(
     )
     const forge = await loadForge(config.forge, paths.repoRoot)
     const runner = await loadRunner(config.runner)
-    const project = await loadProject(paths.root)
-    const loop = createLoop({ paths, config, forge, runner, project, log, marker, now: () => new Date() })
+    const projectModule = await import('./adapters/project.ts')
+    const monitoredProject = await projectModule.loadMonitoredProject(paths.root)
+    const loop = createLoop({
+      paths,
+      config,
+      forge,
+      runner,
+      project: monitoredProject.project,
+      projectAdapterChanged: monitoredProject.sourceChanged,
+      log,
+      marker,
+      now: () => new Date(),
+    })
 
     if (!loop.validatePushTarget()) return 1
     await loop.initializeIssueQueue()
@@ -890,7 +901,9 @@ async function runLoopDaemon(
             ))
             return 1
           }
-          log(formatEventLine('Restarted', 'core', `replacement PID ${replacement.pid}`))
+          log(formatEventLine(
+            'Restarted', loop.restartSubject(), `replacement PID ${replacement.pid}`,
+          ))
         }
         return 0
       }

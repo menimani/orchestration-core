@@ -150,12 +150,45 @@ afterEach(() => {
 })
 
 describe('pre-cycle core update', () => {
+  it('restarts for a changed project adapter before checking core or starting a cycle', async () => {
+    const coreConfig = config({ CORE_AUTO_UPDATE: 'false' })
+    const updateCore = vi.fn(async () => 'continue' as const)
+    const adapterChanged = vi.fn(() => true)
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const loop = createLoop({
+      paths,
+      config: coreConfig,
+      forge: makeFakeForge(),
+      runner: {
+        sharedSkills: fakeRunnerSharedSkills,
+        start: async () => {
+          throw new Error('a scan must not start before the adapter restart')
+        },
+      },
+      project: stubProject,
+      log: (line) => events.push(line),
+      now: () => new Date(2026, 7, 12, 0, 0, 0),
+      updateCoreBeforeCycle: updateCore,
+      projectAdapterChanged: adapterChanged,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('restart')
+    expect(loop.restartSubject()).toBe('adapter')
+    expect(adapterChanged).toHaveBeenCalledOnce()
+    expect(updateCore).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(events).toContain('Restarting adapter     for cycle 1')
+  })
+
   it('pulls a behind subtree and requests re-exec before starting the cycle', async () => {
     const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
     const newCore = advanceUpstream('version two\n')
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
+    expect(loop.restartSubject()).toBe('core')
     expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
       .toBe('version two\n')
     expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)

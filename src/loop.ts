@@ -68,6 +68,7 @@ export interface LoopDeps {
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   enqueueTask?: typeof enqueueTask
   updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
+  projectAdapterChanged?: () => boolean
 }
 
 interface QueueEntry {
@@ -173,6 +174,8 @@ export function createLoop(deps: LoopDeps) {
       cycle,
       (name, subject, detail = '') => event(name, subject, detail),
     ))
+  const projectAdapterChanged = deps.projectAdapterChanged ?? (() => false)
+  let restartSubject = 'core'
 
   function rateLimitTime(resetAt: Date): string {
     return new Intl.DateTimeFormat('en-GB', {
@@ -1740,6 +1743,14 @@ export function createLoop(deps: LoopDeps) {
     const nextCycle = currentScans + 1
     // This is the only safe restart boundary: the previous gate is closed, no task is
     // running, and the next cycle has not yet consumed its number or started a scan.
+    // Restarting the whole daemon here is safer than hot-swapping the project adapter:
+    // every closure and adapter consumer changes atomically before any new work exists.
+    if (projectAdapterChanged()) {
+      restartSubject = 'adapter'
+      event('Restarting', 'adapter', `for cycle ${nextCycle}`)
+      return 'restart'
+    }
+    restartSubject = 'core'
     if (await updateCore(nextCycle) === 'restart') return 'restart'
     const requestedScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
     let nScans = requestedScans
@@ -2278,6 +2289,7 @@ export function createLoop(deps: LoopDeps) {
     validatePushTarget,
     initializeSessionStateForBranch,
     cleanupSessionState,
+    restartSubject: () => restartSubject,
     // exported for tests
     actionableFindings,
     recordScanYield,

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import ts from 'typescript'
@@ -461,10 +461,15 @@ function discoverProjectAdapter(orchestrationRoot: string): { path: string; name
   }
 }
 
-export async function loadProject(
+interface ResolvedProjectAdapter {
+  path: string
+  name?: string
+}
+
+function resolveProjectAdapter(
   orchestrationRoot: string,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<ProjectAdapter> {
+  env: NodeJS.ProcessEnv,
+): ResolvedProjectAdapter {
   const configuredName = env['PROJECT'] === undefined || env['PROJECT'] === ''
     ? undefined
     : env['PROJECT']
@@ -475,14 +480,21 @@ export async function loadProject(
     ? discoverProjectAdapter(orchestrationRoot)
     : undefined
   const name = configuredName ?? discovered?.name
-  const adapterPath = configuredPath !== undefined
-    ? resolve(orchestrationRoot, configuredPath)
-    : discovered?.path ?? resolve(orchestrationRoot, 'project', `project-${name}.ts`)
-
-  if (!existsSync(adapterPath)) {
-    throw new Error(`Project adapter not found: ${adapterPath}`)
+  return {
+    name,
+    path: configuredPath !== undefined
+      ? resolve(orchestrationRoot, configuredPath)
+      : discovered?.path ?? resolve(orchestrationRoot, 'project', `project-${name}.ts`),
   }
+}
 
+export interface MonitoredProjectAdapter {
+  project: ProjectAdapter
+  path: string
+  sourceChanged: () => boolean
+}
+
+async function importProject(adapterPath: string, name?: string): Promise<ProjectAdapter> {
   const mod = await import(pathToFileURL(adapterPath).href) as Record<string, unknown>
   let matchingProblem: string | undefined
   for (const value of Object.values(mod)) {
@@ -499,4 +511,45 @@ export async function loadProject(
   }
   const expected = name === undefined ? 'a project adapter' : `project '${name}'`
   throw new Error(`Project adapter '${adapterPath}' does not export ${expected}`)
+}
+
+/** Load an adapter and retain the exact source the daemon must stop using if it changes. */
+export async function loadMonitoredProject(
+  orchestrationRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<MonitoredProjectAdapter> {
+  const resolved = resolveProjectAdapter(orchestrationRoot, env)
+  if (!existsSync(resolved.path)) {
+    throw new Error(`Project adapter not found: ${resolved.path}`)
+  }
+
+  const sourceBeforeImport = readFileSync(resolved.path)
+  const project = await importProject(resolved.path, resolved.name)
+  const source = readFileSync(resolved.path)
+  if (!source.equals(sourceBeforeImport)) {
+    throw new Error(`Project adapter changed while it was loading: ${resolved.path}`)
+  }
+  return {
+    project,
+    path: resolved.path,
+    sourceChanged: () => {
+      try {
+        return !readFileSync(resolved.path).equals(source)
+      } catch {
+        // Missing and unreadable adapters must both fail closed through a restart.
+        return true
+      }
+    },
+  }
+}
+
+export async function loadProject(
+  orchestrationRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ProjectAdapter> {
+  const resolved = resolveProjectAdapter(orchestrationRoot, env)
+  if (!existsSync(resolved.path)) {
+    throw new Error(`Project adapter not found: ${resolved.path}`)
+  }
+  return importProject(resolved.path, resolved.name)
 }
