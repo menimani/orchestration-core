@@ -281,6 +281,7 @@ export function createLoop(deps: LoopDeps) {
       if (error instanceof ForgeRateLimitError) return false
       warning('reconcile-closed-issue-labels', 'reconciling closed issue labels',
         `could not reconcile closed issue labels: ${errorSummary(error)}`)
+      return false
     }
     issueQueueInitialized = true
     return true
@@ -871,8 +872,13 @@ export function createLoop(deps: LoopDeps) {
       try {
         const enqueue = enqueueTaskImpl(paths, newId, newDepth)
         if (enqueue.outcome === 'enqueued') recordPublishedTask()
-      } catch {
+      } catch (error) {
         reconciled = false
+        reportGateFailure(
+          `could not enqueue finding from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
+          true,
+          `completion-scan-${taskId}`,
+        )
       }
     }
     return { findings, destinations, reconciled }
@@ -1278,7 +1284,7 @@ export function createLoop(deps: LoopDeps) {
   async function ensureDraftPr(mode: 'cycle' | 'final'): Promise<boolean> {
     const branch = git(['branch', '--show-current']).trim()
     if (branch === '') {
-      reportGateFailure('could not get branch name; PR skipped')
+      reportGateFailure('could not get branch name; PR skipped', true)
       return false
     }
     let pushRemote: string
@@ -1305,14 +1311,14 @@ export function createLoop(deps: LoopDeps) {
       'symbolic-ref', '--quiet', '--short', `refs/remotes/${baseRemote}/HEAD`,
     ]).trim()
     if (!baseRef.startsWith(`${baseRemote}/`)) {
-      reportGateFailure(`could not get ${baseRemote} default branch; PR skipped`)
+      reportGateFailure(`could not get ${baseRemote} default branch; PR skipped`, true)
       return false
     }
     const baseBranch = baseRef.slice(baseRemote.length + 1)
     try {
       gitIn(paths.repoRoot, ['fetch', baseRemote, baseBranch, '--quiet'])
     } catch (error) {
-      reportGateFailure(`could not fetch ${baseRef}: ${errorSummary(error)}`)
+      reportGateFailure(`could not fetch ${baseRef}: ${errorSummary(error)}`, true)
       return false
     }
     const cycle = readCount(scanCountFile)
@@ -1324,7 +1330,7 @@ export function createLoop(deps: LoopDeps) {
       status = await forge.prStatus({ kind: 'branch', value: branch })
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
-        reportGateFailure(`could not check PR status: ${errorSummary(error)}`)
+        reportGateFailure(`could not check PR status: ${errorSummary(error)}`, true)
       }
       return false
     }
@@ -1336,7 +1342,7 @@ export function createLoop(deps: LoopDeps) {
         body = await forge.prBody(branch)
       } catch (error) {
         if (!(error instanceof ForgeRateLimitError)) {
-          reportGateFailure(`could not read PR body: ${errorSummary(error)}`)
+          reportGateFailure(`could not read PR body: ${errorSummary(error)}`, true)
         }
         return false
       }
@@ -1350,7 +1356,7 @@ export function createLoop(deps: LoopDeps) {
           : { title })
       } catch (error) {
         if (!(error instanceof ForgeRateLimitError)) {
-          reportGateFailure(`could not update PR ${generatedBody ? 'body' : 'title'}: ${errorSummary(error)}`)
+          reportGateFailure(`could not update PR ${generatedBody ? 'body' : 'title'}: ${errorSummary(error)}`, true)
         }
         return false
       }
@@ -1372,7 +1378,7 @@ export function createLoop(deps: LoopDeps) {
       return true
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
-        reportGateFailure(`could not create PR: ${errorSummary(error)}`)
+        reportGateFailure(`could not create PR: ${errorSummary(error)}`, true)
       }
       return false
     }
@@ -1647,7 +1653,7 @@ export function createLoop(deps: LoopDeps) {
               if (error instanceof ForgeRateLimitError) return 'continue'
               warning('reconcile-closed-issue-labels', 'reconciling closed issue labels',
                 `could not reconcile closed issue labels: ${errorSummary(error)}`)
-              reconciledCycleGates.add(currentScans)
+              return 'continue'
             }
           }
           // A cycle that lost tasks did not do what it set out to do, and the PR cannot
@@ -2254,6 +2260,12 @@ export function createLoop(deps: LoopDeps) {
             }
           } else {
             event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)
+            if (readStatus(paths, entry.taskId) === undefined) {
+              enqueueTask(paths, entry.taskId, entry.depth)
+              // A deterministic preflight error would otherwise be dequeued again in
+              // this poll. Preserve it for a later poll after the input is repaired.
+              break
+            }
           }
         }
       }
