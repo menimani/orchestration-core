@@ -35,6 +35,10 @@ const SOURCE_NAMES: ReadonlySet<string> = new Set([
 const GENERATED_DIRECTORY_NAMES: ReadonlySet<string> = new Set([
   '.git', 'build', 'coverage', 'dist', 'node_modules',
 ])
+const GENERATED_DIRECTORY_PATTERNS: readonly RegExp[] = [
+  /^\.node_modules\.previous-.+/,
+  /^\.orchestration-npm-ci-.+/,
+]
 const RUNTIME_DIRECTORIES: ReadonlySet<string> = new Set([
   'orchestration/logs',
   'orchestration/queue',
@@ -51,14 +55,16 @@ const permitted = (character: string): boolean =>
 
 const normalizedPath = (file: string): string => file.replaceAll('\\', '/')
 
-const repositoryRelativePath = (file: string): string => normalizedPath(relative(
-  PACKAGE_ROOT,
-  isAbsolute(file) ? file : resolve(PACKAGE_ROOT, file),
+const repositoryRelativePath = (file: string, root = PACKAGE_ROOT): string => normalizedPath(relative(
+  root,
+  isAbsolute(file) ? file : resolve(root, file),
 ))
 
-const isGeneratedDirectory = (directory: string): boolean => {
-  const repositoryPath = repositoryRelativePath(directory)
-  return GENERATED_DIRECTORY_NAMES.has(repositoryPath.split('/').at(-1) ?? '')
+const isGeneratedDirectory = (directory: string, root: string): boolean => {
+  const repositoryPath = repositoryRelativePath(directory, root)
+  const name = repositoryPath.split('/').at(-1) ?? ''
+  return GENERATED_DIRECTORY_NAMES.has(name)
+    || GENERATED_DIRECTORY_PATTERNS.some((pattern) => pattern.test(name))
     || RUNTIME_DIRECTORIES.has(repositoryPath)
 }
 
@@ -86,21 +92,21 @@ const isSource = (file: string): boolean => {
   return SOURCE_NAMES.has(name) || SOURCE_EXTENSIONS.has(extname(name))
 }
 
-const walk = (directory: string): string[] =>
+const walk = (directory: string, root: string): string[] =>
   readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const fullPath = join(directory, entry.name)
-    if (entry.isDirectory()) return isGeneratedDirectory(fullPath) ? [] : walk(fullPath)
+    if (entry.isDirectory()) return isGeneratedDirectory(fullPath, root) ? [] : walk(fullPath, root)
     return entry.isFile() && isSource(entry.name) ? [fullPath] : []
   })
 
-export const main = (): number => {
+export const main = (root = PACKAGE_ROOT): number => {
   let hits = 0
 
-  for (const file of walk(PACKAGE_ROOT)) {
+  for (const file of walk(root, root)) {
     for (const violation of scanText(readFileSync(file, 'utf8'))) {
       // Name the code points because some offenders, such as zero-width spaces, are
       // invisible in the report too.
-      console.log(`${repositoryRelativePath(file)}:${violation.line}: ${violation.codePoints.join(' ')}`)
+      console.log(`${repositoryRelativePath(file, root)}:${violation.line}: ${violation.codePoints.join(' ')}`)
       console.log(`    ${violation.text}`)
       hits++
     }

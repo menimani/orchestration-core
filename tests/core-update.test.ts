@@ -299,6 +299,30 @@ describe('pre-cycle core update', () => {
     )), events.join('\n')).toBe(true)
   })
 
+  it('syncs managed skills while preserving an unrelated staged repository skill', async () => {
+    const bundled = join(packageRoot, 'skills', 'loop-start', 'SKILL.md')
+    writeFileSync(bundled, 'version two: {{ORCHESTRATION_COMMAND_PREFIX}} loop-status\n')
+    commit(repoRoot, 'test: update bundled skill fixture')
+    const unrelated = join(repoRoot, '.claude', 'skills', 'verify-changes', 'SKILL.md')
+    mkdirSync(join(unrelated, '..'), { recursive: true })
+    writeFileSync(unrelated, 'repository-owned skill\n')
+    git(repoRoot, ['add', '--', '.claude/skills/verify-changes/SKILL.md'])
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('continue')
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe('version two: npm run -C orchestration/ts loop-status\n')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
+    expect(git(repoRoot, ['show', ':.claude/skills/verify-changes/SKILL.md'])
+      .replaceAll('\r', ''))
+      .toBe('repository-owned skill')
+    expect(git(repoRoot, ['status', '--short']))
+      .toBe('A  .claude/skills/verify-changes/SKILL.md')
+    expect(events.some((line) => line.includes('staged changes exist at'))).toBe(false)
+  })
+
   it('warns on a dirty tree and starts the cycle without changing the subtree', async () => {
     advanceUpstream('version two\n')
     writeFileSync(join(repoRoot, 'host.txt'), 'dirty host\n')

@@ -968,6 +968,22 @@ describe('runAutoReview', () => {
     expect(spec).toContain('against origin/trunk')
   })
 
+  it('refreshes an intact remote default branch before generating the review', () => {
+    const staleBase = git(['rev-parse', 'refs/remotes/origin/main'])
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'advanced\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'advance default branch'])
+    const advancedBase = git(['rev-parse', 'HEAD'])
+    git(['push', 'origin', 'main'])
+    git(['update-ref', 'refs/remotes/origin/main', staleBase])
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+
+    expect(git(['rev-parse', 'refs/remotes/origin/main'])).toBe(advancedBase)
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+    expect(spec).toContain('against origin/main')
+  })
+
   it('reviews a fork branch against its tracked upstream instead of its push remote', () => {
     git(['remote', 'rename', 'origin', 'upstream'])
     const fork = join(repoRoot, 'fork.git')
@@ -1010,7 +1026,6 @@ describe('runAutoReview', () => {
     git(['commit', '-m', 'advance default branch'])
     git(['push', 'origin', 'main'])
     git(['update-ref', 'refs/remotes/origin/main', staleBase])
-    git(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
     writeFileSync(join(repoRoot, '.git', 'refs', 'remotes', 'origin', 'main.lock'), '')
 
     expect(makeLoop().runAutoReview(7, false)).toBe(false)

@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { isAbsolute, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
 import type { Runner } from './adapters/runner.ts'
 import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
-import { syncSharedSkills } from './sharedSkills.ts'
+import { sharedSkillManagedPaths, syncSharedSkills } from './sharedSkills.ts'
 
 export type CoreUpdateOutcome = 'continue' | 'restart'
 
@@ -59,15 +59,6 @@ function repositoryPaths(repoRoot: string, paths: string[]): string[] {
   })
 }
 
-function sharedSkillRoots(repoRoot: string, runner: Runner): string[] {
-  const roots = [
-    runner.sharedSkills.destinationRoot(repoRoot),
-    ...(runner.sharedSkills.legacyRoots?.(repoRoot) ?? []),
-    join(repoRoot, '.claude', 'skills'),
-  ]
-  return [...new Set(repositoryPaths(repoRoot, roots))]
-}
-
 function syncSkills(
   repoRoot: string,
   packageRoot: string,
@@ -78,8 +69,12 @@ function syncSkills(
 ): void {
   if (isConsumer) {
     try {
+      const managedPaths = repositoryPaths(
+        repoRoot,
+        sharedSkillManagedPaths(repoRoot, packageRoot, runner),
+      )
       const alreadyStaged = runtime.git(repoRoot, [
-        'diff', '--cached', '--name-only', '--', ...sharedSkillRoots(repoRoot, runner),
+        'diff', '--cached', '--name-only', '--', ...managedPaths,
       ]).trim()
       if (alreadyStaged !== '') {
         event('WARN',

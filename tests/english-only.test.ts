@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import { main, scanText } from '../checks/english-only.ts'
+
+const fixtures: string[] = []
+
+afterEach(() => {
+  for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true })
+})
 
 describe('English-only source check', () => {
   it('accepts ASCII, English typography, and borrowed Latin letters', () => {
@@ -27,5 +36,21 @@ describe('English-only source check', () => {
 
   it('checks every repository source during the normal test suite', () => {
     expect(main()).toBe(0)
+  })
+
+  it('ignores retained dependency trees from safe npm cleanup failures', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-english-only-'))
+    fixtures.push(root)
+    writeFileSync(join(root, 'source.ts'), 'export const value = 1\n')
+    for (const retained of [
+      '.node_modules.previous-123-456',
+      '.orchestration-npm-ci-abcdef',
+    ]) {
+      const dependency = join(root, retained, 'node_modules', 'fixture')
+      mkdirSync(dependency, { recursive: true })
+      writeFileSync(join(dependency, 'README.md'), 'dependency emoji \ud83d\udca1\n')
+    }
+
+    expect(main(root)).toBe(0)
   })
 })

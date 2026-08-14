@@ -50,6 +50,28 @@ export interface SharedSkillsSyncResult {
   failures: string[]
 }
 
+/** Paths a consumer sync owns before it mutates any generated skill tree. */
+export function sharedSkillManagedPaths(
+  repoRoot: string,
+  packageRoot: string,
+  runner: Runner,
+): string[] {
+  const manifest = readManifest(packageRoot)
+  const paths: string[] = []
+  for (const target of skillTargets(repoRoot, runner)) {
+    paths.push(join(target.destinationRoot, STATE_FILE))
+    paths.push(...manifest.skills.map((skill) => join(target.destinationRoot, skill)))
+    for (const legacyRoot of target.legacyRoots) {
+      const stateFile = join(legacyRoot, STATE_FILE)
+      if (!existsSync(stateFile)) continue
+      const state = readState(stateFile)
+      paths.push(stateFile)
+      paths.push(...Object.keys(state.skills).map((skill) => join(legacyRoot, skill)))
+    }
+  }
+  return [...new Set(paths)]
+}
+
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
