@@ -138,6 +138,43 @@ describe('test suite wrapper', () => {
     expect(result.stderr).toBe('')
   })
 
+  it('waits for a live owner when its process identity is temporarily unavailable', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-owner-unknown-'))
+    fixtures.push(fixture)
+    const scripts = join(fixture, 'scripts')
+    const vitest = join(fixture, 'node_modules', 'vitest')
+    mkdirSync(scripts, { recursive: true })
+    mkdirSync(vitest, { recursive: true })
+    const wrapper = readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs'), 'utf8')
+      .replace(
+        'function processIdentity(pid) {',
+        "function processIdentity(pid) {\n  if (String(pid) === process.env.ORCHESTRATION_TEST_UNKNOWN_IDENTITY_PID) return null",
+      )
+    writeFileSync(join(scripts, 'run-tests.mjs'), wrapper)
+    writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+    writeFileSync(join(vitest, 'vitest.mjs'), '')
+    const lock = join(fixture, '.orchestration-test-suite-lock')
+    mkdirSync(lock)
+    writeFileSync(join(lock, 'owner.json'), `${JSON.stringify({
+      pid: process.pid,
+      token: 'previous-owner',
+      processIdentity: 'temporarily-unverifiable',
+      acquiredAt: new Date().toISOString(),
+      cwd: fixture,
+    })}\n`)
+
+    const result = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
+      ...process.env,
+      ORCHESTRATION_TEST_LOCK_TIMEOUT_MS: '100',
+      ORCHESTRATION_TEST_UNKNOWN_IDENTITY_PID: String(process.pid),
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('identity unavailable')
+    expect(result.stderr).toMatch(/Timed out after 100ms/)
+    expect(existsSync(lock)).toBe(true)
+  })
+
   it('stops waiting at the configured deadline and reports the owner', async () => {
     const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-timeout-'))
     fixtures.push(fixture)

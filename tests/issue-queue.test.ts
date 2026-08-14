@@ -10,12 +10,13 @@ import type { ForgeIssue } from '../src/adapters/forge.ts'
 import {
   buildIssueBody, claimIssue, claimIssueGroup, closeIssueAndRemoveLifecycleLabels,
   commentOnIssueMerge, fingerprintOf, groupReadyFindings, heartbeatIssueForTask,
-  issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   IssueReleaseReconciliationError,
   missingRequirementCompletionMarkers, parseIssueBody,
   publishDelegatedTask, publishFinding, reapStaleLeases,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints, recordIssueForTask,
-  recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotion, recordIssuePromotions,
+  recordIssueCompletions, recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotion,
+  recordIssuePromotions,
   releaseIssueClaim,
   returnIssueToReady, LABEL_FINDING,
   LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
@@ -622,13 +623,19 @@ describe('publishFinding', () => {
       .toBe(`advisory:GHSA-QWWW-VCR4-C8H2 ${first.issueNumber}\n`)
   })
 
-  it('keeps advisory identifier deduplication after its promoted issue closes', async () => {
+  it('keeps advisory deduplication after closed promotion metadata is cleaned up', async () => {
     const first = await publishFinding(
       forge, paths, '[SECURITY] GHSA-qwww-vcr4-c8h2 affects a dependency', 'scan-1',
     )
     recordIssueForTask(paths, 'task-advisory-fix', first.issueNumber)
     recordIssuePromotion(paths, 'task-advisory-fix', 'a'.repeat(40), 'chore/run-branch')
     await forge.closeIssue(first.issueNumber, 'Promoted')
+    await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
+
+    expect(issuePromotionForIssue(paths, first.issueNumber)).toBeUndefined()
+    expect(issueCompletionForIssue(paths, first.issueNumber)).toMatchObject({
+      taskId: 'task-advisory-fix', outcome: 'merged',
+    })
 
     const second = await publishFinding(
       forge, paths, '[SECURITY] A differently worded recurrence of GHSA-QWWW-VCR4-C8H2', 'scan-2',
@@ -638,6 +645,25 @@ describe('publishFinding', () => {
     expect(forge.issues.size).toBe(1)
     expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
       .toBe(`advisory:GHSA-QWWW-VCR4-C8H2 ${first.issueNumber}\n`)
+  })
+
+  it('keeps advisory deduplication after a no-change completion', async () => {
+    const first = await publishFinding(
+      forge, paths, '[SECURITY] GHSA-qwww-vcr4-c8h2 affects a dependency', 'scan-1',
+    )
+    recordIssueForTask(paths, 'task-advisory-no-change', first.issueNumber)
+    recordIssueCompletions(paths, 'task-advisory-no-change', 'no-change')
+    await forge.closeIssue(first.issueNumber, 'No change warranted')
+
+    const second = await publishFinding(
+      forge, paths, '[SECURITY] Different wording for GHSA-QWWW-VCR4-C8H2', 'scan-2',
+    )
+
+    expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
+    expect(forge.issues.size).toBe(1)
+    expect(issueCompletionForIssue(paths, first.issueNumber)).toMatchObject({
+      taskId: 'task-advisory-no-change', outcome: 'no-change',
+    })
   })
 
   it('drops a ledger entry for a closed issue and files the finding again', async () => {

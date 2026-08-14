@@ -9,7 +9,8 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
-  buildIssueBody, issueNumbersForTask, issuePromotionForIssue, recordIssueForTask,
+  buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
+  recordIssueForTask,
   recordIssuePromotion, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
@@ -632,6 +633,23 @@ describe('actionable findings', () => {
       'NEXT_TASK: nothing to report',
     ].join('\n'))
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
+  })
+
+  it('ignores Japanese descriptions that only report no findings', () => {
+    const loop = makeLoop()
+    const phrases = [
+      [0x6307, 0x6458, 0x306a, 0x3057],
+      [0x554f, 0x984c, 0x306a, 0x3057],
+      [0x8a72, 0x5f53, 0x306a, 0x3057],
+      [0x7279, 0x306b, 0x306a, 0x3057],
+      [0x306a, 0x3057],
+    ].map((points) => String.fromCodePoint(...points))
+    const fullStop = String.fromCodePoint(0x3002)
+    const findings = phrases.flatMap((phrase) => [phrase, `${phrase}${fullStop}`])
+    writeFinal('t4-ja', findings.map((finding) => `NEXT_TASK: ${finding}`).join('\n'))
+
+    expect(loop.actionableFindings(finalMessageFile(paths, 't4-ja'))).toEqual([])
+    expect(logged).toEqual([])
   })
 
   it('warns and ignores a finding whose description cannot produce a task slug', () => {
@@ -2751,6 +2769,9 @@ describe('completed task merge recovery', () => {
     expect(await loop.poll()).toBe('continue')
 
     expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(issueCompletionForIssue(paths, issueNumber)).toMatchObject({
+      taskId, outcome: 'no-change',
+    })
     expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
     expect(fakeForge.issueComments.get(issueNumber)?.join('\n'))
       .toContain('no change was warranted')

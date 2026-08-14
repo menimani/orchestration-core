@@ -49,7 +49,7 @@ import {
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
-  recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
+  recordIssueCompletions, recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
@@ -393,6 +393,7 @@ export function createLoop(deps: LoopDeps) {
                 `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
           },
         })
+        recordIssueCompletions(paths, taskId, 'no-change')
         return
       }
       throw new Error(`${taskId} has no commits and is not an inspection task`)
@@ -660,9 +661,19 @@ export function createLoop(deps: LoopDeps) {
 
   function reportsNothing(text: string): boolean {
     const trimmed = text.trim()
-    const normalized = trimmed.replace(/[.!]+$/, '').toLowerCase()
+    const ideographicFullStop = String.fromCodePoint(0x3002)
+    const normalized = trimmed.replace(/[.!]+$/, '')
+      .replace(new RegExp(`${ideographicFullStop}+$`), '').toLowerCase()
     if (['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
       .includes(normalized)) return true
+    const noFindingPhrases = [
+      [0x6307, 0x6458, 0x306a, 0x3057],
+      [0x554f, 0x984c, 0x306a, 0x3057],
+      [0x8a72, 0x5f53, 0x306a, 0x3057],
+      [0x7279, 0x306b, 0x306a, 0x3057],
+      [0x306a, 0x3057],
+    ].map((points) => String.fromCodePoint(...points))
+    if (noFindingPhrases.includes(normalized)) return true
     const firstSentence = (trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? '')
       .replace(/[.!]+$/, '').toLowerCase()
     return /^none\b/.test(firstSentence)
@@ -1953,6 +1964,7 @@ export function createLoop(deps: LoopDeps) {
           },
         })
         if (mergeResult.outcome === 'no-change') {
+          recordIssueCompletions(paths, taskId, 'no-change')
           event('No-change', shortTaskId(taskId), 'no change warranted')
           if (!isInspectionTaskId(paths, taskId)) {
             const cycle = readCount(scanCountFile)
