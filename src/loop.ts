@@ -37,6 +37,7 @@ import {
 import { pitfallsFileForDesc } from './gates.ts'
 import { currentBranchPushRemote, currentBranchTrackingRemote } from './gitRemote.ts'
 import { LoopWarningLog } from './loopLog.ts'
+import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
@@ -631,16 +632,9 @@ export function createLoop(deps: LoopDeps) {
 
   function reportsNothing(text: string): boolean {
     const trimmed = text.trim()
-    const normalized = trimmed.replace(/[\u3002.!]+$/, '').toLowerCase()
+    const normalized = trimmed.replace(/[.!]+$/, '').toLowerCase()
     if (['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
       .includes(normalized)) return true
-    if ([
-      '\u6307\u6458\u306a\u3057',
-      '\u554f\u984c\u306a\u3057',
-      '\u8a72\u5f53\u306a\u3057',
-      '\u7279\u306b\u306a\u3057',
-      '\u306a\u3057',
-    ].includes(normalized)) return true
     const firstSentence = (trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? '')
       .replace(/[.!]+$/, '').toLowerCase()
     return /^none\b/.test(firstSentence)
@@ -1331,7 +1325,7 @@ export function createLoop(deps: LoopDeps) {
         }
         return false
       }
-      const generatedBody = body.includes(GENERATED_BODY_MARKER)
+      const generatedBody = body.split(/\r?\n/, 1)[0] === GENERATED_BODY_MARKER
       try {
         await forge.updatePr(branch, generatedBody
           ? {
@@ -1389,13 +1383,14 @@ export function createLoop(deps: LoopDeps) {
     previousGateFailures.delete('ci-status')
     if (status.state === 'none') return 'unknown'
     if (status.state === 'merged') return 'success'
-    if (status.checks.length === 0) {
+    const checks = newestChecksByName(status.checks)
+    if (checks.length === 0) {
       // Silence cannot prove success: workflows may be delayed or misconfigured. Only a
       // project that explicitly declares it expects no CI checks may clear this gate.
       return project.ciChecksExpected === false ? 'success' : 'unknown'
     }
-    if (status.checks.some((check) => check.conclusion === 'pending')) return 'pending'
-    if (status.checks.some((check) => check.conclusion === 'failure')) return 'failure'
+    if (checks.some((check) => check.conclusion === 'pending')) return 'pending'
+    if (checks.some((check) => check.conclusion === 'failure')) return 'failure'
     return 'success'
   }
 

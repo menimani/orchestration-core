@@ -634,25 +634,9 @@ describe('actionable findings', () => {
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
   })
 
-  it('ignores Japanese descriptions that only report no findings', () => {
-    const loop = makeLoop()
-    const phrases = [
-      '\u6307\u6458\u306a\u3057',
-      '\u554f\u984c\u306a\u3057',
-      '\u8a72\u5f53\u306a\u3057',
-      '\u7279\u306b\u306a\u3057',
-      '\u306a\u3057',
-    ]
-    const findings = phrases.flatMap((phrase) => [phrase, `${phrase}\u3002`])
-    writeFinal('t4-ja', findings.map((finding) => `NEXT_TASK: ${finding}`).join('\n'))
-
-    expect(loop.actionableFindings(finalMessageFile(paths, 't4-ja'))).toEqual([])
-    expect(logged).toEqual([])
-  })
-
   it('warns and ignores a finding whose description cannot produce a task slug', () => {
     const loop = makeLoop()
-    const finding = '\u8a2d\u5b9a\u753b\u9762\u304c\u958b\u3051\u306a\u3044'
+    const finding = '[!!!]'
     writeFinal('t-empty-slug', `NEXT_TASK: ${finding}\n`)
 
     expect(loop.actionableFindings(finalMessageFile(paths, 't-empty-slug'))).toEqual([])
@@ -742,6 +726,17 @@ describe('checkPrCiStatus', () => {
       { name: 'b', conclusion: 'failure', startedAt: '' },
     ]
     expect(await loop.checkPrCiStatus()).not.toBe('success')
+  })
+
+  it('uses the newest rerun of each check name', async () => {
+    const loop = makeLoop()
+    forgeStatus.checks = [
+      { name: 'frontend', conclusion: 'success', startedAt: '2026-08-14T02:00:00Z' },
+      { name: 'frontend', conclusion: 'failure', startedAt: '2026-08-14T01:00:00Z' },
+      { name: 'backend', conclusion: 'success', startedAt: '2026-08-14T01:30:00Z' },
+    ]
+
+    expect(await loop.checkPrCiStatus()).toBe('success')
   })
 
   it('does not clear the gate for an old PR head with no checks', async () => {
@@ -1339,6 +1334,71 @@ describe('cycle gate', () => {
     expect(logged).toContain(`LOOP_DONE: ${prUrl}`)
     expect(logged).toContain(`Completed Loop        PR ${prUrl}`)
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('retains empty-cap session state when promotion fails, then retries', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    const loop = makeLoop({
+      autoPr: true,
+      reviewEnabled: false,
+      maxScanCycles: 5,
+      maxEmptyScans: 2,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'empty-scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
+    let promotions = 0
+    fakeForge.markPrReady = async () => {
+      promotions += 1
+      if (promotions === 1) throw new Error('promotion failed')
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(promotions).toBe(1)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(readFileSync(join(paths.queueDir, 'empty-scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(true)
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+    expect(promotions).toBe(2)
+  })
+
+  it('promotes and cleans the session when the empty-scan cap is complete', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    const loop = makeLoop({
+      autoPr: true,
+      reviewEnabled: false,
+      maxScanCycles: 5,
+      maxEmptyScans: 2,
+    })
+    const scannedDir = join(paths.queueDir, 'scanned')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'empty-scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-2'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-2'), '')
+    writeFileSync(join(paths.queueDir, 'decisions.txt'), 'Keep the compatibility path.\n')
+    mkdirSync(scannedDir, { recursive: true })
+    writeFileSync(join(scannedDir, 'completed-task'), '')
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'empty-scan-count.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-2'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'decisions.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'pr-url.txt'))).toBe(false)
+    expect(readdirSync(scannedDir)).toEqual([])
   })
 
   it('keeps running while scanning can still produce work', async () => {
@@ -2258,6 +2318,23 @@ describe('completion marker output', () => {
     })
     expect(readFileSync(join(paths.queueDir, 'pr-url.txt'), 'utf8'))
       .toBe('https://example.test/pull/1\n')
+  })
+
+  it('does not overwrite an edited PR body with a displaced generated marker', async () => {
+    configureLocalRemote()
+    const loop = makeLoop()
+    fakeForge.prBody = async () => [
+      'A person rewrote this summary.',
+      GENERATED_BODY_MARKER,
+      'The marker remains only as quoted history.',
+    ].join('\n')
+    const updatePr = vi.fn(async () => {})
+    fakeForge.updatePr = updatePr
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(true)
+    expect(updatePr).toHaveBeenCalledWith('main', {
+      title: 'feat: autonomous scan loop — cycle 0/3',
+    })
   })
 
   it('creates and summarizes a PR against the remote default branch', async () => {
