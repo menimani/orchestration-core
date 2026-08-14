@@ -209,10 +209,13 @@ values must be non-negative integers, with the narrower bounds stated below.
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop).
 14. Effort defaults: scans and automatic reviews run the runner at high reasoning
-    effort, and queued tasks at medium. `SCAN_EFFORT`, `TASK_EFFORT`, and
-    `REVIEW_EFFORT` accept `minimal`, `low`, `medium`, or `high` and override their
-    respective defaults; `SCAN_MODEL` and `TASK_MODEL` override the runner model, and
-    `delegate --effort` overrides effort per task.
+    effort, and queued tasks at medium. Fixes spawned by an automatic review are the
+    exception: they always run at high effort because they repair findings that escaped
+    the original implementation. `SCAN_EFFORT`, `TASK_EFFORT`, and `REVIEW_EFFORT`
+    accept `minimal`, `low`, `medium`, or `high` and override their respective defaults;
+    `TASK_EFFORT` applies to queued tasks that do not have a per-task override, so it does
+    not replace the high-effort review-fix override. `SCAN_MODEL` and `TASK_MODEL`
+    override the runner model, and `delegate --effort` overrides effort per task.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
     previous cycle gate has closed and while no task is running, the daemon first compares
     the selected project adapter with the exact source loaded at startup. A changed,
