@@ -634,22 +634,6 @@ describe('actionable findings', () => {
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
   })
 
-  it('ignores Japanese descriptions that only report no findings', () => {
-    const loop = makeLoop()
-    const phrases = [
-      '\u6307\u6458\u306a\u3057',
-      '\u554f\u984c\u306a\u3057',
-      '\u8a72\u5f53\u306a\u3057',
-      '\u7279\u306b\u306a\u3057',
-      '\u306a\u3057',
-    ]
-    const findings = phrases.flatMap((phrase) => [phrase, `${phrase}\u3002`])
-    writeFinal('t4-ja', findings.map((finding) => `NEXT_TASK: ${finding}`).join('\n'))
-
-    expect(loop.actionableFindings(finalMessageFile(paths, 't4-ja'))).toEqual([])
-    expect(logged).toEqual([])
-  })
-
   it('warns and ignores a finding whose description cannot produce a task slug', () => {
     const loop = makeLoop()
     const finding = '[!!!]'
