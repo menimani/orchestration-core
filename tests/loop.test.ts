@@ -2010,6 +2010,37 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n')).toHaveLength(3)
   })
 
+  it('does not count tasks already dead at daemon startup as a failure burst', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    for (const taskId of ['old-f1', 'old-f2', 'old-f3']) {
+      writeRawStatus(taskId, 'running', null)
+    }
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of ['old-f1', 'old-f2', 'old-f3']) {
+      expect(readStatus(paths, taskId)?.status).toBe('failed')
+      expect(logged).toContain(
+        `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`,
+      )
+    }
+    expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n'))
+      .toHaveLength(3)
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    for (const taskId of ['old-f1', 'old-f2', 'old-f3']) {
+      rmSync(join(paths.queueDir, 'scanned', `${taskId}.failed`))
+      writeRawStatus(taskId, 'running', null)
+    }
+    logged = []
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logText()).toContain('ERROR 3 tasks failed in one poll; stopping for environment repair')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
   it('records a failed scan in its cycle before entering the cycle gate', async () => {
     const taskId = '20260809_000000_001_scan'
     const loop = makeLoop({
