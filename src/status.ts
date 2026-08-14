@@ -162,10 +162,10 @@ function writeStatusUnlocked(
   const file = statusFile(paths, taskId)
   const temporaryFile = join(paths.statusDir, `.${taskId}.${process.pid}.tmp`)
   const existing = readStatus(paths, taskId)
-  // The registry, not the record, is what later readers believe. Publish there first so
-  // no window exists in which the record claims a process the registry does not have.
+  // The registry, not the record, is what later readers believe. Publish a new owner
+  // before its running status, but keep an existing owner visible until a terminal
+  // status has been published successfully.
   if (pid !== undefined && Number.isInteger(pid)) recordTaskProcess(paths, taskId, pid)
-  else forgetTaskProcess(paths, taskId)
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   const record: DurableTaskStatus = {
     task_id: taskId,
@@ -187,6 +187,7 @@ function writeStatusUnlocked(
   } finally {
     rmSync(temporaryFile, { force: true })
   }
+  if (pid === undefined || !Number.isInteger(pid)) forgetTaskProcess(paths, taskId)
 }
 
 export async function writeStatus(paths: OrchPaths, taskId: string, status: TaskState, pid?: number): Promise<void> {
