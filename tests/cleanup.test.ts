@@ -26,7 +26,7 @@ function seedTask(pid: number | null): void {
   mkdirSync(join(paths.queueDir, 'scanned'), { recursive: true })
   writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, pid }))
   // A task's process lives in the registry, not in the record.
-  if (pid !== null) recordTaskProcess(paths, taskId, pid)
+  if (pid !== null) recordTaskProcess(paths, taskId, pid, () => `started:${pid}`)
   writeFileSync(finalMessageFile(paths, taskId), 'TASK_COMPLETE\n')
   writeFileSync(join(paths.queueDir, 'scanned', taskId), '')
   writeFileSync(join(paths.queueDir, 'scanned', `${taskId}.failed`), '')
@@ -84,6 +84,7 @@ function windowsOperatingSystem(
     remove: () => {},
     now: Date.now,
     sleep: () => {},
+    processStartIdentity: (pid) => `started:${pid}`,
     ...overrides,
   })
 }
@@ -98,6 +99,7 @@ function posixOperatingSystem(
     now: Date.now,
     sleep: () => {},
     groupHasRunningMember: () => undefined,
+    processStartIdentity: (pid) => `started:${pid}`,
     ...overrides,
   })
 }

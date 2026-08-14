@@ -22,7 +22,7 @@ let paths: OrchPaths
 
 function writeRunningTask(taskId: string, pid: number): void {
   writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, status: 'running', pid }))
-  recordTaskProcess(paths, taskId, pid)
+  recordTaskProcess(paths, taskId, pid, () => `started:${pid}`)
 }
 
 function gone(): NodeJS.ErrnoException {
@@ -59,6 +59,7 @@ describe('terminateLiveTaskProcesses', () => {
       remove: () => {},
       now: () => now,
       sleep: (milliseconds) => { now += milliseconds },
+      processStartIdentity: (pid) => alive.has(pid) ? `started:${pid}` : undefined,
     })
 
     const result = terminateLiveTaskProcesses(paths, os)
@@ -72,7 +73,7 @@ describe('terminateLiveTaskProcesses', () => {
     // Stopping is what makes a recorded identifier false, so a stopped task releases it
     // and one that resisted keeps it: something is still running under that number.
     expect(taskProcessPid(paths, 'second-task')).toBeUndefined()
-    expect(taskProcessPid(paths, 'first-task')).toBe(101)
+    expect(taskProcessPid(paths, 'first-task', undefined, () => 'started:101')).toBe(101)
   })
 })
 

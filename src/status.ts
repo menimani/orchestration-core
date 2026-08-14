@@ -4,7 +4,9 @@ import {
 import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
-import { forgetTaskProcess, recordTaskProcess, taskProcessPid } from './processRegistry.ts'
+import {
+  forgetTaskProcess, recordTaskProcess, taskProcessPid, type ProcessStartIdentity,
+} from './processRegistry.ts'
 
 // A task reads `running` while its runner process is alive, `completed` once the
 // completion marker appears in its final-message file, `no-change` after its explicit
@@ -36,7 +38,11 @@ interface StatusMetadata {
 
 type DurableTaskStatus = Omit<TaskStatus, 'pid'>
 
-export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undefined {
+export function readStatus(
+  paths: OrchPaths,
+  taskId: string,
+  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
+): TaskStatus | undefined {
   let record: DurableTaskStatus
   try {
     record = JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as DurableTaskStatus
@@ -46,7 +52,7 @@ export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undef
   }
   // The record is durable; the process it named is not. The registry answers for the
   // process, so a number left in an old record is not read back as a live task.
-  return { ...record, pid: taskProcessPid(paths, taskId) ?? null }
+  return { ...record, pid: taskProcessPid(paths, taskId, undefined, processStartIdentity) ?? null }
 }
 
 function lockDir(paths: OrchPaths, taskId: string): string {

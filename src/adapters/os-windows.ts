@@ -18,12 +18,42 @@ export interface WindowsOperatingSystemRuntime {
   }): void
   now(): number
   sleep(milliseconds: number): void
+  processStartIdentity?(pid: number): string | undefined
   startDaemon?: typeof startWindowsProcess
 }
 
 export interface WindowsProcess {
   pid: number
   parentPid: number
+}
+
+let ownProcessStartIdentity: string | undefined
+
+function windowsProcessStartIdentity(pid: number): string | undefined {
+  if (pid === process.pid && ownProcessStartIdentity !== undefined) {
+    return ownProcessStartIdentity
+  }
+  try {
+    process.kill(pid, 0)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return undefined
+  }
+  const command = [
+    '& { param([int]$TargetPid)',
+    '(Get-Process -Id $TargetPid -ErrorAction Stop).StartTime.ToUniversalTime().Ticks',
+    '}',
+  ].join(' ')
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command', command, String(pid),
+  ], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    windowsHide: true,
+  })
+  const startTime = result.status === 0 ? result.stdout.trim() : ''
+  const identity = startTime === '' ? undefined : `windows:${startTime}`
+  if (pid === process.pid) ownProcessStartIdentity = identity
+  return identity
 }
 
 const systemRuntime: WindowsOperatingSystemRuntime = {
@@ -64,6 +94,7 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
   sleep: (milliseconds) => {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
   },
+  processStartIdentity: windowsProcessStartIdentity,
 }
 
 function extendedLengthPath(path: string): string {
@@ -165,6 +196,7 @@ export function createOperatingSystem(
       }
     },
     processTreeRootPid,
+    processStartIdentity: runtime.processStartIdentity ?? systemRuntime.processStartIdentity!,
     processIsAlive: (pid) => isAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree,

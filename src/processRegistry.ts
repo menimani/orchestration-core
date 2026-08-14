@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync, statSync, readFileSync, writeFileSync } from 'node:fs'
 import { uptime } from 'node:os'
 import { join } from 'node:path'
+import { operatingSystem } from './adapters/os.ts'
 import type { OrchPaths } from './paths.ts'
 
 // A process identifier is true only while that process runs, but a task's status record
@@ -11,12 +12,19 @@ import type { OrchPaths } from './paths.ts'
 // tree that belongs to a stranger.
 //
 // So a PID lives here instead, in a store whose lifetime matches what it describes: the
-// entry is removed when the process is stopped, and an entry written before the current
-// boot is not believed. Nothing migrates — a PID left in an old status record is simply
-// no longer read, which is the same verdict this store would give it.
+// entry is removed when the process is stopped, and an entry is believed only while both
+// its boot and process-start identities still match. Nothing migrates — a PID left in an
+// old status record is simply no longer read, which is the same verdict this store gives.
 
 /** Clock granularity between a recorded time and the boot time derived from uptime. */
 const BOOT_COMPARISON_TOLERANCE_MS = 5_000
+
+interface ProcessRegistryEntry {
+  pid: number
+  startIdentity: string
+}
+
+export type ProcessStartIdentity = (pid: number) => string | undefined
 
 function registryDir(paths: OrchPaths): string {
   return join(paths.queueDir, 'pids')
@@ -32,9 +40,28 @@ export function bootedAt(now: () => number = Date.now, up: () => number = uptime
 }
 
 /** Record the process now running `taskId`. Replaces any earlier entry. */
-export function recordTaskProcess(paths: OrchPaths, taskId: string, pid: number): void {
+export function recordTaskProcess(
+  paths: OrchPaths,
+  taskId: string,
+  pid: number,
+  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
+): void {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    forgetTaskProcess(paths, taskId)
+    return
+  }
+  let startIdentity: string | undefined
+  try {
+    startIdentity = processStartIdentity(pid)
+  } catch {
+    startIdentity = undefined
+  }
+  if (startIdentity === undefined) {
+    forgetTaskProcess(paths, taskId)
+    return
+  }
   mkdirSync(registryDir(paths), { recursive: true })
-  writeFileSync(registryFile(paths, taskId), `${pid}\n`)
+  writeFileSync(registryFile(paths, taskId), `${JSON.stringify({ pid, startIdentity })}\n`)
 }
 
 /** Forget the process for `taskId`. Safe to call when nothing was recorded. */
@@ -43,25 +70,35 @@ export function forgetTaskProcess(paths: OrchPaths, taskId: string): void {
 }
 
 /**
- * The process recorded for `taskId`, or undefined when none is or a recorded one predates
- * this boot. A stale entry is dropped as it is read, so the answer does not change again.
+ * The process recorded for `taskId`, or undefined when none is or its boot/start identity
+ * is stale. A stale entry is dropped as it is read, so the answer does not change again.
  */
 export function taskProcessPid(
   paths: OrchPaths,
   taskId: string,
   boot: () => number = bootedAt,
+  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
 ): number | undefined {
   const file = registryFile(paths, taskId)
   let recorded: string
+  let entry: ProcessRegistryEntry
   let writtenAt: number
   try {
-    recorded = readFileSync(file, 'utf8').trim()
+    recorded = readFileSync(file, 'utf8')
     writtenAt = statSync(file).mtimeMs
   } catch {
     return undefined
   }
+  try {
+    entry = JSON.parse(recorded) as ProcessRegistryEntry
+  } catch {
+    forgetTaskProcess(paths, taskId)
+    return undefined
+  }
 
-  if (!/^[1-9][0-9]*$/.test(recorded)) {
+  if (entry === null || typeof entry !== 'object'
+    || !Number.isSafeInteger(entry.pid) || entry.pid <= 0 || typeof entry.startIdentity !== 'string'
+    || entry.startIdentity === '') {
     forgetTaskProcess(paths, taskId)
     return undefined
   }
@@ -69,5 +106,15 @@ export function taskProcessPid(
     forgetTaskProcess(paths, taskId)
     return undefined
   }
-  return Number(recorded)
+  let currentStartIdentity: string | undefined
+  try {
+    currentStartIdentity = processStartIdentity(entry.pid)
+  } catch {
+    currentStartIdentity = undefined
+  }
+  if (currentStartIdentity !== entry.startIdentity) {
+    forgetTaskProcess(paths, taskId)
+    return undefined
+  }
+  return entry.pid
 }

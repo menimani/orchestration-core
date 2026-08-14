@@ -77,7 +77,7 @@ export function cleanupTask(
   runtime: CleanupRuntime = systemRuntime,
   announce = true,
 ): void {
-  const status = readStatus(paths, taskId)
+  const status = readStatus(paths, taskId, runtime.os.processStartIdentity)
   if (status !== undefined && status.pid !== null) {
     stopProcess(runtime, status.pid)
   }

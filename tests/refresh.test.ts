@@ -90,6 +90,7 @@ describe('refreshTask', () => {
 
   it('uses the operating-system liveness verdict for a task process', async () => {
     const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('started:protected')
     writeRawStatus('protected-task', '{"task_id":"protected-task","status":"running","pid":2147483647}\n')
 
     const after = await refreshTask(paths, 'protected-task')

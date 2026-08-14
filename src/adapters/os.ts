@@ -35,6 +35,8 @@ export interface DaemonProcess {
 export interface OperatingSystem {
   launchDaemon(options: DaemonLaunchOptions): Promise<DaemonProcess>
   processTreeRootPid(env?: NodeJS.ProcessEnv): number
+  /** Stable identity for this particular use of a PID, or undefined when unverifiable. */
+  processStartIdentity(pid: number): string | undefined
   terminateProcessTree(pid: number): boolean
   /**
    * Whether a process with this identifier is running. Detection asks about the process;

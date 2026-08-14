@@ -55,14 +55,14 @@ afterEach(async () => {
 
 describe('status files', () => {
   it('stores task status without the transient runner pid', async () => {
-    await writeStatus(paths, 'task-alpha', 'running', 12345)
+    await writeStatus(paths, 'task-alpha', 'running', process.pid)
     const stored = JSON.parse(readFileSync(statusFile(paths, 'task-alpha'), 'utf8')) as Record<string, unknown>
     const status = readStatus(paths, 'task-alpha')
 
     expect(status?.task_id).toBe('task-alpha')
     expect(status?.status).toBe('running')
     expect(stored).not.toHaveProperty('pid')
-    expect(status?.pid).toBe(12345)
+    expect(status?.pid).toBe(process.pid)
   })
 
   it('derives an unset pid as null without serializing it', async () => {

@@ -2,9 +2,8 @@ import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { type OrchPaths } from './paths.ts'
-import { forgetTaskProcess } from './processRegistry.ts'
+import { bootedAt, forgetTaskProcess, taskProcessPid } from './processRegistry.ts'
 import { listTaskIds } from './refresh.ts'
-import { readStatus } from './status.ts'
 
 export interface TaskProcess {
   taskId: string
@@ -22,7 +21,7 @@ export function liveTaskProcesses(
 ): TaskProcess[] {
   const live: TaskProcess[] = []
   for (const taskId of listTaskIds(paths)) {
-    const pid = readStatus(paths, taskId)?.pid
+    const pid = taskProcessPid(paths, taskId, bootedAt, os.processStartIdentity)
     if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue
     // Detection asks whether that process is running, not whether it leads a group. A
     // recorded PID that is not a group leader answered "gone" on POSIX, so this waved
