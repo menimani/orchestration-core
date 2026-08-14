@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { main, scanText } from '../checks/english-only.ts'
 
 const fixtures: string[] = []
@@ -61,5 +61,23 @@ describe('English-only source check', () => {
     }
 
     expect(main(root)).toBe(0)
+  })
+
+  it('checks retained dependency directory names below the package root', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-english-only-'))
+    fixtures.push(root)
+    for (const nested of [
+      '.node_modules.previous-123-456',
+      '.orchestration-npm-ci-abcdef',
+    ]) {
+      const source = join(root, 'src', nested)
+      mkdirSync(source, { recursive: true })
+      writeFileSync(join(source, 'fixture.ts'), 'export const greeting = "\u65e5\u672c\u8a9e"\n')
+    }
+    const output = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+
+    expect(main(root)).toBe(1)
+    expect(output).toHaveBeenCalledWith('2 lines')
+    output.mockRestore()
   })
 })

@@ -65,7 +65,8 @@ const isGeneratedDirectory = (directory: string, root: string): boolean => {
   const repositoryPath = repositoryRelativePath(directory, root)
   const name = repositoryPath.split('/').at(-1) ?? ''
   return GENERATED_DIRECTORY_NAMES.has(name)
-    || GENERATED_DIRECTORY_PATTERNS.some((pattern) => pattern.test(name))
+    || (!repositoryPath.includes('/')
+      && GENERATED_DIRECTORY_PATTERNS.some((pattern) => pattern.test(name)))
     || RUNTIME_DIRECTORIES.has(repositoryPath)
 }
 
