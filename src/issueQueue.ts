@@ -1205,6 +1205,12 @@ export type ClaimResult
     enqueue: EnqueueResult
     pendingMerge: boolean
   }
+    | {
+      outcome: 'already-processed'
+      taskId: string
+      issueNumber: number
+      issueNumbers: number[]
+    }
     | { outcome: 'lost-race'; issueNumber: number }
     | { outcome: 'untrusted-author'; issueNumber: number; author: string }
     | { outcome: 'unparseable'; issueNumber: number; reason: string }
@@ -1401,8 +1407,30 @@ export async function claimIssueGroup(
       const origin = claimedIssues.some(({ parsed }) =>
         findingTaskOrigin(parsed.parentTaskId) === 'fix') ? 'fix' : 'auto'
       const existing = existingTaskIdForDesc(paths, origin, description)
+      const existingStatus = existing === undefined ? undefined : readStatus(paths, existing)?.status
+      const terminalAdvisory = existing !== undefined
+        && (existingStatus === 'merged' || existingStatus === 'no-change')
+        && requirements.every(({ requirement }) =>
+          fingerprintOf(requirement).startsWith('advisory:'))
+      if (terminalAdvisory) {
+        const issueNumbers = requirements.map(({ issueNumber }) => issueNumber)
+        for (const { issue: claimed } of claimedIssues) {
+          await forge.unassignIssue(claimed.number, me)
+          await closeIssueAndRemoveLifecycleLabels(
+            forge,
+            claimed.number,
+            `Duplicate advisory already processed by task ${existing} (${existingStatus}).`,
+          )
+        }
+        return {
+          outcome: 'already-processed',
+          taskId: existing,
+          issueNumber: issueNumbers[0]!,
+          issueNumbers,
+        }
+      }
       const needsFreshTask = existing !== undefined
-        && ['merged', 'no-change'].includes(readStatus(paths, existing)?.status ?? '')
+        && (existingStatus === 'merged' || existingStatus === 'no-change')
         && !requirements.every(({ requirement }) =>
           fingerprintOf(requirement).startsWith('advisory:'))
       const taskId = needsFreshTask

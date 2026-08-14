@@ -2189,6 +2189,10 @@ export function createLoop(deps: LoopDeps) {
                   result.issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' '))
                 if (result.pendingMerge) await mergeCompletedTask(result.taskId)
                 capacity -= 1
+              } else if (result.outcome === 'already-processed') {
+                event('Deduplicated',
+                  result.issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' '),
+                  `against ${shortTaskId(result.taskId)}`)
               } else if (result.outcome === 'untrusted-author') {
                 // The poll's shared listing predates the label mutation. Reflect it
                 // locally so this quarantined issue cannot hold today's idle gate open.
