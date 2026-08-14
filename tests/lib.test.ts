@@ -13,6 +13,7 @@ import {
   isScanTaskId,
   orchPaths, packageScriptCommand, statusFile, type OrchPaths,
 } from '../src/paths.ts'
+import { taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
 import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
 
@@ -167,6 +168,17 @@ describe('status files', () => {
     await writeStatus(paths, 'task-atomic', 'running', 12345)
     expect(existsSync(join(paths.statusDir, `.task-atomic.${process.pid}.tmp`))).toBe(false)
     expect(readStatus(paths, 'task-atomic')?.status).toBe('running')
+  })
+
+  it('keeps process ownership when terminal status publication is interrupted', async () => {
+    const taskId = 'task-interrupted-terminal'
+    await writeStatus(paths, taskId, 'running', process.pid)
+    mkdirSync(join(paths.statusDir, `.${taskId}.${process.pid}.tmp`))
+
+    await expect(writeStatus(paths, taskId, 'completed')).rejects.toThrow()
+
+    expect(readStatus(paths, taskId)?.status).toBe('running')
+    expect(taskProcessPid(paths, taskId)).toBe(process.pid)
   })
 
   it('derives the final message path from the log path', () => {
