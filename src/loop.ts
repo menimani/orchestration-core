@@ -1064,8 +1064,13 @@ export function createLoop(deps: LoopDeps) {
     let baseBranch = git([
       'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
     ]).trim()
-    if (baseBranch.startsWith(remotePrefix)
-      && git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
+    if (!baseBranch.startsWith(remotePrefix)
+      || git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
+      const advertised = git(['ls-remote', '--symref', remote, 'HEAD'])
+      const branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(advertised)?.[1] ?? ''
+      baseBranch = branch === '' ? '' : `${remote}/${branch}`
+    }
+    if (baseBranch.startsWith(remotePrefix)) {
       const branch = baseBranch.slice(remotePrefix.length)
       try {
         gitIn(paths.repoRoot, ['fetch', '--quiet', remote,
@@ -1073,21 +1078,6 @@ export function createLoop(deps: LoopDeps) {
       } catch (error) {
         event('WARN', `could not refresh review base ${baseBranch}: ${errorSummary(error)}`)
         return false
-      }
-    }
-    if (!baseBranch.startsWith(remotePrefix)
-      || git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
-      const advertised = git(['ls-remote', '--symref', remote, 'HEAD'])
-      const branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(advertised)?.[1] ?? ''
-      baseBranch = branch === '' ? '' : `${remote}/${branch}`
-      if (branch !== '') {
-        try {
-          gitIn(paths.repoRoot, ['fetch', '--quiet', remote,
-            `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`])
-        } catch (error) {
-          event('WARN', `could not refresh review base ${baseBranch}: ${errorSummary(error)}`)
-          return false
-        }
       }
     }
     if (!baseBranch.startsWith(remotePrefix)

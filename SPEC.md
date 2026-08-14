@@ -156,8 +156,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     missing. Startup synchronization is limited to the package copy inside the repository
     being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
     it is running from. Install output is captured; a failure logs a summarized `WARN`
-    but does not undo the merge or stop startup. Because failure does not update the
-    recorded hash or restore a missing dependency, the next daemon restart retries it.
+    and stops the loop or startup without undoing an already persisted merge. The next
+    daemon restart retries synchronization, and work resumes only after dependencies are
+    repaired and the install succeeds.
 
 ## Scans and cycles
 
