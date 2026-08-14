@@ -8,7 +8,7 @@
     "node": ">=23.6"
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "node scripts/run-tests.mjs",
     "test:linux": "node scripts/test-linux.mjs",
     "typecheck": "tsc --noEmit",
     "init": "node src/cli.ts init",
