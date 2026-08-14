@@ -641,7 +641,7 @@ async function findExistingFinding(
     }
     const durableClosedAdvisory = recordedIssue?.state === 'closed'
       && isAdvisoryFingerprint(fingerprint)
-      && issueHasMergedFix(paths, recordedIssue)
+      && issueCompletionForIssue(paths, recordedIssue.number) !== undefined
     if (recordedIssue !== undefined
       && (recordedIssue.state === 'open' || durableClosedAdvisory)
       && isTrustedFingerprintOwner(recordedIssue)
@@ -1047,6 +1047,58 @@ export interface IssuePromotion {
   commentConfirmed?: boolean
 }
 
+export interface IssueCompletion {
+  taskId: string
+  issueNumber: number
+  outcome: 'merged' | 'no-change'
+}
+
+function completionDir(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-completion')
+}
+
+function completionFile(paths: OrchPaths, issueNumber: number): string {
+  return join(completionDir(paths), `${issueNumber}.json`)
+}
+
+export function issueCompletionForIssue(
+  paths: OrchPaths,
+  issueNumber: number,
+): IssueCompletion | undefined {
+  const file = completionFile(paths, issueNumber)
+  if (!existsSync(file)) return undefined
+  try {
+    const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<IssueCompletion>
+    if (typeof value.taskId !== 'string' || value.taskId === ''
+      || value.issueNumber !== issueNumber
+      || (value.outcome !== 'merged' && value.outcome !== 'no-change')) return undefined
+    return value as IssueCompletion
+  } catch {
+    return undefined
+  }
+}
+
+/** Persist task completion after transient promotion and task-to-issue metadata is gone. */
+export function recordIssueCompletions(
+  paths: OrchPaths,
+  taskId: string,
+  outcome: IssueCompletion['outcome'],
+): number[] {
+  const issueNumbers = issueNumbersForTask(paths, taskId)
+  if (issueNumbers.length === 0) return []
+  mkdirSync(completionDir(paths), { recursive: true })
+  for (const issueNumber of issueNumbers) {
+    const temporaryFile = join(completionDir(paths), `.${issueNumber}.${process.pid}.tmp`)
+    try {
+      writeFileSync(temporaryFile, `${JSON.stringify({ taskId, issueNumber, outcome })}\n`)
+      renameSync(temporaryFile, completionFile(paths, issueNumber))
+    } finally {
+      rmSync(temporaryFile, { force: true })
+    }
+  }
+  return issueNumbers
+}
+
 function promotionDir(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-promotion')
 }
@@ -1112,6 +1164,7 @@ export function recordIssuePromotions(
       rmSync(temporaryFile, { force: true })
     }
   }
+  recordIssueCompletions(paths, taskId, 'merged')
   return issueNumbers
 }
 

@@ -87,10 +87,12 @@ function readLockOwner() {
       || typeof owner.acquiredAt !== 'string' || Number.isNaN(Date.parse(owner.acquiredAt))
       || typeof owner.cwd !== 'string' || owner.cwd === ''
     ) return { alive: false, diagnostic: 'invalid owner record' }
-    const currentIdentity = processIdentity(owner.pid)
+    const alive = processIsAlive(owner.pid)
+    const currentIdentity = alive ? processIdentity(owner.pid) : null
     return {
-      alive: processIsAlive(owner.pid) && currentIdentity === owner.processIdentity,
-      diagnostic: `PID ${owner.pid}, acquired ${owner.acquiredAt}, cwd ${owner.cwd}`,
+      alive: alive && (currentIdentity === null || currentIdentity === owner.processIdentity),
+      diagnostic: `PID ${owner.pid}, acquired ${owner.acquiredAt}, cwd ${owner.cwd}${
+        alive && currentIdentity === null ? ', identity unavailable' : ''}`,
     }
   } catch {
     try {
