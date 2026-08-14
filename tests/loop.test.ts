@@ -2491,6 +2491,79 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
+  it('terminalizes an explicit no-change task and closes its issue without merge failures', async () => {
+    const taskId = '20260814_144959_066_auto-already-resolved'
+    const initialHead = initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFinal(taskId,
+      'The reported failure is already fixed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'already resolved finding', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+    expect(fakeForge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain('no change was warranted')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged).toContain('No-change 066_auto    no change warranted')
+    expect(logged.some((line) => line.startsWith('Failed 066_auto'))).toBe(false)
+  })
+
+  it('retries no-change issue reconciliation without counting a merge failure', async () => {
+    const taskId = '20260814_145209_067_auto-no-change-retry'
+    initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFinal(taskId, 'No change is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'transient reconciliation', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    let unavailable = true
+    fakeForge.getIssue = async (number) => {
+      if (number === issueNumber && unavailable) {
+        unavailable = false
+        throw new Error('forge unavailable')
+      }
+      return getIssue(number)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).toContain('could not reconcile no-change task 067_auto')
+    expect(logged.some((line) => line.startsWith('Failed 067_auto'))).toBe(false)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+  })
+
   it('does not merge an abandoned grouped task after the loop restarts', async () => {
     const taskId = '20260811_120000_064_auto-abandoned-group'
     const initialHead = initializeGitRepo()

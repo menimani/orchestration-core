@@ -72,8 +72,14 @@ export async function closeIssueAndRemoveLifecycleLabels(
   issueNumber: number,
   comment: string,
 ): Promise<void> {
-  await forge.closeIssue(issueNumber, comment)
-  const issue = await forge.getIssue(issueNumber)
+  let issue = await forge.getIssue(issueNumber)
+  if (issue.state === 'open') {
+    await forge.closeIssue(issueNumber, comment)
+    issue = await forge.getIssue(issueNumber)
+  }
+  if (issue.state !== 'closed') {
+    throw new Error(`Issue #${issueNumber} is still open after closure`)
+  }
   await Promise.all(LIFECYCLE_LABELS
     .filter((label) => issue.labels.includes(label))
     .map((label) => forge.removeLabel(issueNumber, label)))
@@ -1396,7 +1402,7 @@ export async function claimIssueGroup(
         findingTaskOrigin(parsed.parentTaskId) === 'fix') ? 'fix' : 'auto'
       const existing = existingTaskIdForDesc(paths, origin, description)
       const needsFreshTask = existing !== undefined
-        && readStatus(paths, existing)?.status === 'merged'
+        && ['merged', 'no-change'].includes(readStatus(paths, existing)?.status ?? '')
         && !requirements.every(({ requirement }) =>
           fingerprintOf(requirement).startsWith('advisory:'))
       const taskId = needsFreshTask

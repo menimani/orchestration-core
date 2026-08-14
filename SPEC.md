@@ -79,15 +79,17 @@ values must be non-negative integers, with the narrower bounds stated below.
    `.final` file (written by the runner through its last-message output), even if its
    runner process is still alive. Without that marker, it remains `running` while the
    process is alive and becomes `failed` when the process is gone. Markers in the
-   transcript log are ignored — only the final-message file is authoritative.
+   transcript log are ignored — only the final-message file is authoritative. An ordinary
+   completed task may additionally report `NO_CHANGE_WARRANTED` on its own line when its
+   investigation proves the requested change is already unnecessary.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
    `scan` for scans and start with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes,
    scan findings, review-origin fixes, and delegated work. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
    task is queued, running, completed, or retryable after failure. If an identical
-   non-advisory finding returns after that task has merged, it creates a fresh task and
-   updates the index; merged advisories remain deduplicated.
+   non-advisory finding returns after that task has merged or completed with no change, it
+   creates a fresh task and updates the index; completed advisories remain deduplicated.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
    `task/<id>`. The direct layout is the default because a consumer whose source lives
    outside the loop gains no safety from another checkout. With `INTEGRATION_BRANCH`
@@ -142,7 +144,11 @@ values must be non-negative integers, with the narrower bounds stated below.
 
 8. A merge aborts and keeps the worktree when the worktree holds uncommitted changes or
    no new commits — an agent that forgot to commit must not silently lose its work.
-   Scan tasks and `--inspect` tasks are exempt (investigation produces no commits). A
+   A clean ordinary task with no new commits and the exact `NO_CHANGE_WARRANTED` marker
+   instead becomes `no-change`, removes its worktree and branch, and directly closes its
+   linked issues; forge reconciliation must succeed first, so a failed close remains
+   retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
+   tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
    verified gone before the merge can discard that PID or remove the worktree.
 9. Pre-merge tests are chosen from the paths the worktree touched. `TASK_GATE=full`
@@ -347,8 +353,9 @@ values must be non-negative integers, with the narrower bounds stated below.
 26. The daemon holds the code it started with; the wrapper prints where the log lives
     and how to stop.
 27. `prune --days N` deletes logs/status/generated specs/queue markers of tasks finished
-    more than N days ago; it never touches an unmerged or failed task, a worktree still
-    on disk, or a spec tracked by git. `--dry-run` lists without deleting.
+    more than N days ago; it accepts merged and no-change tasks and never touches an
+    unfinished or failed task, a worktree still on disk, or a spec tracked by git.
+    `--dry-run` lists without deleting.
 
 ## Delegation surface
 
@@ -375,7 +382,7 @@ values must be non-negative integers, with the narrower bounds stated below.
     arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`). The runner contract is the output markers — `TASK_COMPLETE`,
-    `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
+    `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
     rendering behavior inside the adapter. Any runner honoring the contract is
     substitutable, and none of them owns the interactive agent's skill directory.
@@ -528,8 +535,9 @@ so authorship and verified ancestry must both hold.
     the standard path and starts their local tasks. A completed task with commits pushes
     `task/<id>` to the configured push remote, comments the branch and exact head commit
     on its issue, and
-    swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection with no
-    commits comments and closes its issue instead. Its poll status uses the shared
+    swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection or an ordinary
+    task with an explicit no-change verdict and no commits comments and closes its issue
+    instead. Its poll status uses the shared
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.
@@ -550,8 +558,8 @@ so authorship and verified ancestry must both hold.
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
-    `loop:merge-ready` → closed or `loop:merge-failed`; inspections take the intentional
-    `loop:in-progress` → closed shortcut.
+    `loop:merge-ready` → closed or `loop:merge-failed`; inspections and accepted no-change
+    verdicts take the intentional `loop:in-progress` → closed shortcut.
 
 ## Test parity
 

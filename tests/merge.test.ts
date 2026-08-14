@@ -12,7 +12,9 @@ import { createOperatingSystem as createWindowsOperatingSystem } from '../src/ad
 import {
   MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
 } from '../src/merge.ts'
-import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
+import {
+  branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
+} from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { stubProject } from './stubProject.ts'
@@ -261,11 +263,13 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_001_user-adds-a-file'
     const worktree = await makeCompletedTask(taskId, { commit: true })
 
-    const mergeCommit = await mergeTask(
+    const result = await mergeTask(
       paths, taskId, { taskGate: 'light', project: stubProject },
     )
 
-    expect(mergeCommit).toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
+    expect(result).toEqual({
+      outcome: 'merged', mergeCommit: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    })
     expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
       `Merge ${taskId} via orchestration`,
     )
@@ -286,7 +290,7 @@ describe('mergeTask', () => {
 
     await expect(mergeTask(paths, taskId, {
       taskGate: 'light', project: noCheckProject,
-    })).resolves.toBe(appliedCommit)
+    })).resolves.toEqual({ outcome: 'merged', mergeCommit: appliedCommit })
 
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(appliedCommit)
     expect(readStatus(paths, taskId)).toMatchObject({
@@ -369,6 +373,55 @@ describe('mergeTask', () => {
     await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
       .rejects.toThrow(/no new commits/)
     expect(existsSync(worktree)).toBe(true)
+  })
+
+  it('accepts an explicit no-change verdict without creating a merge commit', async () => {
+    const taskId = '20260808_000000_023_user-already-resolved'
+    const worktree = await makeCompletedTask(taskId)
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const onNoChange = vi.fn(async () => {})
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The reported problem is already fixed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onNoChange,
+    })).resolves.toEqual({ outcome: 'no-change' })
+
+    expect(onNoChange).toHaveBeenCalledOnce()
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+  })
+
+  it('keeps a no-change task retryable when its linked work cannot be reconciled', async () => {
+    const taskId = '20260808_000000_024_user-no-change-retry'
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject,
+      onNoChange: async () => { throw new Error('forge unavailable') },
+    })).rejects.toThrow('Could not reconcile the no-change verdict: forge unavailable')
+
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('requires reconciliation before accepting a linked no-change task', async () => {
+    const taskId = '20260808_000000_025_user-linked-no-change'
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow('A linked no-change task requires issue reconciliation.')
+
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
   it('lets a scan through without commits', async () => {
@@ -553,7 +606,9 @@ describe('mergeTask', () => {
 
     await expect(mergeTask(paths, taskId, {
       taskGate: 'light', project,
-    })).resolves.toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
+    })).resolves.toEqual({
+      outcome: 'merged', mergeCommit: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    })
   })
 
   it('accepts a check that installs its own dependencies as its first step', async () => {

@@ -2,7 +2,8 @@
 // The contract that makes runners substitutable is the marker protocol, not the CLI:
 // a runner receives a task specification and must write a final-message file whose
 // last lines carry `TASK_COMPLETE` on its own line when the work is done, and may
-// carry `NEXT_TASK: <description>` and `DECISION_REQUIRED: <text>` lines before it.
+// carry `NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, and
+// `DECISION_REQUIRED: <text>` lines before it.
 // Markers anywhere else (the transcript log) are ignored by the core. SPEC.md item 30.
 
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
