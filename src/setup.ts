@@ -53,6 +53,7 @@ function adapterPaths(project: ProjectAdapter): string[] {
   }
   for (const step of project.preCommitChecks) record(step)
   for (const step of project.scanWorktreeSetup ?? []) record(step)
+  for (const step of project.integrationWorktreeSetup ?? []) record(step)
   for (const step of project.mergeChecks('full')) record(step)
   for (const step of project.mergeChecks('light')) record(step)
   for (const step of project.cycleSuite()) record(step)
