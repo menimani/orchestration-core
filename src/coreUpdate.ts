@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
+import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
 import { sharedSkillManagedTargets, syncSharedSkills } from './sharedSkills.ts'
@@ -63,33 +64,34 @@ function syncSkills(
   repoRoot: string,
   packageRoot: string,
   runner: Runner,
+  project: ProjectAdapter,
   isConsumer: boolean,
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime,
 ): void {
-  const skippedDestinations: string[] = []
+  const sharedSkills = [runner.sharedSkills, ...(project.sharedSkills ?? [])]
   if (isConsumer) {
-    try {
-      for (const target of sharedSkillManagedTargets(repoRoot, packageRoot, runner)) {
-        const managedPaths = repositoryPaths(repoRoot, target.managedPaths)
-        const alreadyStaged = runtime.git(repoRoot, [
+    for (const target of sharedSkillManagedTargets(repoRoot, packageRoot, sharedSkills)) {
+      const managedPaths = repositoryPaths(repoRoot, target.managedPaths)
+      let alreadyStaged: string
+      try {
+        alreadyStaged = runtime.git(repoRoot, [
           'diff', '--cached', '--name-only', '--', ...managedPaths,
         ]).trim()
-        if (alreadyStaged !== '') {
-          event('WARN',
-            `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
-          skippedDestinations.push(target.destinationRoot)
-        }
+      } catch (error) {
+        throw new Error(`shared skill sync could not verify a clean managed index: ${summary(error)}`)
       }
-    } catch (error) {
-      event('WARN', `shared skill sync could not be committed: ${summary(error)}`)
-      return
+      if (alreadyStaged !== '') {
+        throw new Error(
+          `shared skill sync requires a clean managed index: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`,
+        )
+      }
     }
   }
 
   let result: ReturnType<typeof syncSharedSkills>
   try {
-    result = syncSharedSkills(repoRoot, packageRoot, runner, undefined, skippedDestinations)
+    result = syncSharedSkills(repoRoot, packageRoot, sharedSkills)
   } catch (error) {
     event('WARN', `shared skill sync failed: ${summary(error)}`)
     return
@@ -107,17 +109,17 @@ function syncSkills(
   if (isConsumer) {
     const managed = repositoryPaths(repoRoot, result.managedPaths)
     const removed = repositoryPaths(repoRoot, result.removedPaths)
-    try {
-      const scope = [...managed, ...removed]
-      if (scope.length > 0) {
-        const alreadyStaged = runtime.git(repoRoot, [
-          'diff', '--cached', '--name-only', '--', ...scope,
-        ]).trim()
-        if (alreadyStaged !== '') {
-          event('WARN',
-            `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
-          return
-        }
+    const scope = [...managed, ...removed]
+    if (scope.length > 0) {
+      const alreadyStaged = runtime.git(repoRoot, [
+        'diff', '--cached', '--name-only', '--', ...scope,
+      ]).trim()
+      if (alreadyStaged !== '') {
+        throw new Error(
+          `shared skill sync requires a clean managed index: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`,
+        )
+      }
+      try {
         if (managed.length > 0) runtime.git(repoRoot, ['add', '-f', '--', ...managed])
         const trackedRemoved = removed.length === 0
           ? []
@@ -137,10 +139,9 @@ function syncSkills(
             ])
           }
         }
+      } catch (error) {
+        throw new Error(`shared skill sync could not be committed: ${summary(error)}`)
       }
-    } catch (error) {
-      event('WARN', `shared skill sync could not be committed: ${summary(error)}`)
-      return
     }
   }
 
@@ -160,6 +161,7 @@ export async function updateCoreBeforeCycle(
     'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch' | 'integrationBranch'>,
   forge: Forge,
   runner: Runner,
+  project: ProjectAdapter,
   cycle: number,
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime = defaultRuntime,
@@ -175,12 +177,12 @@ export async function updateCoreBeforeCycle(
   // consumers. Only the owning repository receives local, ignored generated copies.
   if (prefix === undefined) {
     if (relative(paths.repoRoot, packageRoot) === '') {
-      syncSkills(paths.repoRoot, packageRoot, runner, false, event, runtime)
+      syncSkills(paths.repoRoot, packageRoot, runner, project, false, event, runtime)
     }
     return 'continue'
   }
   const finish = (outcome: CoreUpdateOutcome): CoreUpdateOutcome => {
-    syncSkills(paths.repoRoot, packageRoot, runner, true, event, runtime)
+    syncSkills(paths.repoRoot, packageRoot, runner, project, true, event, runtime)
     return outcome
   }
   if (config.upstreamRemote.trim() === '') {
@@ -213,21 +215,25 @@ export async function updateCoreBeforeCycle(
   let upstream: string
   try {
     upstream = runtime.git(paths.repoRoot, ['rev-parse', 'FETCH_HEAD']).trim()
-    if (upstream === imported) return finish('continue')
-    runtime.git(paths.repoRoot, ['merge-base', '--is-ancestor', imported, upstream])
+    if (upstream !== imported) {
+      runtime.git(paths.repoRoot, ['merge-base', '--is-ancestor', imported, upstream])
+    }
   } catch {
     warn(event,
       `core update skipped: imported ${imported.slice(0, 8)} is not behind ${config.upstreamBranch}`)
     return finish('continue')
   }
+  if (upstream === imported) return finish('continue')
 
+  let dirty: boolean
   try {
-    if (runtime.git(paths.repoRoot, ['status', '--porcelain']).trim() !== '') {
-      warn(event, 'core update skipped: working tree is dirty')
-      return finish('continue')
-    }
+    dirty = runtime.git(paths.repoRoot, ['status', '--porcelain']).trim() !== ''
   } catch (error) {
     warn(event, `core update status check failed: ${summary(error)}`)
+    return finish('continue')
+  }
+  if (dirty) {
+    warn(event, 'core update skipped: working tree is dirty')
     return finish('continue')
   }
 
@@ -246,7 +252,7 @@ export async function updateCoreBeforeCycle(
     return finish('continue')
   }
 
-  syncSkills(paths.repoRoot, packageRoot, runner, true, event, runtime)
+  syncSkills(paths.repoRoot, packageRoot, runner, project, true, event, runtime)
   const newHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   const changed = runtime.git(paths.repoRoot, [
     'diff', '--name-only', oldHead, newHead, '--', prefix,

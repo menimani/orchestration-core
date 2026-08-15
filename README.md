@@ -69,10 +69,10 @@ That same boundary syncs the skills declared in `skills/manifest.json` into ever
 directory an agent working in the repository reads them from. The selected runner adapter
 supplies one — the bundled Codex adapter uses `.agents/skills/` and rewrites the sources
 into Codex's own form, while the Claude adapter uses `.claude/skills/` in canonical form —
-and `.claude/skills/` receives them for the interactive agent a person drives. When Claude
-is the runner, that shared destination is rendered only once. Serving only the runner
-meant that selecting Codex silently took every shared workflow away from the person, so
-one destination failing no longer costs the others theirs. Loop commands are rendered for
+and the project adapter selects any additional interactive-agent targets. This repository
+selects the bundled Claude target for `.claude/skills/`; duplicate destinations are served
+only once. One destination failing does not cost the others theirs. Loop commands are
+rendered for
 the installed package location (`npm run` here, `npm run -C orchestration/ts` in the
 layout below).
 The sync tracks the exact content it generated: a consumer edit, deletion, or added
@@ -109,7 +109,8 @@ With neither variable set, the core uses the single `project-*.ts` file in
 to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explicit path;
 it overrides the conventional path selected by `PROJECT`.
 
-A project adapter answers a few questions: which staged-path checks run before a commit,
+A project adapter answers a few questions: which interactive agents receive shared skills,
+which staged-path checks run before a commit,
 which commands gate a merge, which tests a changed path implies, which suites run once per
 cycle, which repository or toolchain output identifies an infrastructure failure, how
 commits are grouped in the generated pull request, which changed paths signal risk, and
@@ -188,7 +189,8 @@ and merge into the integration branch as well, where the next task can see them.
 Immediately before a completed local task enters its merge gate, the loop rebases that
 task branch onto the current integration tip. Long-running tasks therefore test the work
 that has landed while they were running instead of repeatedly presenting the same stale
-branch to the gate.
+branch to the gate. If every task commit becomes empty because that work already landed,
+the task completes as no-change and its linked issues are closed normally.
 
 A stopped daemon retains both branch identities and the daemon commit. Restarting is a
 resume of the same run: integration commits made while it was down remain available to

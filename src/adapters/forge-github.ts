@@ -193,6 +193,12 @@ function isRateLimitFailure(error: unknown): boolean {
   return /rate.?limit|HTTP 429/i.test(commandErrorText(error))
 }
 
+function isMissingPrFailure(error: unknown): boolean {
+  const text = commandErrorText(error)
+  return /\bno (?:open )?pull requests found for branch\b/i.test(text)
+    || /\bCould not resolve to a PullRequest with the number of \d+\b/i.test(text)
+}
+
 function githubPrBody(body: string): string {
   // GitHub reads a bare #N in a PR body as an issue reference and links it to some
   // unrelated pull request from the repository's first week. This presentation rule
@@ -332,7 +338,10 @@ export function createGithubForge(
         stdout = await checkedGh(repoRoot, args)
       } catch (error) {
         if (error instanceof ForgeRateLimitError) throw error
-        return { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+        if (isMissingPrFailure(error)) {
+          return { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+        }
+        throw error
       }
       const data = parseGhJson(args, stdout, prStatusSchema)
       const state

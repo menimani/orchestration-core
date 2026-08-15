@@ -86,7 +86,12 @@ describe('createClaudeRunner', () => {
     expect(sharedSkills.legacyRoots).toBeUndefined()
     expect(sharedSkills.renderFile(
       Buffer.from(source),
-      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+      {
+        repoRoot,
+        packageRoot,
+        commandPrefixPlaceholder: '{{COMMAND_PREFIX}}',
+        packagePathPrefixPlaceholder: '{{PACKAGE_PATH_PREFIX}}',
+      },
     ).toString('utf8')).toBe([
       '---',
       'name: git-commit',

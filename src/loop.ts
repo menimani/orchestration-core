@@ -50,7 +50,7 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
-  recordIssueCompletions, recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
+  recordIssueCompletions, recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
@@ -194,6 +194,7 @@ export function createLoop(deps: LoopDeps) {
       config,
       rawForge,
       runner,
+      project,
       cycle,
       (name, subject, detail = '') => event(name, subject, detail),
     ))
@@ -1599,7 +1600,9 @@ export function createLoop(deps: LoopDeps) {
       const repair = step.repairWhenMissing
       if (repair !== undefined && !existsSync(join(paths.repoRoot, repair.path))) {
         if (!runStep(join(paths.repoRoot, step.cwd), repair.command)) {
-          event('WARN', 'repair command could not restore the toolchain')
+          event('ERROR', repair.message)
+          writeFileSync(stopFile, '')
+          return false
         }
       }
       ok = runStep(join(paths.repoRoot, step.cwd), step.command)
@@ -1693,6 +1696,13 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const currentScans = readCount(scanCountFile)
+    const expectedScanFile = join(paths.queueDir, `scan-expected-${currentScans}`)
+    if (currentScans > 0 && existsSync(expectedScanFile)
+      && completeScanYields(currentScans) === undefined) {
+      event('ERROR', `cycle ${currentScans} did not receive every expected scan yield; stopping the loop`)
+      writeFileSync(stopFile, '')
+      return 'continue'
+    }
 
     if (currentScans > 0 && (config.autoPr || config.reviewEnabled)) {
       const resumeFlag = join(paths.queueDir, `cycle-resume-${currentScans}`)
@@ -1876,11 +1886,9 @@ export function createLoop(deps: LoopDeps) {
         sectionGroups = partitionScanSections(sections, nScans)
       }
     }
-    writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
-    writeFileSync(scanCountFile, `${nextCycle}\n`)
-
     // Round-robin groups cover every discovered section exactly once while keeping
     // group sizes within one, without assuming what any section asks the scan to do.
+    let launchFailed = false
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
       const scope = nScans === 1
@@ -1895,9 +1903,17 @@ export function createLoop(deps: LoopDeps) {
         })
         event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
       } catch (error) {
-        event('WARN', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))})`)
+        event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
+        launchFailed = true
+        break
       }
     }
+    if (launchFailed) {
+      writeFileSync(stopFile, '')
+      return 'continue'
+    }
+    writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
+    writeFileSync(scanCountFile, `${nextCycle}\n`)
     return 'continue'
   }
 
@@ -2006,7 +2022,7 @@ export function createLoop(deps: LoopDeps) {
             if (linkedIssues.length > 0) {
               await Promise.all(linkedIssues.map((issueNumber) =>
                 closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
-                  `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+                  `Task ${taskId} completed without changes because no change was warranted.`)))
             }
             recordIssueCompletions(paths, taskId, 'no-change')
           },
@@ -2143,15 +2159,13 @@ export function createLoop(deps: LoopDeps) {
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
       if (failedIssues.length > 0 && remoteOperationsAvailable) {
-        try {
-          await Promise.all(failedIssues.map((issueNumber) =>
-            returnIssueToReady(forge, issueNumber, true)))
-          dropClaimedTaskMaterialization(paths, taskId)
+        recordIssueReleaseIntent(paths, taskId, failedIssues)
+        const failures = await reconcileIssueReleaseIntent(forge, paths, taskId)
+        if (failures.length === 0) {
           event('Released', shortTaskId(taskId), 'grouped task failed')
-        } catch (releaseError) {
-          if (!(releaseError instanceof ForgeRateLimitError)) {
-            event('WARN', `${shortTaskId(taskId)} failed and its grouped issues could not all be released: ${errorSummary(releaseError)}`)
-          }
+        } else {
+          issueReconciliationPending = true
+          noteIssueReleaseFailure(new IssueReleaseReconciliationError(failures))
         }
       }
       if (status === 'failed' && !existsSync(failedFlag)) {
@@ -2356,20 +2370,14 @@ export function createLoop(deps: LoopDeps) {
           if (config.issueQueueEnabled && issueNumbers.length > 0) {
             let released = false
             if (remoteOperationsAvailable) {
-              try {
-                if (cachedUser === undefined) cachedUser = await forge.currentUser()
-                if (issueNumbers.length > 1) {
-                  await Promise.all(issueNumbers.map((issueNumber) =>
-                    returnIssueToReady(forge, issueNumber, true)))
-                } else {
-                  await releaseIssueClaim(forge, issueNumbers[0]!, cachedUser)
-                }
+              recordIssueReleaseIntent(paths, entry.taskId, issueNumbers)
+              const failures = await reconcileIssueReleaseIntent(forge, paths, entry.taskId)
+              if (failures.length === 0) {
                 released = true
                 event('Released', shortTaskId(entry.taskId), 'startup failed')
-              } catch (releaseError) {
-                if (!(releaseError instanceof ForgeRateLimitError)) {
-                  event('WARN', `${shortTaskId(entry.taskId)} startup failed and issues ${issueNumbers.map((number) => `#${number}`).join(' ')} could not all be released: ${errorSummary(releaseError)}`)
-                }
+              } else {
+                issueReconciliationPending = true
+                noteIssueReleaseFailure(new IssueReleaseReconciliationError(failures))
               }
             }
             if (released) {
@@ -2380,9 +2388,8 @@ export function createLoop(deps: LoopDeps) {
                 event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)
               }
             } else {
-              requeueAfterStartupFailure(entry.taskId, entry.depth, error)
-              // Do not dequeue the same retained materialization again in this poll.
-              // The next poll retries the release while keeping the forge claim linked.
+              // The durable release intent owns the retry. Keep the task mapping linked
+              // until reconciliation succeeds, but do not restart work for that claim.
               break
             }
           } else {

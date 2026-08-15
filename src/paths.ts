@@ -38,6 +38,12 @@ export function packageCommandPrefix(repoRoot: string, packageRoot = PACKAGE_ROO
   return packageDirectory === '' ? 'npm run' : `npm run -C ${packageArgument}`
 }
 
+/** Prefix a repository-relative package file, including its separator when needed. */
+export function packagePathPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT): string {
+  const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
+  return packageDirectory === '' ? '' : `${packageDirectory}/`
+}
+
 export function packageScriptCommand(
   repoRoot: string,
   script: string,

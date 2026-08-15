@@ -88,8 +88,9 @@ values must be non-negative integers, with the narrower bounds stated below.
    completed task may additionally report `NO_CHANGE_WARRANTED` on its own line when its
    investigation proves the requested change is already unnecessary.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
-   `scan` for scans and start with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes,
-   scan findings, review-origin fixes, and delegated work. Listings sort chronologically.
+   `scan` for scans, are `review-c<n>` for automatic reviews of cycle `<n>`, and start
+   with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes, scan findings, review-origin
+   fixes, and delegated work. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
    task is queued, running, completed, or retryable after failure. If an identical
@@ -155,7 +156,10 @@ values must be non-negative integers, with the narrower bounds stated below.
    retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
    tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
-   verified gone before the merge can discard that PID or remove the worktree.
+   verified gone before the merge can discard that PID or remove the worktree. When all
+   of a task's commits become empty while rebasing because their changes are already on
+   the run branch, the task follows the same `no-change` completion path without
+   requiring the worker to have predicted that outcome.
 9. Before its merge gate, a completed local task branch is rebased onto the current run
    branch tip. This refresh is retained when a check fails, so the next attempt does not
    test the same stale branch again. A conflicting rebase is aborted and keeps both the
@@ -167,6 +171,8 @@ values must be non-negative integers, with the narrower bounds stated below.
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
    entry. Light-gate attribution cost (a suite break at the gate names no task) is
    accepted and documented; the gate stops the loop rather than promote a failing tip.
+   A missing-toolchain repair that fails also stops the gate and reports the adapter's
+   remediation message without running the subsequent suite step.
 9a. A merge check that passes counts only where its directory satisfies its own declared
     dependencies. A worktree sits inside the checkout it was cut from, so Node resolves
     anything the worktree lacks from the parent's `node_modules`: an install that stopped
@@ -212,7 +218,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
     (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
-    counter once, at the gate, only when every expected scan completed successfully.
+    counter once, at the gate, only when every expected scan completed successfully. A
+    scan launch failure stops the loop without advancing the cycle number, and a cycle
+    missing any expected yield stops rather than advancing to another cycle or completion.
     For parallel scans, sections in the rendered `scan-template.md` are Markdown ATX
     headings whose text begins with a number and period (for example, `### 1. Tests`),
     and every section number must be unique; headings inside fenced code blocks do not
@@ -257,14 +265,14 @@ values must be non-negative integers, with the narrower bounds stated below.
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
     At the same boundary, the package manifest's skills are rendered into every
-    directory an agent working in the repository discovers skills in: the selected
-    runner's, supplied by its adapter, and `.claude/skills/` for the interactive agent a
-    person drives. The Codex adapter renders into repository root `.agents/skills/`; the
-    Claude adapter and interactive agent share `.claude/skills/` and are served once. The
-    Claude rendering resolves the command prefix only, the canonical sources already
-    being in that agent's format. Both use `npm run` as the command prefix in the owning
-    repository and `npm run -C <package-path>` in a subtree consumer, and a runner that
-    discovers `.claude/skills/` is served once rather than twice. The
+    directory selected by an agent adapter. The runner supplies its target, and the
+    project adapter supplies targets for additional interactive agents. The Codex adapter
+    renders into repository root `.agents/skills/`; this repository's project adapter
+    selects the Claude adapter, which renders into `.claude/skills/` and resolves only the
+    command prefix because the canonical sources already use that agent's format. Both use
+    `npm run` as the command prefix in the owning repository and
+    `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
+    served once. The
     sync replaces only a tree whose content matches its recorded last output; consumer
     divergence is warned and retained, and skills absent from the manifest are untouched.
     A destination that cannot be served is reported without costing the others theirs.
@@ -422,8 +430,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
     rendering behavior inside the adapter. Any runner honoring the contract is
-    substitutable. The Claude runner uses the interactive agent's skill directory as its
-    own discovery path, so the shared-skill sync deduplicates that target.
+    substitutable. Additional interactive-agent skill destinations and rendering are
+    selected by the consumer's project adapter rather than assumed by the core. The Claude
+    runner and an interactive Claude adapter may share a destination, which is deduplicated.
 31. Everything the orchestration knows about the repository it runs in — which staged
     paths select fast pre-commit checks, which commands verify a merge, which paths make
     each check relevant, which suites prove a cycle's

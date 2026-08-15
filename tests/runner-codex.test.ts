@@ -70,12 +70,17 @@ describe('createCodexRunner', () => {
 
     expect(sharedSkills.destinationRoot(repoRoot))
       .toBe(join(repoRoot, '.agents', 'skills'))
-    // `.claude/skills` is the interactive agent's directory, which the core keeps
-    // filled; claiming it as a legacy root here emptied it whenever Codex was selected.
+    // `.claude/skills` may be selected independently by the consumer; claiming it as a
+    // legacy root here emptied it whenever Codex was selected.
     expect(sharedSkills.legacyRoots).toBeUndefined()
     expect(sharedSkills.renderFile(
       Buffer.from('{{COMMAND_PREFIX}} loop\n'),
-      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+      {
+        repoRoot,
+        packageRoot,
+        commandPrefixPlaceholder: '{{COMMAND_PREFIX}}',
+        packagePathPrefixPlaceholder: '{{PACKAGE_PATH_PREFIX}}',
+      },
     ).toString('utf8')).toBe('npm run -C orchestration/ts loop\n')
   })
 
@@ -102,7 +107,12 @@ describe('createCodexRunner', () => {
 
     const rendered = createCodexRunner().sharedSkills.renderFile(
       Buffer.from(source),
-      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+      {
+        repoRoot,
+        packageRoot,
+        commandPrefixPlaceholder: '{{COMMAND_PREFIX}}',
+        packagePathPrefixPlaceholder: '{{PACKAGE_PATH_PREFIX}}',
+      },
     ).toString('utf8')
 
     expect(rendered).toBe([
@@ -134,7 +144,12 @@ describe('createCodexRunner', () => {
       Buffer.from(
         'Read `CLAUDE.md` and `.claude/skills/git-review/SKILL.md`, then run `/git-review` and `/verify-changes`.\n',
       ),
-      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+      {
+        repoRoot,
+        packageRoot,
+        commandPrefixPlaceholder: '{{COMMAND_PREFIX}}',
+        packagePathPrefixPlaceholder: '{{PACKAGE_PATH_PREFIX}}',
+      },
     ).toString('utf8')
 
     expect(rendered).toBe(
@@ -151,7 +166,12 @@ describe('createCodexRunner', () => {
 
     const rendered = createCodexRunner().sharedSkills.renderFile(
       Buffer.from('Read `CLAUDE.md` and `.claude/skills/verify-changes/SKILL.md`.\n'),
-      { repoRoot, packageRoot, commandPrefixPlaceholder: '{{COMMAND_PREFIX}}' },
+      {
+        repoRoot,
+        packageRoot,
+        commandPrefixPlaceholder: '{{COMMAND_PREFIX}}',
+        packagePathPrefixPlaceholder: '{{PACKAGE_PATH_PREFIX}}',
+      },
     ).toString('utf8')
 
     expect(rendered)
@@ -167,7 +187,11 @@ describe('createCodexRunner', () => {
     ) ? actualFs.readFileSync(path, 'utf8') : 'task specification')
     const manifest = JSON.parse(actualFs.readFileSync(
       join(packageRoot, 'skills', 'manifest.json'), 'utf8',
-    )) as { commandPrefixPlaceholder: string; skills: string[] }
+    )) as {
+      commandPrefixPlaceholder: string
+      packagePathPrefixPlaceholder: string
+      skills: string[]
+    }
     const rendered: Record<string, string> = {}
     const visit = (skill: string, root: string, current = root): void => {
       for (const entry of actualFs.readdirSync(current, { withFileTypes: true })
@@ -182,6 +206,7 @@ describe('createCodexRunner', () => {
               repoRoot: packageRoot,
               packageRoot,
               commandPrefixPlaceholder: manifest.commandPrefixPlaceholder,
+              packagePathPrefixPlaceholder: manifest.packagePathPrefixPlaceholder,
             },
           ).toString('utf8')
         }

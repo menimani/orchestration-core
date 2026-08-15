@@ -412,6 +412,45 @@ describe('forge poll budget', () => {
     expect(existsSync(join(paths.tasksDir, `${failedTaskId}.md`))).toBe(false)
   })
 
+  it('persists a failed-task release and stops after three failed reconciliations', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const description = '[BUG] `src/single.ts` retain an unreleasable failed task'
+    const issueNumber = await fakeForge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    await loop.poll()
+    const failedTaskId = readdirSync(paths.statusDir)[0]!.replace(/\.json$/, '')
+    writeRawStatus(failedTaskId, 'failed')
+    const addLabel = fakeForge.addLabel.bind(fakeForge)
+    fakeForge.addLabel = async (number, label) => {
+      if (number === issueNumber && label === LABEL_READY) throw new Error('forge unavailable')
+      await addLabel(number, label)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+    expect(readFileSync(join(paths.queueDir, 'issue-release-intent', failedTaskId), 'utf8'))
+      .toBe(`${issueNumber}\n`)
+    expect(readFileSync(join(paths.queueDir, 'issue-release-failure-count.txt'), 'utf8'))
+      .toBe('1\n')
+
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'issue-release-failure-count.txt'), 'utf8'))
+      .toBe('3\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      `ERROR 3 consecutive issue release failures for #${issueNumber}; stopping the loop`,
+    )
+  })
+
   it('warns with the outsider login and leaves an untrusted issue unclaimed', async () => {
     initializeGitRepo()
     const loop = makeLoop({
@@ -1247,6 +1286,7 @@ describe('cycle gate', () => {
   ])('partitions $sectionCount scan sections across $scanParallel scans', async ({
     sectionCount, scanParallel,
   }) => {
+    initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     const sections = Array.from(
       { length: sectionCount },
@@ -1348,6 +1388,54 @@ describe('cycle gate', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logText()).toContain(
       'ERROR scan-template.md is unusable: it must contain unique numbered Markdown headings outside fenced code blocks',
+    )
+  })
+
+  it('stops without advancing the cycle when any scan fails to launch', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n',
+    )
+    let starts = 0
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async () => {
+        starts += 1
+        if (starts === 2) throw new Error('runner unavailable')
+        return process.pid
+      },
+    }
+    const loop = makeLoop(
+      { scanParallel: 2, autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(starts).toBe(2)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR scan startup failed: runner unavailable (log:',
+    )
+  })
+
+  it('stops a cycle gate that is missing an expected scan yield', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-1'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-1'), 'empty\n')
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(true)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(logText()).toContain(
+      'ERROR cycle 1 did not receive every expected scan yield; stopping the loop',
     )
   })
 
@@ -2304,7 +2392,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(reclaimed.assignees).toEqual(['worker-a'])
   })
 
-  it('retains and re-enqueues a claimed task when releasing its issue fails', async () => {
+  it('persists a startup-failure release and stops after three failed reconciliations', async () => {
     initializeGitRepo()
     const description = '[BUG] retain a claimed task until its issue can be released'
     const attemptedTaskIds: string[] = []
@@ -2342,11 +2430,26 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(issue.labels).toContain(LABEL_IN_PROGRESS)
     expect(issue.labels).not.toContain(LABEL_READY)
     expect(issue.assignees).toEqual([])
-    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:1\n`)
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe('')
     expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(true)
     expect(existsSync(statusFile(paths, taskId))).toBe(true)
     expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
     expect(existingTaskIdForDesc(paths, 'auto', description)).toBe(taskId)
+    expect(readFileSync(join(paths.queueDir, 'issue-release-intent', taskId), 'utf8'))
+      .toBe(`${issueNumber}\n`)
+    expect(readFileSync(join(paths.queueDir, 'issue-release-failure-count.txt'), 'utf8'))
+      .toBe('1\n')
+
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(attemptedTaskIds).toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'issue-release-failure-count.txt'), 'utf8'))
+      .toBe('3\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      `ERROR 3 consecutive issue release failures for #${issueNumber}; stopping the loop`,
+    )
   })
 })
 
@@ -2904,6 +3007,65 @@ describe('completed task merge recovery', () => {
     expect(logged.some((line) => line.startsWith('Failed 066_auto'))).toBe(false)
   })
 
+  it('terminalizes a task whose change is already on the run branch as no-change', async () => {
+    const taskId = '20260814_144306_064_auto-duplicate-fix'
+    initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(join(worktree, 'tracked.txt'), 'fixed\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: duplicate the run fix'], { cwd: worktree })
+    writeFinal(taskId, 'TASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'fixed\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: land the fix from another task'])
+    const runHead = git(['rev-parse', 'HEAD'])
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'duplicate fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    let unavailable = true
+    fakeForge.getIssue = async (number) => {
+      if (number === issueNumber && unavailable) {
+        unavailable = false
+        throw new Error('forge unavailable')
+      }
+      return getIssue(number)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(issueCompletionForIssue(paths, issueNumber)).toMatchObject({
+      taskId, outcome: 'no-change',
+    })
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+    expect(fakeForge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain('no change was warranted')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged).toContain('No-change 064_auto    no change warranted')
+    expect(logged.some((line) => line.startsWith('Failed 064_auto'))).toBe(false)
+  })
+
   it('retries no-change issue reconciliation without counting a merge failure', async () => {
     const taskId = '20260814_145209_067_auto-no-change-retry'
     initializeGitRepo()
@@ -3285,6 +3447,25 @@ describe('runCycleSuite', () => {
     expect(logged).toContain('Started Suite       cycle 1')
   })
 
+  it('stops before running a Docker suite when its probe is not configured', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Docker suite', cwd: '',
+        command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
+        needsDocker: true,
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+
+    expect(existsSync(stopFile())).toBe(false)
+    expect(loop.runCycleSuite(1)).toBe(false)
+
+    expect(logText()).toContain('ERROR cycle suite infrastructure probe is not configured')
+    expect(existsSync(stopFile())).toBe(true)
+    expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(false)
+  })
+
   it('stops before running suite steps when the Docker probe fails', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
@@ -3437,6 +3618,28 @@ describe('runCycleSuite', () => {
     writeFileSync(join(repoRoot, 'launcher-shim'), '')
     expect(loop.runCycleSuite(4)).toBe(true)
     expect(existsSync(join(repoRoot, 'repaired'))).toBe(false)
+  })
+
+  it('stops and reports the remediation when a missing-toolchain repair fails', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Repairable', cwd: '',
+        command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
+        repairWhenMissing: {
+          path: 'launcher-shim',
+          command: 'node -e "process.exit(1)"',
+          message: 'restore the launcher and restart the loop',
+        },
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+
+    expect(loop.runCycleSuite(7)).toBe(false)
+
+    expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(false)
+    expect(existsSync(stopFile())).toBe(true)
+    expect(logText()).toContain('ERROR restore the launcher and restart the loop')
   })
 
   it('skips a step whose required path is absent', () => {

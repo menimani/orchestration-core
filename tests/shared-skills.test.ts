@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createClaudeRunner } from '../src/adapters/runner-claude.ts'
 import type { Runner } from '../src/adapters/runner.ts'
+import { createClaudeSharedSkills } from '../src/adapters/shared-skills-claude.ts'
 import { syncSharedSkills } from '../src/sharedSkills.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 
@@ -11,6 +12,11 @@ let fixtureRoot: string
 let repoRoot: string
 let packageRoot: string
 let runner: Runner
+const interactiveSharedSkills = createClaudeSharedSkills()
+
+function skillAdapters(selectedRunner: Runner = runner) {
+  return [selectedRunner.sharedSkills, interactiveSharedSkills]
+}
 
 function writeSkill(name: string, contents: string): void {
   const directory = join(packageRoot, 'skills', name)
@@ -22,6 +28,7 @@ function writeManifest(skills: string[]): void {
   mkdirSync(join(packageRoot, 'skills'), { recursive: true })
   writeFileSync(join(packageRoot, 'skills', 'manifest.json'), `${JSON.stringify({
     commandPrefixPlaceholder: '{{ORCHESTRATION_COMMAND_PREFIX}}',
+    packagePathPrefixPlaceholder: '{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}',
     skills,
   }, null, 2)}\n`)
 }
@@ -45,7 +52,7 @@ describe('shared skill sync', () => {
   it('installs only manifest skills at the consumer root with its package command prefix', () => {
     writeSkill('verify-changes', 'consumer-specific gates\n')
 
-    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(result.installed).toEqual([
       '.agents/skills/git-commit', '.agents/skills/loop-start',
@@ -64,20 +71,46 @@ describe('shared skill sync', () => {
     writeManifest(['loop-start'])
     writeSkill('loop-start', '{{ORCHESTRATION_COMMAND_PREFIX}} loop-status\n')
 
-    syncSharedSkills(repoRoot, packageRoot, runner)
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe('npm run loop-status\n')
+  })
+
+  it('renders package source paths for consumer and package-owned layouts', () => {
+    writeSkill(
+      'loop-start',
+      'source: `{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}src`\n',
+    )
+
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
+
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toBe('source: `orchestration/ts/src`\n')
+
+    const ownerRoot = join(fixtureRoot, 'owner-path')
+    packageRoot = ownerRoot
+    repoRoot = ownerRoot
+    writeManifest(['loop-start'])
+    writeSkill(
+      'loop-start',
+      'source: `{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}src`\n',
+    )
+
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
+
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toBe('source: `src`\n')
   })
 
   it('refreshes exact generated copies and retains unlisted repository skills', () => {
     const localSkill = join(repoRoot, '.agents', 'skills', 'verify-changes', 'SKILL.md')
     mkdirSync(join(repoRoot, '.agents', 'skills', 'verify-changes'), { recursive: true })
     writeFileSync(localSkill, 'repository gates\n')
-    syncSharedSkills(repoRoot, packageRoot, runner)
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
     writeSkill('loop-start', 'version two: {{ORCHESTRATION_COMMAND_PREFIX}} loop\n')
 
-    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(result.updated).toEqual(['.agents/skills/loop-start', '.claude/skills/loop-start'])
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
@@ -86,12 +119,12 @@ describe('shared skill sync', () => {
   })
 
   it('reports and preserves a generated skill that the consumer changed', () => {
-    syncSharedSkills(repoRoot, packageRoot, runner)
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     writeFileSync(installed, 'consumer version\n')
     writeSkill('loop-start', 'upstream version\n')
 
-    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(result.conflicts).toEqual(['.agents/skills/loop-start'])
     expect(result.updated).toEqual(['.claude/skills/loop-start'])
@@ -99,10 +132,10 @@ describe('shared skill sync', () => {
   })
 
   it('treats deletion of a managed skill as deliberate divergence', () => {
-    syncSharedSkills(repoRoot, packageRoot, runner)
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
     rmSync(join(repoRoot, '.agents', 'skills', 'loop-start'), { recursive: true })
 
-    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(result.conflicts).toEqual(['.agents/skills/loop-start'])
     expect(existsSync(join(repoRoot, '.agents', 'skills', 'loop-start'))).toBe(false)
@@ -117,7 +150,7 @@ describe('shared skill sync', () => {
         destinationRoot: () => legacyRoot,
       },
     }
-    syncSharedSkills(repoRoot, packageRoot, legacyRunner)
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters(legacyRunner))
     runner = {
       ...runner,
       sharedSkills: { ...runner.sharedSkills, legacyRoots: () => [legacyRoot] },
@@ -126,7 +159,7 @@ describe('shared skill sync', () => {
     mkdirSync(dirname(localSkill), { recursive: true })
     writeFileSync(localSkill, 'repository gates\n')
 
-    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(result.migrationConflicts).toEqual([])
     expect(existsSync(join(legacyRoot, 'git-commit'))).toBe(false)
@@ -144,7 +177,7 @@ describe('shared skill sync', () => {
         destinationRoot: () => legacyRoot,
       },
     }
-    syncSharedSkills(repoRoot, packageRoot, legacyRunner)
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters(legacyRunner))
     runner = {
       ...runner,
       sharedSkills: { ...runner.sharedSkills, legacyRoots: () => [legacyRoot] },
@@ -152,8 +185,8 @@ describe('shared skill sync', () => {
     const divergent = join(legacyRoot, 'loop-start', 'SKILL.md')
     writeFileSync(divergent, 'consumer version\n')
 
-    const first = syncSharedSkills(repoRoot, packageRoot, runner)
-    const second = syncSharedSkills(repoRoot, packageRoot, runner)
+    const first = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
+    const second = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(first.migrationConflicts).toEqual([join(legacyRoot, 'loop-start')])
     expect(second.migrationConflicts).toEqual([])
@@ -172,13 +205,20 @@ describe('shared skill sync', () => {
       start: async () => process.pid,
     }
 
-    syncSharedSkills(repoRoot, packageRoot, runner)
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(readFileSync(
       join(repoRoot, '.alternate-runner', 'skills', 'loop-start', 'SKILL.md'),
       'utf8',
     )).toBe('alternate command loop -- --daemon\n')
     expect(existsSync(join(repoRoot, '.agents', 'skills'))).toBe(false)
+  })
+
+  it('does not assume an interactive agent target the consumer did not select', () => {
+    syncSharedSkills(repoRoot, packageRoot, [runner.sharedSkills])
+
+    expect(existsSync(join(repoRoot, '.agents', 'skills', 'loop-start'))).toBe(true)
+    expect(existsSync(join(repoRoot, '.claude'))).toBe(false)
   })
 
   it('rejects a runner destination outside the repository before writing', () => {
@@ -191,7 +231,7 @@ describe('shared skill sync', () => {
       start: async () => process.pid,
     }
 
-    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(result.failures).toEqual([
       `shared skill destination escaped the repository: ${escaped}`,
@@ -212,7 +252,7 @@ describe('shared skill sync', () => {
       '',
     ].join('\n'))
 
-    syncSharedSkills(repoRoot, packageRoot, runner)
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     const interactive = readFileSync(
       join(repoRoot, '.claude', 'skills', 'git-commit', 'SKILL.md'), 'utf8',
@@ -237,7 +277,7 @@ describe('shared skill sync', () => {
       start: async () => process.pid,
     }
 
-    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(result.installed).toEqual(['.claude/skills/git-commit', '.claude/skills/loop-start'])
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
@@ -250,7 +290,7 @@ describe('shared skill sync', () => {
     writeFileSync(localSkill, 'repository gates\n')
     runner = createClaudeRunner()
 
-    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
     expect(result.installed).toEqual([
       '.claude/skills/git-commit', '.claude/skills/loop-start',

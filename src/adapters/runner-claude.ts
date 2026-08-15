@@ -4,11 +4,10 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { packageCommandPrefix } from '../paths.ts'
+import { createClaudeSharedSkills } from './shared-skills-claude.ts'
 import { startWindowsProcess } from './windows-process.ts'
 import type {
-  ReasoningEffort, Runner, RunnerLoadOptions, RunnerSharedSkillRenderOptions,
-  RunnerStartOptions,
+  ReasoningEffort, Runner, RunnerLoadOptions, RunnerStartOptions,
 } from './runner.ts'
 
 const DEFAULT_MODEL = 'claude-opus-5'
@@ -37,16 +36,6 @@ function buildArgs(
 ): string[] {
   const model = configuredModel(options.model, models[options.effort])
   return ['-p', '--permission-mode', 'bypassPermissions', '--model', model]
-}
-
-function renderSharedSkillFile(
-  contents: Buffer,
-  options: RunnerSharedSkillRenderOptions,
-): Buffer {
-  return Buffer.from(contents.toString('utf8').replaceAll(
-    options.commandPrefixPlaceholder,
-    packageCommandPrefix(options.repoRoot, options.packageRoot),
-  ))
 }
 
 function publishFinalMessage(file: string, contents: Buffer): void {
@@ -103,10 +92,7 @@ export function runClaudeProcess(
 export function createClaudeRunner(options: RunnerLoadOptions = {}): Runner {
   const models = effortModels(options)
   return {
-    sharedSkills: {
-      destinationRoot: (repoRoot) => join(repoRoot, '.claude', 'skills'),
-      renderFile: renderSharedSkillFile,
-    },
+    sharedSkills: createClaudeSharedSkills(),
     start(startOptions: RunnerStartOptions): Promise<number> {
       const wrapperArgs = [
         fileURLToPath(import.meta.url),

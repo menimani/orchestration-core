@@ -95,7 +95,7 @@ function makeLoop(
     now: () => new Date(2026, 7, 12, 0, 0, 0),
     updateCoreBeforeCycle: (cycle) =>
       updateCoreBeforeCycle(
-        paths, coreConfig, forge, runner, cycle, event as CoreUpdateEvent, runtime,
+        paths, coreConfig, forge, runner, stubProject, cycle, event as CoreUpdateEvent, runtime,
       ),
   })
   loop.initializeSessionStateForBranch()
@@ -113,6 +113,7 @@ beforeEach(() => {
   mkdirSync(join(upstreamRoot, 'skills'), { recursive: true })
   writeFileSync(join(upstreamRoot, 'skills', 'manifest.json'), JSON.stringify({
     commandPrefixPlaceholder: '{{ORCHESTRATION_COMMAND_PREFIX}}',
+    packagePathPrefixPlaceholder: '{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}',
     skills: ['loop-start'],
   }))
   writeUpstreamSkill('version one: {{ORCHESTRATION_COMMAND_PREFIX}} loop\n')
@@ -135,10 +136,9 @@ beforeEach(() => {
   ])
 
   packageRoot = join(repoRoot, 'orchestration', 'ts')
-  syncSharedSkills(repoRoot, packageRoot, {
-    sharedSkills: fakeRunnerSharedSkills,
-    start: async () => process.pid,
-  })
+  syncSharedSkills(repoRoot, packageRoot, [
+    fakeRunnerSharedSkills, ...(stubProject.sharedSkills ?? []),
+  ])
   commit(repoRoot, 'chore: install shared skills')
   paths = orchPaths(repoRoot)
   events = []
@@ -207,6 +207,7 @@ describe('pre-cycle core update', () => {
       coreConfig,
       makeFakeForge(),
       { sharedSkills: fakeRunnerSharedSkills, start: async () => process.pid },
+      stubProject,
       2,
       event as CoreUpdateEvent,
       { packageRoot, git },
@@ -281,13 +282,16 @@ describe('pre-cycle core update', () => {
     // `.claude/skills` as a legacy root and emptied it. A repository carrying that
     // arrangement must come out of an update with both directories filled, not one.
     rmSync(join(repoRoot, '.agents'), { recursive: true })
-    syncSharedSkills(repoRoot, packageRoot, {
+    const formerRunner: Runner = {
       sharedSkills: {
         ...fakeRunnerSharedSkills,
         destinationRoot: (root) => join(root, '.claude', 'skills'),
       },
       start: async () => process.pid,
-    })
+    }
+    syncSharedSkills(repoRoot, packageRoot, [
+      formerRunner.sharedSkills, ...(stubProject.sharedSkills ?? []),
+    ])
     commit(repoRoot, 'chore: adopt the former arrangement')
     const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
     const loop = makeLoop(config())
@@ -333,7 +337,7 @@ describe('pre-cycle core update', () => {
     )
   })
 
-  it('skips a staged skill destination while syncing and committing the other destination', async () => {
+  it('requires managed staged changes to be cleared before syncing any destination', async () => {
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     const generated = readFileSync(installed)
     writeFileSync(join(packageRoot, 'skills', 'loop-start', 'SKILL.md'), 'version two\n')
@@ -343,23 +347,44 @@ describe('pre-cycle core update', () => {
     writeFileSync(installed, generated)
     const loop = makeLoop(config())
 
-    expect(await loop.poll(), events.join('\n')).toBe('continue')
+    await expect(loop.poll()).rejects.toThrow(
+      'shared skill sync requires a clean managed index',
+    )
     expect(readFileSync(installed, 'utf8').replaceAll('\r', ''))
       .toBe('version one: npm run -C orchestration/ts loop\n')
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
-      .toBe('version two\n')
+      .toBe('version one: npm run -C orchestration/ts loop\n')
     expect(git(repoRoot, ['show', ':.agents/skills/loop-start/SKILL.md'])
       .replaceAll('\r', ''))
       .toBe('staged consumer command')
-    expect(git(repoRoot, ['show', 'HEAD:.claude/skills/loop-start/SKILL.md'])
-      .replaceAll('\r', ''))
-      .toBe('version two')
     expect(git(repoRoot, ['status', '--short']))
       .toBe('MM .agents/skills/loop-start/SKILL.md')
-    expect(events.some((line) => line.startsWith(
-      'WARN shared skill sync could not be committed: staged changes exist at',
-    )), events.join('\n')).toBe(true)
+    expect(runnerStarts).toHaveLength(0)
+  })
+
+  it('stops after a skill commit failure and refuses to resume with its staged output', async () => {
+    const bundled = join(packageRoot, 'skills', 'loop-start', 'SKILL.md')
+    writeFileSync(bundled, 'version two: {{ORCHESTRATION_COMMAND_PREFIX}} loop-status\n')
+    commit(repoRoot, 'test: update bundled skill fixture')
+    const failingGit = vi.fn((root: string, args: string[]) => {
+      if (args[0] === 'commit') throw new Error('simulated commit failure')
+      return git(root, args)
+    })
+    const loop = makeLoop(config(), { packageRoot, git: failingGit })
+
+    await expect(loop.poll()).rejects.toThrow(
+      'shared skill sync could not be committed: simulated commit failure',
+    )
+    expect(runnerStarts).toHaveLength(0)
+    expect(git(repoRoot, ['diff', '--cached', '--name-only']))
+      .toContain('.agents/skills/loop-start/SKILL.md')
+
+    const resumedLoop = makeLoop(config())
+    await expect(resumedLoop.poll()).rejects.toThrow(
+      'shared skill sync requires a clean managed index',
+    )
+    expect(runnerStarts).toHaveLength(0)
   })
 
   it('syncs managed skills while preserving an unrelated staged repository skill', async () => {
