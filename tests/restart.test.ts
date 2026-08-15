@@ -51,6 +51,13 @@ function fakeOperatingSystem(
       return daemon
     },
     processTreeRootPid: () => process.pid,
+    terminateProcessTree: vi.fn(() => {
+      if (child.exitCode !== null) return false
+      child.kill()
+      Object.assign(child, { exitCode: 0 })
+      return true
+    }),
+    processTreeIsAlive: vi.fn(() => child.exitCode === null),
   } as unknown as OperatingSystem
 }
 
@@ -176,10 +183,11 @@ describe('loop replacement startup', () => {
     fixtureRoots.push(root)
     const child = fakeChild(43213)
     child.kill = vi.fn(() => { throw new Error('access denied while stopping replacement') })
+    const os = fakeOperatingSystem(child)
 
     await expect(startLoopReplacement(join(root, 'ready'), {
       env: environmentWithoutWrapper(),
-      operatingSystem: fakeOperatingSystem(child),
+      operatingSystem: os,
       outputFile: join(root, 'loop.log'),
       packageRoot: root,
       startupTimeoutMs: 1,
@@ -188,6 +196,50 @@ describe('loop replacement startup', () => {
       pid: 43213,
       error: 'replacement did not become ready before the startup timeout; '
         + 'replacement cleanup failed: access denied while stopping replacement',
+    })
+    expect(os.processTreeIsAlive).toHaveBeenCalledWith(43213)
+  })
+
+  it('terminates and verifies the replacement process tree after the startup timeout', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const child = fakeChild(43215)
+    const os = fakeOperatingSystem(child)
+
+    await expect(startLoopReplacement(join(root, 'ready'), {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      startupTimeoutMs: 1,
+    })).resolves.toEqual({
+      ok: false,
+      pid: 43215,
+      error: 'replacement did not become ready before the startup timeout',
+    })
+    expect(os.terminateProcessTree).toHaveBeenCalledWith(43215)
+    expect(os.processTreeIsAlive).toHaveBeenCalledWith(43215)
+  })
+
+  it('reports failure when the replacement process tree survives cleanup', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const child = fakeChild(43216)
+    const os = fakeOperatingSystem(child)
+    vi.mocked(os.terminateProcessTree).mockReturnValue(true)
+    vi.mocked(os.processTreeIsAlive).mockReturnValue(true)
+
+    await expect(startLoopReplacement(join(root, 'ready'), {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      startupTimeoutMs: 1,
+    })).resolves.toEqual({
+      ok: false,
+      pid: 43216,
+      error: 'replacement did not become ready before the startup timeout; '
+        + 'replacement cleanup failed: Could not stop process tree 43216.',
     })
   })
 
