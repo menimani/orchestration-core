@@ -540,6 +540,38 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('does not report a background daemon as started when the PID lock is held', () => {
+    mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
+    writeFileSync(daemonFile('loop.pid'), `${process.pid}\n`)
+
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).not.toContain('Started the loop in the background')
+    expect(result.stderr).toContain('Could not start the loop: Loop is already running')
+  })
+
+  it('returns a background daemon initialization error to its launcher', () => {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).not.toContain('Started the loop in the background')
+    expect(result.stderr).toContain("Could not start the loop: Unknown FORGE 'missing'")
+    expect(existsSync(daemonFile('loop.pid'))).toBe(false)
+  })
+
   it('loads and prepares the project adapter from the integration worktree', () => {
     git(['config', 'user.email', 'test@example.com'])
     git(['config', 'user.name', 'Test'])

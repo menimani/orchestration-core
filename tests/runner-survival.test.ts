@@ -105,7 +105,7 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require="${preload.replaceAll('\\', '\\\\')}"`.trim(),
       ORCH_TEST_SPAWN_PROBE: probeFile,
       POLL_INTERVAL: '1',
-      PROJECT: 'fixture',
+      PROJECT: 'shiora',
       PROJECT_ADAPTER,
       REVIEW_ENABLED: 'false',
       SCAN_ENABLED: 'false',
