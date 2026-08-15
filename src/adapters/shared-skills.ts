@@ -2,6 +2,7 @@ export interface SharedSkillRenderOptions {
   repoRoot: string
   packageRoot: string
   commandPrefixPlaceholder: string
+  packagePathPrefixPlaceholder: string
 }
 
 /** One agent's repository-scoped skill discovery and rendering behavior. */
