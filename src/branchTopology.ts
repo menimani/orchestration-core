@@ -60,6 +60,12 @@ export function prepareBranchTopology(
   integrationBranch: string,
   packageRoot = PACKAGE_ROOT,
 ): BranchTopology {
+  const recordedBranch = readMarker(paths, 'integration-branch.txt')
+  if (recordedBranch !== undefined && recordedBranch !== integrationBranch) {
+    throw new Error(
+      `This run uses integration branch ${recordedBranch}; refusing ${integrationBranch || 'direct mode'}.`,
+    )
+  }
   if (integrationBranch === '') {
     return {
       paths,
@@ -75,15 +81,9 @@ export function prepareBranchTopology(
   if (daemonBranch === '') throw new Error('The daemon checkout must be on a branch.')
 
   git(paths.repoRoot, ['check-ref-format', '--branch', integrationBranch])
-  const recordedBranch = readMarker(paths, 'integration-branch.txt')
   const recordedDaemonBranch = readMarker(paths, 'daemon-branch.txt')
   const recordedDaemonHead = readMarker(paths, 'daemon-head.txt')
   const resuming = recordedBranch !== undefined
-  if (resuming && recordedBranch !== integrationBranch) {
-    throw new Error(
-      `This run uses integration branch ${recordedBranch}; refusing ${integrationBranch}.`,
-    )
-  }
   if (resuming && (recordedDaemonBranch !== daemonBranch || recordedDaemonHead !== daemonHead)) {
     throw new Error(
       `The resumed run is fixed to ${recordedDaemonBranch ?? '(unknown)'} at `
