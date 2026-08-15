@@ -327,6 +327,13 @@ describe('integration branch topology', () => {
       .toThrow('The resumed run is fixed')
   })
 
+  it('refuses direct mode when resuming an integration run', () => {
+    prepareBranchTopology(paths, 'integration/run')
+
+    expect(() => prepareBranchTopology(paths, ''))
+      .toThrow('This run uses integration branch integration/run; refusing direct mode.')
+  })
+
   it('installs integration dependencies through adapter-owned setup', () => {
     const topology = prepareBranchTopology(paths, 'integration/run')
     const reported: string[] = []
