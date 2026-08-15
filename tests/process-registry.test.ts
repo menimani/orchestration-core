@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import {
-  bootedAt, forgetTaskProcess, recordTaskProcess, taskProcessPid,
+  bootedAt, forgetTaskProcess, recordTaskProcess, taskProcessPid, terminableTaskProcessPid,
 } from '../src/processRegistry.ts'
 
 describe('task process registry', () => {
@@ -83,18 +83,23 @@ describe('task process registry', () => {
 
     expect(taskProcessPid(paths, taskId, undefined, () => undefined, () => true)).toBe(4321)
     expect(existsSync(registryFile())).toBe(true)
+    expect(terminableTaskProcessPid(
+      paths, taskId, undefined, () => undefined, () => true,
+    )).toBeUndefined()
     expect(taskProcessPid(paths, taskId, undefined, identity, () => true)).toBe(4321)
     expect(existsSync(registryFile())).toBe(true)
   })
 
-  it('records unverifiable ownership and adds the identity when the probe recovers', () => {
+  it('never adopts a recovered identity for ownership that was unverified at launch', () => {
     recordTaskProcess(paths, taskId, 4321, () => undefined, () => true)
 
     expect(existsSync(registryFile())).toBe(true)
     expect(taskProcessPid(paths, taskId, undefined, identity, () => true)).toBe(4321)
     expect(JSON.parse(readFileSync(registryFile(), 'utf8'))).toEqual({
-      pid: 4321, startIdentity: 'started:4321',
+      pid: 4321, startIdentity: null,
     })
+    expect(terminableTaskProcessPid(paths, taskId, undefined, identity, () => true))
+      .toBeUndefined()
   })
 
   it('drops unverifiable ownership only when the process is confirmed gone', () => {
