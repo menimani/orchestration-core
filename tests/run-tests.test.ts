@@ -205,17 +205,19 @@ describe('test suite wrapper', () => {
     const startedAt = performance.now()
     const result = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
       ...process.env,
-      ORCHESTRATION_TEST_LOCK_TIMEOUT_MS: '100',
+      ORCHESTRATION_TEST_LOCK_TIMEOUT_MS: '400',
       ORCHESTRATION_TEST_RECLAIM_ATTEMPTS: reclaimAttempts,
       ORCHESTRATION_TEST_RECLAIM_EPERM: '1',
     })
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toMatch(/Timed out after 100ms/)
-    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(75)
+    expect(result.stderr).toMatch(/Timed out after 400ms/)
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(300)
+    // The 250ms backoff admits two scheduled attempts within the 400ms budget; the
+    // bound leaves room for the short final sleeps near the deadline on slow runners.
     const attemptCount = readFileSync(reclaimAttempts, 'utf8').trim().split(/\r?\n/).length
     expect(attemptCount).toBeGreaterThanOrEqual(1)
-    expect(attemptCount).toBeLessThanOrEqual(2)
+    expect(attemptCount).toBeLessThanOrEqual(4)
     expect(existsSync(lock)).toBe(true)
   })
 
