@@ -3007,6 +3007,65 @@ describe('completed task merge recovery', () => {
     expect(logged.some((line) => line.startsWith('Failed 066_auto'))).toBe(false)
   })
 
+  it('terminalizes a task whose change is already on the run branch as no-change', async () => {
+    const taskId = '20260814_144306_064_auto-duplicate-fix'
+    initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(join(worktree, 'tracked.txt'), 'fixed\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: duplicate the run fix'], { cwd: worktree })
+    writeFinal(taskId, 'TASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'fixed\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: land the fix from another task'])
+    const runHead = git(['rev-parse', 'HEAD'])
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'duplicate fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    let unavailable = true
+    fakeForge.getIssue = async (number) => {
+      if (number === issueNumber && unavailable) {
+        unavailable = false
+        throw new Error('forge unavailable')
+      }
+      return getIssue(number)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(issueCompletionForIssue(paths, issueNumber)).toMatchObject({
+      taskId, outcome: 'no-change',
+    })
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+    expect(fakeForge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain('no change was warranted')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged).toContain('No-change 064_auto    no change warranted')
+    expect(logged.some((line) => line.startsWith('Failed 064_auto'))).toBe(false)
+  })
+
   it('retries no-change issue reconciliation without counting a merge failure', async () => {
     const taskId = '20260814_145209_067_auto-no-change-retry'
     initializeGitRepo()

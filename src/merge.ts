@@ -317,6 +317,15 @@ function rebaseTaskOntoRunTip(
   }
 }
 
+/** Whether every task commit has the same tree as its parent. */
+function taskCommitsAreEmpty(worktree: string, currentBranch: string): boolean {
+  const commits = git(worktree, ['rev-list', '--reverse', `${currentBranch}..HEAD`])
+    .trim().split(/\s+/).filter((commit) => commit !== '')
+  return commits.every((commit) =>
+    git(worktree, ['rev-parse', `${commit}^{tree}`]).trim()
+      === git(worktree, ['rev-parse', `${commit}^1^{tree}`]).trim())
+}
+
 function mergeIo(outputFile?: string): MergeIo {
   const out = (text: string): void => {
     if (outputFile !== undefined) {
@@ -752,6 +761,15 @@ async function mergeTaskWithGuardHeld(
     }
   }
   rebaseTaskOntoRunTip(worktree, currentBranch, io)
+  if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
+    if (closingIssues.length > 0 && options.onNoChange === undefined) {
+      throw new NoChangeReconciliationError(
+        'A linked no-change task requires issue reconciliation.',
+      )
+    }
+    await finalizeNoChange(paths, taskId, branch, worktree, io, options)
+    return { outcome: 'no-change' }
+  }
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
