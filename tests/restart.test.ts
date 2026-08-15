@@ -133,6 +133,20 @@ describe('loop replacement startup', () => {
     expect(child.unref).not.toHaveBeenCalled()
   })
 
+  it('upgrades a legacy bare-PID reservation only when the ready replacement is published', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const pidFile = join(root, 'loop.pid')
+    writeFileSync(pidFile, `${process.pid}\n`)
+    vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockImplementation((pid) => `start-${pid}`)
+
+    publishLoopReplacementPid(pidFile, process.pid, 43214)
+
+    expect(readFileSync(pidFile, 'utf8'))
+      .toBe(processMarkerText({ pid: 43214, startIdentity: 'start-43214' }))
+  })
+
   it('delegates replacement launch details to the operating-system adapter', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
     fixtureRoots.push(root)

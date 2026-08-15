@@ -85,11 +85,15 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
   for (let attempts = 0; ; attempts++) {
     try {
       mkdirSync(dir)
-      // Keep the PID file readable by older cores and publish identity separately.
-      writeFileSync(pidFile, `${process.pid}\n`)
-      writeFileSync(identityFile, `${owner}\n`)
-      return owner
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      try {
+        if (!statSync(dir).isDirectory()) throw error
+      } catch (inspectionError) {
+        // The directory may have been released between mkdir and inspection.
+        if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
       // Lock held. Reclaim it only when its owner is provably gone: a recorded PID that
       // no longer runs, or no PID at all once the lock has aged past the window in which
       // a live owner could still be about to publish one.
@@ -130,6 +134,19 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
         throw new Error(`Timed out waiting for the status lock: ${taskId}`)
       }
       await sleep(10)
+      continue
+    }
+
+    try {
+      // Keep the PID file readable by older cores and publish identity separately.
+      writeFileSync(pidFile, `${process.pid}\n`)
+      writeFileSync(identityFile, `${owner}\n`)
+      return owner
+    } catch (error) {
+      // Publishing metadata is part of acquisition, not contention. A writer that
+      // cannot finish it must not leave its own PID looking like a live lock owner.
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 })
+      throw error
     }
   }
 }
@@ -162,10 +179,15 @@ function writeStatusUnlocked(
   const file = statusFile(paths, taskId)
   const temporaryFile = join(paths.statusDir, `.${taskId}.${process.pid}.tmp`)
   const existing = readStatus(paths, taskId)
+  const existingPid = taskProcessPid(paths, taskId)
   // The registry, not the record, is what later readers believe. Publish a new owner
   // before its running status, but keep an existing owner visible until a terminal
   // status has been published successfully.
-  if (pid !== undefined && Number.isInteger(pid)) recordTaskProcess(paths, taskId, pid)
+  // Rewriting a status for the same PID must also preserve whether launch captured its
+  // start identity; a later successful probe cannot make an initially unsafe PID safe.
+  if (pid !== undefined && Number.isInteger(pid) && pid !== existingPid) {
+    recordTaskProcess(paths, taskId, pid)
+  }
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   const record: DurableTaskStatus = {
     task_id: taskId,
