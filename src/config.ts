@@ -39,6 +39,11 @@ export interface LoopConfig {
   taskGate: 'full' | 'light'
   forge: string
   runner: string
+  runnerClaudeModel: string
+  runnerClaudeModelMinimal: string
+  runnerClaudeModelLow: string
+  runnerClaudeModelMedium: string
+  runnerClaudeModelHigh: string
   /** Findings become forge issues that workers claim, instead of direct local enqueues. */
   issueQueueEnabled: boolean
   /** Claim and execute shared work without scanning, reviewing, or merging it locally. */
@@ -126,6 +131,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
   if (reviewEveryNCycles < 1) {
     throw new Error('REVIEW_EVERY_N_CYCLES must be at least 1')
   }
+  const runnerClaudeModel = str(env, 'RUNNER_CLAUDE_MODEL', 'claude-opus-5')
   return {
     maxParallel,
     pollIntervalSeconds,
@@ -156,6 +162,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoopConfig {
     taskGate,
     forge: str(env, 'FORGE', 'github'),
     runner: str(env, 'RUNNER', 'codex'),
+    runnerClaudeModel,
+    runnerClaudeModelMinimal: str(env, 'RUNNER_CLAUDE_MODEL_MINIMAL', runnerClaudeModel),
+    runnerClaudeModelLow: str(env, 'RUNNER_CLAUDE_MODEL_LOW', runnerClaudeModel),
+    runnerClaudeModelMedium: str(env, 'RUNNER_CLAUDE_MODEL_MEDIUM', runnerClaudeModel),
+    runnerClaudeModelHigh: str(env, 'RUNNER_CLAUDE_MODEL_HIGH', runnerClaudeModel),
     issueQueueEnabled,
     workerMode,
     issueLeaseHours: num(env, 'ISSUE_LEASE_HOURS', 3),
