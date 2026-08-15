@@ -392,9 +392,9 @@ export function createLoop(deps: LoopDeps) {
             await Promise.all(issueNumbers.map((issueNumber) =>
               closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
                 `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+            recordIssueCompletions(paths, taskId, 'no-change')
           },
         })
-        recordIssueCompletions(paths, taskId, 'no-change')
         return
       }
       throw new Error(`${taskId} has no commits and is not an inspection task`)
@@ -1997,14 +1997,16 @@ export function createLoop(deps: LoopDeps) {
           outputFile: mergeLog,
           orchestrationDepsRuntime,
           onOrchestrationDepsEvent: orchestrationDepsEvent,
-          onNoChange: linkedIssues.length === 0 ? undefined : async () => {
-            await Promise.all(linkedIssues.map((issueNumber) =>
-              closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
-                `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+          onNoChange: async () => {
+            if (linkedIssues.length > 0) {
+              await Promise.all(linkedIssues.map((issueNumber) =>
+                closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
+                  `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+            }
+            recordIssueCompletions(paths, taskId, 'no-change')
           },
         })
         if (mergeResult.outcome === 'no-change') {
-          recordIssueCompletions(paths, taskId, 'no-change')
           event('No-change', shortTaskId(taskId), 'no change warranted')
           if (!isInspectionTaskId(paths, taskId)) {
             const cycle = readCount(scanCountFile)

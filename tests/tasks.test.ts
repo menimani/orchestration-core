@@ -184,8 +184,17 @@ describe('delegateTask', () => {
     expect(isLoopRunning(paths)).toBe(false)
   })
 
-  it('rejects legacy bare-PID daemon markers as unverifiable', () => {
+  it('preserves live legacy bare-PID daemon markers during upgrades', () => {
     vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    writeFileSync(join(paths.queueDir, 'issue-mode'), 'true\n2147483647\n')
+    writeFileSync(join(paths.queueDir, 'loop.pid'), '2147483646\n')
+
+    expect(isIssueModeActive(paths, {})).toBe(true)
+    expect(isLoopRunning(paths)).toBe(true)
+  })
+
+  it('ignores stopped legacy bare-PID daemon markers', () => {
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
     writeFileSync(join(paths.queueDir, 'issue-mode'), 'true\n2147483647\n')
     writeFileSync(join(paths.queueDir, 'loop.pid'), '2147483646\n')
 

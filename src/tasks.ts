@@ -9,7 +9,7 @@ import { readTemplate } from './templates.ts'
 import { signalWake } from './wake.ts'
 import type { Forge } from './adapters/forge.ts'
 import {
-  parseProcessMarker, processMarker, processMarkerIsCurrent, processMarkerText,
+  currentProcessMarkerPid, parseProcessMarker, processMarker, processMarkerText,
 } from './processMarker.ts'
 
 // The queue-writing commands: new, enqueue, delegate. Everything here prints the exact
@@ -160,8 +160,7 @@ export function isIssueModeActive(
   if (!existsSync(marker)) return false
   const [enabled, ownerText] = readFileSync(marker, 'utf8').split(/\r?\n/, 2)
   if (enabled !== 'true' || ownerText === undefined) return false
-  const owner = parseProcessMarker(ownerText)
-  return owner !== undefined && processMarkerIsCurrent(owner)
+  return currentProcessMarkerPid(ownerText) !== undefined
 }
 
 /**
@@ -259,6 +258,5 @@ export async function delegateTaskVisible(
 export function isLoopRunning(paths: OrchPaths): boolean {
   const pidFile = join(paths.queueDir, 'loop.pid')
   if (!existsSync(pidFile)) return false
-  const owner = parseProcessMarker(readFileSync(pidFile, 'utf8'))
-  return owner !== undefined && processMarkerIsCurrent(owner)
+  return currentProcessMarkerPid(readFileSync(pidFile, 'utf8')) !== undefined
 }

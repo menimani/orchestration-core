@@ -10,7 +10,8 @@ import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
+  completeTaskWithoutChanges, MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
+  removeTemporaryWorktree,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
@@ -376,6 +377,45 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
   })
 
+  it('does not terminate an unverified runner before merging', async () => {
+    const taskId = '20260815_120000_001_user-unverified-merge-runner'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runnerPid = 12345
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue(undefined)
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
+      .rejects.toThrow(`Could not verify completed runner ${runnerPid}; task state was retained.`)
+
+    expect(terminate).not.toHaveBeenCalled()
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
+  })
+
+  it('does not terminate an unverified runner before no-change completion', async () => {
+    const taskId = '20260815_120000_002_user-unverified-no-change-runner'
+    const worktree = await makeCompletedTask(taskId)
+    const runnerPid = 12345
+    writeFileSync(finalMessageFile(paths, taskId),
+      'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue(undefined)
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+
+    await expect(completeTaskWithoutChanges(
+      paths, taskId, git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    )).rejects.toThrow(
+      `Could not verify completed runner ${runnerPid}; task state was retained.`,
+    )
+
+    expect(terminate).not.toHaveBeenCalled()
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
+  })
+
   it('forgets a stopped runner before a failed-check merge is retried', async () => {
     const taskId = '20260808_000000_027_user-failed-check-retry'
     const worktree = await makeCompletedTask(taskId, { commit: true })
@@ -485,11 +525,19 @@ describe('mergeTask', () => {
     writeFileSync(finalMessageFile(paths, taskId),
       'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
 
+    const onNoChange = vi.fn(async () => {
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+      expect(existsSync(worktree)).toBe(true)
+      throw new Error('completion persistence unavailable')
+    })
     await expect(mergeTask(paths, taskId, {
       taskGate: 'light', project: stubProject,
-      onNoChange: async () => { throw new Error('forge unavailable') },
-    })).rejects.toThrow('Could not reconcile the no-change verdict: forge unavailable')
+      onNoChange,
+    })).rejects.toThrow(
+      'Could not reconcile the no-change verdict: completion persistence unavailable',
+    )
 
+    expect(onNoChange).toHaveBeenCalledOnce()
     expect(existsSync(worktree)).toBe(true)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })

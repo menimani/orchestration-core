@@ -11,7 +11,7 @@ import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
-  parseProcessMarker, processMarker, processMarkerIsCurrent, processMarkerText,
+  currentProcessMarkerPid, processMarker, processMarkerText,
 } from './processMarker.ts'
 import { cleanupTask } from './cleanup.ts'
 import { runCleanupCommand } from './cleanupCommand.ts'
@@ -578,19 +578,21 @@ const cmdMerge: Command = async (paths, args) => {
       project: await loadProject(paths.root),
       closesIssues: linkedIssues,
       forge,
-      onNoChange: linkedIssues.length === 0 ? undefined : async () => {
-        await Promise.all(linkedIssues.map((linkedIssue) =>
-          closeIssueAndRemoveLifecycleLabels(forge!, linkedIssue,
-            `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+      onNoChange: async () => {
+        if (linkedIssues.length > 0) {
+          await Promise.all(linkedIssues.map((linkedIssue) =>
+            closeIssueAndRemoveLifecycleLabels(forge!, linkedIssue,
+              `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+        }
+        // Keep completion persistence inside the retryable reconciliation phase. Once
+        // mergeTask writes no-change and removes the worktree there is no merge retry.
+        recordIssueCompletions(paths, taskId, 'no-change')
       },
     })
     if (mergeResult.outcome === 'merged') {
       // A completed manual merge proves the previous failures are no longer consecutive.
       // Clear the durable streak immediately, before optional forge bookkeeping can fail.
       writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
-    }
-    if (mergeResult.outcome === 'no-change') {
-      recordIssueCompletions(paths, taskId, 'no-change')
     }
     if (mergeResult.outcome === 'merged' && linkedIssues.length > 0) {
       const mergeCommit = mergeResult.mergeCommit
@@ -682,11 +684,11 @@ const cmdLoopStatus: Command = async (paths) => {
   // A compact answer to "is it running, and what is in flight". Always exits 0 so it
   // is safe to embed in a skill preamble.
   const pidFile = join(paths.queueDir, 'loop.pid')
-  const owner = existsSync(pidFile)
-    ? parseProcessMarker(readFileSync(pidFile, 'utf8'))
+  const ownerPid = existsSync(pidFile)
+    ? currentProcessMarkerPid(readFileSync(pidFile, 'utf8'))
     : undefined
-  if (owner !== undefined && processMarkerIsCurrent(owner)) {
-    console.log(`loop: running (PID=${owner.pid})`)
+  if (ownerPid !== undefined) {
+    console.log(`loop: running (PID=${ownerPid})`)
   } else {
     console.log('loop: not running')
   }
@@ -895,15 +897,14 @@ async function runLoopDaemon(
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
         throw error
       }
-      const existing = parseProcessMarker(existingText)
+      const existingPid = currentProcessMarkerPid(existingText)
       if (restartPredecessorPid !== undefined
-        && existing?.pid === restartPredecessorPid
-        && processMarkerIsCurrent(existing)) {
+        && existingPid === restartPredecessorPid) {
         usesRestartReservation = true
         break
       }
-      if (existing !== undefined && processMarkerIsCurrent(existing)) {
-        log(`ERROR: Loop is already running (PID=${existing.pid}). Please stop and restart.`)
+      if (existingPid !== undefined) {
+        log(`ERROR: Loop is already running (PID=${existingPid}). Please stop and restart.`)
         return 1
       }
       log('WARN: Removing stale PID file')

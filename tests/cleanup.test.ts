@@ -151,6 +151,28 @@ describe('cleanupTask', () => {
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
   })
 
+  it('retains task state without terminating an unverified process', () => {
+    const pid = 12345
+    seedTask(pid)
+    recordTaskProcess(paths, taskId, pid, () => undefined, () => true)
+    const terminateProcessTree = vi.fn(() => true)
+    const runtime = makeRuntime({
+      os: {
+        ...windowsOperatingSystem(),
+        processIsAlive: () => true,
+        processStartIdentity: () => undefined,
+        terminateProcessTree,
+      },
+    })
+
+    expect(() => cleanupTask(paths, taskId, runtime))
+      .toThrow(`Could not verify process ${pid}; task state was retained.`)
+
+    expect(terminateProcessTree).not.toHaveBeenCalled()
+    expectTaskStateToExist()
+    expect(existsSync(worktree)).toBe(true)
+  })
+
   it('signals and verifies the detached process group on POSIX', () => {
     seedTask(12345)
     let groupAlive = true

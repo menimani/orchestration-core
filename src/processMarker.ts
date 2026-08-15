@@ -24,7 +24,7 @@ export function processMarkerText(marker: ProcessMarker): string {
   return `${JSON.stringify(marker)}\n`
 }
 
-/** Bare-PID and malformed legacy markers are intentionally unverifiable. */
+/** Parse an identity-bearing marker written by current versions. */
 export function parseProcessMarker(text: string): ProcessMarker | undefined {
   try {
     const parsed = JSON.parse(text) as Partial<ProcessMarker>
@@ -40,4 +40,29 @@ export function parseProcessMarker(text: string): ProcessMarker | undefined {
 
 export function processMarkerIsCurrent(marker: ProcessMarker): boolean {
   return lockOwnerIsCurrent(marker.pid, marker.startIdentity)
+}
+
+function legacyProcessMarkerPid(text: string): number | undefined {
+  const value = text.trim()
+  if (!/^[1-9][0-9]*$/.test(value)) return undefined
+  const pid = Number(value)
+  return Number.isSafeInteger(pid) ? pid : undefined
+}
+
+/**
+ * Return the live owner described by current or legacy marker text. Legacy bare PIDs
+ * cannot distinguish reuse, but while that PID is live an upgrade must preserve the
+ * old daemon's reservation instead of risking two loops in one repository.
+ */
+export function currentProcessMarkerPid(text: string): number | undefined {
+  const marker = parseProcessMarker(text)
+  if (marker !== undefined) return processMarkerIsCurrent(marker) ? marker.pid : undefined
+  const pid = legacyProcessMarkerPid(text)
+  if (pid === undefined) return undefined
+  try {
+    return operatingSystem.processIsAlive(pid) ? pid : undefined
+  } catch {
+    // An unavailable liveness probe does not prove that the legacy owner stopped.
+    return pid
+  }
 }
