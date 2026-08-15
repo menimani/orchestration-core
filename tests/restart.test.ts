@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import type {
   DaemonLaunchOptions, DaemonProcess, OperatingSystem,
 } from '../src/adapters/os.ts'
@@ -12,10 +13,12 @@ import {
   publishLoopReplacementPid, signalLoopRestartReady, startLoopReplacement,
 } from '../src/restart.ts'
 import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/adapters/windows-process.ts'
+import { processMarker, processMarkerText } from '../src/processMarker.ts'
 
 const fixtureRoots: string[] = []
 
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
@@ -69,7 +72,10 @@ describe('loop replacement startup', () => {
     fixtureRoots.push(root)
     const readyFile = join(root, 'ready')
     const pidFile = join(root, 'loop.pid')
-    writeFileSync(pidFile, `${process.pid}\n`)
+    vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockImplementation((pid) => `start-${pid}`)
+    const predecessorMarker = processMarkerText(processMarker(process.pid))
+    writeFileSync(pidFile, predecessorMarker)
     const child = fakeChild(43210)
     const os = fakeOperatingSystem(child, (options) => {
       const env = options.env as NodeJS.ProcessEnv
@@ -78,7 +84,7 @@ describe('loop replacement startup', () => {
       // The predecessor exits as soon as this process is ready, and an attached child
       // dies with it: a Windows consumer's loop ended at its first core auto-update.
       expect(options.outputFile).toBe(join(root, 'loop.log'))
-      expect(readFileSync(pidFile, 'utf8')).toBe(`${process.pid}\n`)
+      expect(readFileSync(pidFile, 'utf8')).toBe(predecessorMarker)
       setTimeout(() => writeFileSync(readyFile, '43210\n'), 0)
     })
 
@@ -90,7 +96,8 @@ describe('loop replacement startup', () => {
       onReady: (pid) => publishLoopReplacementPid(pidFile, process.pid, pid),
       startupTimeoutMs: 1_000,
     })).resolves.toEqual({ ok: true, pid: 43210 })
-    expect(readFileSync(pidFile, 'utf8')).toBe('43210\n')
+    expect(readFileSync(pidFile, 'utf8'))
+      .toBe(processMarkerText({ pid: 43210, startIdentity: 'start-43210' }))
     expect(child.unref).toHaveBeenCalled()
   })
 
@@ -98,7 +105,10 @@ describe('loop replacement startup', () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
     fixtureRoots.push(root)
     const pidFile = join(root, 'loop.pid')
-    writeFileSync(pidFile, `${process.pid}\n`)
+    vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockImplementation((pid) => `start-${pid}`)
+    const predecessorMarker = processMarkerText(processMarker(process.pid))
+    writeFileSync(pidFile, predecessorMarker)
     const child = fakeChild(43211)
     const os = fakeOperatingSystem(child, () => {
       setTimeout(() => {
@@ -119,7 +129,7 @@ describe('loop replacement startup', () => {
       pid: 43211,
       error: 'replacement exited before becoming ready (exit code 1)',
     })
-    expect(readFileSync(pidFile, 'utf8')).toBe(`${process.pid}\n`)
+    expect(readFileSync(pidFile, 'utf8')).toBe(predecessorMarker)
     expect(child.unref).not.toHaveBeenCalled()
   })
 

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { issueCompletionForIssue, recordIssueForTask } from '../src/issueQueue.ts'
 import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
+import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import { writeStatus } from '../src/status.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { PROCESS_TEST_TIMEOUT_MS, TestProcessRegistry } from './testProcess.ts'
@@ -542,7 +543,7 @@ describe('manually promoted run ending', () => {
 describe('loop daemon ownership', () => {
   it('does not report a background daemon as started when the PID lock is held', () => {
     mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
-    writeFileSync(daemonFile('loop.pid'), `${process.pid}\n`)
+    writeFileSync(daemonFile('loop.pid'), processMarkerText(processMarker(process.pid)))
 
     const result = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
       cwd: repoRoot,
@@ -555,6 +556,28 @@ describe('loop daemon ownership', () => {
     expect(result.status).toBe(1)
     expect(result.stdout).not.toContain('Started the loop in the background')
     expect(result.stderr).toContain('Could not start the loop: Loop is already running')
+  })
+
+  it('reclaims a loop marker when its live PID belongs to a different process start', () => {
+    const paths = orchPaths(repoRoot)
+    writeFileSync(
+      daemonFile('loop.pid'),
+      `${JSON.stringify({ pid: process.pid, startIdentity: 'not-the-current-process' })}\n`,
+    )
+    mkdirSync(join(paths.worktreesDir, 'orphan-after-reused-loop-pid'))
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('Removing stale PID file')
+    expect(result.stdout).not.toContain('Loop is already running')
+    expect(existsSync(daemonFile('loop.pid'))).toBe(false)
   })
 
   it('returns a background daemon initialization error to its launcher', () => {
@@ -753,6 +776,12 @@ describe('loop daemon ownership', () => {
       "  if (typeof file === 'string' && /[\\\\/]loop\\.pid$/.test(file)) {",
       '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000)',
       '  }',
+      "  if (typeof file === 'string' && /[\\\\/]cycle-cap\\.txt$/.test(file)) {",
+      "    const stop = file.replace(/cycle-cap\\.txt$/, 'stop')",
+      '    while (!fs.existsSync(stop)) {',
+      '      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)',
+      '    }',
+      '  }',
       '  return result',
       '}',
       'syncBuiltinESMExports()',
@@ -805,6 +834,12 @@ describe('loop daemon ownership', () => {
       '  const result = originalWriteFileSync.call(this, file, ...args)',
       "  if (typeof file === 'string' && /[\\\\/]loop\\.pid$/.test(file)) {",
       '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000)',
+      '  }',
+      "  if (typeof file === 'string' && /[\\\\/]cycle-cap\\.txt$/.test(file)) {",
+      "    const stop = file.replace(/cycle-cap\\.txt$/, 'stop')",
+      '    while (!fs.existsSync(stop)) {',
+      '      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)',
+      '    }',
       '  }',
       '  return result',
       '}',

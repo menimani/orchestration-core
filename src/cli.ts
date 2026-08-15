@@ -10,6 +10,9 @@ import { loadForge } from './adapters/forge.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
+import {
+  parseProcessMarker, processMarker, processMarkerIsCurrent, processMarkerText,
+} from './processMarker.ts'
 import { cleanupTask } from './cleanup.ts'
 import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
@@ -679,9 +682,11 @@ const cmdLoopStatus: Command = async (paths) => {
   // A compact answer to "is it running, and what is in flight". Always exits 0 so it
   // is safe to embed in a skill preamble.
   const pidFile = join(paths.queueDir, 'loop.pid')
-  const pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8').trim() : ''
-  if (/^\d+$/.test(pid) && operatingSystem.processIsAlive(Number(pid))) {
-    console.log(`loop: running (PID=${pid})`)
+  const owner = existsSync(pidFile)
+    ? parseProcessMarker(readFileSync(pidFile, 'utf8'))
+    : undefined
+  if (owner !== undefined && processMarkerIsCurrent(owner)) {
+    console.log(`loop: running (PID=${owner.pid})`)
   } else {
     console.log('loop: not running')
   }
@@ -858,6 +863,8 @@ async function runLoopDaemon(
   ready: () => void = () => {},
 ): Promise<number> {
   const daemonPid = operatingSystem.processTreeRootPid()
+  const daemonOwner = processMarker(daemonPid)
+  const daemonOwnerText = processMarkerText(daemonOwner)
   const pidFile = join(paths.queueDir, 'loop.pid')
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
@@ -870,30 +877,33 @@ async function runLoopDaemon(
 
   // PID lock: one loop per repository.
   for (;;) {
-    try {
-      writeFileSync(pidFile, `${daemonPid}\n`, { flag: 'wx' })
-      break
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    }
-
     const releaseRecoveryLock = await acquireRecoveryLock(recoveryLock)
     try {
-      let existing: string
       try {
-        existing = readFileSync(pidFile, 'utf8').trim()
+        // Creation uses the same mutex as stale recovery so another starter cannot
+        // observe the file between its exclusive creation and completed metadata write.
+        writeFileSync(pidFile, daemonOwnerText, { flag: 'wx' })
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+
+      let existingText: string
+      try {
+        existingText = readFileSync(pidFile, 'utf8')
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
         throw error
       }
+      const existing = parseProcessMarker(existingText)
       if (restartPredecessorPid !== undefined
-        && existing === `${restartPredecessorPid}`
-        && operatingSystem.processIsAlive(restartPredecessorPid)) {
+        && existing?.pid === restartPredecessorPid
+        && processMarkerIsCurrent(existing)) {
         usesRestartReservation = true
         break
       }
-      if (/^\d+$/.test(existing) && operatingSystem.processIsAlive(Number(existing))) {
-        log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
+      if (existing !== undefined && processMarkerIsCurrent(existing)) {
+        log(`ERROR: Loop is already running (PID=${existing.pid}). Please stop and restart.`)
         return 1
       }
       log('WARN: Removing stale PID file')
@@ -910,7 +920,7 @@ async function runLoopDaemon(
       // nothing to release
     }
     try {
-      if (readFileSync(pidFile, 'utf8').trim() === `${daemonPid}`) {
+      if (readFileSync(pidFile, 'utf8') === daemonOwnerText) {
         rmSync(pidFile, { force: true })
       }
     } catch {
