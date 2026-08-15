@@ -9,7 +9,7 @@ import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
 } from './internalEnvironment.ts'
 import {
-  parseProcessMarker, processMarker, processMarkerIsCurrent, processMarkerText,
+  currentProcessMarkerPid, parseProcessMarker, processMarker, processMarkerText,
 } from './processMarker.ts'
 
 export {
@@ -56,7 +56,10 @@ export function publishLoopReplacementPid(
 ): void {
   const ownerText = readFileSync(pidFile, 'utf8')
   const owner = parseProcessMarker(ownerText)
-  if (owner?.pid !== predecessorPid || !processMarkerIsCurrent(owner)) {
+  // A replacement started by a legacy predecessor must leave its bare reservation
+  // untouched until that predecessor completes the handover. The replacement can then
+  // upgrade that inherited reservation safely on its next current-version restart.
+  if (currentProcessMarkerPid(ownerText) !== predecessorPid) {
     throw new Error(`loop PID owner changed before restart handover (${owner?.pid ?? 'invalid'})`)
   }
   const candidate = `${pidFile}.handover-${predecessorPid}-${replacementPid}-${randomUUID()}`

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
-import { recordTaskProcess } from '../src/processRegistry.ts'
+import { recordTaskProcess, terminableTaskProcessPid } from '../src/processRegistry.ts'
 import {
   completionMarkerPresent, noChangeMarkerPresent, refreshAll, refreshTask,
 } from '../src/refresh.ts'
@@ -122,6 +122,23 @@ describe('refreshTask', () => {
     const after = await refreshTask(paths, 'live-done')
     expect(after?.status).toBe('completed')
     expect(after?.pid).toBe(process.pid)
+  })
+
+  it('does not make an initially unverified live PID terminable while completing it', async () => {
+    const pid = 2147483647
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue(undefined)
+    writeRawStatus('unverified-done',
+      `{"task_id":"unverified-done","status":"running","pid":${pid}}\n`)
+    processStartIdentity.mockReturnValue('started:possibly-reused')
+    writeFileSync(finalMessageFile(paths, 'unverified-done'), 'TASK_COMPLETE\n')
+
+    const after = await refreshTask(paths, 'unverified-done')
+
+    expect(after).toMatchObject({ status: 'completed', pid })
+    expect(terminableTaskProcessPid(paths, 'unverified-done')).toBeUndefined()
+    expect(processIsAlive).toHaveBeenCalledWith(pid)
   })
 })
 
