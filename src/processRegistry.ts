@@ -89,17 +89,13 @@ export function forgetTaskProcess(paths: OrchPaths, taskId: string): void {
   rmSync(registryFile(paths, taskId), { force: true })
 }
 
-/**
- * The process recorded for `taskId`, or undefined when none is or it is confirmed stale.
- * An unverifiable identity keeps the recorded ownership for a later retry. A confirmed
- * stale entry is dropped as it is read, so the answer does not change again.
- */
-export function taskProcessPid(
+function registeredTaskProcessPid(
   paths: OrchPaths,
   taskId: string,
-  boot: () => number = bootedAt,
-  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
-  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
+  boot: () => number,
+  processStartIdentity: ProcessStartIdentity,
+  processIsAlive: ProcessIsAlive,
+  requireVerifiedIdentity: boolean,
 ): number | undefined {
   const file = registryFile(paths, taskId)
   let recorded: string
@@ -129,6 +125,7 @@ export function taskProcessPid(
     forgetTaskProcess(paths, taskId)
     return undefined
   }
+  if (requireVerifiedIdentity && entry.startIdentity === null) return undefined
   let currentStartIdentity: string | undefined
   try {
     currentStartIdentity = processStartIdentity(entry.pid)
@@ -142,7 +139,7 @@ export function taskProcessPid(
     } catch {
       // An unavailable liveness probe does not prove that the process stopped.
     }
-    if (alive) return entry.pid
+    if (alive) return requireVerifiedIdentity ? undefined : entry.pid
     forgetTaskProcess(paths, taskId)
     return undefined
   }
@@ -150,10 +147,39 @@ export function taskProcessPid(
     forgetTaskProcess(paths, taskId)
     return undefined
   }
-  if (entry.startIdentity === null) {
-    writeFileSync(file, `${JSON.stringify({
-      pid: entry.pid, startIdentity: currentStartIdentity,
-    })}\n`)
-  }
   return entry.pid
+}
+
+/**
+ * The process recorded for `taskId`, or undefined when none is or it is confirmed stale.
+ * An unverifiable identity keeps the recorded ownership as a blocker. A confirmed stale
+ * entry is dropped as it is read, so the answer does not change again.
+ */
+export function taskProcessPid(
+  paths: OrchPaths,
+  taskId: string,
+  boot: () => number = bootedAt,
+  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
+  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
+): number | undefined {
+  return registeredTaskProcessPid(
+    paths, taskId, boot, processStartIdentity, processIsAlive, false,
+  )
+}
+
+/**
+ * The verified process recorded for `taskId`, or undefined when it must not be terminated.
+ * An identity missing at launch can never be recovered safely: the PID may have been reused
+ * before a later probe succeeded, so the unverified entry remains only as a blocker.
+ */
+export function terminableTaskProcessPid(
+  paths: OrchPaths,
+  taskId: string,
+  boot: () => number = bootedAt,
+  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
+  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
+): number | undefined {
+  return registeredTaskProcessPid(
+    paths, taskId, boot, processStartIdentity, processIsAlive, true,
+  )
 }

@@ -75,6 +75,32 @@ describe('terminateLiveTaskProcesses', () => {
     expect(taskProcessPid(paths, 'second-task')).toBeUndefined()
     expect(taskProcessPid(paths, 'first-task', undefined, () => 'started:101')).toBe(101)
   })
+
+  it('keeps an initially unverified PID as a non-terminable blocker', () => {
+    writeFileSync(
+      statusFile(paths, 'blocked-task'),
+      JSON.stringify({ task_id: 'blocked-task', status: 'running', pid: 101 }),
+    )
+    recordTaskProcess(paths, 'blocked-task', 101, () => undefined, () => true)
+    const terminateProcessTree = vi.fn(() => true)
+    const os = {
+      processStartIdentity: () => 'started:possibly-reused',
+      processIsAlive: () => true,
+      terminateProcessTree,
+    } as unknown as OperatingSystem
+
+    const result = terminateLiveTaskProcesses(paths, os)
+
+    expect(terminateProcessTree).not.toHaveBeenCalled()
+    expect(result.terminated).toEqual([])
+    expect(result.failures).toEqual([{
+      taskId: 'blocked-task',
+      pid: 101,
+      error: 'process identity was not captured at launch or is currently unavailable',
+    }])
+    expect(taskProcessPid(paths, 'blocked-task', undefined, () => 'started:possibly-reused'))
+      .toBe(101)
+  })
 })
 
 describe('orphanedWorktreeDirectories', () => {
