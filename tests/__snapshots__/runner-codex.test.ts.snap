@@ -372,7 +372,8 @@ Work can be handed to a running loop without stopping it — \`$loop-delegate\`
 turns a decision from the conversation into a queued task the loop picks up on
 its next poll, ahead of any future scan.
 
-The daemon holds the code it started with. **Editing the loop source under \`src\` changes
+The daemon holds the code it started with. **Editing the loop source under
+\`src\` changes
 nothing until the loop is restarted**, and reporting that a fix took effect without
 restarting is how a fix gets credited that never ran.
 

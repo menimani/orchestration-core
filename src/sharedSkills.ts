@@ -24,6 +24,7 @@ interface SharedSkillTarget {
 
 interface SharedSkillsManifest {
   commandPrefixPlaceholder: string
+  packagePathPrefixPlaceholder: string
   skills: string[]
 }
 
@@ -85,8 +86,11 @@ function readManifest(packageRoot: string): SharedSkillsManifest {
   const file = join(packageRoot, 'skills', 'manifest.json')
   const parsed = object(JSON.parse(readFileSync(file, 'utf8')))
   const placeholder = parsed?.commandPrefixPlaceholder
+  const packagePathPrefixPlaceholder = parsed?.packagePathPrefixPlaceholder
   const skills = parsed?.skills
-  if (typeof placeholder !== 'string' || placeholder === '' || !Array.isArray(skills)
+  if (typeof placeholder !== 'string' || placeholder === ''
+    || typeof packagePathPrefixPlaceholder !== 'string' || packagePathPrefixPlaceholder === ''
+    || !Array.isArray(skills)
     || skills.some((skill) => typeof skill !== 'string'
       || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(skill))) {
     throw new Error(`invalid shared skills manifest: ${file}`)
@@ -94,7 +98,11 @@ function readManifest(packageRoot: string): SharedSkillsManifest {
   if (new Set(skills).size !== skills.length) {
     throw new Error(`duplicate skill in shared skills manifest: ${file}`)
   }
-  return { commandPrefixPlaceholder: placeholder, skills: skills as string[] }
+  return {
+    commandPrefixPlaceholder: placeholder,
+    packagePathPrefixPlaceholder,
+    skills: skills as string[],
+  }
 }
 
 function readState(file: string): SharedSkillsState {
@@ -129,7 +137,7 @@ function filesIn(root: string, current = root): RenderedFile[] {
 function renderedSkill(
   packageRoot: string,
   skill: string,
-  placeholder: string,
+  manifest: SharedSkillsManifest,
   repoRoot: string,
   target: SharedSkillTarget,
 ): RenderedFile[] {
@@ -142,7 +150,8 @@ function renderedSkill(
     contents: target.renderFile(file.contents, {
       repoRoot,
       packageRoot,
-      commandPrefixPlaceholder: placeholder,
+      commandPrefixPlaceholder: manifest.commandPrefixPlaceholder,
+      packagePathPrefixPlaceholder: manifest.packagePathPrefixPlaceholder,
     }),
   }))
 }
@@ -289,7 +298,7 @@ function syncTarget(
   for (const skill of manifest.skills) {
     const destination = join(destinationRoot, skill)
     const desiredFiles = renderedSkill(
-      packageRoot, skill, manifest.commandPrefixPlaceholder, repoRoot, target,
+      packageRoot, skill, manifest, repoRoot, target,
     )
     const desiredHash = hashFiles(desiredFiles)
     const previousHash = state.skills[skill]

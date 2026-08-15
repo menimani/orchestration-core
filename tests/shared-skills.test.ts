@@ -28,6 +28,7 @@ function writeManifest(skills: string[]): void {
   mkdirSync(join(packageRoot, 'skills'), { recursive: true })
   writeFileSync(join(packageRoot, 'skills', 'manifest.json'), `${JSON.stringify({
     commandPrefixPlaceholder: '{{ORCHESTRATION_COMMAND_PREFIX}}',
+    packagePathPrefixPlaceholder: '{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}',
     skills,
   }, null, 2)}\n`)
 }
@@ -74,6 +75,32 @@ describe('shared skill sync', () => {
 
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe('npm run loop-status\n')
+  })
+
+  it('renders package source paths for consumer and package-owned layouts', () => {
+    writeSkill(
+      'loop-start',
+      'source: `{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}src`\n',
+    )
+
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
+
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toBe('source: `orchestration/ts/src`\n')
+
+    const ownerRoot = join(fixtureRoot, 'owner-path')
+    packageRoot = ownerRoot
+    repoRoot = ownerRoot
+    writeManifest(['loop-start'])
+    writeSkill(
+      'loop-start',
+      'source: `{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}src`\n',
+    )
+
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
+
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toBe('source: `src`\n')
   })
 
   it('refreshes exact generated copies and retains unlisted repository skills', () => {

@@ -113,6 +113,7 @@ beforeEach(() => {
   mkdirSync(join(upstreamRoot, 'skills'), { recursive: true })
   writeFileSync(join(upstreamRoot, 'skills', 'manifest.json'), JSON.stringify({
     commandPrefixPlaceholder: '{{ORCHESTRATION_COMMAND_PREFIX}}',
+    packagePathPrefixPlaceholder: '{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}',
     skills: ['loop-start'],
   }))
   writeUpstreamSkill('version one: {{ORCHESTRATION_COMMAND_PREFIX}} loop\n')
