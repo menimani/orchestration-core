@@ -137,6 +137,7 @@ export function createLoop(deps: LoopDeps) {
   const decisionsFile = join(paths.queueDir, 'decisions.txt')
   const prUrlFile = join(paths.queueDir, 'pr-url.txt')
   const totalTaskCountFile = join(paths.queueDir, 'total-task-count.txt')
+  let emptyRun = false
 
   mkdirSync(scannedDir, { recursive: true })
   ensureBacklog(queueFile)
@@ -1308,8 +1309,9 @@ export function createLoop(deps: LoopDeps) {
     return readFileSync(decisionsFile, 'utf8').split(/\r?\n/).filter((line) => line !== '')
   }
 
-  /** Push the branch and create or update the draft PR. Returns false when no PR exists. */
+  /** Push the branch and create or update the draft PR. Returns false when it must retry. */
   async function ensureDraftPr(mode: 'cycle' | 'final'): Promise<boolean> {
+    emptyRun = false
     const branch = git(['branch', '--show-current']).trim()
     if (branch === '') {
       reportGateFailure('could not get branch name; PR skipped', true)
@@ -1394,6 +1396,21 @@ export function createLoop(deps: LoopDeps) {
     }
 
     try {
+      const ahead = gitIn(paths.repoRoot, ['rev-list', '--count', `${baseRef}..HEAD`]).trim()
+      if (ahead === '0') {
+        // A forge cannot create a PR without a commit between head and base. This is a
+        // completed empty run, not a transient forge failure to retry forever.
+        emptyRun = true
+        rmSync(prUrlFile, { force: true })
+        previousGateFailures.delete('draft-pr')
+        return true
+      }
+    } catch (error) {
+      reportGateFailure(`could not compare branch with ${baseRef}: ${errorSummary(error)}`, true)
+      return false
+    }
+
+    try {
       const url = await forge.createPr({
         branch,
         base: baseBranch,
@@ -1460,6 +1477,11 @@ export function createLoop(deps: LoopDeps) {
   /** After the final gate: promote the draft PR and print LOOP_DONE. */
   async function postLoopPr(): Promise<boolean> {
     if (!(await ensureDraftPr('final'))) return false
+    if (emptyRun) {
+      marker('LOOP_DONE: no changes')
+      event('Completed', 'Loop', 'no changes')
+      return true
+    }
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     if (prUrl === '') return false
     const branch = git(['branch', '--show-current']).trim()
@@ -1727,7 +1749,11 @@ export function createLoop(deps: LoopDeps) {
           writeFileSync(completeFlag, '')
         }
 
-        const ciStatus = config.ciGateEnabled ? await checkPrCiStatus() : 'success'
+        const cyclePrUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
+        const emptyPrGate = config.autoPr && cyclePrUrl === ''
+        const ciStatus = config.ciGateEnabled && !emptyPrGate
+          ? await checkPrCiStatus()
+          : 'success'
         if (ciStatus === 'pending' || ciStatus === 'unknown') {
           gateWaitTarget = 'CI checks'
           return 'continue'
@@ -1757,7 +1783,9 @@ export function createLoop(deps: LoopDeps) {
           }
           return 'continue'
         }
-        if (config.autoReview) {
+        if (emptyPrGate) {
+          writeFileSync(resumeFlag, '')
+        } else if (config.autoReview) {
           if (!runAutoReview(currentScans, cycleIsFinal(currentScans))) return 'continue'
           writeFileSync(resumeFlag, '')
         } else if (config.reviewEnabled) {

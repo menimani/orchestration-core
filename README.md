@@ -192,6 +192,10 @@ fetches and merges the remote's advertised default branch. A conflict is aborted
 warned about for a person to resolve, and the cycle proceeds without that merge. The
 daemon branch is never updated at this boundary.
 
+When a run finishes with no commits beyond the fetched default branch, there is no pull
+request for the forge to create. The loop skips the inapplicable PR, CI, and review gates,
+records `LOOP_DONE: no changes`, and exits normally.
+
 `node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
 the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
 head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's

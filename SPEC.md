@@ -309,7 +309,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
     `LOOP_DONE: <PR URL>` is emitted to the machine-marker sink and as a formatted
-    `loop.log` copy, session state is cleaned up, and the loop exits.
+    `loop.log` copy, session state is cleaned up, and the loop exits. When the run branch
+    has no commits beyond the fetched default branch, the PR, CI, and review
+    gates are inapplicable; the loop emits `LOOP_DONE: no changes`, cleans up, and exits.
 18a. `shipped <pr-number-or-url>` records the equivalent ending for a run whose PR was
      promoted by hand. It requires exactly one positive PR number (with an optional `#`)
      or absolute HTTP(S) URL
