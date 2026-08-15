@@ -3285,6 +3285,25 @@ describe('runCycleSuite', () => {
     expect(logged).toContain('Started Suite       cycle 1')
   })
 
+  it('stops before running a Docker suite when its probe is not configured', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Docker suite', cwd: '',
+        command: `node -e "require('node:fs').writeFileSync('suite-ran', '')"`,
+        needsDocker: true,
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+
+    expect(existsSync(stopFile())).toBe(false)
+    expect(loop.runCycleSuite(1)).toBe(false)
+
+    expect(logText()).toContain('ERROR cycle suite infrastructure probe is not configured')
+    expect(existsSync(stopFile())).toBe(true)
+    expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(false)
+  })
+
   it('stops before running suite steps when the Docker probe fails', () => {
     const suiteProject: ProjectAdapter = {
       ...stubProject,
