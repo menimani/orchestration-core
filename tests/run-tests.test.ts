@@ -4,6 +4,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const fixtures: string[] = []
@@ -172,6 +173,49 @@ describe('test suite wrapper', () => {
     expect(result.status).toBe(1)
     expect(result.stdout).toContain('identity unavailable')
     expect(result.stderr).toMatch(/Timed out after 100ms/)
+    expect(existsSync(lock)).toBe(true)
+  })
+
+  it('backs off and times out when an abandoned lock cannot be reclaimed', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-reclaim-timeout-'))
+    fixtures.push(fixture)
+    const scripts = join(fixture, 'scripts')
+    const vitest = join(fixture, 'node_modules', 'vitest')
+    mkdirSync(scripts, { recursive: true })
+    mkdirSync(vitest, { recursive: true })
+    const wrapper = readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs'), 'utf8')
+      .replace(
+        'renameSync(lockDirectory, abandoned)',
+        "if (process.env.ORCHESTRATION_TEST_RECLAIM_EPERM === '1') {\n      writeFileSync(process.env.ORCHESTRATION_TEST_RECLAIM_ATTEMPTS, 'attempt\\n', { flag: 'a' })\n      const error = new Error('reclaim denied')\n      error.code = 'EPERM'\n      throw error\n    }\n    renameSync(lockDirectory, abandoned)",
+      )
+    writeFileSync(join(scripts, 'run-tests.mjs'), wrapper)
+    writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+    writeFileSync(join(vitest, 'vitest.mjs'), '')
+    const lock = join(fixture, '.orchestration-test-suite-lock')
+    mkdirSync(lock)
+    writeFileSync(join(lock, 'owner.json'), `${JSON.stringify({
+      pid: process.pid,
+      token: 'previous-owner',
+      processIdentity: 'not-the-current-process',
+      acquiredAt: new Date().toISOString(),
+      cwd: fixture,
+    })}\n`)
+    const reclaimAttempts = join(fixture, 'reclaim-attempts')
+
+    const startedAt = performance.now()
+    const result = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
+      ...process.env,
+      ORCHESTRATION_TEST_LOCK_TIMEOUT_MS: '100',
+      ORCHESTRATION_TEST_RECLAIM_ATTEMPTS: reclaimAttempts,
+      ORCHESTRATION_TEST_RECLAIM_EPERM: '1',
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(/Timed out after 100ms/)
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(75)
+    const attemptCount = readFileSync(reclaimAttempts, 'utf8').trim().split(/\r?\n/).length
+    expect(attemptCount).toBeGreaterThanOrEqual(1)
+    expect(attemptCount).toBeLessThanOrEqual(2)
     expect(existsSync(lock)).toBe(true)
   })
 
