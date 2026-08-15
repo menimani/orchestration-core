@@ -188,7 +188,8 @@ and merge into the integration branch as well, where the next task can see them.
 Immediately before a completed local task enters its merge gate, the loop rebases that
 task branch onto the current integration tip. Long-running tasks therefore test the work
 that has landed while they were running instead of repeatedly presenting the same stale
-branch to the gate.
+branch to the gate. If every task commit becomes empty because that work already landed,
+the task completes as no-change and its linked issues are closed normally.
 
 A stopped daemon retains both branch identities and the daemon commit. Restarting is a
 resume of the same run: integration commits made while it was down remain available to

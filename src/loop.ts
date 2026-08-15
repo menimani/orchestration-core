@@ -2021,7 +2021,7 @@ export function createLoop(deps: LoopDeps) {
             if (linkedIssues.length > 0) {
               await Promise.all(linkedIssues.map((issueNumber) =>
                 closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
-                  `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+                  `Task ${taskId} completed without changes because no change was warranted.`)))
             }
             recordIssueCompletions(paths, taskId, 'no-change')
           },

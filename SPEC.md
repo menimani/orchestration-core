@@ -156,7 +156,10 @@ values must be non-negative integers, with the narrower bounds stated below.
    retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
    tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
-   verified gone before the merge can discard that PID or remove the worktree.
+   verified gone before the merge can discard that PID or remove the worktree. When all
+   of a task's commits become empty while rebasing because their changes are already on
+   the run branch, the task follows the same `no-change` completion path without
+   requiring the worker to have predicted that outcome.
 9. Before its merge gate, a completed local task branch is rebased onto the current run
    branch tip. This refresh is retained when a check fails, so the next attempt does not
    test the same stale branch again. A conflicting rebase is aborted and keeps both the
