@@ -33,6 +33,9 @@ export class MergeError extends Error {
   }
 }
 
+/** A stale local task cannot be refreshed and must not be selected for merge again. */
+export class RebaseConflictError extends MergeError {}
+
 /** Remote bookkeeping for a valid no-change verdict failed and should be retried. */
 export class NoChangeReconciliationError extends MergeError {}
 
@@ -308,7 +311,7 @@ function rebaseTaskOntoRunTip(
     } catch {
       // nothing to abort
     }
-    throw new MergeError(
+    throw new RebaseConflictError(
       `A conflict occurred while rebasing the task onto ${currentBranch}; the rebase was aborted.`,
     )
   }
