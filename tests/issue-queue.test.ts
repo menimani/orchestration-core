@@ -813,6 +813,33 @@ describe('claimIssue', () => {
     expect(readdirSync(paths.tasksDir)).toEqual([])
   })
 
+  it('releases earlier members when claiming a later group member throws', async () => {
+    const issueNumbers = await Promise.all([
+      readyIssue('[BUG] `src/a/b.ts` releases the first member after an error'),
+      readyIssue('[TEST] `src/a/b.ts` fails while claiming the second member'),
+    ])
+    const getIssue = forge.getIssue.bind(forge)
+    forge.getIssue = async (number) => {
+      if (number === issueNumbers[1]) throw new Error('later claim failed')
+      return getIssue(number)
+    }
+
+    await expect(claimIssueGroup(
+      forge,
+      paths,
+      await Promise.all(issueNumbers.map((number) => getIssue(number))),
+      'worker-a',
+      () => {},
+    )).rejects.toThrow('later claim failed')
+
+    const released = await getIssue(issueNumbers[0]!)
+    expect(released.labels).toContain(LABEL_READY)
+    expect(released.labels).toContain(LABEL_GROUP_SINGLETON)
+    expect(released.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(released.assignees).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
   it('claims a collaborator-authored issue and materializes its framed specification', async () => {
     const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks on empty input')
     const stored = forge.issues.get(issueNumber)
