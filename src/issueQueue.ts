@@ -1454,23 +1454,23 @@ export async function claimIssueGroup(
   }
   return withIssueCoordinations(forge, issues.map((candidate) => candidate.number), async () => {
     const claimedIssues: Array<{ issue: ForgeIssue; parsed: ParsedIssue }> = []
-    for (const issue of issues) {
-      const result = await claimRemoteIssue(forge, issue, me)
-      if (result.outcome !== 'claimed') {
-        await Promise.all(claimedIssues.map(({ issue: claimed }) =>
-          releasePartialClaim(forge, claimed.number, me, issues.length > 1)))
-        return result
-      }
-      claimedIssues.push(result)
-    }
-
-    const requirements = claimedIssues.map(({ issue: claimed, parsed }) => ({
-      issueNumber: claimed.number,
-      requirement: parsed.requirement,
-    }))
-    const description = requirements.map(({ requirement }) => requirement).join('\n\n')
     let createdTaskId: string | undefined
     try {
+      for (const issue of issues) {
+        const result = await claimRemoteIssue(forge, issue, me)
+        if (result.outcome !== 'claimed') {
+          await Promise.all(claimedIssues.map(({ issue: claimed }) =>
+            releasePartialClaim(forge, claimed.number, me, issues.length > 1)))
+          return result
+        }
+        claimedIssues.push(result)
+      }
+
+      const requirements = claimedIssues.map(({ issue: claimed, parsed }) => ({
+        issueNumber: claimed.number,
+        requirement: parsed.requirement,
+      }))
+      const description = requirements.map(({ requirement }) => requirement).join('\n\n')
       const inspectionModes = new Set(claimedIssues.map(({ parsed }) => parsed.inspect))
       if (inspectionModes.size > 1) {
         throw new Error('A claim group cannot mix inspection and implementation issues.')
