@@ -4,16 +4,21 @@ import {
 import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
-import { forgetTaskProcess, recordTaskProcess, taskProcessPid } from './processRegistry.ts'
+import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
+import {
+  forgetTaskProcess, recordTaskProcess, taskProcessPid, type ProcessIsAlive,
+  type ProcessStartIdentity,
+} from './processRegistry.ts'
 
 // A task reads `running` while its runner process is alive, `completed` once the
-// completion marker appears in its final-message file, and `failed` when the process is
-// gone without it. Status refresh and merge can run at the same time — the loop daemon
+// completion marker appears in its final-message file, `no-change` after its explicit
+// no-change verdict is accepted, and `failed` when the process is gone without completion.
+// Status refresh and merge can run at the same time — the loop daemon
 // and a CLI invocation are separate processes — so every writer takes the same on-disk
 // lock and compare-and-swap transitions refuse to overwrite a state another writer
 // already changed.
 
-export type TaskState = 'running' | 'completed' | 'failed' | 'merged' | string
+export type TaskState = 'running' | 'completed' | 'failed' | 'merged' | 'no-change' | string
 
 export interface TaskStatus {
   task_id: string
@@ -35,7 +40,12 @@ interface StatusMetadata {
 
 type DurableTaskStatus = Omit<TaskStatus, 'pid'>
 
-export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undefined {
+export function readStatus(
+  paths: OrchPaths,
+  taskId: string,
+  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
+  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
+): TaskStatus | undefined {
   let record: DurableTaskStatus
   try {
     record = JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as DurableTaskStatus
@@ -45,7 +55,10 @@ export function readStatus(paths: OrchPaths, taskId: string): TaskStatus | undef
   }
   // The record is durable; the process it named is not. The registry answers for the
   // process, so a number left in an old record is not read back as a live task.
-  return { ...record, pid: taskProcessPid(paths, taskId) ?? null }
+  return {
+    ...record,
+    pid: taskProcessPid(paths, taskId, undefined, processStartIdentity, processIsAlive) ?? null,
+  }
 }
 
 function lockDir(paths: OrchPaths, taskId: string): string {
@@ -64,26 +77,39 @@ function lockIsAged(dir: string): boolean {
   }
 }
 
-async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<void> {
+async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<string> {
   const dir = lockDir(paths, taskId)
   const pidFile = join(dir, 'pid')
+  const identityFile = join(dir, 'start-identity')
+  const owner = JSON.stringify(currentProcessStartIdentity())
   for (let attempts = 0; ; attempts++) {
     try {
       mkdirSync(dir)
+      // Keep the PID file readable by older cores and publish identity separately.
       writeFileSync(pidFile, `${process.pid}\n`)
-      return
+      writeFileSync(identityFile, `${owner}\n`)
+      return owner
     } catch {
       // Lock held. Reclaim it only when its owner is provably gone: a recorded PID that
       // no longer runs, or no PID at all once the lock has aged past the window in which
       // a live owner could still be about to publish one.
-      let lockPid = ''
+      let recordedOwner = ''
       try {
-        lockPid = readFileSync(pidFile, 'utf8').trim()
+        recordedOwner = readFileSync(pidFile, 'utf8').trim()
       } catch {
         // no pid published yet
       }
-      if (/^[1-9][0-9]*$/.test(lockPid) && !operatingSystem.processIsAlive(Number(lockPid))) {
+      const validOwner = /^[1-9][0-9]*$/.test(recordedOwner)
+      let startIdentity: string | undefined
+      try {
+        const parsed = JSON.parse(readFileSync(identityFile, 'utf8')) as unknown
+        if (typeof parsed === 'string' && parsed !== '') startIdentity = parsed
+      } catch {
+        // Legacy owner or identity not published yet.
+      }
+      if (validOwner && !lockOwnerIsCurrent(Number(recordedOwner), startIdentity)) {
         try {
+          rmSync(identityFile, { force: true })
           rmSync(pidFile)
           rmdirSync(dir)
         } catch {
@@ -91,9 +117,9 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<void
         }
         continue
       }
-      if (!/^[1-9][0-9]*$/.test(lockPid) && lockIsAged(dir)) {
+      if (!validOwner && lockIsAged(dir)) {
         try {
-          if (lockPid !== '') rmSync(pidFile)
+          if (recordedOwner !== '') rmSync(pidFile)
           rmdirSync(dir)
         } catch {
           // another waiter won the reclaim
@@ -108,16 +134,20 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<void
   }
 }
 
-function releaseStatusLock(paths: OrchPaths, taskId: string): void {
+function releaseStatusLock(paths: OrchPaths, taskId: string, owner: string): void {
   const dir = lockDir(paths, taskId)
   const pidFile = join(dir, 'pid')
-  let lockPid = ''
+  const identityFile = join(dir, 'start-identity')
+  let recordedPid = ''
+  let recordedOwner = ''
   try {
-    lockPid = readFileSync(pidFile, 'utf8').trim()
+    recordedPid = readFileSync(pidFile, 'utf8').trim()
+    recordedOwner = readFileSync(identityFile, 'utf8').trim()
   } catch {
     return
   }
-  if (lockPid !== String(process.pid)) return
+  if (recordedPid !== String(process.pid) || recordedOwner !== owner) return
+  rmSync(identityFile)
   rmSync(pidFile)
   rmdirSync(dir)
 }
@@ -132,10 +162,10 @@ function writeStatusUnlocked(
   const file = statusFile(paths, taskId)
   const temporaryFile = join(paths.statusDir, `.${taskId}.${process.pid}.tmp`)
   const existing = readStatus(paths, taskId)
-  // The registry, not the record, is what later readers believe. Publish there first so
-  // no window exists in which the record claims a process the registry does not have.
+  // The registry, not the record, is what later readers believe. Publish a new owner
+  // before its running status, but keep an existing owner visible until a terminal
+  // status has been published successfully.
   if (pid !== undefined && Number.isInteger(pid)) recordTaskProcess(paths, taskId, pid)
-  else forgetTaskProcess(paths, taskId)
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   const record: DurableTaskStatus = {
     task_id: taskId,
@@ -157,14 +187,15 @@ function writeStatusUnlocked(
   } finally {
     rmSync(temporaryFile, { force: true })
   }
+  if (pid === undefined || !Number.isInteger(pid)) forgetTaskProcess(paths, taskId)
 }
 
 export async function writeStatus(paths: OrchPaths, taskId: string, status: TaskState, pid?: number): Promise<void> {
-  await acquireStatusLock(paths, taskId)
+  const owner = await acquireStatusLock(paths, taskId)
   try {
     writeStatusUnlocked(paths, taskId, status, pid)
   } finally {
-    releaseStatusLock(paths, taskId)
+    releaseStatusLock(paths, taskId, owner)
   }
 }
 
@@ -175,11 +206,11 @@ export async function writeMergedStatus(
   mergeCommit: string,
   runBranch: string,
 ): Promise<void> {
-  await acquireStatusLock(paths, taskId)
+  const owner = await acquireStatusLock(paths, taskId)
   try {
     writeStatusUnlocked(paths, taskId, 'merged', undefined, { mergeCommit, runBranch })
   } finally {
-    releaseStatusLock(paths, taskId)
+    releaseStatusLock(paths, taskId, owner)
   }
 }
 
@@ -194,13 +225,13 @@ export async function transitionStatus(
   next: TaskState,
   pid?: number,
 ): Promise<boolean> {
-  await acquireStatusLock(paths, taskId)
+  const owner = await acquireStatusLock(paths, taskId)
   try {
     const current = readStatus(paths, taskId)?.status
     if (current !== expected) return false
     writeStatusUnlocked(paths, taskId, next, pid)
     return true
   } finally {
-    releaseStatusLock(paths, taskId)
+    releaseStatusLock(paths, taskId, owner)
   }
 }

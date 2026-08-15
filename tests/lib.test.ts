@@ -9,10 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
-  branchName, finalMessageFile, isInspectionTaskId, isReviewFixTaskId, isReviewTaskId,
+  branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId,
   isScanTaskId,
   orchPaths, packageScriptCommand, statusFile, type OrchPaths,
 } from '../src/paths.ts'
+import { taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
 import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
 
@@ -55,14 +56,14 @@ afterEach(async () => {
 
 describe('status files', () => {
   it('stores task status without the transient runner pid', async () => {
-    await writeStatus(paths, 'task-alpha', 'running', 12345)
+    await writeStatus(paths, 'task-alpha', 'running', process.pid)
     const stored = JSON.parse(readFileSync(statusFile(paths, 'task-alpha'), 'utf8')) as Record<string, unknown>
     const status = readStatus(paths, 'task-alpha')
 
     expect(status?.task_id).toBe('task-alpha')
     expect(status?.status).toBe('running')
     expect(stored).not.toHaveProperty('pid')
-    expect(status?.pid).toBe(12345)
+    expect(status?.pid).toBe(process.pid)
   })
 
   it('derives an unset pid as null without serializing it', async () => {
@@ -123,6 +124,22 @@ describe('status files', () => {
     expect(readStatus(paths, 'adapter-lock')?.status).toBe('completed')
   })
 
+  it('reclaims a status lock when its live PID belongs to a different process start', async () => {
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue('current-start')
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const lockDir = join(paths.statusDir, '.reused-pid-lock.lock')
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'pid'), `${process.pid}\n`)
+    writeFileSync(join(lockDir, 'start-identity'), `${JSON.stringify('previous-start')}\n`)
+
+    await writeStatus(paths, 'reused-pid-lock', 'completed')
+
+    expect(processStartIdentity).toHaveBeenCalledWith(process.pid)
+    expect(processIsAlive).not.toHaveBeenCalledWith(process.pid)
+    expect(readStatus(paths, 'reused-pid-lock')?.status).toBe('completed')
+  })
+
   it('reclaims an aged lock that never published a pid', async () => {
     const lockDir = join(paths.statusDir, '.task-pidless.lock')
     mkdirSync(lockDir)
@@ -151,6 +168,17 @@ describe('status files', () => {
     await writeStatus(paths, 'task-atomic', 'running', 12345)
     expect(existsSync(join(paths.statusDir, `.task-atomic.${process.pid}.tmp`))).toBe(false)
     expect(readStatus(paths, 'task-atomic')?.status).toBe('running')
+  })
+
+  it('keeps process ownership when terminal status publication is interrupted', async () => {
+    const taskId = 'task-interrupted-terminal'
+    await writeStatus(paths, taskId, 'running', process.pid)
+    mkdirSync(join(paths.statusDir, `.${taskId}.${process.pid}.tmp`))
+
+    await expect(writeStatus(paths, taskId, 'completed')).rejects.toThrow()
+
+    expect(readStatus(paths, taskId)?.status).toBe('running')
+    expect(taskProcessPid(paths, taskId)).toBe(process.pid)
   })
 
   it('derives the final message path from the log path', () => {
@@ -289,10 +317,8 @@ describe('task id classes', () => {
     expect(isReviewTaskId('20260808_093005_001_auto-review-page')).toBe(false)
   })
 
-  it('matches review-fix ids without classifying them as inspections', () => {
+  it('does not classify review-fix ids as inspections', () => {
     const id = '20260808_093005_001_fix-preserve-zero'
-    expect(isReviewFixTaskId(id)).toBe(true)
-    expect(isReviewFixTaskId('20260808_093005_001_auto-preserve-zero')).toBe(false)
     expect(isReviewTaskId(id)).toBe(false)
     expect(isScanTaskId(id)).toBe(false)
     expect(isInspectionTaskId(paths, id)).toBe(false)

@@ -34,7 +34,9 @@ from or equivalent to `orchestration/tests/*.sh`.
   (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
   the npm form as part of the cutover. A background launch prints status and stop
   commands for the package's actual location: direct `npm run` commands at the repository
-  root, or `npm run -C <package-path>` when installed as a subtree. What stays frozen:
+  root, or `npm run -C <package-path>` when installed as a subtree. It prints those
+  commands only after the child has acquired the PID lock and completed initialization;
+  a child startup error is returned to the launcher instead. What stays frozen:
   the environment variable names (they pass through npm unchanged, so launch commands
   keep their shape) and the
   output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -79,15 +81,17 @@ values must be non-negative integers, with the narrower bounds stated below.
    `.final` file (written by the runner through its last-message output), even if its
    runner process is still alive. Without that marker, it remains `running` while the
    process is alive and becomes `failed` when the process is gone. Markers in the
-   transcript log are ignored — only the final-message file is authoritative.
+   transcript log are ignored — only the final-message file is authoritative. An ordinary
+   completed task may additionally report `NO_CHANGE_WARRANTED` on its own line when its
+   investigation proves the requested change is already unnecessary.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
    `scan` for scans and start with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes,
    scan findings, review-origin fixes, and delegated work. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
    task is queued, running, completed, or retryable after failure. If an identical
-   non-advisory finding returns after that task has merged, it creates a fresh task and
-   updates the index; merged advisories remain deduplicated.
+   non-advisory finding returns after that task has merged or completed with no change, it
+   creates a fresh task and updates the index; completed advisories remain deduplicated.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
    `task/<id>`. The direct layout is the default because a consumer whose source lives
    outside the loop gains no safety from another checkout. With `INTEGRATION_BRANCH`
@@ -142,10 +146,18 @@ values must be non-negative integers, with the narrower bounds stated below.
 
 8. A merge aborts and keeps the worktree when the worktree holds uncommitted changes or
    no new commits — an agent that forgot to commit must not silently lose its work.
-   Scan tasks and `--inspect` tasks are exempt (investigation produces no commits). A
+   A clean ordinary task with no new commits and the exact `NO_CHANGE_WARRANTED` marker
+   instead becomes `no-change`, removes its worktree and branch, and directly closes its
+   linked issues; forge reconciliation must succeed first, so a failed close remains
+   retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
+   tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
    verified gone before the merge can discard that PID or remove the worktree.
-9. Pre-merge tests are chosen from the paths the worktree touched. `TASK_GATE=full`
+9. Before its merge gate, a completed local task branch is rebased onto the current run
+   branch tip. This refresh is retained when a check fails, so the next attempt does not
+   test the same stale branch again. A conflicting rebase is aborted and keeps both the
+   task worktree and run branch clean. Pre-merge tests are chosen from the paths the
+   rebased worktree touched. `TASK_GATE=full`
    asks the project adapter for its full merge checks; `TASK_GATE=light` asks it for
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
    entry. Light-gate attribution cost (a suite break at the gate names no task) is
@@ -203,16 +215,20 @@ values must be non-negative integers, with the narrower bounds stated below.
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop).
 14. Effort defaults: scans and automatic reviews run the runner at high reasoning
-    effort, and queued tasks at medium. `SCAN_EFFORT`, `TASK_EFFORT`, and
-    `REVIEW_EFFORT` accept `minimal`, `low`, `medium`, or `high` and override their
-    respective defaults; `SCAN_MODEL` and `TASK_MODEL` override the runner model, and
-    `delegate --effort` overrides effort per task.
+    effort, and queued tasks at medium. Fixes spawned by an automatic review are the
+    exception: they always run at high effort because they repair findings that escaped
+    the original implementation. `SCAN_EFFORT`, `TASK_EFFORT`, and `REVIEW_EFFORT`
+    accept `minimal`, `low`, `medium`, or `high` and override their respective defaults;
+    `TASK_EFFORT` applies to queued tasks that do not have a per-task override, so it does
+    not replace the high-effort review-fix override. `SCAN_MODEL` and `TASK_MODEL`
+    override the runner model, and `delegate --effort` overrides effort per task.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
     previous cycle gate has closed and while no task is running, the daemon first compares
     the selected project adapter with the exact source loaded at startup. A changed,
     missing, or unreadable adapter logs `Restarting adapter     for cycle <n>` and replaces
     the daemon before continuing, so every adapter consumer changes atomically at the same
-    restart-safe boundary. The daemon then fetches the
+    restart-safe boundary. In integration mode the monitored source is the adapter in the
+    integration worktree. The daemon then fetches the
     configured core upstream and compares its tip with the last `git-subtree-split` for
     this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
     A package-file change logs an aligned `Updated    core        <old8>..<new8>` event.
@@ -222,8 +238,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     waits for the replacement to finish daemon initialization and logs `Restarted`; a
     failed replacement restores ownership, logs `ERROR`, and makes the parent exit nonzero.
     In integration mode, the fixed daemon continues without restarting and the pulled core
-    becomes executable only in a later run, as specified in 4b. A daemon otherwise runs
-    the core code it started with. Neither check ever runs mid-cycle. A dirty
+    becomes executable only in a later run, as specified in 4b. It then absorbs the default
+    branch and compares the adapter again before integration setup or scan dispatch. A daemon
+    otherwise runs the core code it started with. Neither check ever runs mid-cycle. A dirty
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
     At the same boundary, the package manifest's skills are rendered into every
@@ -251,7 +268,8 @@ values must be non-negative integers, with the narrower bounds stated below.
     suite logs its `Started Suite` event before invoking the blocking commands. Its
     passing verdict is retained for that commit while PR setup retries, and is discarded
     as soon as the branch tip changes. Repeated gate failures remain visible with a
-    count; a repeated push failure logs `ERROR`, writes the stop file, and stops retrying.
+    count; any repeated non-rate-limit PR-setup failure logs `ERROR`, writes the stop
+    file, and stops retrying.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot
@@ -274,6 +292,11 @@ values must be non-negative integers, with the narrower bounds stated below.
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a
     review rather than reviewing against a missing or stale base.
+    The optional consumer file `orchestration/accepted-limits.md` supplies findings that
+    a review should not repeat; a missing or whitespace-only file renders as `(none)`.
+    Its contents are repository-controlled prose and are framed as untrusted text in the
+    generated task, so they can narrow review findings but cannot authorize commands,
+    credential access, or orchestration and CI changes.
     when the package is a consumer subtree, its repository-relative path is explicitly
     out of scope and excluded from every Git diff/log command printed by the default
     review template. The exclusion and command-scope placeholders render empty when the
@@ -290,7 +313,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
     `LOOP_DONE: <PR URL>` is emitted to the machine-marker sink and as a formatted
-    `loop.log` copy, session state is cleaned up, and the loop exits.
+    `loop.log` copy, session state is cleaned up, and the loop exits. When the run branch
+    has no commits beyond the fetched default branch, the PR, CI, and review
+    gates are inapplicable; the loop emits `LOOP_DONE: no changes`, cleans up, and exits.
 18a. `shipped <pr-number-or-url>` records the equivalent ending for a run whose PR was
      promoted by hand. It requires exactly one positive PR number (with an optional `#`)
      or absolute HTTP(S) URL
@@ -347,8 +372,9 @@ values must be non-negative integers, with the narrower bounds stated below.
 26. The daemon holds the code it started with; the wrapper prints where the log lives
     and how to stop.
 27. `prune --days N` deletes logs/status/generated specs/queue markers of tasks finished
-    more than N days ago; it never touches an unmerged or failed task, a worktree still
-    on disk, or a spec tracked by git. `--dry-run` lists without deleting.
+    more than N days ago; it accepts merged and no-change tasks and never touches an
+    unfinished or failed task, a worktree still on disk, or a spec tracked by git.
+    `--dry-run` lists without deleting.
 
 ## Delegation surface
 
@@ -364,9 +390,12 @@ values must be non-negative integers, with the narrower bounds stated below.
     `forge-github.ts`; gitea/gitlab implementations can be added without touching the
     core). The interface returns normalized values only: PR state plus check records with
     `name`, `conclusion`, and `startedAt`, which is an ISO timestamp when the forge reports
-    one and otherwise an empty string. CI waiting uses the newest available `startedAt`
-    record for each check name so timestamped reruns supersede earlier attempts; when a
-    forge omits timestamps, repeated names cannot be reliably ordered.
+    one and otherwise an empty string. For each check name, CI waiting discards only
+    timestamped records older than the newest `startedAt`: it retains every record tied
+    at that newest timestamp and every record whose timestamp is absent or invalid,
+    because those records cannot be reliably ordered. This fails closed when retained
+    results conflict: a pending result keeps the gate waiting, and otherwise any failure
+    prevents success.
     Draft-vs-ready is a forge-neutral flag. The shipped issue-queue surface
     likewise normalizes issues, comments, and author write-access verdicts. It exposes
     current-user and label discovery/creation; issue creation, lookup, open/closed
@@ -375,14 +404,16 @@ values must be non-negative integers, with the narrower bounds stated below.
     arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`). The runner contract is the output markers — `TASK_COMPLETE`,
-    `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
+    `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
     rendering behavior inside the adapter. Any runner honoring the contract is
     substitutable, and none of them owns the interactive agent's skill directory.
 31. Everything the orchestration knows about the repository it runs in — which staged
     paths select fast pre-commit checks, which commands verify a merge, which paths make
     each check relevant, which suites prove a cycle's
-    tip, which toolchain breakage a reinstall repairs, and how commits and changed paths
+    tip, which toolchain breakage a reinstall repairs, which repository- or
+    toolchain-specific command output identifies an infrastructure failure, and how
+    commits and changed paths
     become pull-request sections, area labels, and risk bullets — lives in the project
     adapter (`adapters/project.ts`; with neither selection variable set, the single
     `../project/project-*.ts` file is discovered; `PROJECT=<name>` selects
@@ -528,8 +559,9 @@ so authorship and verified ancestry must both hold.
     the standard path and starts their local tasks. A completed task with commits pushes
     `task/<id>` to the configured push remote, comments the branch and exact head commit
     on its issue, and
-    swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection with no
-    commits comments and closes its issue instead. Its poll status uses the shared
+    swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection or an ordinary
+    task with an explicit no-change verdict and no commits comments and closes its issue
+    instead. Its poll status uses the shared
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.
@@ -550,8 +582,8 @@ so authorship and verified ancestry must both hold.
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
-    `loop:merge-ready` → closed or `loop:merge-failed`; inspections take the intentional
-    `loop:in-progress` → closed shortcut.
+    `loop:merge-ready` → closed or `loop:merge-failed`; inspections and accepted no-change
+    verdicts take the intentional `loop:in-progress` → closed shortcut.
 
 ## Test parity
 

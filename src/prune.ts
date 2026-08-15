@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { logFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
+import { logFile, worktreeDir, type OrchPaths } from './paths.ts'
 
 // Deletes what finished tasks leave behind: logs, status files, generated specs, and
-// queue markers. What it never touches: tasks that are not merged (including failed
-// tasks), any task whose worktree is still on disk (cleanup decides that fate), specs
+// queue markers. What it never touches: tasks that are neither merged nor no-change
+// (including failed tasks), any task whose worktree is still on disk (cleanup decides that fate), specs
 // tracked by git (hand-written history, not loop debris), and loop.log.
 
 export interface PruneOptions {
@@ -45,8 +45,10 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
         { cwd: paths.repoRoot, encoding: 'utf8', windowsHide: true })
         .split(/\r?\n/).filter((line) => line !== ''),
     )
-  } catch {
-    trackedSpecs = new Set()
+  } catch (error) {
+    throw new Error('Failed to discover tracked task specifications; pruning aborted', {
+      cause: error,
+    })
   }
 
   for (const name of readdirSync(paths.statusDir)) {
@@ -61,7 +63,7 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
     } catch {
       continue
     }
-    if (status !== 'merged') continue
+    if (status !== 'merged' && status !== 'no-change') continue
 
     if (existsSync(worktreeDir(paths, taskId))) {
       report.kept.push(`kept (worktree still on disk, run cleanup first): ${taskId}`)
@@ -83,18 +85,6 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
       ...(specTracked ? [] : [spec]),
     )
     report.prunedTasks += 1
-  }
-
-  // Logs whose task has no status file at all — left by crashes or by a cleanup that
-  // removed the status but not the log.
-  for (const name of readdirSync(paths.logsDir)) {
-    if (!name.endsWith('.log') && !name.endsWith('.final')) continue
-    if (name === 'loop.log') continue
-    const file = join(paths.logsDir, name)
-    if (!olderThan(file, options.days)) continue
-    const taskId = name.replace(/\.merge\.log$/, '').replace(/\.log$/, '').replace(/\.final$/, '')
-    if (existsSync(statusFile(paths, taskId))) continue
-    remove(file)
   }
 
   // Description-index entries whose spec is gone would only mint fresh ids anyway.

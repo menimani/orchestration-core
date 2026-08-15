@@ -72,8 +72,14 @@ export async function closeIssueAndRemoveLifecycleLabels(
   issueNumber: number,
   comment: string,
 ): Promise<void> {
-  await forge.closeIssue(issueNumber, comment)
-  const issue = await forge.getIssue(issueNumber)
+  let issue = await forge.getIssue(issueNumber)
+  if (issue.state === 'open') {
+    await forge.closeIssue(issueNumber, comment)
+    issue = await forge.getIssue(issueNumber)
+  }
+  if (issue.state !== 'closed') {
+    throw new Error(`Issue #${issueNumber} is still open after closure`)
+  }
   await Promise.all(LIFECYCLE_LABELS
     .filter((label) => issue.labels.includes(label))
     .map((label) => forge.removeLabel(issueNumber, label)))
@@ -631,9 +637,13 @@ async function findExistingFinding(
     try {
       recordedIssue = await forge.getIssue(recorded.issueNumber)
     } catch {
-      // A missing issue is stale in the same way as a closed one.
+      // A missing issue cannot validate even a durable advisory ledger entry.
     }
-    if (recordedIssue?.state === 'open'
+    const durableClosedAdvisory = recordedIssue?.state === 'closed'
+      && isAdvisoryFingerprint(fingerprint)
+      && issueCompletionForIssue(paths, recordedIssue.number) !== undefined
+    if (recordedIssue !== undefined
+      && (recordedIssue.state === 'open' || durableClosedAdvisory)
       && isTrustedFingerprintOwner(recordedIssue)
       && recordedIssue.labels.includes(LABEL_FINDING)
       && hasIssueFingerprint(recordedIssue, fingerprint)
@@ -641,6 +651,7 @@ async function findExistingFinding(
       // Advisory identifiers are deliberately durable because the same advisory
       // recurs with different prose.
       && issueSuppressesFingerprint(paths, recordedIssue, fingerprint)) {
+      if (durableClosedAdvisory) return recorded.issueNumber
       const fingerprints = issueFingerprints(recordedIssue)
       const survivor = (await reconcileOpenFindings(
         forge, paths, fingerprints, recorded.issueNumber, undefined, onMutation,
@@ -686,8 +697,8 @@ export async function unresolvedFindings(
 
 /**
  * File a finding as a ready issue unless an open issue already carries its
- * fingerprint. The check reads open findings only: a closed issue's fix already
- * landed, and a finding that genuinely resurfaces deserves a fresh issue.
+ * fingerprint. Ordinary closed findings can recur as fresh work; advisory identifiers
+ * remain durable after their promoted issue closes.
  */
 export async function publishFinding(
   forge: Forge,
@@ -1036,6 +1047,58 @@ export interface IssuePromotion {
   commentConfirmed?: boolean
 }
 
+export interface IssueCompletion {
+  taskId: string
+  issueNumber: number
+  outcome: 'merged' | 'no-change'
+}
+
+function completionDir(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-completion')
+}
+
+function completionFile(paths: OrchPaths, issueNumber: number): string {
+  return join(completionDir(paths), `${issueNumber}.json`)
+}
+
+export function issueCompletionForIssue(
+  paths: OrchPaths,
+  issueNumber: number,
+): IssueCompletion | undefined {
+  const file = completionFile(paths, issueNumber)
+  if (!existsSync(file)) return undefined
+  try {
+    const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<IssueCompletion>
+    if (typeof value.taskId !== 'string' || value.taskId === ''
+      || value.issueNumber !== issueNumber
+      || (value.outcome !== 'merged' && value.outcome !== 'no-change')) return undefined
+    return value as IssueCompletion
+  } catch {
+    return undefined
+  }
+}
+
+/** Persist task completion after transient promotion and task-to-issue metadata is gone. */
+export function recordIssueCompletions(
+  paths: OrchPaths,
+  taskId: string,
+  outcome: IssueCompletion['outcome'],
+): number[] {
+  const issueNumbers = issueNumbersForTask(paths, taskId)
+  if (issueNumbers.length === 0) return []
+  mkdirSync(completionDir(paths), { recursive: true })
+  for (const issueNumber of issueNumbers) {
+    const temporaryFile = join(completionDir(paths), `.${issueNumber}.${process.pid}.tmp`)
+    try {
+      writeFileSync(temporaryFile, `${JSON.stringify({ taskId, issueNumber, outcome })}\n`)
+      renameSync(temporaryFile, completionFile(paths, issueNumber))
+    } finally {
+      rmSync(temporaryFile, { force: true })
+    }
+  }
+  return issueNumbers
+}
+
 function promotionDir(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-promotion')
 }
@@ -1101,6 +1164,7 @@ export function recordIssuePromotions(
       rmSync(temporaryFile, { force: true })
     }
   }
+  recordIssueCompletions(paths, taskId, 'merged')
   return issueNumbers
 }
 
@@ -1199,6 +1263,12 @@ export type ClaimResult
     enqueue: EnqueueResult
     pendingMerge: boolean
   }
+    | {
+      outcome: 'already-processed'
+      taskId: string
+      issueNumber: number
+      issueNumbers: number[]
+    }
     | { outcome: 'lost-race'; issueNumber: number }
     | { outcome: 'untrusted-author'; issueNumber: number; author: string }
     | { outcome: 'unparseable'; issueNumber: number; reason: string }
@@ -1279,7 +1349,20 @@ async function claimRemoteIssue(
   }
 
   await forge.assignIssue(issue.number, me)
-  const afterAssignment = await forge.getIssue(issue.number)
+  let afterAssignment: ForgeIssue
+  try {
+    afterAssignment = await forge.getIssue(issue.number)
+  } catch (error) {
+    try {
+      await forge.unassignIssue(issue.number, me)
+    } catch (releaseError) {
+      throw new AggregateError(
+        [error, releaseError],
+        `Claim verification and compensation both failed for issue #${issue.number}`,
+      )
+    }
+    throw error
+  }
   const winner = [...afterAssignment.assignees].sort()[0]
   if (afterAssignment.state !== 'open'
     || !issueHasExactlyLifecycleLabel(afterAssignment, LABEL_READY)
@@ -1371,23 +1454,23 @@ export async function claimIssueGroup(
   }
   return withIssueCoordinations(forge, issues.map((candidate) => candidate.number), async () => {
     const claimedIssues: Array<{ issue: ForgeIssue; parsed: ParsedIssue }> = []
-    for (const issue of issues) {
-      const result = await claimRemoteIssue(forge, issue, me)
-      if (result.outcome !== 'claimed') {
-        await Promise.all(claimedIssues.map(({ issue: claimed }) =>
-          releasePartialClaim(forge, claimed.number, me, issues.length > 1)))
-        return result
-      }
-      claimedIssues.push(result)
-    }
-
-    const requirements = claimedIssues.map(({ issue: claimed, parsed }) => ({
-      issueNumber: claimed.number,
-      requirement: parsed.requirement,
-    }))
-    const description = requirements.map(({ requirement }) => requirement).join('\n\n')
     let createdTaskId: string | undefined
     try {
+      for (const issue of issues) {
+        const result = await claimRemoteIssue(forge, issue, me)
+        if (result.outcome !== 'claimed') {
+          await Promise.all(claimedIssues.map(({ issue: claimed }) =>
+            releasePartialClaim(forge, claimed.number, me, issues.length > 1)))
+          return result
+        }
+        claimedIssues.push(result)
+      }
+
+      const requirements = claimedIssues.map(({ issue: claimed, parsed }) => ({
+        issueNumber: claimed.number,
+        requirement: parsed.requirement,
+      }))
+      const description = requirements.map(({ requirement }) => requirement).join('\n\n')
       const inspectionModes = new Set(claimedIssues.map(({ parsed }) => parsed.inspect))
       if (inspectionModes.size > 1) {
         throw new Error('A claim group cannot mix inspection and implementation issues.')
@@ -1395,8 +1478,30 @@ export async function claimIssueGroup(
       const origin = claimedIssues.some(({ parsed }) =>
         findingTaskOrigin(parsed.parentTaskId) === 'fix') ? 'fix' : 'auto'
       const existing = existingTaskIdForDesc(paths, origin, description)
+      const existingStatus = existing === undefined ? undefined : readStatus(paths, existing)?.status
+      const terminalAdvisory = existing !== undefined
+        && (existingStatus === 'merged' || existingStatus === 'no-change')
+        && requirements.every(({ requirement }) =>
+          fingerprintOf(requirement).startsWith('advisory:'))
+      if (terminalAdvisory) {
+        const issueNumbers = requirements.map(({ issueNumber }) => issueNumber)
+        for (const { issue: claimed } of claimedIssues) {
+          await forge.unassignIssue(claimed.number, me)
+          await closeIssueAndRemoveLifecycleLabels(
+            forge,
+            claimed.number,
+            `Duplicate advisory already processed by task ${existing} (${existingStatus}).`,
+          )
+        }
+        return {
+          outcome: 'already-processed',
+          taskId: existing,
+          issueNumber: issueNumbers[0]!,
+          issueNumbers,
+        }
+      }
       const needsFreshTask = existing !== undefined
-        && readStatus(paths, existing)?.status === 'merged'
+        && (existingStatus === 'merged' || existingStatus === 'no-change')
         && !requirements.every(({ requirement }) =>
           fingerprintOf(requirement).startsWith('advisory:'))
       const taskId = needsFreshTask

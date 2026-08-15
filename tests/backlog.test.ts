@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { withBacklogLock } from '../src/backlog.ts'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
 import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
@@ -71,6 +72,22 @@ describe('backlog process lock', () => {
 
     expect(() => withBacklogLock(backlog, () => undefined))
       .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+  })
+
+  it('reclaims a lock when its live PID belongs to a different process start', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    writeFileSync(
+      join(lockDir, 'owner'),
+      `${process.pid} ${Date.now() - 31_000} v2.old-token.${Buffer.from('previous-start').toString('base64url')}\n`,
+    )
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('current-start')
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    expect(processIsAlive).not.toHaveBeenCalledWith(process.pid)
+    expect(existsSync(lockDir)).toBe(false)
   })
 
   it('recovers an aged recovery mutex abandoned beside a stale lock', () => {

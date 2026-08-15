@@ -19,6 +19,14 @@ export function completionMarkerPresent(paths: OrchPaths, taskId: string): boole
   return readFileSync(file, 'utf8').split(/\r?\n/).some((line) => line === 'TASK_COMPLETE')
 }
 
+/** An explicit verdict that a completed implementation task legitimately needs no commit. */
+export function noChangeMarkerPresent(paths: OrchPaths, taskId: string): boolean {
+  const file = finalMessageFile(paths, taskId)
+  if (!existsSync(file)) return false
+  return readFileSync(file, 'utf8').split(/\r?\n/)
+    .some((line) => line === 'NO_CHANGE_WARRANTED')
+}
+
 /**
  * Refresh one task: a live process with the marker is completed; a dead process is
  * completed or failed by whether the marker made it into the final message. Returns
@@ -60,7 +68,7 @@ export async function refreshAll(paths: OrchPaths): Promise<string[]> {
   for (const taskId of listTaskIds(paths)) {
     const before = readStatus(paths, taskId)
     if (before === undefined) continue
-    if (before.status === 'merged' || before.status === 'failed') {
+    if (before.status === 'merged' || before.status === 'no-change' || before.status === 'failed') {
       lines.push(`${taskId.padEnd(20)} ${before.status.padEnd(10)} pid=`)
       continue
     }

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
+import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import {
   buildIssueBody, issueNumberForTask, parseIssueBody,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
@@ -50,7 +51,7 @@ describe('enqueueTask', () => {
     expect(queueLines()).toEqual(['duplicate-task:0'])
   })
 
-  it.each(['merged', 'running', 'completed'])('skips a task whose status is %s', (status) => {
+  it.each(['merged', 'no-change', 'running', 'completed'])('skips a task whose status is %s', (status) => {
     const taskId = `${status}-task`
     createSpec(taskId)
     writeTestStatus(taskId, status)
@@ -94,6 +95,7 @@ describe('delegateTask', () => {
     expect(spec).toMatch(/^## Before reporting this done$/m)
     const lines = spec.trimEnd().split('\n')
     expect(lines[lines.length - 1]).toBe('TASK_COMPLETE')
+    expect(spec).toContain('NO_CHANGE_WARRANTED')
   })
 
   it('resolves the same description to the one existing task and spec', () => {
@@ -143,24 +145,67 @@ describe('delegateTask', () => {
   })
 
   it('ignores an issue-mode marker whose daemon is no longer alive', () => {
-    writeIssueModeMarker(paths, true, 2147483647)
+    writeFileSync(
+      join(paths.queueDir, 'issue-mode'),
+      'true\n{"pid":2147483647,"startIdentity":"exited-start"}\n',
+    )
 
     expect(isIssueModeActive(paths, {})).toBe(false)
   })
 
-  it('uses the operating-system liveness verdict for daemon markers', () => {
-    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+  it('verifies process-start identity for daemon markers', () => {
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockImplementation((pid) => `start-${pid}`)
     writeIssueModeMarker(paths, true, 2147483647)
+    writeFileSync(
+      join(paths.queueDir, 'loop.pid'),
+      processMarkerText(processMarker(2147483646)),
+    )
+    processStartIdentity.mockClear()
+
+    expect(isIssueModeActive(paths, {})).toBe(true)
+    expect(isLoopRunning(paths)).toBe(true)
+    expect(processStartIdentity).toHaveBeenNthCalledWith(1, 2147483647)
+    expect(processStartIdentity).toHaveBeenNthCalledWith(2, 2147483646)
+  })
+
+  it('rejects markers when their live PID belongs to a different process start', () => {
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue('recorded-start')
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    writeIssueModeMarker(paths, true, 2147483647)
+    writeFileSync(
+      join(paths.queueDir, 'loop.pid'),
+      processMarkerText(processMarker(2147483646)),
+    )
+    processStartIdentity.mockReturnValue('reused-start')
+
+    expect(isIssueModeActive(paths, {})).toBe(false)
+    expect(isLoopRunning(paths)).toBe(false)
+  })
+
+  it('preserves live legacy bare-PID daemon markers during upgrades', () => {
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    writeFileSync(join(paths.queueDir, 'issue-mode'), 'true\n2147483647\n')
     writeFileSync(join(paths.queueDir, 'loop.pid'), '2147483646\n')
 
     expect(isIssueModeActive(paths, {})).toBe(true)
     expect(isLoopRunning(paths)).toBe(true)
-    expect(processIsAlive).toHaveBeenNthCalledWith(1, 2147483647)
-    expect(processIsAlive).toHaveBeenNthCalledWith(2, 2147483646)
+  })
+
+  it('ignores stopped legacy bare-PID daemon markers', () => {
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+    writeFileSync(join(paths.queueDir, 'issue-mode'), 'true\n2147483647\n')
+    writeFileSync(join(paths.queueDir, 'loop.pid'), '2147483646\n')
+
+    expect(isIssueModeActive(paths, {})).toBe(false)
+    expect(isLoopRunning(paths)).toBe(false)
   })
 
   it('removes only the issue-mode marker owned by the exiting daemon', () => {
     const marker = join(paths.queueDir, 'issue-mode')
+    vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockImplementation((pid) => `start-${pid}`)
     writeIssueModeMarker(paths, true, 123)
 
     removeIssueModeMarker(paths, 456)

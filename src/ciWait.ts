@@ -9,15 +9,30 @@ export interface CiWaitOptions {
   print?: (line: string) => void
 }
 
-function newestChecksByName(checks: PrCheck[]): PrCheck[] {
-  const newest = new Map<string, PrCheck>()
+export function newestChecksByName(checks: PrCheck[]): PrCheck[] {
+  const byName = new Map<string, PrCheck[]>()
   for (const check of checks) {
-    const previous = newest.get(check.name)
-    if (previous === undefined || check.startedAt >= previous.startedAt) {
-      newest.set(check.name, check)
-    }
+    const named = byName.get(check.name) ?? []
+    named.push(check)
+    byName.set(check.name, named)
   }
-  return [...newest.values()].sort((left, right) => left.name.localeCompare(right.name))
+  return [...byName.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([, named]) => {
+      const dated = named.flatMap((check) => {
+        const timestamp = Date.parse(check.startedAt)
+        return Number.isFinite(timestamp) ? [{ check, timestamp }] : []
+      })
+      const newestTimestamp = dated.reduce<number | undefined>((newest, { timestamp }) =>
+        newest === undefined || timestamp > newest ? timestamp : newest, undefined)
+      // An absent/invalid timestamp cannot prove that a result supersedes another run.
+      // Preserve every such result, plus every dated result tied for newest, so an
+      // arbitrarily ordered success cannot hide a conflicting failure or pending run.
+      return named.filter((check) => {
+        const timestamp = Date.parse(check.startedAt)
+        return !Number.isFinite(timestamp) || timestamp === newestTimestamp
+      })
+    })
 }
 
 function sameNames(left: string[] | undefined, right: string[]): boolean {

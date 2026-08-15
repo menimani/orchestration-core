@@ -8,12 +8,13 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { recordIssueForTask } from '../src/issueQueue.ts'
-import { branchName, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
+import { issueCompletionForIssue, recordIssueForTask } from '../src/issueQueue.ts'
+import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
+import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import { writeStatus } from '../src/status.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
-import { TestProcessRegistry } from './testProcess.ts'
+import { PROCESS_TEST_TIMEOUT_MS, TestProcessRegistry } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'src', 'cli.ts')
@@ -83,12 +84,14 @@ function childCompletion(child: ChildProcess): Promise<{ code: number | null; ou
     child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString() })
     child.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString() })
     child.on('error', reject)
-    child.on('exit', (code) => resolve({ code, output }))
+    // `exit` can precede the final stdout/stderr data events. `close` proves that the
+    // process and its stdio handles have all finished before assertions inspect output.
+    child.on('close', (code) => resolve({ code, output }))
   })
 }
 
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + PROCESS_TEST_TIMEOUT_MS
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(message)
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -308,6 +311,110 @@ describe('manual merge', () => {
     })
   })
 
+  it('preserves the merge failure streak for a no-change outcome', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260814_180935_082_user-no-change'
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The requested behavior is already present.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    await writeStatus(paths, taskId, 'completed')
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '3\n')
+
+    const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('3\n')
+  })
+
+  it('records durable completion for a linked no-change outcome', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260815_074127_029_user-linked-no-change'
+    const issueNumber = 218
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The requested behavior is already present.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    await writeStatus(paths, taskId, 'completed')
+    recordIssueForTask(paths, taskId, issueNumber)
+
+    let issueState: 'open' | 'closed' = 'open'
+    const forge = {
+      issueClosingCommitMessage: (message: string) => message,
+      getIssue: async () => ({
+        number: issueNumber,
+        state: issueState,
+        title: 'Linked task',
+        body: '',
+        author: { login: 'maintainer', hasWriteAccess: true },
+        labels: [],
+        assignees: [],
+        updatedAt: '2026-08-15T00:00:00Z',
+      }),
+      closeIssue: async () => { issueState = 'closed' },
+      removeLabel: async () => {},
+    }
+    vi.doMock('../src/adapters/forge.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/adapters/forge.ts')>(),
+      loadForge: async () => forge,
+    }))
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    try {
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV)
+      process.argv = [process.execPath, CLI, 'merge', taskId, '--yes']
+
+      await import('../src/cli.ts')
+
+      expect(process.exitCode).toBe(0)
+      expect(issueState).toBe('closed')
+      expect(issueCompletionForIssue(paths, issueNumber)).toEqual({
+        taskId, issueNumber, outcome: 'no-change',
+      })
+    } finally {
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      vi.doUnmock('../src/adapters/forge.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
+  })
+
   it('forwards failed check output before reporting the merge failure', async () => {
     git(['config', 'user.email', 'test@example.com'])
     git(['config', 'user.name', 'Test'])
@@ -434,6 +541,145 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('does not report a background daemon as started when the PID lock is held', () => {
+    mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
+    writeFileSync(daemonFile('loop.pid'), processMarkerText(processMarker(process.pid)))
+
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).not.toContain('Started the loop in the background')
+    expect(result.stderr).toContain('Could not start the loop: Loop is already running')
+  })
+
+  it('does not replace a live daemon that owns a legacy bare-PID lock', () => {
+    mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
+    writeFileSync(daemonFile('loop.pid'), `${process.pid}\n`)
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain(`Loop is already running (PID=${process.pid})`)
+    expect(result.stdout).not.toContain('Removing stale PID file')
+    expect(readFileSync(daemonFile('loop.pid'), 'utf8')).toBe(`${process.pid}\n`)
+  })
+
+  it('reclaims a loop marker when its live PID belongs to a different process start', () => {
+    const paths = orchPaths(repoRoot)
+    writeFileSync(
+      daemonFile('loop.pid'),
+      `${JSON.stringify({ pid: process.pid, startIdentity: 'not-the-current-process' })}\n`,
+    )
+    mkdirSync(join(paths.worktreesDir, 'orphan-after-reused-loop-pid'))
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('Removing stale PID file')
+    expect(result.stdout).not.toContain('Loop is already running')
+    expect(existsSync(daemonFile('loop.pid'))).toBe(false)
+  })
+
+  it('returns a background daemon initialization error to its launcher', () => {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).not.toContain('Started the loop in the background')
+    expect(result.stderr).toContain("Could not start the loop: Unknown FORGE 'missing'")
+    expect(existsSync(daemonFile('loop.pid'))).toBe(false)
+  })
+
+  it('loads and prepares the project adapter from the integration worktree', () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    const projectDirectory = join(repoRoot, 'orchestration', 'project')
+    const adapter = join(projectDirectory, 'project-test.ts')
+    mkdirSync(projectDirectory, { recursive: true })
+    writeFileSync(join(repoRoot, '.gitignore'), [
+      'orchestration/logs/',
+      'orchestration/queue/',
+      'orchestration/status/',
+      'orchestration/tasks/',
+      'orchestration/worktrees/',
+      '',
+    ].join('\n'))
+    const adapterSource = (withSetup: boolean) => [
+      'export const project = {',
+      "  name: 'test',",
+      '  preCommitChecks: [],',
+      "  pullRequest: { categories: [{ label: 'Changes' }], titleFallback: 'changes',",
+      "    classifyCommit: () => ({ category: 'Changes' }), detectRisks: () => [] },",
+      '  mergeChecks: () => [],',
+      '  cycleSuite: () => [],',
+      ...(withSetup ? [
+        '  integrationWorktreeSetup: [{',
+        "    label: 'Integration adapter', cwd: '',",
+        `    command: ${JSON.stringify(
+          "node -e \"require('node:fs').writeFileSync('integration-adapter-loaded', 'ready')\"",
+        )},`,
+        '  }],',
+      ] : []),
+      '}',
+      '',
+    ].join('\n')
+    writeFileSync(adapter, adapterSource(false))
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: add daemon adapter'])
+    git(['switch', '-q', '-c', 'integration/run'])
+    writeFileSync(adapter, adapterSource(true))
+    git(['add', '-A'])
+    git(['commit', '-qm', 'fix: update integration adapter'])
+    git(['switch', '-q', '-c', 'daemon/run', 'HEAD~1'])
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: {
+        ...INHERITED_ENV,
+        PROJECT: 'test',
+        PROJECT_ADAPTER: '',
+        INTEGRATION_BRANCH: 'integration/run',
+        CORE_AUTO_UPDATE: 'false',
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_SCAN_CYCLES: '0',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(join(
+      repoRoot, 'orchestration', 'worktrees', '.integration',
+      'integration-adapter-loaded',
+    ), 'utf8')).toBe('ready')
+    expect(existsSync(join(repoRoot, 'integration-adapter-loaded'))).toBe(false)
+  })
+
   it('repairs incomplete orchestration dependencies before loading the project adapter', () => {
     const packageRoot = join(repoRoot, 'orchestration', 'ts')
     const packageModules = join(packageRoot, 'node_modules')
@@ -548,6 +794,12 @@ describe('loop daemon ownership', () => {
       "  if (typeof file === 'string' && /[\\\\/]loop\\.pid$/.test(file)) {",
       '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000)',
       '  }',
+      "  if (typeof file === 'string' && /[\\\\/]cycle-cap\\.txt$/.test(file)) {",
+      "    const stop = file.replace(/cycle-cap\\.txt$/, 'stop')",
+      '    while (!fs.existsSync(stop)) {',
+      '      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)',
+      '    }',
+      '  }',
       '  return result',
       '}',
       'syncBuiltinESMExports()',
@@ -600,6 +852,12 @@ describe('loop daemon ownership', () => {
       '  const result = originalWriteFileSync.call(this, file, ...args)',
       "  if (typeof file === 'string' && /[\\\\/]loop\\.pid$/.test(file)) {",
       '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000)',
+      '  }',
+      "  if (typeof file === 'string' && /[\\\\/]cycle-cap\\.txt$/.test(file)) {",
+      "    const stop = file.replace(/cycle-cap\\.txt$/, 'stop')",
+      '    while (!fs.existsSync(stop)) {',
+      '      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)',
+      '    }',
       '  }',
       '  return result',
       '}',
@@ -674,6 +932,32 @@ describe('loop daemon ownership', () => {
       token: 'abandoned-owner',
     }))
     mkdirSync(join(paths.worktreesDir, 'orphan-after-owner-recovery'))
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('Removing stale PID file')
+    expect(existsSync(recovery)).toBe(false)
+  })
+
+  it('reclaims a recovery lock when its live PID belongs to a different process start', () => {
+    const paths = orchPaths(repoRoot)
+    const recovery = `${daemonFile('loop.pid')}.recovery`
+    writeFileSync(daemonFile('loop.pid'), '999999999\n')
+    mkdirSync(recovery)
+    writeFileSync(join(recovery, 'owner.json'), JSON.stringify({
+      pid: process.pid,
+      startIdentity: 'not-the-current-process',
+      acquiredAt: new Date().toISOString(),
+      token: 'reused-pid-owner',
+    }))
+    mkdirSync(join(paths.worktreesDir, 'orphan-after-reused-pid-recovery'))
 
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,

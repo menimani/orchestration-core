@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
@@ -9,7 +9,8 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
-  buildIssueBody, issueNumbersForTask, issuePromotionForIssue, recordIssueForTask,
+  buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
+  recordIssueForTask,
   recordIssuePromotion, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
@@ -20,7 +21,8 @@ import {
   syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
 import {
-  branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
+  branchName, finalMessageFile, orchPaths, PACKAGE_ROOT, statusFile, worktreeDir,
+  type OrchPaths,
 } from '../src/paths.ts'
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
@@ -637,13 +639,14 @@ describe('actionable findings', () => {
   it('ignores Japanese descriptions that only report no findings', () => {
     const loop = makeLoop()
     const phrases = [
-      '\u6307\u6458\u306a\u3057',
-      '\u554f\u984c\u306a\u3057',
-      '\u8a72\u5f53\u306a\u3057',
-      '\u7279\u306b\u306a\u3057',
-      '\u306a\u3057',
-    ]
-    const findings = phrases.flatMap((phrase) => [phrase, `${phrase}\u3002`])
+      [0x6307, 0x6458, 0x306a, 0x3057],
+      [0x554f, 0x984c, 0x306a, 0x3057],
+      [0x8a72, 0x5f53, 0x306a, 0x3057],
+      [0x7279, 0x306b, 0x306a, 0x3057],
+      [0x306a, 0x3057],
+    ].map((points) => String.fromCodePoint(...points))
+    const fullStop = String.fromCodePoint(0x3002)
+    const findings = phrases.flatMap((phrase) => [phrase, `${phrase}${fullStop}`])
     writeFinal('t4-ja', findings.map((finding) => `NEXT_TASK: ${finding}`).join('\n'))
 
     expect(loop.actionableFindings(finalMessageFile(paths, 't4-ja'))).toEqual([])
@@ -652,7 +655,7 @@ describe('actionable findings', () => {
 
   it('warns and ignores a finding whose description cannot produce a task slug', () => {
     const loop = makeLoop()
-    const finding = '\u8a2d\u5b9a\u753b\u9762\u304c\u958b\u3051\u306a\u3044'
+    const finding = '[!!!]'
     writeFinal('t-empty-slug', `NEXT_TASK: ${finding}\n`)
 
     expect(loop.actionableFindings(finalMessageFile(paths, 't-empty-slug'))).toEqual([])
@@ -743,6 +746,31 @@ describe('checkPrCiStatus', () => {
     ]
     expect(await loop.checkPrCiStatus()).not.toBe('success')
   })
+
+  it('uses the newest rerun of each check name', async () => {
+    const loop = makeLoop()
+    forgeStatus.checks = [
+      { name: 'frontend', conclusion: 'success', startedAt: '2026-08-14T02:00:00Z' },
+      { name: 'frontend', conclusion: 'failure', startedAt: '2026-08-14T01:00:00Z' },
+      { name: 'backend', conclusion: 'success', startedAt: '2026-08-14T01:30:00Z' },
+    ]
+
+    expect(await loop.checkPrCiStatus()).toBe('success')
+  })
+
+  it.each([
+    ['without timestamps', ''],
+    ['with tied timestamps', '2026-08-14T02:00:00Z'],
+  ])('does not let an arbitrarily ordered success hide a same-name failure %s',
+    async (_description, startedAt) => {
+      const loop = makeLoop()
+      forgeStatus.checks = [
+        { name: 'frontend', conclusion: 'failure', startedAt },
+        { name: 'frontend', conclusion: 'success', startedAt },
+      ]
+
+      expect(await loop.checkPrCiStatus()).toBe('failure')
+    })
 
   it('does not clear the gate for an old PR head with no checks', async () => {
     const headSha = initializeGitRepo()
@@ -915,6 +943,25 @@ describe('runAutoReview', () => {
     expect(spec).toContain('## Accepted limits')
     expect(spec).toContain('(none)')
     expect(spec).not.toContain('{{ACCEPTED_LIMITS}}')
+  })
+
+  it('maps the vendored package scope into the integration worktree', () => {
+    rmSync(join(paths.root, 'templates', 'review-template.md'))
+    const stateRepoRoot = dirname(PACKAGE_ROOT)
+    paths = {
+      ...paths,
+      root: join(stateRepoRoot, 'orchestration'),
+    }
+    const packagePrefix = relative(stateRepoRoot, PACKAGE_ROOT).replaceAll('\\', '/')
+
+    expect(makeLoop({ integrationBranch: 'integration/run' }).runAutoReview(7, false))
+      .toBe(false)
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+
+    expect(spec).toContain(
+      `Changes under \`${packagePrefix}/\` belong to the vendored core repository`,
+    )
+    expect(spec).toContain(` -- . ':(top,exclude,literal)${packagePrefix}'`)
   })
 
   it('dispatches a review on first entry and resumes after a clean one', () => {
@@ -1169,6 +1216,29 @@ describe('cycleIsFinal', () => {
 })
 
 describe('cycle gate', () => {
+  it('keeps lifecycle reconciliation pending when a cycle attempt fails', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: false,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    let attempts = 0
+    fakeForge.listClosedIssues = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('cycle reconciliation failed')
+      return []
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(attempts).toBe(2)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+  })
+
   it.each([
     { sectionCount: 5, scanParallel: 2 },
     { sectionCount: 8, scanParallel: 3 },
@@ -1341,6 +1411,97 @@ describe('cycle gate', () => {
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('concludes an empty run without retrying pull request creation', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/stale\n')
+    forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: true,
+      autoReview: true,
+      ciGateEnabled: true,
+    })
+    loop.initializeSessionStateForBranch()
+    const createPr = vi.fn(async () => 'https://example.test/pull/1')
+    fakeForge.createPr = createPr
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(createPr).not.toHaveBeenCalled()
+    expect(logged).toContain('CYCLE_COMPLETE: 1/3')
+    expect(logged).toContain('LOOP_DONE: no changes')
+    expect(logged).toContain('Completed Loop        no changes')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('retains empty-cap session state when promotion fails, then retries', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    const loop = makeLoop({
+      autoPr: true,
+      reviewEnabled: false,
+      maxScanCycles: 5,
+      maxEmptyScans: 2,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'empty-scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
+    let promotions = 0
+    fakeForge.markPrReady = async () => {
+      promotions += 1
+      if (promotions === 1) throw new Error('promotion failed')
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(promotions).toBe(1)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(readFileSync(join(paths.queueDir, 'empty-scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(true)
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+    expect(promotions).toBe(2)
+  })
+
+  it('promotes and cleans the session when the empty-scan cap is complete', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    const loop = makeLoop({
+      autoPr: true,
+      reviewEnabled: false,
+      maxScanCycles: 5,
+      maxEmptyScans: 2,
+    })
+    const scannedDir = join(paths.queueDir, 'scanned')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'empty-scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-2'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-2'), '')
+    writeFileSync(join(paths.queueDir, 'decisions.txt'), 'Keep the compatibility path.\n')
+    mkdirSync(scannedDir, { recursive: true })
+    writeFileSync(join(scannedDir, 'completed-task'), '')
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+    expect(existsSync(join(paths.queueDir, 'empty-scan-count.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-2'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'decisions.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'pr-url.txt'))).toBe(false)
+    expect(readdirSync(scannedDir)).toEqual([])
+  })
+
   it('keeps running while scanning can still produce work', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
@@ -1492,6 +1653,24 @@ describe('cycle gate', () => {
 })
 
 describe('remote issue queue idle detection', () => {
+  it('retries closed-issue lifecycle reconciliation during queue initialization', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    let attempts = 0
+    fakeForge.listClosedIssues = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('closed issue lookup failed')
+      return []
+    }
+
+    expect(await loop.initializeIssueQueue()).toBe(false)
+    expect(await loop.initializeIssueQueue()).toBe(true)
+
+    expect(attempts).toBe(2)
+    expect(logText()).toContain(
+      'could not reconcile closed issue labels: closed issue lookup failed',
+    )
+  })
+
   beforeEach(() => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
@@ -1864,11 +2043,12 @@ describe('failure announcement and burst stop (via poll)', () => {
   it('ages and backs off idle status lines, then resets when work appears', async () => {
     let current = new Date('2026-08-08T03:00:00Z')
     const loop = makeLoop(
-      { scanEnabled: false, maxScanCycles: 6 },
+      { scanEnabled: false, autoPr: false, issueQueueEnabled: true, maxScanCycles: 6 },
       stubProject,
       undefined,
       () => current,
     )
+    fakeForge.listOpenIssues = async () => { throw new Error('remote status unavailable') }
     const idleLines: Array<{ at: number; line: string }> = []
 
     for (let poll = 0; poll <= 60; poll += 1) {
@@ -1903,7 +2083,7 @@ describe('failure announcement and burst stop (via poll)', () => {
     current = new Date('2026-08-08T03:31:30Z')
     await loop.poll()
     expect(logged.at(-1)).toBe(
-      'Idle Status      Task=0  Queue=0  0s  Waiting=pull request promotion',
+      'Idle Status      Task=0  Queue=0  0s  Waiting=finding status',
     )
   })
 
@@ -1948,6 +2128,37 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(await loop.poll()).toBe('stopped')
     expect(logText()).not.toContain('Failed f1')
     expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n')).toHaveLength(3)
+  })
+
+  it('does not count tasks already dead at daemon startup as a failure burst', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    for (const taskId of ['old-f1', 'old-f2', 'old-f3']) {
+      writeRawStatus(taskId, 'running', null)
+    }
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of ['old-f1', 'old-f2', 'old-f3']) {
+      expect(readStatus(paths, taskId)?.status).toBe('failed')
+      expect(logged).toContain(
+        `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`,
+      )
+    }
+    expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n'))
+      .toHaveLength(3)
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    for (const taskId of ['old-f1', 'old-f2', 'old-f3']) {
+      rmSync(join(paths.queueDir, 'scanned', `${taskId}.failed`))
+      writeRawStatus(taskId, 'running', null)
+    }
+    logged = []
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logText()).toContain('ERROR 3 tasks failed in one poll; stopping for environment repair')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
   it('records a failed scan in its cycle before entering the cycle gate', async () => {
@@ -1997,6 +2208,49 @@ describe('failure announcement and burst stop (via poll)', () => {
     await loop.poll()
     expect(runnerStarts).toHaveLength(0)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain('queued-task')
+  })
+
+  it('requeues a local task when startup fails before a status can be persisted', async () => {
+    initializeGitRepo()
+    const taskId = '20260809_000002_003_auto-invalid-effort'
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 1 })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+    writeFileSync(join(paths.queueDir, 'effort', taskId), 'impossible\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:2\n`)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:2\n`)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(runnerStarts).toHaveLength(0)
+    expect(logText()).toContain("startup failed: effort must be minimal, low, medium or high")
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${taskId}:2\n`)
+    expect(logText()).toContain(
+      "ERROR 003_auto startup failed: effort must be minimal, low, medium or high, got 'impossible' (repeated 2 times)",
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('stops cleanly when a statusless startup failure cannot be requeued', async () => {
+    initializeGitRepo()
+    const taskId = '20260809_000003_004_auto-missing-spec'
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 1 })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:1\n`)
+
+    await expect(loop.poll()).resolves.toBe('continue')
+
+    expect(runnerStarts).toHaveLength(0)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR 004_auto startup failed: Task specification not found:',
+    )
+    expect(logText()).toContain('; could not requeue: Task specification not found:')
   })
 
   it('releases a claimed issue immediately when task startup fails', async () => {
@@ -2150,7 +2404,8 @@ describe('completion marker output', () => {
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
     expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
-    expect(logText()).toContain('WARN could not read PR body: body read failed (repeated 2 times)')
+    expect(logText()).toContain('ERROR could not read PR body: body read failed (repeated 2 times)')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
 
     writeFileSync(join(repoRoot, 'tip-change.txt'), 'new tip\n')
     git(['add', 'tip-change.txt'])
@@ -2159,6 +2414,28 @@ describe('completion marker output', () => {
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
     expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\nrun\n')
+  })
+
+  it('retains an opted-in full-gate suite verdict for the branch tip', async () => {
+    configureLocalRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Browser smoke', cwd: '', runAtEveryTaskGate: true,
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+      }],
+    }
+    const loop = makeLoop({ autoPr: true, taskGate: 'full' }, suiteProject)
+    fakeForge.prBody = async () => { throw new Error('body read failed') }
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(readFileSync(join(paths.queueDir, 'cycle-suite-tip-1'), 'utf8').trim())
+      .toBe(git(['rev-parse', 'HEAD']).trim())
+    expect(logged.filter((line) => line === 'Started Suite       cycle 1')).toHaveLength(1)
   })
 
   it('retries the cycle gate when the existing PR body cannot be read', async () => {
@@ -2242,6 +2519,12 @@ describe('completion marker output', () => {
     expect(await loop.ensureDraftPr('cycle')).toBe(false)
     expect(logText()).toContain('WARN could not update PR body: body update failed')
     expect(existsSync(join(paths.queueDir, 'pr-url.txt'))).toBe(false)
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(logText()).toContain(
+      'ERROR could not update PR body: body update failed (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
   it('accepts a confirmed hand-edited PR body without overwriting it', async () => {
@@ -2258,6 +2541,23 @@ describe('completion marker output', () => {
     })
     expect(readFileSync(join(paths.queueDir, 'pr-url.txt'), 'utf8'))
       .toBe('https://example.test/pull/1\n')
+  })
+
+  it('does not overwrite an edited PR body with a displaced generated marker', async () => {
+    configureLocalRemote()
+    const loop = makeLoop()
+    fakeForge.prBody = async () => [
+      'A person rewrote this summary.',
+      GENERATED_BODY_MARKER,
+      'The marker remains only as quoted history.',
+    ].join('\n')
+    const updatePr = vi.fn(async () => {})
+    fakeForge.updatePr = updatePr
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(true)
+    expect(updatePr).toHaveBeenCalledWith('main', {
+      title: 'feat: autonomous scan loop — cycle 0/3',
+    })
   })
 
   it('creates and summarizes a PR against the remote default branch', async () => {
@@ -2491,6 +2791,87 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
+  it('terminalizes a no-change task while preserving failures and invalidating the cycle', async () => {
+    const taskId = '20260814_144959_066_auto-already-resolved'
+    const initialHead = initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFinal(taskId,
+      'The reported failure is already fixed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'already resolved finding', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(issueCompletionForIssue(paths, issueNumber)).toMatchObject({
+      taskId, outcome: 'no-change',
+    })
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+    expect(fakeForge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain('no change was warranted')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged).toContain('No-change 066_auto    no change warranted')
+    expect(logged.some((line) => line.startsWith('Failed 066_auto'))).toBe(false)
+  })
+
+  it('retries no-change issue reconciliation without counting a merge failure', async () => {
+    const taskId = '20260814_145209_067_auto-no-change-retry'
+    initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFinal(taskId, 'No change is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'transient reconciliation', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    let unavailable = true
+    fakeForge.getIssue = async (number) => {
+      if (number === issueNumber && unavailable) {
+        unavailable = false
+        throw new Error('forge unavailable')
+      }
+      return getIssue(number)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).toContain('could not reconcile no-change task 067_auto')
+    expect(logged.some((line) => line.startsWith('Failed 067_auto'))).toBe(false)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+  })
+
   it('does not merge an abandoned grouped task after the loop restarts', async () => {
     const taskId = '20260811_120000_064_auto-abandoned-group'
     const initialHead = initializeGitRepo()
@@ -2513,6 +2894,9 @@ describe('completed task merge recovery', () => {
     await loop.poll()
 
     expect(readStatus(paths, taskId)?.status).toBe('failed')
+    const failedLogPath = `logs/${taskId}.merge.log`
+    expect(logged).toContain(`Failed 064_auto    log ${failedLogPath}`)
+    expect(existsSync(join(paths.root, failedLogPath))).toBe(true)
     expect(issueNumbersForTask(paths, taskId)).toEqual([])
     expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(false)
     expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
@@ -2748,11 +3132,27 @@ describe('noteMergeFailure', () => {
     expect(logText()).not.toMatch(/fixture service is unavailable|unreachable/)
   })
 
-  it('recognises the unreachable-registry signature', () => {
+  it('delegates toolchain-specific registry failures to the project adapter', () => {
+    const mavenProject: ProjectAdapter = {
+      ...stubProject,
+      classifyInfrastructureFailure: (output) => output.includes('Could not transfer artifact')
+        ? {
+            diagnosis: 'the Maven repository is unreachable',
+            remediation: 'restore access to the Maven repository and restart the loop',
+          }
+        : undefined,
+    }
+    const loop = makeLoop({}, mavenProject)
+    writeFileSync(mergeLog(), 'Could not transfer artifact org.example:thing from central\n')
+    loop.noteMergeFailure(mergeLog())
+    expect(logText()).toContain('the Maven repository is unreachable')
+  })
+
+  it('does not classify a toolchain-specific registry failure without an adapter rule', () => {
     const loop = makeLoop()
     writeFileSync(mergeLog(), 'Could not transfer artifact org.example:thing from central\n')
     loop.noteMergeFailure(mergeLog())
-    expect(logText()).toContain('unreachable')
+    expect(logText()).not.toContain('unreachable')
   })
 })
 
@@ -2770,6 +3170,30 @@ describe('runCycleSuite', () => {
     const loop = makeLoop({ taskGate: 'full' }, suiteProject)
     expect(loop.runCycleSuite(1)).toBe(true)
     expect(existsSync(join(repoRoot, 'suite-ran'))).toBe(false)
+  })
+
+  it('runs only opted-in project suite steps under full task gates', () => {
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [
+        {
+          label: 'Light only', cwd: '',
+          command: `node -e "require('node:fs').writeFileSync('light-suite-ran', '')"`,
+        },
+        {
+          label: 'Every gate', cwd: '', runAtEveryTaskGate: true,
+          command: `node -e "require('node:fs').writeFileSync('every-gate-suite-ran', '')"`,
+        },
+      ],
+    }
+    const loop = makeLoop({ taskGate: 'full' }, suiteProject)
+
+    expect(loop.runCycleSuite(1)).toBe(true)
+
+    expect(existsSync(join(repoRoot, 'light-suite-ran'))).toBe(false)
+    expect(existsSync(join(repoRoot, 'every-gate-suite-ran'))).toBe(true)
+    expect(existsSync(stopFile())).toBe(false)
+    expect(logged).toContain('Started Suite       cycle 1')
   })
 
   it('runs the project suite under light gates and continues on a pass', () => {
@@ -3239,6 +3663,27 @@ describe('scanForNextTasks', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
     expect(git(['rev-parse', 'HEAD'])).not.toBe(initialHead)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+  })
+
+  it('logs and stops after repeated local finding enqueue failures', async () => {
+    const loop = makeLoop(
+      {}, stubProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
+      () => { throw new Error('persistent local queue failure') },
+    )
+    const taskId = '20250101_000000_025_scan'
+    writeFinal(taskId, 'NEXT_TASK: [BUG] preserve a failed completion scan\n')
+
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+    expect(logText()).toContain(
+      'WARN could not enqueue finding from 025_scan: persistent local queue failure',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+    expect(logText()).toContain(
+      'ERROR could not enqueue finding from 025_scan: persistent local queue failure (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {

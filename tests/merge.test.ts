@@ -10,11 +10,16 @@ import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
+  completeTaskWithoutChanges, MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
+  removeTemporaryWorktree,
 } from '../src/merge.ts'
-import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
+import {
+  branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
+} from '../src/paths.ts'
+import { taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
+import type { WorktreeRemovalRuntime } from '../src/worktree.ts'
 import { stubProject } from './stubProject.ts'
 import { TestProcessRegistry } from './testProcess.ts'
 
@@ -81,6 +86,18 @@ function posixOperatingSystem(remove: (path: string, options: {
     signalProcessGroup: () => {}, probeProcess: () => {}, remove,
     now: Date.now, sleep: () => {}, groupHasRunningMember: () => undefined,
   })
+}
+
+function failedWorktreeRemovalRuntime(): WorktreeRemovalRuntime {
+  return {
+    os: posixOperatingSystem(() => { throw new Error('Direct removal failed') }),
+    git: (_cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') {
+        throw new Error('Git removal failed')
+      }
+      return ''
+    },
+  }
 }
 
 async function makeCompletedTask(taskId: string, options: { commit?: boolean; dirty?: boolean } = {}): Promise<string> {
@@ -175,10 +192,11 @@ describe('removeMergedWorktree', () => {
     })
     const log = vi.fn()
 
-    removeMergedWorktree(paths, worktree, log, {
+    const removed = removeMergedWorktree(paths, worktree, log, {
       os: posixOperatingSystem(remove), git: gitRuntime,
     })
 
+    expect(removed).toBe(true)
     expect(remove).toHaveBeenCalledWith(worktree, { recursive: true, force: true })
     expect(gitRuntime).toHaveBeenNthCalledWith(
       2, paths.repoRoot, ['worktree', 'prune'],
@@ -201,11 +219,12 @@ describe('removeMergedWorktree', () => {
     })
     const log = vi.fn()
 
-    removeMergedWorktree(paths, worktree, log, {
+    const removed = removeMergedWorktree(paths, worktree, log, {
       os: windowsOperatingSystem(() => { throw new Error('Filename too long') }),
       git: gitRuntime,
     })
 
+    expect(removed).toBe(false)
     expect(log).toHaveBeenCalledOnce()
     expect(log).toHaveBeenCalledWith(
       `WARN: merged, but the worktree is still there and has to go by hand: ${worktree} (error: failed to delete: Filename too long)`,
@@ -261,11 +280,13 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_001_user-adds-a-file'
     const worktree = await makeCompletedTask(taskId, { commit: true })
 
-    const mergeCommit = await mergeTask(
+    const result = await mergeTask(
       paths, taskId, { taskGate: 'light', project: stubProject },
     )
 
-    expect(mergeCommit).toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
+    expect(result).toEqual({
+      outcome: 'merged', mergeCommit: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    })
     expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
       `Merge ${taskId} via orchestration`,
     )
@@ -286,7 +307,7 @@ describe('mergeTask', () => {
 
     await expect(mergeTask(paths, taskId, {
       taskGate: 'light', project: noCheckProject,
-    })).resolves.toBe(appliedCommit)
+    })).resolves.toEqual({ outcome: 'merged', mergeCommit: appliedCommit })
 
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(appliedCommit)
     expect(readStatus(paths, taskId)).toMatchObject({
@@ -294,6 +315,26 @@ describe('mergeTask', () => {
     })
     expect(existsSync(worktree)).toBe(false)
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
+  })
+
+  it('reports manual cleanup when a merged worktree could not be removed', async () => {
+    const taskId = '20260808_000000_026_user-retained-merged-worktree'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const outputFile = join(repoRoot, 'merge-output.log')
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+      worktreeRemovalRuntime: failedWorktreeRemovalRuntime(),
+    })
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain(
+      `WARN: merged, but the worktree is still there and has to go by hand: ${worktree}`,
+    )
+    expect(output).toContain(`Merged ${taskId}; manual worktree cleanup remains: ${worktree}`)
+    expect(output).not.toContain(`Merged ${taskId} and removed the worktree.`)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
   it('stops and verifies a completed runner with a live PID before merging', async () => {
@@ -321,6 +362,7 @@ describe('mergeTask', () => {
     const taskId = '20260808_000000_018_user-runner-resists-stop'
     const worktree = await makeCompletedTask(taskId, { commit: true })
     const runnerPid = 12345
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('started:runner')
     await writeStatus(paths, taskId, 'completed', runnerPid)
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
     vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
@@ -333,6 +375,69 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).not.toBe('')
     expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
     expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
+  })
+
+  it('does not terminate an unverified runner before merging', async () => {
+    const taskId = '20260815_120000_001_user-unverified-merge-runner'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runnerPid = 12345
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue(undefined)
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
+      .rejects.toThrow(`Could not verify completed runner ${runnerPid}; task state was retained.`)
+
+    expect(terminate).not.toHaveBeenCalled()
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
+  })
+
+  it('does not terminate an unverified runner before no-change completion', async () => {
+    const taskId = '20260815_120000_002_user-unverified-no-change-runner'
+    const worktree = await makeCompletedTask(taskId)
+    const runnerPid = 12345
+    writeFileSync(finalMessageFile(paths, taskId),
+      'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue(undefined)
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+
+    await expect(completeTaskWithoutChanges(
+      paths, taskId, git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    )).rejects.toThrow(
+      `Could not verify completed runner ${runnerPid}; task state was retained.`,
+    )
+
+    expect(terminate).not.toHaveBeenCalled()
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
+  })
+
+  it('forgets a stopped runner before a failed-check merge is retried', async () => {
+    const taskId = '20260808_000000_027_user-failed-check-retry'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runnerPid = 12345
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('started:runner')
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(false)
+    const options = {
+      taskGate: 'light' as const,
+      project: stubProject,
+      testCmd: 'node -e "process.exit(1)"',
+    }
+
+    await expect(mergeTask(paths, taskId, options)).rejects.toThrow('Tests failed')
+
+    expect(taskProcessPid(paths, taskId)).toBeUndefined()
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: null })
+    expect(existsSync(worktree)).toBe(true)
+
+    await expect(mergeTask(paths, taskId, options)).rejects.toThrow('Tests failed')
+    expect(terminate).toHaveBeenCalledTimes(1)
   })
 
   it('leaves linked-issue closing syntax to the forge adapter', async () => {
@@ -369,6 +474,87 @@ describe('mergeTask', () => {
     await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
       .rejects.toThrow(/no new commits/)
     expect(existsSync(worktree)).toBe(true)
+  })
+
+  it('accepts an explicit no-change verdict without creating a merge commit', async () => {
+    const taskId = '20260808_000000_023_user-already-resolved'
+    const worktree = await makeCompletedTask(taskId)
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const onNoChange = vi.fn(async () => {})
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The reported problem is already fixed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onNoChange,
+    })).resolves.toEqual({ outcome: 'no-change' })
+
+    expect(onNoChange).toHaveBeenCalledOnce()
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+  })
+
+  it('reports manual cleanup when a no-change worktree could not be removed', async () => {
+    const taskId = '20260808_000000_028_user-retained-no-change-worktree'
+    const worktree = await makeCompletedTask(taskId)
+    const outputFile = join(repoRoot, 'no-change-output.log')
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The reported problem is already fixed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, outputFile,
+      worktreeRemovalRuntime: failedWorktreeRemovalRuntime(),
+    })
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain(
+      `WARN: task completed without changes, but the worktree is still there and has to go by hand: ${worktree}`,
+    )
+    expect(output).toContain(
+      `Completed ${taskId} without changes; manual worktree cleanup remains: ${worktree}`,
+    )
+    expect(output).not.toContain(`Completed ${taskId} without changes and removed the worktree.`)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+  })
+
+  it('keeps a no-change task retryable when its linked work cannot be reconciled', async () => {
+    const taskId = '20260808_000000_024_user-no-change-retry'
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    const onNoChange = vi.fn(async () => {
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+      expect(existsSync(worktree)).toBe(true)
+      throw new Error('completion persistence unavailable')
+    })
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject,
+      onNoChange,
+    })).rejects.toThrow(
+      'Could not reconcile the no-change verdict: completion persistence unavailable',
+    )
+
+    expect(onNoChange).toHaveBeenCalledOnce()
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('requires reconciliation before accepting a linked no-change task', async () => {
+    const taskId = '20260808_000000_025_user-linked-no-change'
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow('A linked no-change task requires issue reconciliation.')
+
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
   it('lets a scan through without commits', async () => {
@@ -464,10 +650,11 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
     expect(existsSync(worktree)).toBe(true)
+    expect(git(worktree, ['merge-base', '--is-ancestor', runHead, 'HEAD'])).toBe('')
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
-  it('aborts a conflicting merge without changing the run branch or task state', async () => {
+  it('aborts a conflicting rebase without changing the run branch or task state', async () => {
     const taskId = '20260808_000000_016_user-conflicting-change'
     const worktree = await makeCompletedTask(taskId)
     writeFileSync(join(worktree, 'README.md'), '# task version\n')
@@ -483,7 +670,9 @@ describe('mergeTask', () => {
 
     await expect(mergeTask(paths, taskId, {
       taskGate: 'light', project: noCheckProject,
-    })).rejects.toThrow('A merge conflict occurred. Rebase the worktree, then retry the merge.')
+    })).rejects.toThrow(
+      'A conflict occurred while rebasing the task onto main; the rebase was aborted.',
+    )
 
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe(runStatus)
@@ -553,7 +742,9 @@ describe('mergeTask', () => {
 
     await expect(mergeTask(paths, taskId, {
       taskGate: 'light', project,
-    })).resolves.toBe(git(repoRoot, ['rev-parse', 'HEAD']).trim())
+    })).resolves.toEqual({
+      outcome: 'merged', mergeCommit: git(repoRoot, ['rev-parse', 'HEAD']).trim(),
+    })
   })
 
   it('accepts a check that installs its own dependencies as its first step', async () => {

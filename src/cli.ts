@@ -1,14 +1,18 @@
-import { spawn, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync,
   statSync, writeFileSync,
 } from 'node:fs'
 import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
-import { operatingSystem } from './adapters/os.ts'
+import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
+import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
+import {
+  currentProcessMarkerPid, processMarker, processMarkerText,
+} from './processMarker.ts'
 import { cleanupTask } from './cleanup.ts'
 import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
@@ -17,10 +21,13 @@ import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
-  commentOnIssueMerge, issueNumbersForTask, missingRequirementCompletionMarkers,
-  recordIssuePromotions,
+  closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, issueNumbersForTask,
+  missingRequirementCompletionMarkers, recordIssueCompletions, recordIssuePromotions,
 } from './issueQueue.ts'
-import { mergeTask, MergeError, syncOrchestrationDepsAtStartup } from './merge.ts'
+import {
+  mergeTask, MergeError, orchestrationDepsRuntimeForPackage,
+  syncOrchestrationDepsAtStartup,
+} from './merge.ts'
 import { deploy } from './deploy.ts'
 import {
   isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
@@ -45,10 +52,10 @@ import {
   loopRestartPredecessorPid, publishLoopReplacementPid, signalLoopRestartReady,
   startLoopReplacement,
 } from './restart.ts'
-import { processTreeRootPid, startWindowsProcess } from './adapters/windows-process.ts'
 import {
   prepareBranchTopology, prepareIntegrationWorktree,
 } from './branchTopology.ts'
+import { LOOP_STARTUP_RESULT_FILE_ENV } from './internalEnvironment.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -72,6 +79,7 @@ function repoRoot(): string {
 
 interface RecoveryLockOwner {
   pid: number
+  startIdentity?: string | null
   acquiredAt: string
   token: string
 }
@@ -79,6 +87,111 @@ interface RecoveryLockOwner {
 const RECOVERY_LOCK_STALE_MS = 10_000
 const RECOVERY_LOCK_TIMEOUT_MS = 10_000
 const RECOVERY_LOCK_POLL_MS = 10
+const LOOP_STARTUP_TIMEOUT_MS = 30_000
+
+interface LoopStartupResult {
+  status: 'ready' | 'error'
+  pid: number
+  error?: string
+}
+
+function errorSummary(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return (message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'
+}
+
+function publishLoopStartupResult(
+  resultFile: string | undefined,
+  result: LoopStartupResult,
+): void {
+  if (resultFile === undefined || resultFile === '') return
+  writeFileSync(resultFile, `${JSON.stringify(result)}\n`, { flag: 'wx' })
+}
+
+async function waitForLoopStartup(
+  daemon: Awaited<ReturnType<OperatingSystem['launchDaemon']>>,
+  resultFile: string,
+): Promise<LoopStartupResult> {
+  const deadline = Date.now() + LOOP_STARTUP_TIMEOUT_MS
+  let spawnError: string | undefined
+  const onError = (error: Error): void => { spawnError = errorSummary(error) }
+  daemon.onError(onError)
+  try {
+    for (;;) {
+      if (existsSync(resultFile)) {
+        try {
+          const result = JSON.parse(readFileSync(resultFile, 'utf8')) as LoopStartupResult
+          if (result.pid !== daemon.pid) {
+            try {
+              daemon.terminate()
+            } catch (error) {
+              return {
+                status: 'error',
+                pid: daemon.pid,
+                error: `daemon published an unexpected PID (${result.pid}); `
+                  + `cleanup failed: ${errorSummary(error)}`,
+              }
+            }
+            return {
+              status: 'error',
+              pid: daemon.pid,
+              error: `daemon published an unexpected PID (${result.pid})`,
+            }
+          }
+          if (result.status === 'ready') return result
+          if (result.status === 'error') {
+            while (daemon.isAlive() && Date.now() < deadline) await sleep(10)
+            if (daemon.isAlive()) {
+              try {
+                daemon.terminate()
+              } catch (error) {
+                return {
+                  ...result,
+                  error: `${result.error ?? 'daemon initialization failed'}; `
+                    + `cleanup failed: ${errorSummary(error)}`,
+                }
+              }
+            }
+            return result
+          }
+        } catch {
+          // The child may still be completing its single status-file write.
+        }
+      }
+      if (spawnError !== undefined) {
+        return { status: 'error', pid: daemon.pid, error: spawnError }
+      }
+      if (!daemon.isAlive()) {
+        return {
+          status: 'error',
+          pid: daemon.pid,
+          error: 'daemon exited before reporting startup readiness',
+        }
+      }
+      if (Date.now() >= deadline) {
+        try {
+          daemon.terminate()
+        } catch (error) {
+          return {
+            status: 'error',
+            pid: daemon.pid,
+            error: 'daemon did not initialize before the startup timeout; '
+              + `cleanup failed: ${errorSummary(error)}`,
+          }
+        }
+        return {
+          status: 'error',
+          pid: daemon.pid,
+          error: 'daemon did not initialize before the startup timeout',
+        }
+      }
+      await sleep(10)
+    }
+  } finally {
+    daemon.offError(onError)
+    rmSync(resultFile, { force: true })
+  }
+}
 
 function recoveryLockOwner(recoveryLock: string): RecoveryLockOwner | undefined {
   try {
@@ -86,6 +199,8 @@ function recoveryLockOwner(recoveryLock: string): RecoveryLockOwner | undefined 
     if (typeof parsed !== 'object' || parsed === null) return undefined
     const owner = parsed as Partial<RecoveryLockOwner>
     if (!Number.isSafeInteger(owner.pid) || (owner.pid ?? 0) <= 0
+      || (owner.startIdentity !== undefined && owner.startIdentity !== null
+        && (typeof owner.startIdentity !== 'string' || owner.startIdentity === ''))
       || typeof owner.acquiredAt !== 'string' || typeof owner.token !== 'string'
       || owner.token === '') return undefined
     return owner as RecoveryLockOwner
@@ -96,7 +211,7 @@ function recoveryLockOwner(recoveryLock: string): RecoveryLockOwner | undefined 
 
 function reclaimRecoveryLock(recoveryLock: string): boolean {
   const owner = recoveryLockOwner(recoveryLock)
-  if (owner !== undefined && operatingSystem.processIsAlive(owner.pid)) return false
+  if (owner !== undefined && lockOwnerIsCurrent(owner.pid, owner.startIdentity)) return false
   if (owner === undefined) {
     try {
       if (Date.now() - statSync(recoveryLock).mtimeMs < RECOVERY_LOCK_STALE_MS) return false
@@ -122,6 +237,7 @@ function sleep(milliseconds: number): Promise<void> {
 async function acquireRecoveryLock(recoveryLock: string): Promise<() => void> {
   const owner: RecoveryLockOwner = {
     pid: process.pid,
+    startIdentity: currentProcessStartIdentity(),
     acquiredAt: new Date().toISOString(),
     token: randomUUID(),
   }
@@ -455,18 +571,31 @@ const cmdMerge: Command = async (paths, args) => {
     const forge = linkedIssues.length === 0
       ? undefined
       : await loadForge(config.forge, paths.repoRoot)
-    const mergeCommit = await mergeTask(paths, taskId, {
+    const mergeResult = await mergeTask(paths, taskId, {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(paths.root),
       closesIssues: linkedIssues,
       forge,
+      onNoChange: async () => {
+        if (linkedIssues.length > 0) {
+          await Promise.all(linkedIssues.map((linkedIssue) =>
+            closeIssueAndRemoveLifecycleLabels(forge!, linkedIssue,
+              `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+        }
+        // Keep completion persistence inside the retryable reconciliation phase. Once
+        // mergeTask writes no-change and removes the worktree there is no merge retry.
+        recordIssueCompletions(paths, taskId, 'no-change')
+      },
     })
-    // A completed manual merge proves the previous failures are no longer consecutive.
-    // Clear the durable streak immediately, before optional forge bookkeeping can fail.
-    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
-    if (linkedIssues.length > 0) {
+    if (mergeResult.outcome === 'merged') {
+      // A completed manual merge proves the previous failures are no longer consecutive.
+      // Clear the durable streak immediately, before optional forge bookkeeping can fail.
+      writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+    }
+    if (mergeResult.outcome === 'merged' && linkedIssues.length > 0) {
+      const mergeCommit = mergeResult.mergeCommit
       const runBranch = execFileSync('git', ['branch', '--show-current'], {
         cwd: paths.repoRoot,
         encoding: 'utf8',
@@ -555,9 +684,11 @@ const cmdLoopStatus: Command = async (paths) => {
   // A compact answer to "is it running, and what is in flight". Always exits 0 so it
   // is safe to embed in a skill preamble.
   const pidFile = join(paths.queueDir, 'loop.pid')
-  const pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8').trim() : ''
-  if (/^\d+$/.test(pid) && operatingSystem.processIsAlive(Number(pid))) {
-    console.log(`loop: running (PID=${pid})`)
+  const ownerPid = existsSync(pidFile)
+    ? currentProcessMarkerPid(readFileSync(pidFile, 'utf8'))
+    : undefined
+  if (ownerPid !== undefined) {
+    console.log(`loop: running (PID=${ownerPid})`)
   } else {
     console.log('loop: not running')
   }
@@ -605,6 +736,10 @@ const cmdLoop: Command = async (paths, args) => {
     ).trim()
     prepareLoopLog(paths, { runBranch })
     const markerLog = join(paths.logsDir, 'loop-markers.log')
+    const startupResultFile = join(
+      paths.logsDir,
+      `.loop-startup-${process.pid}-${randomUUID()}.json`,
+    )
     const daemonArgs = [packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog]
     // The daemon must work on the repository this launcher was pointed at. Starting it
     // in the package directory instead made it resolve its own checkout as the
@@ -612,28 +747,21 @@ const cmdLoop: Command = async (paths, args) => {
     // daemon runs from — `npm ci` deletes node_modules first, so a suite launching a
     // daemon deleted its own dependencies mid-run. The script path is absolute, so the
     // working directory is free to be the repository.
-    let daemonPid: number
-    if (process.platform === 'win32') {
-      // Measured on Windows: detached launches gave every console descendant its own
-      // visible window. The hidden launcher creates one non-visible console shared by
-      // the daemon tree, and that tree remains alive after this launcher exits.
-      daemonPid = await startWindowsProcess({
-        args: daemonArgs,
-        command: process.execPath,
-        cwd: paths.repoRoot,
-        outputFile: loopLog,
-      })
-    } else {
-      const fd = openSync(loopLog, 'a')
-      const child = spawn(process.execPath, daemonArgs, {
-        cwd: paths.repoRoot,
-        detached: true,
-        stdio: ['ignore', fd, fd],
-        windowsHide: true,
-      })
-      child.unref()
-      daemonPid = child.pid ?? 0
+    const daemon = await operatingSystem.launchDaemon({
+      args: daemonArgs,
+      command: process.execPath,
+      cwd: paths.repoRoot,
+      env: { ...process.env, [LOOP_STARTUP_RESULT_FILE_ENV]: startupResultFile },
+      outputFile: loopLog,
+    })
+    const daemonPid = daemon.pid
+    const startup = await waitForLoopStartup(daemon, startupResultFile)
+    if (startup.status === 'error') {
+      console.error(`Could not start the loop: ${startup.error ?? 'unknown error'}`)
+      console.error(`Log: ${loopLog}`)
+      return 1
     }
+    daemon.release()
     console.log(`Started the loop in the background (PID=${daemonPid})`)
     console.log(`Log: ${loopLog}`)
     console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
@@ -641,16 +769,28 @@ const cmdLoop: Command = async (paths, args) => {
     return 0
   }
   const markerOutput = args[0] === '--marker-output' ? args[1] : undefined
-  const config = loadConfig()
+  const startupResultFile = process.env[LOOP_STARTUP_RESULT_FILE_ENV]
+  delete process.env[LOOP_STARTUP_RESULT_FILE_ENV]
+  let startupReported = false
+  const reportStartup = (result: LoopStartupResult): void => {
+    if (startupReported) return
+    startupReported = true
+    publishLoopStartupResult(startupResultFile, result)
+  }
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+  let config: LoopConfig | undefined
+  let startupError: string | undefined
   const log = (message: string, error = false): void => {
+    if (startupError === undefined && message.startsWith('ERROR:')) {
+      startupError = message.slice('ERROR:'.length).trim()
+    }
     const write = error ? console.error : console.log
     const currentCycle = existsSync(scanCountFile)
       ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
       : 0
     for (const line of loopLogLines(message, {
       currentCycle,
-      cycleCap: config.maxScanCycles,
+      cycleCap: config?.maxScanCycles ?? 0,
     })) write(line)
   }
   const marker = (message: string): void => {
@@ -658,10 +798,29 @@ const cmdLoop: Command = async (paths, args) => {
     else appendFileSync(markerOutput, `${message}\n`)
   }
   try {
-    return await runLoopDaemon(paths, log, marker, config)
+    config = loadConfig()
+    const result = await runLoopDaemon(paths, log, marker, config, () => {
+      reportStartup({
+        status: 'ready',
+        pid: operatingSystem.processTreeRootPid(),
+      })
+    })
+    if (result !== 0) {
+      reportStartup({
+        status: 'error',
+        pid: operatingSystem.processTreeRootPid(),
+        error: startupError ?? 'daemon initialization failed',
+      })
+    }
+    return result
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    log(`ERROR: ${(message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'}`, true)
+    const message = errorSummary(error)
+    log(`ERROR: ${message}`, true)
+    reportStartup({
+      status: 'error',
+      pid: operatingSystem.processTreeRootPid(),
+      error: message,
+    })
     return 1
   }
 }
@@ -703,8 +862,11 @@ async function runLoopDaemon(
   log: (line: string) => void,
   marker: (line: string) => void,
   config: LoopConfig,
+  ready: () => void = () => {},
 ): Promise<number> {
-  const daemonPid = processTreeRootPid()
+  const daemonPid = operatingSystem.processTreeRootPid()
+  const daemonOwner = processMarker(daemonPid)
+  const daemonOwnerText = processMarkerText(daemonOwner)
   const pidFile = join(paths.queueDir, 'loop.pid')
   const stopFile = join(paths.queueDir, 'stop')
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
@@ -717,30 +879,32 @@ async function runLoopDaemon(
 
   // PID lock: one loop per repository.
   for (;;) {
-    try {
-      writeFileSync(pidFile, `${daemonPid}\n`, { flag: 'wx' })
-      break
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    }
-
     const releaseRecoveryLock = await acquireRecoveryLock(recoveryLock)
     try {
-      let existing: string
       try {
-        existing = readFileSync(pidFile, 'utf8').trim()
+        // Creation uses the same mutex as stale recovery so another starter cannot
+        // observe the file between its exclusive creation and completed metadata write.
+        writeFileSync(pidFile, daemonOwnerText, { flag: 'wx' })
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+
+      let existingText: string
+      try {
+        existingText = readFileSync(pidFile, 'utf8')
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
         throw error
       }
+      const existingPid = currentProcessMarkerPid(existingText)
       if (restartPredecessorPid !== undefined
-        && existing === `${restartPredecessorPid}`
-        && operatingSystem.processIsAlive(restartPredecessorPid)) {
+        && existingPid === restartPredecessorPid) {
         usesRestartReservation = true
         break
       }
-      if (/^\d+$/.test(existing) && operatingSystem.processIsAlive(Number(existing))) {
-        log(`ERROR: Loop is already running (PID=${existing}). Please stop and restart.`)
+      if (existingPid !== undefined) {
+        log(`ERROR: Loop is already running (PID=${existingPid}). Please stop and restart.`)
         return 1
       }
       log('WARN: Removing stale PID file')
@@ -757,7 +921,7 @@ async function runLoopDaemon(
       // nothing to release
     }
     try {
-      if (readFileSync(pidFile, 'utf8').trim() === `${daemonPid}`) {
+      if (readFileSync(pidFile, 'utf8') === daemonOwnerText) {
         rmSync(pidFile, { force: true })
       }
     } catch {
@@ -839,7 +1003,10 @@ async function runLoopDaemon(
     const forge = await loadForge(config.forge, loopPaths.repoRoot)
     const runner = await loadRunner(config.runner)
     const projectModule = await import('./adapters/project.ts')
-    const monitoredProject = await projectModule.loadMonitoredProject(paths.root)
+    const projectRoot = topology.integrationBranch === undefined
+      ? paths.root
+      : join(loopPaths.repoRoot, relative(paths.repoRoot, paths.root))
+    const monitoredProject = await projectModule.loadMonitoredProject(projectRoot)
     if (topology.integrationBranch !== undefined) {
       prepareIntegrationWorktree(
         loopPaths,
@@ -854,6 +1021,7 @@ async function runLoopDaemon(
       runner,
       project: monitoredProject.project,
       projectAdapterChanged: monitoredProject.sourceChanged,
+      orchestrationDepsRuntime: orchestrationDepsRuntimeForPackage(topology.packageRoot),
       branchGuard: topology.validateDaemonCheckout,
       prepareIntegrationWorktree: topology.integrationBranch === undefined
         ? undefined
@@ -872,6 +1040,7 @@ async function runLoopDaemon(
 
     loop.initializeSessionStateForBranch()
     signalLoopRestartReady()
+    ready()
 
     for (;;) {
       // Observe first: delegation may append after poll() returns but before this

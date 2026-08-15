@@ -1,15 +1,16 @@
-import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
-import { PACKAGE_ROOT } from './paths.ts'
 import {
-  processTreeRootPid, startWindowsProcess, type WindowsProcessOptions,
-} from './adapters/windows-process.ts'
+  operatingSystem, type DaemonProcess, type OperatingSystem,
+} from './adapters/os.ts'
+import { PACKAGE_ROOT } from './paths.ts'
 import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
 } from './internalEnvironment.ts'
+import {
+  parseProcessMarker, processMarker, processMarkerIsCurrent, processMarkerText,
+} from './processMarker.ts'
 
 export {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
@@ -34,11 +35,7 @@ interface LoopRestartRuntime {
   operatingSystem?: OperatingSystem
   outputFile?: string
   packageRoot?: string
-  platform?: NodeJS.Platform
-  spawn?: typeof spawn
-  startWindowsProcess?: (options: WindowsProcessOptions) => Promise<number>
   startupTimeoutMs?: number
-  stdio?: StdioOptions
 }
 
 /** Identify the live daemon whose PID reservation a replacement is allowed to use. */
@@ -57,13 +54,14 @@ export function publishLoopReplacementPid(
   predecessorPid: number,
   replacementPid: number,
 ): void {
-  const owner = readFileSync(pidFile, 'utf8').trim()
-  if (owner !== `${predecessorPid}`) {
-    throw new Error(`loop PID owner changed before restart handover (${owner || 'empty'})`)
+  const ownerText = readFileSync(pidFile, 'utf8')
+  const owner = parseProcessMarker(ownerText)
+  if (owner?.pid !== predecessorPid || !processMarkerIsCurrent(owner)) {
+    throw new Error(`loop PID owner changed before restart handover (${owner?.pid ?? 'invalid'})`)
   }
   const candidate = `${pidFile}.handover-${predecessorPid}-${replacementPid}-${randomUUID()}`
   try {
-    writeFileSync(candidate, `${replacementPid}\n`, { flag: 'wx' })
+    writeFileSync(candidate, processMarkerText(processMarker(replacementPid)), { flag: 'wx' })
     renameSync(candidate, pidFile)
   } finally {
     rmSync(candidate, { force: true })
@@ -83,10 +81,13 @@ export function loopRestartCommand(
 }
 
 /** The replacement publishes readiness only after daemon initialization has completed. */
-export function signalLoopRestartReady(env: NodeJS.ProcessEnv = process.env): void {
+export function signalLoopRestartReady(
+  env: NodeJS.ProcessEnv = process.env,
+  os: OperatingSystem = operatingSystem,
+): void {
   const readyFile = env[LOOP_RESTART_READY_FILE_ENV]
   if (readyFile === undefined || readyFile === '') return
-  writeFileSync(readyFile, `${processTreeRootPid(env)}\n`, { flag: 'wx' })
+  writeFileSync(readyFile, `${os.processTreeRootPid(env)}\n`, { flag: 'wx' })
 }
 
 function errorSummary(error: unknown): string {
@@ -101,51 +102,28 @@ export async function startLoopReplacement(
 ): Promise<LoopRestartResult> {
   rmSync(readyFile, { force: true })
   const command = loopRestartCommand(runtime.argv, runtime.packageRoot)
-  const spawnProcess = runtime.spawn ?? spawn
-  const platform = runtime.platform ?? process.platform
   const os = runtime.operatingSystem ?? operatingSystem
-  const predecessorPid = processTreeRootPid(runtime.env ?? process.env)
-  let replacement: ChildProcess | undefined
-  let pid: number | undefined
+  const predecessorPid = os.processTreeRootPid(runtime.env ?? process.env)
+  let replacement: DaemonProcess
   try {
     const env = {
       ...(runtime.env ?? process.env),
       [LOOP_RESTART_READY_FILE_ENV]: readyFile,
       [LOOP_RESTART_PREDECESSOR_PID_ENV]: `${predecessorPid}`,
     }
-    if (platform === 'win32' && runtime.spawn === undefined) {
-      // Measured on Windows: the same hidden-console launcher used by a fresh daemon
-      // survives the predecessor and gives the replacement tree one non-visible console.
-      // A detached Node launch survived too, but every console descendant opened a
-      // separate visible window whether windowsHide was set or not.
-      if (runtime.outputFile === undefined) {
-        throw new Error('A loop log file is required to restart the Windows daemon')
-      }
-      pid = await (runtime.startWindowsProcess ?? startWindowsProcess)({
-        args: command.args,
-        command: command.executable,
-        cwd: command.cwd,
-        env,
-        outputFile: runtime.outputFile,
-      })
-    } else {
-      replacement = spawnProcess(command.executable, command.args, {
-        cwd: command.cwd,
-        detached: true,
-        env,
-        stdio: runtime.stdio ?? 'inherit',
-        windowsHide: true,
-      })
-      pid = replacement.pid
-    }
+    if (runtime.outputFile === undefined) throw new Error('A loop log file is required to restart the daemon')
+    replacement = await os.launchDaemon({
+      args: command.args,
+      command: command.executable,
+      cwd: command.cwd,
+      env,
+      outputFile: runtime.outputFile,
+    })
   } catch (error) {
     return { ok: false, error: errorSummary(error) }
   }
 
-  if (pid === undefined) {
-    replacement?.kill()
-    return { ok: false, error: 'replacement process did not receive a PID' }
-  }
+  const pid = replacement.pid
 
   return await new Promise((resolve) => {
     let settled = false
@@ -155,10 +133,10 @@ export async function startLoopReplacement(
       settled = true
       clearInterval(poll)
       clearTimeout(timeout)
-      replacement?.off('error', onError)
-      replacement?.off('exit', onExit)
+      replacement.offError(onError)
+      replacement.offExit(onExit)
       rmSync(readyFile, { force: true })
-      if (result.ok) replacement?.unref()
+      if (result.ok) replacement.release()
       resolve(result)
     }
     const onError = (error: Error): void => {
@@ -173,6 +151,18 @@ export async function startLoopReplacement(
         error: spawnError ?? `replacement exited before becoming ready (${outcome})`,
       })
     }
+    const terminateAndFinish = (result: LoopRestartResult): void => {
+      try {
+        replacement.terminate()
+      } catch (error) {
+        finish({
+          ...result,
+          error: `${result.error ?? 'replacement startup failed'}; replacement cleanup failed: ${errorSummary(error)}`,
+        })
+        return
+      }
+      finish(result)
+    }
     const poll = setInterval(() => {
       if (!existsSync(readyFile)) return
       let owner = ''
@@ -182,39 +172,33 @@ export async function startLoopReplacement(
         return
       }
       if (owner !== `${pid}`) {
-        if (replacement !== undefined) replacement.kill()
-        else os.terminateProcessTree(pid)
-        finish({
+        terminateAndFinish({
           ok: false,
           pid,
           error: `replacement published an unexpected PID (${owner || 'empty'})`,
         })
         return
       }
-      if (replacement !== undefined ? replacement.exitCode !== null : !os.processIsAlive(pid)) {
+      if (!replacement.isAlive()) {
         finish({ ok: false, pid, error: 'replacement exited before becoming ready' })
         return
       }
       try {
         runtime.onReady?.(pid)
       } catch (error) {
-        if (replacement !== undefined) replacement.kill()
-        else os.terminateProcessTree(pid)
-        finish({ ok: false, pid, error: errorSummary(error) })
+        terminateAndFinish({ ok: false, pid, error: errorSummary(error) })
         return
       }
       finish({ ok: true, pid })
     }, 10)
     const timeout = setTimeout(() => {
-      if (replacement !== undefined) replacement.kill()
-      else os.terminateProcessTree(pid)
-      finish({
+      terminateAndFinish({
         ok: false,
         pid,
         error: 'replacement did not become ready before the startup timeout',
       })
     }, runtime.startupTimeoutMs ?? 30_000)
-    replacement?.once('error', onError)
-    replacement?.once('exit', onExit)
+    replacement.onError(onError)
+    replacement.onExit(onExit)
   })
 }

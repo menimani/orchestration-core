@@ -13,7 +13,30 @@ export interface WorktreePath {
   holderHint: string
 }
 
+export interface DaemonLaunchOptions {
+  args: readonly string[]
+  command: string
+  cwd: string
+  env?: NodeJS.ProcessEnv
+  outputFile: string
+}
+
+export interface DaemonProcess {
+  pid: number
+  isAlive(): boolean
+  terminate(): void
+  release(): void
+  onError(listener: (error: Error) => void): void
+  offError(listener: (error: Error) => void): void
+  onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void
+  offExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void
+}
+
 export interface OperatingSystem {
+  launchDaemon(options: DaemonLaunchOptions): Promise<DaemonProcess>
+  processTreeRootPid(env?: NodeJS.ProcessEnv): number
+  /** Stable identity for this particular use of a PID, or undefined when unverifiable. */
+  processStartIdentity(pid: number): string | undefined
   terminateProcessTree(pid: number): boolean
   /**
    * Whether a process with this identifier is running. Detection asks about the process;

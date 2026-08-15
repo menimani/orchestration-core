@@ -43,10 +43,12 @@ afterEach(() => {
 
 describe('pruneTasks', () => {
   const OLD_MERGED = '20250101_000000_001_user-old-merged'
+  const OLD_NO_CHANGE = '20250101_000000_005_user-old-no-change'
   const OLD_FAILED = '20250101_000000_004_user-old-failed'
 
   function setUpFixtures(): void {
     makeTask(OLD_MERGED, 'merged', 'old')
+    makeTask(OLD_NO_CHANGE, 'no-change', 'old')
     mkdirSync(join(paths.queueDir, 'desc-index'), { recursive: true })
     writeFileSync(join(paths.queueDir, 'desc-index', 'user-deadbeef'), `${OLD_MERGED}\n`)
 
@@ -64,10 +66,13 @@ describe('pruneTasks', () => {
 
     const orphan = join(paths.logsDir, 'orphan-task.log')
     writeFileSync(orphan, 'orphan\n')
+    const orphanFinal = join(paths.logsDir, 'orphan-task.final')
+    writeFileSync(orphanFinal, 'final message\n')
     const loopLog = join(paths.logsDir, 'loop.log')
     writeFileSync(loopLog, 'loop\n')
     const past = (Date.now() - 30 * 24 * 3600 * 1000) / 1000
     utimesSync(orphan, past, past)
+    utimesSync(orphanFinal, past, past)
     utimesSync(loopLog, past, past)
   }
 
@@ -78,7 +83,26 @@ describe('pruneTasks', () => {
     expect(existsSync(join(paths.statusDir, `${OLD_MERGED}.json`))).toBe(true)
   })
 
-  it('prunes old merged tasks and keeps everything protected', () => {
+  it('aborts without deleting artifacts when tracked-spec discovery fails', () => {
+    makeTask(OLD_MERGED, 'merged', 'old')
+    rmSync(join(repoRoot, '.git'), { recursive: true, force: true })
+
+    expect(() => pruneTasks(paths, { days: 14, dryRun: false }))
+      .toThrow('Failed to discover tracked task specifications; pruning aborted')
+
+    for (const retained of [
+      join(paths.statusDir, `${OLD_MERGED}.json`),
+      join(paths.logsDir, `${OLD_MERGED}.log`),
+      join(paths.logsDir, `${OLD_MERGED}.merge.log`),
+      join(paths.tasksDir, `${OLD_MERGED}.md`),
+      join(paths.queueDir, 'scanned', OLD_MERGED),
+      join(paths.queueDir, 'effort', OLD_MERGED),
+    ]) {
+      expect(existsSync(retained), `artifact should be retained: ${retained}`).toBe(true)
+    }
+  })
+
+  it('prunes old finished tasks and keeps everything protected', () => {
     setUpFixtures()
     pruneTasks(paths, { days: 14, dryRun: false })
 
@@ -89,6 +113,9 @@ describe('pruneTasks', () => {
       join(paths.tasksDir, `${OLD_MERGED}.md`),
       join(paths.queueDir, 'scanned', OLD_MERGED),
       join(paths.queueDir, 'effort', OLD_MERGED),
+      join(paths.statusDir, `${OLD_NO_CHANGE}.json`),
+      join(paths.logsDir, `${OLD_NO_CHANGE}.log`),
+      join(paths.tasksDir, `${OLD_NO_CHANGE}.md`),
       join(paths.queueDir, 'desc-index', 'user-deadbeef'),
     ]) {
       expect(existsSync(gone), `should be pruned: ${gone}`).toBe(false)
@@ -111,7 +138,8 @@ describe('pruneTasks', () => {
     expect(existsSync(join(paths.statusDir, '20250101_000000_003_user-old-worktree.json'))).toBe(true)
     expect(existsSync(join(paths.tasksDir, 'manual-task.md'))).toBe(true)
     expect(existsSync(join(paths.statusDir, 'manual-task.json'))).toBe(false)
-    expect(existsSync(join(paths.logsDir, 'orphan-task.log'))).toBe(false)
+    expect(existsSync(join(paths.logsDir, 'orphan-task.log'))).toBe(true)
+    expect(existsSync(join(paths.logsDir, 'orphan-task.final'))).toBe(true)
     expect(existsSync(join(paths.logsDir, 'loop.log'))).toBe(true)
   })
 })

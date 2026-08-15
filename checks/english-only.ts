@@ -49,10 +49,25 @@ const RUNTIME_DIRECTORIES: ReadonlySet<string> = new Set([
   'orchestration/worktrees',
 ])
 
+const BACKSLASH = String.fromCodePoint(92)
+const ESCAPED_NON_ENGLISH_FIXTURE_LINES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['tests/runner-codex.test.ts', new Set([
+    `const specification = 'non-ASCII specification ${BACKSLASH}u65e5${BACKSLASH}u672c${BACKSLASH}u8a9e${BACKSLASH}n'.repeat(1_000)`,
+  ])],
+])
+
 const permitted = (character: string): boolean =>
   character.codePointAt(0)! < 128
   || PUNCTUATION.has(character)
   || ENGLISH_LATIN.has(character)
+
+const decodedEscapes = (line: string): string => line.replace(
+  /\\(?:u\{([\da-f]{1,6})\}|u([\da-f]{4})|x([\da-f]{2}))/gi,
+  (escape, braced: string | undefined, fixed: string | undefined, byte: string | undefined) => {
+    const codePoint = Number.parseInt(braced ?? fixed ?? byte!, 16)
+    return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : escape
+  },
+)
 
 const normalizedPath = (file: string): string => file.replaceAll('\\', '/')
 
@@ -79,7 +94,7 @@ export type TextViolation = {
 /** Finds the non-English characters on each violating line of source text. */
 export const scanText = (content: string): TextViolation[] =>
   content.split('\n').flatMap((line, index) => {
-    const offenders = [...new Set([...line].filter((character) => !permitted(character)))]
+    const offenders = [...new Set([...decodedEscapes(line)].filter((character) => !permitted(character)))]
     if (offenders.length === 0) return []
     return [{
       line: index + 1,
@@ -88,6 +103,15 @@ export const scanText = (content: string): TextViolation[] =>
       text: line.trim().slice(0, 76),
     }]
   })
+
+const isEscapedFixtureLine = (
+  file: string,
+  root: string,
+  lines: readonly string[],
+  violation: TextViolation,
+): boolean => ESCAPED_NON_ENGLISH_FIXTURE_LINES
+  .get(repositoryRelativePath(file, root))
+  ?.has(lines[violation.line - 1]?.trim() ?? '') === true
 
 const isSource = (file: string): boolean => {
   const name = file.split(/[\\/]/).at(-1) ?? ''
@@ -105,7 +129,10 @@ export const main = (root = PACKAGE_ROOT): number => {
   let hits = 0
 
   for (const file of walk(root, root)) {
-    for (const violation of scanText(readFileSync(file, 'utf8'))) {
+    const content = readFileSync(file, 'utf8')
+    const lines = content.split('\n')
+    for (const violation of scanText(content)) {
+      if (isEscapedFixtureLine(file, root, lines, violation)) continue
       // Name the code points because some offenders, such as zero-width spaces, are
       // invisible in the report too.
       console.log(`${repositoryRelativePath(file, root)}:${violation.line}: ${violation.codePoints.join(' ')}`)

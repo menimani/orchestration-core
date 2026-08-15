@@ -14,7 +14,7 @@ import {
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
-import { writeStatus } from '../src/status.ts'
+import { readStatus, writeStatus } from '../src/status.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
@@ -172,16 +172,39 @@ describe('worker mode', () => {
     expect(logged.join('\n')).not.toContain('cycle')
   })
 
-  it('closes a completed inspection issue without pushing a branch', async () => {
+  it('keeps the inspection completion path when its final message has a no-change marker', async () => {
     const taskId = '20260809_000000_002_auto-inspection'
     await completedTask(taskId, false)
     const issueNumber = await claimedIssue(taskId, true)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The inspection found nothing to change.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
     const loop = makeWorkerLoop()
 
     expect(await loop.poll()).toBe('continue')
 
     expect((await forge.getIssue(issueNumber)).state).toBe('closed')
-    expect(forge.issueComments.get(issueNumber)?.join('\n')).toContain('completed without commits')
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain(`Inspection task ${taskId} completed without commits.`)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(() => git(origin, ['rev-parse', `refs/heads/${branchName(taskId)}`])).toThrow()
+  })
+
+  it('closes an explicit no-change task without publishing an empty branch', async () => {
+    const taskId = '20260809_000000_004_auto-already-resolved'
+    git(repoRoot, ['checkout', '--detach'])
+    await completedTask(taskId, false)
+    const issueNumber = await claimedIssue(taskId)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The reported defect no longer reproduces.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    const loop = makeWorkerLoop()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect((await forge.getIssue(issueNumber)).state).toBe('closed')
+    expect(forge.issueComments.get(issueNumber)?.join('\n')).toContain('no change was warranted')
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
     expect(() => git(origin, ['rev-parse', `refs/heads/${branchName(taskId)}`])).toThrow()
   })
 })

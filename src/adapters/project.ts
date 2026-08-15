@@ -30,6 +30,8 @@ export interface SuiteStep {
   /** Directory the command runs in, relative to the repository root ('' = the root). */
   cwd: string
   command: string
+  /** Run at the cycle gate under every task-gate mode, not only the light gate. */
+  runAtEveryTaskGate?: boolean
   /** Skip silently when this repo-relative path does not exist. */
   requires?: string
   /** Run a repair command first when a repo-relative path is missing — for a toolchain
@@ -110,7 +112,7 @@ export interface ProjectAdapter {
   mergeChecks(taskGate: 'full' | 'light'): MergeCheck[]
   /** Fast checks run by the core-owned pre-commit hook against staged paths. */
   preCommitChecks: MergeCheck[]
-  /** The full suites the cycle gate runs against the branch tip under light task gates. */
+  /** Suites the cycle gate runs against the branch tip. Steps default to light gates only. */
   cycleSuite(): SuiteStep[]
   /** Repository-specific probe used when a cycle suite step needs Docker. */
   cycleSuiteDockerProbe?: DockerProbe

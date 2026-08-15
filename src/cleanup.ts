@@ -3,6 +3,9 @@ import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { branchName, finalMessageFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
+import {
+  forgetTaskProcess, taskProcessPid, terminableTaskProcessPid,
+} from './processRegistry.ts'
 import { readStatus } from './status.ts'
 import { removeWorktreeWithFallback } from './worktree.ts'
 
@@ -57,11 +60,34 @@ function branchExists(runtime: CleanupRuntime, paths: OrchPaths, branch: string)
   return output.split(/\r?\n/).includes(ref)
 }
 
-function stopProcess(runtime: CleanupRuntime, pid: number): void {
+function stopTaskProcess(
+  runtime: CleanupRuntime,
+  paths: OrchPaths,
+  taskId: string,
+  pid: number,
+): void {
+  const terminablePid = terminableTaskProcessPid(
+    paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processIsAlive,
+  )
+  if (terminablePid === undefined) {
+    const blockingPid = taskProcessPid(
+      paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processIsAlive,
+    )
+    if (blockingPid !== undefined) {
+      throw new Error(`Could not verify process ${blockingPid}; task state was retained.`)
+    }
+    return
+  }
+  if (terminablePid !== pid) {
+    throw new Error('Task process ownership changed; task state was retained.')
+  }
   try {
-    if (runtime.os.terminateProcessTree(pid)) console.log(`Stopping running process: pid=${pid}`)
+    if (runtime.os.terminateProcessTree(terminablePid)) {
+      console.log(`Stopping running process: pid=${terminablePid}`)
+    }
+    forgetTaskProcess(paths, taskId)
   } catch {
-    throw new Error(`Could not stop process ${pid}; task state was retained.`)
+    throw new Error(`Could not stop process ${terminablePid}; task state was retained.`)
   }
 }
 
@@ -77,9 +103,11 @@ export function cleanupTask(
   runtime: CleanupRuntime = systemRuntime,
   announce = true,
 ): void {
-  const status = readStatus(paths, taskId)
+  const status = readStatus(
+    paths, taskId, runtime.os.processStartIdentity, runtime.os.processIsAlive,
+  )
   if (status !== undefined && status.pid !== null) {
-    stopProcess(runtime, status.pid)
+    stopTaskProcess(runtime, paths, taskId, status.pid)
   }
 
   const worktree = worktreeDir(paths, taskId)

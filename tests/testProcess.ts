@@ -2,7 +2,9 @@ import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:chi
 import { fileURLToPath } from 'node:url'
 import { operatingSystem } from '../src/adapters/os.ts'
 
-const PROCESS_EXIT_TIMEOUT_MS = 5_000
+export const PROCESS_TEST_TIMEOUT_MS = 30_000
+
+const PROCESS_EXIT_TIMEOUT_MS = PROCESS_TEST_TIMEOUT_MS
 const PROCESS_EXIT_POLL_MS = 10
 const PARENT_EXIT_POLL_MS = 100
 

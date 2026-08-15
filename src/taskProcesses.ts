@@ -2,9 +2,10 @@ import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { type OrchPaths } from './paths.ts'
-import { forgetTaskProcess } from './processRegistry.ts'
+import {
+  bootedAt, forgetTaskProcess, taskProcessPid, terminableTaskProcessPid,
+} from './processRegistry.ts'
 import { listTaskIds } from './refresh.ts'
-import { readStatus } from './status.ts'
 
 export interface TaskProcess {
   taskId: string
@@ -22,7 +23,9 @@ export function liveTaskProcesses(
 ): TaskProcess[] {
   const live: TaskProcess[] = []
   for (const taskId of listTaskIds(paths)) {
-    const pid = readStatus(paths, taskId)?.pid
+    const pid = taskProcessPid(
+      paths, taskId, bootedAt, os.processStartIdentity, os.processIsAlive,
+    )
     if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue
     // Detection asks whether that process is running, not whether it leads a group. A
     // recorded PID that is not a group leader answered "gone" on POSIX, so this waved
@@ -41,8 +44,18 @@ export function terminateLiveTaskProcesses(
 ): TaskProcessTermination {
   const result: TaskProcessTermination = { terminated: [], failures: [] }
   for (const task of liveTaskProcesses(paths, os)) {
+    const terminablePid = terminableTaskProcessPid(
+      paths, task.taskId, bootedAt, os.processStartIdentity, os.processIsAlive,
+    )
+    if (terminablePid === undefined) {
+      result.failures.push({
+        ...task,
+        error: 'process identity was not captured at launch or is currently unavailable',
+      })
+      continue
+    }
     try {
-      if (os.terminateProcessTree(task.pid)) result.terminated.push(task)
+      if (os.terminateProcessTree(terminablePid)) result.terminated.push(task)
       // Stopping is what makes the recorded number false, so it is dropped here rather
       // than left for whoever reads next. A tree that resisted termination keeps its
       // entry: something is still running under that number.

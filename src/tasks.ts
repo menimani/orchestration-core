@@ -8,7 +8,9 @@ import { readStatus } from './status.ts'
 import { readTemplate } from './templates.ts'
 import { signalWake } from './wake.ts'
 import type { Forge } from './adapters/forge.ts'
-import { operatingSystem } from './adapters/os.ts'
+import {
+  currentProcessMarkerPid, parseProcessMarker, processMarker, processMarkerText,
+} from './processMarker.ts'
 
 // The queue-writing commands: new, enqueue, delegate. Everything here prints the exact
 // lines the bash implementation printed (`Created:`, `Enqueued:`, `WARN:`), because the
@@ -22,7 +24,11 @@ Commit prefixes: feat: / fix: / refactor: / test: / docs: / chore:
 
 ## Completion Marker
 
-After committing, output the following as the final standalone line:
+If investigation proves that no change is warranted, do not create an empty commit.
+Explain why and output \`NO_CHANGE_WARRANTED\` on its own line.
+
+After committing, or after reporting that no change is warranted, output the following
+as the final standalone line:
 TASK_COMPLETE
 `
 
@@ -67,7 +73,8 @@ export function enqueueTask(paths: OrchPaths, taskId: string, depth = 0): Enqueu
   const status = existsSync(statusFile(paths, taskId))
     ? readStatus(paths, taskId)?.status
     : undefined
-  if (status === 'merged' || status === 'running' || status === 'completed') {
+  if (status === 'merged' || status === 'no-change'
+    || status === 'running' || status === 'completed') {
     return { outcome: 'already-processed', taskId, status }
   }
   const appended = appendBacklogUnless(
@@ -130,14 +137,16 @@ export function writeIssueModeMarker(
   enabled: boolean,
   pid = process.pid,
 ): void {
-  writeFileSync(issueModeMarkerFile(paths), `${enabled}\n${pid}\n`)
+  writeFileSync(issueModeMarkerFile(paths), `${enabled}\n${processMarkerText(processMarker(pid))}`)
 }
 
 export function removeIssueModeMarker(paths: OrchPaths, pid: number): void {
   const marker = issueModeMarkerFile(paths)
   if (!existsSync(marker)) return
-  const [, owner] = readFileSync(marker, 'utf8').trim().split(/\s+/)
-  if (owner === `${pid}`) rmSync(marker, { force: true })
+  const [, ownerText] = readFileSync(marker, 'utf8').split(/\r?\n/, 2)
+  if (ownerText !== undefined && parseProcessMarker(ownerText)?.pid === pid) {
+    rmSync(marker, { force: true })
+  }
 }
 
 /** The delegate process prefers its own explicit setting, then the daemon marker. */
@@ -149,9 +158,9 @@ export function isIssueModeActive(
   if (configured !== undefined) return configured === 'true'
   const marker = issueModeMarkerFile(paths)
   if (!existsSync(marker)) return false
-  const [enabled, owner] = readFileSync(marker, 'utf8').trim().split(/\s+/)
-  if (enabled !== 'true' || owner === undefined || !/^\d+$/.test(owner)) return false
-  return operatingSystem.processIsAlive(Number(owner))
+  const [enabled, ownerText] = readFileSync(marker, 'utf8').split(/\r?\n/, 2)
+  if (enabled !== 'true' || ownerText === undefined) return false
+  return currentProcessMarkerPid(ownerText) !== undefined
 }
 
 /**
@@ -249,7 +258,5 @@ export async function delegateTaskVisible(
 export function isLoopRunning(paths: OrchPaths): boolean {
   const pidFile = join(paths.queueDir, 'loop.pid')
   if (!existsSync(pidFile)) return false
-  const pid = readFileSync(pidFile, 'utf8').trim()
-  if (!/^\d+$/.test(pid)) return false
-  return operatingSystem.processIsAlive(Number(pid))
+  return currentProcessMarkerPid(readFileSync(pidFile, 'utf8')) !== undefined
 }

@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
-import { completionMarkerPresent, refreshAll, refreshTask } from '../src/refresh.ts'
+import {
+  completionMarkerPresent, noChangeMarkerPresent, refreshAll, refreshTask,
+} from '../src/refresh.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -38,19 +40,27 @@ function ageFile(file: string): void {
 describe('refreshAll', () => {
   // Terminal files deliberately contain only enough JSON to classify them. A refresh
   // must not inspect other fields, and must leave their content exactly as found.
-  it('leaves merged and failed files byte-for-byte untouched', async () => {
+  it('leaves terminal files byte-for-byte untouched', async () => {
     const merged = writeRawStatus('merged-task', '{"status":"merged","sentinel":"keep merged"}\n')
+    const noChange = writeRawStatus('no-change-task',
+      '{"status":"no-change","sentinel":"keep no change"}\n')
     const failed = writeRawStatus('failed-task', '{"status":"failed","sentinel":"keep failed"}\n')
     ageFile(merged)
+    ageFile(noChange)
     ageFile(failed)
     const mergedBefore = { content: readFileSync(merged, 'utf8'), mtime: statSync(merged).mtimeMs }
+    const noChangeBefore = {
+      content: readFileSync(noChange, 'utf8'), mtime: statSync(noChange).mtimeMs,
+    }
     const failedBefore = { content: readFileSync(failed, 'utf8'), mtime: statSync(failed).mtimeMs }
 
     await refreshAll(paths)
 
     expect(readFileSync(merged, 'utf8')).toBe(mergedBefore.content)
+    expect(readFileSync(noChange, 'utf8')).toBe(noChangeBefore.content)
     expect(readFileSync(failed, 'utf8')).toBe(failedBefore.content)
     expect(statSync(merged).mtimeMs).toBe(mergedBefore.mtime)
+    expect(statSync(noChange).mtimeMs).toBe(noChangeBefore.mtime)
     expect(statSync(failed).mtimeMs).toBe(failedBefore.mtime)
   })
 
@@ -80,12 +90,30 @@ describe('refreshTask', () => {
 
   it('uses the operating-system liveness verdict for a task process', async () => {
     const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('started:protected')
     writeRawStatus('protected-task', '{"task_id":"protected-task","status":"running","pid":2147483647}\n')
 
     const after = await refreshTask(paths, 'protected-task')
 
     expect(processIsAlive).toHaveBeenCalledWith(2147483647)
     expect(after?.status).toBe('running')
+  })
+
+  it('defers failure while identity is unavailable and keeps ownership after recovery', async () => {
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue('started:protected')
+    writeRawStatus(
+      'probe-task',
+      '{"task_id":"probe-task","status":"running","pid":2147483647}\n',
+    )
+    processStartIdentity.mockReturnValue(undefined)
+
+    expect((await refreshTask(paths, 'probe-task'))?.status).toBe('running')
+
+    processStartIdentity.mockReturnValue('started:protected')
+    expect((await refreshTask(paths, 'probe-task'))?.status).toBe('running')
+    expect(processIsAlive).toHaveBeenCalledWith(2147483647)
   })
 
   it('completes a live task once the marker appears', async () => {
@@ -108,5 +136,14 @@ describe('completionMarkerPresent', () => {
   it('never reads the transcript log', () => {
     writeFileSync(join(paths.logsDir, 'y.log'), 'TASK_COMPLETE\n')
     expect(completionMarkerPresent(paths, 'y')).toBe(false)
+  })
+})
+
+describe('noChangeMarkerPresent', () => {
+  it('requires the no-change verdict on its own line in the final message', () => {
+    writeFileSync(finalMessageFile(paths, 'x'), 'No change warranted in prose.\nTASK_COMPLETE\n')
+    expect(noChangeMarkerPresent(paths, 'x')).toBe(false)
+    writeFileSync(finalMessageFile(paths, 'x'), 'NO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    expect(noChangeMarkerPresent(paths, 'x')).toBe(true)
   })
 })

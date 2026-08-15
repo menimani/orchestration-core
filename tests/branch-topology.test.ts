@@ -92,8 +92,13 @@ describe('integration branch topology', () => {
   })
 
   it('cuts tasks from integration, merges them back there, and never moves the daemon', async () => {
+    const daemonPackageRoot = join(repoRoot, 'orchestration', 'ts')
+    mkdirSync(daemonPackageRoot, { recursive: true })
+    writeFileSync(join(daemonPackageRoot, 'package.json'), '{"private":true}\n')
+    git(repoRoot, ['add', 'orchestration/ts/package.json'])
+    git(repoRoot, ['commit', '-qm', 'chore: add orchestration package'])
     const daemonHead = git(repoRoot, ['rev-parse', 'HEAD'])
-    const topology = prepareBranchTopology(paths, 'integration/run')
+    const topology = prepareBranchTopology(paths, 'integration/run', daemonPackageRoot)
     const integrationRoot = topology.paths.repoRoot
     const integrationBase = commit(
       integrationRoot, 'integration.txt', 'available to tasks\n', 'feat: integration input',
@@ -111,13 +116,19 @@ describe('integration branch topology', () => {
       .toBe('available to tasks\n')
     expect(git(taskRoot, ['merge-base', branchName(taskId), integrationBase])).toBe(integrationBase)
     commit(taskRoot, 'task.txt', 'task result\n', 'feat: task result')
+    commit(
+      taskRoot, 'orchestration/ts/package.json', '{"private":true,"dependencies":{}}\n',
+      'chore: update orchestration package',
+    )
     const taskHead = git(taskRoot, ['rev-parse', 'HEAD'])
     await writeStatus(paths, taskId, 'completed')
+    const install = vi.fn()
 
     await mergeTask(topology.paths, taskId, {
       taskGate: 'light',
       project: stubProject,
       outputFile: join(paths.logsDir, 'topology.merge.log'),
+      orchestrationDepsRuntime: { install, packageRoot: topology.packageRoot },
     })
 
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(daemonHead)
@@ -125,6 +136,8 @@ describe('integration branch topology', () => {
       .toBe('')
     expect(git(integrationRoot, ['branch', '--show-current'])).toBe('integration/run')
     expect(git(integrationRoot, ['rev-parse', 'HEAD'])).not.toBe(integrationBase)
+    expect(topology.packageRoot).toBe(join(integrationRoot, 'orchestration', 'ts'))
+    expect(install).toHaveBeenCalledWith(topology.packageRoot)
   })
 
   it('uses the integration branch for PR updates and final promotion', async () => {
@@ -201,7 +214,71 @@ describe('integration branch topology', () => {
     expect(readFileSync(join(topology.paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
   })
 
-  it('stops before cycle work when the fixed daemon checkout changes', async () => {
+  it('rechecks the adapter after absorbing the default branch', async () => {
+    const topology = prepareBranchTopology(paths, 'integration/run')
+    pushRemoteDefaultChange('adapter-change.txt', 'new adapter source\n')
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
+    const prepareIntegration = vi.fn()
+    const start = vi.fn(async () => process.pid)
+    const adapterChanged = vi.fn(() =>
+      existsSync(join(topology.paths.repoRoot, 'adapter-change.txt')))
+    const loop = createLoop({
+      paths: topology.paths,
+      config: {
+        ...loadConfig({}),
+        integrationBranch: 'integration/run',
+        scanParallel: 1,
+        autoPr: false,
+        reviewEnabled: false,
+      },
+      forge: makeFakeForge(),
+      runner: { sharedSkills: fakeRunnerSharedSkills, start },
+      project: stubProject,
+      projectAdapterChanged: adapterChanged,
+      log: vi.fn(),
+      now: () => new Date('2026-08-14T12:00:00Z'),
+      updateCoreBeforeCycle: async () => 'continue',
+      prepareIntegrationWorktree: prepareIntegration,
+    })
+
+    expect(await loop.triggerScanIfIdle()).toBe('restart')
+
+    expect(loop.restartSubject()).toBe('adapter')
+    expect(adapterChanged).toHaveBeenCalledTimes(2)
+    expect(prepareIntegration).not.toHaveBeenCalled()
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(join(topology.paths.queueDir, 'scan-count.txt'))).toBe(false)
+  })
+
+  it.each([
+    {
+      state: 'dirty',
+      changeCheckout: () => {
+        writeFileSync(join(repoRoot, 'unexpected-change.txt'), 'dirty daemon checkout\n')
+        return 'daemon checkout daemon/run has uncommitted changes'
+      },
+    },
+    {
+      state: 'switched branch',
+      changeCheckout: () => {
+        git(repoRoot, ['switch', '-q', '-c', 'unexpected/branch'])
+        return 'daemon checkout unexpected/branch does not match fixed branch daemon/run'
+      },
+    },
+    {
+      state: 'moved HEAD',
+      changeCheckout: (daemonHead: string) => {
+        const currentHead = commit(
+          repoRoot, 'daemon-change.txt', 'moved\n', 'feat: move daemon branch',
+        )
+        return `daemon branch daemon/run moved from fixed commit ${daemonHead.slice(0, 8)} `
+          + `to ${currentHead.slice(0, 8)}`
+      },
+    },
+  ])('stops before cycle work when the fixed daemon checkout is $state', async ({
+    changeCheckout,
+  }) => {
     const topology = prepareBranchTopology(paths, 'integration/run')
     const updateCoreBeforeCycle = vi.fn(async () => 'continue' as const)
     const prepareIntegration = vi.fn()
@@ -226,11 +303,11 @@ describe('integration branch topology', () => {
       prepareIntegrationWorktree: prepareIntegration,
     })
     loop.initializeSessionStateForBranch()
-    writeFileSync(join(repoRoot, 'unexpected-change.txt'), 'dirty daemon checkout\n')
+    const problem = changeCheckout(topology.daemonHead)
 
     expect(await loop.poll()).toBe('stopped')
 
-    expect(events).toContain('ERROR daemon checkout daemon/run has uncommitted changes')
+    expect(events).toContain(`ERROR ${problem}`)
     expect(updateCoreBeforeCycle).not.toHaveBeenCalled()
     expect(prepareIntegration).not.toHaveBeenCalled()
     expect(start).not.toHaveBeenCalled()

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { rmSync } from 'node:fs'
 import { win32 } from 'node:path'
 import type { OperatingSystem } from './os.ts'
+import { processTreeRootPid, startWindowsProcess } from './windows-process.ts'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
@@ -17,11 +18,42 @@ export interface WindowsOperatingSystemRuntime {
   }): void
   now(): number
   sleep(milliseconds: number): void
+  processStartIdentity?(pid: number): string | undefined
+  startDaemon?: typeof startWindowsProcess
 }
 
 export interface WindowsProcess {
   pid: number
   parentPid: number
+}
+
+let ownProcessStartIdentity: string | undefined
+
+function windowsProcessStartIdentity(pid: number): string | undefined {
+  if (pid === process.pid && ownProcessStartIdentity !== undefined) {
+    return ownProcessStartIdentity
+  }
+  try {
+    process.kill(pid, 0)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return undefined
+  }
+  const command = [
+    '& { param([int]$TargetPid)',
+    '(Get-Process -Id $TargetPid -ErrorAction Stop).StartTime.ToUniversalTime().Ticks',
+    '}',
+  ].join(' ')
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command', command, String(pid),
+  ], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    windowsHide: true,
+  })
+  const startTime = result.status === 0 ? result.stdout.trim() : ''
+  const identity = startTime === '' ? undefined : `windows:${startTime}`
+  if (pid === process.pid) ownProcessStartIdentity = identity
+  return identity
 }
 
 const systemRuntime: WindowsOperatingSystemRuntime = {
@@ -62,6 +94,7 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
   sleep: (milliseconds) => {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
   },
+  processStartIdentity: windowsProcessStartIdentity,
 }
 
 function extendedLengthPath(path: string): string {
@@ -128,29 +161,45 @@ export function createOperatingSystem(
   const processTreeIsAlive = (pid: number): boolean => (
     anyProcessIsAlive(runtime, processTreePids(runtime, pid))
   )
+  const terminateProcessTree = (pid: number): boolean => {
+    const trackedPids = processTreePids(runtime, pid)
+    if (!anyProcessIsAlive(runtime, trackedPids)) return false
+
+    try {
+      runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
+    } catch {
+      // The command result is not authoritative: verify the process tree below.
+    }
+
+    const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
+    while (anyProcessIsAlive(runtime, trackedPids) && runtime.now() < deadline) {
+      runtime.sleep(PROCESS_EXIT_POLL_MS)
+    }
+    if (anyProcessIsAlive(runtime, trackedPids)) {
+      throw new Error(`Could not stop process tree ${pid}.`)
+    }
+    return true
+  }
 
   return {
+    async launchDaemon(options) {
+      const pid = await (runtime.startDaemon ?? startWindowsProcess)(options)
+      return {
+        pid,
+        isAlive: () => isAlive(runtime, pid),
+        terminate: () => { terminateProcessTree(pid) },
+        release: () => {},
+        onError: () => {},
+        offError: () => {},
+        onExit: () => {},
+        offExit: () => {},
+      }
+    },
+    processTreeRootPid,
+    processStartIdentity: runtime.processStartIdentity ?? systemRuntime.processStartIdentity!,
     processIsAlive: (pid) => isAlive(runtime, pid),
     processTreeIsAlive,
-    terminateProcessTree(pid): boolean {
-      const trackedPids = processTreePids(runtime, pid)
-      if (!anyProcessIsAlive(runtime, trackedPids)) return false
-
-      try {
-        runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
-      } catch {
-        // The command result is not authoritative: verify the process tree below.
-      }
-
-      const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
-      while (anyProcessIsAlive(runtime, trackedPids) && runtime.now() < deadline) {
-        runtime.sleep(PROCESS_EXIT_POLL_MS)
-      }
-      if (anyProcessIsAlive(runtime, trackedPids)) {
-        throw new Error(`Could not stop process tree ${pid}.`)
-      }
-      return true
-    },
+    terminateProcessTree,
     removeDirectory(path): void {
       if (path.startsWith('\\\\?\\')) {
         runtime.remove(path, { recursive: true, force: true, maxRetries: 3 })

@@ -15,6 +15,7 @@ const EVENT_NAMES = [
   'Idle',
   'Merging',
   'Merged',
+  'No-change',
   'Failed',
   'Filed',
   'Released',

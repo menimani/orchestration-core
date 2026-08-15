@@ -33,6 +33,12 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
+Consumers may list review findings that have been explicitly accepted in the optional
+`orchestration/accepted-limits.md` file. A missing or blank file contributes `(none)`.
+The loop places its contents in the generated review task as untrusted repository text:
+entries can exclude accepted findings, but cannot authorize commands, credential access,
+or changes to orchestration and CI controls.
+
 When the core is installed as a subtree, the default review template excludes that
 vendored path from both the review instructions and every printed Git command. Defects in
 the vendored core belong upstream, not in a consumer finding. A custom
@@ -103,8 +109,9 @@ it overrides the conventional path selected by `PROJECT`.
 
 A project adapter answers a few questions: which staged-path checks run before a commit,
 which commands gate a merge, which tests a changed path implies, which suites run once per
-cycle, how commits are grouped in the generated pull request, which changed paths signal
-risk, and how a deployment is verified. The core supplies commit subjects, changed and
+cycle, which repository or toolchain output identifies an infrastructure failure, how
+commits are grouped in the generated pull request, which changed paths signal risk, and
+how a deployment is verified. The core supplies commit subjects, changed and
 deleted paths, and an on-demand diff reader; the adapter supplies the repository
 vocabulary and path rules. If the repository intentionally has no PR checks, it may
 explicitly declare
@@ -176,6 +183,10 @@ promotion all use the integration branch. The project adapter's
 `integrationWorktreeSetup` commands install dependencies in that fresh checkout; the
 operator does not prepare it by hand. Human fixes made during the run should branch from
 and merge into the integration branch as well, where the next task can see them.
+Immediately before a completed local task enters its merge gate, the loop rebases that
+task branch onto the current integration tip. Long-running tasks therefore test the work
+that has landed while they were running instead of repeatedly presenting the same stale
+branch to the gate.
 
 A stopped daemon retains both branch identities and the daemon commit. Restarting is a
 resume of the same run: integration commits made while it was down remain available to
@@ -184,6 +195,10 @@ running different machinery. Immediately before each new cycle, the integration 
 fetches and merges the remote's advertised default branch. A conflict is aborted and
 warned about for a person to resolve, and the cycle proceeds without that merge. The
 daemon branch is never updated at this boundary.
+
+When a run finishes with no commits beyond the fetched default branch, there is no pull
+request for the forge to create. The loop skips the inapplicable PR, CI, and review gates,
+records `LOOP_DONE: no changes`, and exits normally.
 
 `node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
 the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
@@ -213,12 +228,12 @@ git subtree pull --prefix=orchestration/ts \
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |
 | `MAX_PARALLEL` | 3 | Ordinary task agent processes at once; scan agents use `SCAN_PARALLEL` independently |
 | `SCAN_PARALLEL` | 2 | Scan agent processes started together per scan cycle (1-4), independent of `MAX_PARALLEL` |
-| `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle |
+| `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
 | `AUTO_REVIEW` | false | Enable agent review of cycle diffs and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
 | `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
-| `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work |
+| `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work; `TASK_EFFORT` applies to queued tasks without a per-task override, while review-spawned fixes always use high effort |
 | `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
 | `INTEGRATION_BRANCH` | empty | Empty keeps the direct single-worktree layout; a branch name freezes the daemon checkout and makes this separate branch the task base, merge target, gate target, and PR source |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |
@@ -233,7 +248,9 @@ and merged work stays open until promotion reaches the default branch and closes
 Ready titles naming the same primary file are claimed in groups of up to four; no-path titles
 remain singletons, and failed groups retry as individual findings. Each grouped requirement
 needs its own completion marker before the branch can merge; promotion then closes every
-linked issue. A second machine runs execution-only with
+linked issue. When investigation proves an ordinary task needs no implementation, an exact
+`NO_CHANGE_WARRANTED` final-message marker terminalizes its clean, commit-free task and closes
+the linked issue directly instead of entering merge retries. A second machine runs execution-only with
 `worker <base-ref>` — it claims and executes, pushes finished branches, and never scans,
 reviews, or merges. Exactly one ordinary daemon owns the branch and adopts those pushes.
 
