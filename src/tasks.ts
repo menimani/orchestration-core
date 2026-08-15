@@ -8,7 +8,9 @@ import { readStatus } from './status.ts'
 import { readTemplate } from './templates.ts'
 import { signalWake } from './wake.ts'
 import type { Forge } from './adapters/forge.ts'
-import { operatingSystem } from './adapters/os.ts'
+import {
+  parseProcessMarker, processMarker, processMarkerIsCurrent, processMarkerText,
+} from './processMarker.ts'
 
 // The queue-writing commands: new, enqueue, delegate. Everything here prints the exact
 // lines the bash implementation printed (`Created:`, `Enqueued:`, `WARN:`), because the
@@ -135,14 +137,16 @@ export function writeIssueModeMarker(
   enabled: boolean,
   pid = process.pid,
 ): void {
-  writeFileSync(issueModeMarkerFile(paths), `${enabled}\n${pid}\n`)
+  writeFileSync(issueModeMarkerFile(paths), `${enabled}\n${processMarkerText(processMarker(pid))}`)
 }
 
 export function removeIssueModeMarker(paths: OrchPaths, pid: number): void {
   const marker = issueModeMarkerFile(paths)
   if (!existsSync(marker)) return
-  const [, owner] = readFileSync(marker, 'utf8').trim().split(/\s+/)
-  if (owner === `${pid}`) rmSync(marker, { force: true })
+  const [, ownerText] = readFileSync(marker, 'utf8').split(/\r?\n/, 2)
+  if (ownerText !== undefined && parseProcessMarker(ownerText)?.pid === pid) {
+    rmSync(marker, { force: true })
+  }
 }
 
 /** The delegate process prefers its own explicit setting, then the daemon marker. */
@@ -154,9 +158,10 @@ export function isIssueModeActive(
   if (configured !== undefined) return configured === 'true'
   const marker = issueModeMarkerFile(paths)
   if (!existsSync(marker)) return false
-  const [enabled, owner] = readFileSync(marker, 'utf8').trim().split(/\s+/)
-  if (enabled !== 'true' || owner === undefined || !/^\d+$/.test(owner)) return false
-  return operatingSystem.processIsAlive(Number(owner))
+  const [enabled, ownerText] = readFileSync(marker, 'utf8').split(/\r?\n/, 2)
+  if (enabled !== 'true' || ownerText === undefined) return false
+  const owner = parseProcessMarker(ownerText)
+  return owner !== undefined && processMarkerIsCurrent(owner)
 }
 
 /**
@@ -254,7 +259,6 @@ export async function delegateTaskVisible(
 export function isLoopRunning(paths: OrchPaths): boolean {
   const pidFile = join(paths.queueDir, 'loop.pid')
   if (!existsSync(pidFile)) return false
-  const pid = readFileSync(pidFile, 'utf8').trim()
-  if (!/^\d+$/.test(pid)) return false
-  return operatingSystem.processIsAlive(Number(pid))
+  const owner = parseProcessMarker(readFileSync(pidFile, 'utf8'))
+  return owner !== undefined && processMarkerIsCurrent(owner)
 }

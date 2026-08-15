@@ -8,6 +8,9 @@ import { PACKAGE_ROOT } from './paths.ts'
 import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
 } from './internalEnvironment.ts'
+import {
+  parseProcessMarker, processMarker, processMarkerIsCurrent, processMarkerText,
+} from './processMarker.ts'
 
 export {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
@@ -51,13 +54,14 @@ export function publishLoopReplacementPid(
   predecessorPid: number,
   replacementPid: number,
 ): void {
-  const owner = readFileSync(pidFile, 'utf8').trim()
-  if (owner !== `${predecessorPid}`) {
-    throw new Error(`loop PID owner changed before restart handover (${owner || 'empty'})`)
+  const ownerText = readFileSync(pidFile, 'utf8')
+  const owner = parseProcessMarker(ownerText)
+  if (owner?.pid !== predecessorPid || !processMarkerIsCurrent(owner)) {
+    throw new Error(`loop PID owner changed before restart handover (${owner?.pid ?? 'invalid'})`)
   }
   const candidate = `${pidFile}.handover-${predecessorPid}-${replacementPid}-${randomUUID()}`
   try {
-    writeFileSync(candidate, `${replacementPid}\n`, { flag: 'wx' })
+    writeFileSync(candidate, processMarkerText(processMarker(replacementPid)), { flag: 'wx' })
     renameSync(candidate, pidFile)
   } finally {
     rmSync(candidate, { force: true })
