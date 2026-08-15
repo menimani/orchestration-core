@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createClaudeRunner } from '../src/adapters/runner-claude.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { syncSharedSkills } from '../src/sharedSkills.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -241,5 +242,19 @@ describe('shared skill sync', () => {
     expect(result.installed).toEqual(['.claude/skills/git-commit', '.claude/skills/loop-start'])
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe('npm run -C orchestration/ts loop -- --daemon\n')
+  })
+
+  it('serves the Claude runner without touching an unlisted repository skill', () => {
+    const localSkill = join(repoRoot, '.claude', 'skills', 'verify-changes', 'SKILL.md')
+    mkdirSync(dirname(localSkill), { recursive: true })
+    writeFileSync(localSkill, 'repository gates\n')
+    runner = createClaudeRunner()
+
+    const result = syncSharedSkills(repoRoot, packageRoot, runner)
+
+    expect(result.installed).toEqual([
+      '.claude/skills/git-commit', '.claude/skills/loop-start',
+    ])
+    expect(readFileSync(localSkill, 'utf8')).toBe('repository gates\n')
   })
 })

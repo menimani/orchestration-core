@@ -30,6 +30,11 @@ describe('loadConfig', () => {
       taskGate: 'full',
       forge: 'github',
       runner: 'codex',
+      runnerClaudeModel: 'claude-opus-5',
+      runnerClaudeModelMinimal: 'claude-opus-5',
+      runnerClaudeModelLow: 'claude-opus-5',
+      runnerClaudeModelMedium: 'claude-opus-5',
+      runnerClaudeModelHigh: 'claude-opus-5',
       workerMode: false,
       coreAutoUpdate: true,
       upstreamRemote: 'menimani/orchestration-core',
@@ -47,6 +52,9 @@ describe('loadConfig', () => {
       REVIEW_EFFORT: 'low',
       TASK_EFFORT: 'high',
       TASK_MODEL: 'task-model',
+      RUNNER_CLAUDE_MODEL: 'claude-base',
+      RUNNER_CLAUDE_MODEL_MINIMAL: 'claude-small',
+      RUNNER_CLAUDE_MODEL_HIGH: 'claude-large',
       CORE_AUTO_UPDATE: 'false',
       UPSTREAM_REMOTE: 'shared-core',
       UPSTREAM_BRANCH: 'stable',
@@ -59,6 +67,11 @@ describe('loadConfig', () => {
     expect(config.reviewEffort).toBe('low')
     expect(config.taskEffort).toBe('high')
     expect(config.taskModel).toBe('task-model')
+    expect(config.runnerClaudeModel).toBe('claude-base')
+    expect(config.runnerClaudeModelMinimal).toBe('claude-small')
+    expect(config.runnerClaudeModelLow).toBe('claude-base')
+    expect(config.runnerClaudeModelMedium).toBe('claude-base')
+    expect(config.runnerClaudeModelHigh).toBe('claude-large')
     expect(config.coreAutoUpdate).toBe(false)
     expect(config.upstreamRemote).toBe('shared-core')
     expect(config.upstreamBranch).toBe('stable')
