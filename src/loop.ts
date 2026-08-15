@@ -1979,7 +1979,6 @@ export function createLoop(deps: LoopDeps) {
       if (!config.autoMerge || mergeAttempts.has(taskId)
         || !existsSync(join(scannedDir, taskId))) return
       mergeAttempts.add(taskId)
-      event('Merging', shortTaskId(taskId))
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
       const linkedIssues = issueNumbersForTask(paths, taskId)
       try {
@@ -1997,6 +1996,11 @@ export function createLoop(deps: LoopDeps) {
           outputFile: mergeLog,
           orchestrationDepsRuntime,
           onOrchestrationDepsEvent: orchestrationDepsEvent,
+          onMergeStart: () => event('Merging', shortTaskId(taskId)),
+          onMergeSkipped: (reason) => event(
+            'Skipped', shortTaskId(taskId),
+            reason === 'active' ? 'merge already in progress' : 'merge already succeeded',
+          ),
           onNoChange: async () => {
             if (linkedIssues.length > 0) {
               await Promise.all(linkedIssues.map((issueNumber) =>
@@ -2016,6 +2020,7 @@ export function createLoop(deps: LoopDeps) {
           }
           return
         }
+        if (mergeResult.outcome === 'skipped') return
         const mergeCommit = mergeResult.mergeCommit
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
         writeFileSync(mergeFailureFile, '0\n')
