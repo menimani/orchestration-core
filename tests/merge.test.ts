@@ -602,10 +602,11 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
     expect(existsSync(worktree)).toBe(true)
+    expect(git(worktree, ['merge-base', '--is-ancestor', runHead, 'HEAD'])).toBe('')
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
-  it('aborts a conflicting merge without changing the run branch or task state', async () => {
+  it('aborts a conflicting rebase without changing the run branch or task state', async () => {
     const taskId = '20260808_000000_016_user-conflicting-change'
     const worktree = await makeCompletedTask(taskId)
     writeFileSync(join(worktree, 'README.md'), '# task version\n')
@@ -621,7 +622,9 @@ describe('mergeTask', () => {
 
     await expect(mergeTask(paths, taskId, {
       taskGate: 'light', project: noCheckProject,
-    })).rejects.toThrow('A merge conflict occurred. Rebase the worktree, then retry the merge.')
+    })).rejects.toThrow(
+      'A conflict occurred while rebasing the task onto main; the rebase was aborted.',
+    )
 
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe(runStatus)

@@ -275,6 +275,36 @@ function git(cwd: string, args: string[]): string {
   })
 }
 
+/** Bring a completed local task up to the run tip before any merge-gate work begins. */
+function rebaseTaskOntoRunTip(
+  worktree: string,
+  currentBranch: string,
+  io: MergeIo,
+): void {
+  try {
+    git(worktree, ['merge-base', '--is-ancestor', currentBranch, 'HEAD'])
+    return
+  } catch {
+    // The task started before later work landed on the run branch.
+  }
+
+  io.out(`=== Rebasing task onto ${currentBranch} ===`)
+  try {
+    git(worktree, [
+      'rebase', '--quiet', '--reapply-cherry-picks', '--empty=keep', currentBranch,
+    ])
+  } catch {
+    try {
+      git(worktree, ['rebase', '--abort'])
+    } catch {
+      // nothing to abort
+    }
+    throw new MergeError(
+      `A conflict occurred while rebasing the task onto ${currentBranch}; the rebase was aborted.`,
+    )
+  }
+}
+
 function mergeIo(outputFile?: string): MergeIo {
   const out = (text: string): void => {
     if (outputFile !== undefined) {
@@ -614,6 +644,7 @@ export async function mergeTask(
       )
     }
   }
+  rebaseTaskOntoRunTip(worktree, currentBranch, io)
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
