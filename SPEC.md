@@ -153,7 +153,11 @@ values must be non-negative integers, with the narrower bounds stated below.
    tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
    verified gone before the merge can discard that PID or remove the worktree.
-9. Pre-merge tests are chosen from the paths the worktree touched. `TASK_GATE=full`
+9. Before its merge gate, a completed local task branch is rebased onto the current run
+   branch tip. This refresh is retained when a check fails, so the next attempt does not
+   test the same stale branch again. A conflicting rebase is aborted and keeps both the
+   task worktree and run branch clean. Pre-merge tests are chosen from the paths the
+   rebased worktree touched. `TASK_GATE=full`
    asks the project adapter for its full merge checks; `TASK_GATE=light` asks it for
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
    entry. Light-gate attribution cost (a suite break at the gate names no task) is

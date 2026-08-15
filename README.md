@@ -183,6 +183,10 @@ promotion all use the integration branch. The project adapter's
 `integrationWorktreeSetup` commands install dependencies in that fresh checkout; the
 operator does not prepare it by hand. Human fixes made during the run should branch from
 and merge into the integration branch as well, where the next task can see them.
+Immediately before a completed local task enters its merge gate, the loop rebases that
+task branch onto the current integration tip. Long-running tasks therefore test the work
+that has landed while they were running instead of repeatedly presenting the same stale
+branch to the gate.
 
 A stopped daemon retains both branch identities and the daemon commit. Restarting is a
 resume of the same run: integration commits made while it was down remain available to
