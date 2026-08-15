@@ -69,6 +69,9 @@ values must be non-negative integers, with the narrower bounds stated below.
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
 | `REVIEW_EFFORT` | `high` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
+| `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter. |
+| `RUNNER_CLAUDE_MODEL` | `claude-opus-5` | Base model for the Claude runner when no task-specific model override applies. |
+| `RUNNER_CLAUDE_MODEL_MINIMAL`, `RUNNER_CLAUDE_MODEL_LOW`, `RUNNER_CLAUDE_MODEL_MEDIUM`, `RUNNER_CLAUDE_MODEL_HIGH` | `RUNNER_CLAUDE_MODEL` | Optional Claude model mapping for each runner-neutral reasoning effort. |
 | `MAX_PARALLEL` | `3` | Limit concurrently running queued-task processes and shared-issue claim capacity. It must be at least 1; scan fan-out is controlled separately by `SCAN_PARALLEL`. |
 | `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
 | `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
@@ -228,7 +231,10 @@ values must be non-negative integers, with the narrower bounds stated below.
     accept `minimal`, `low`, `medium`, or `high` and override their respective defaults;
     `TASK_EFFORT` applies to queued tasks that do not have a per-task override, so it does
     not replace the high-effort review-fix override. `SCAN_MODEL` and `TASK_MODEL`
-    override the runner model, and `delegate --effort` overrides effort per task.
+    override the runner model, and `delegate --effort` overrides effort per task. The
+    Claude runner maps effort to `RUNNER_CLAUDE_MODEL_MINIMAL`, `_LOW`, `_MEDIUM`, or
+    `_HIGH`, each defaulting to `RUNNER_CLAUDE_MODEL` (`claude-opus-5`), instead of
+    translating runner-neutral effort into a Claude thinking flag.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
     previous cycle gate has closed and while no task is running, the daemon first compares
     the selected project adapter with the exact source loaded at startup. A changed,
@@ -254,7 +260,8 @@ values must be non-negative integers, with the narrower bounds stated below.
     directory an agent working in the repository discovers skills in: the selected
     runner's, supplied by its adapter, and `.claude/skills/` for the interactive agent a
     person drives. The Codex adapter renders into repository root `.agents/skills/`; the
-    interactive rendering resolves the command prefix only, the canonical sources already
+    Claude adapter and interactive agent share `.claude/skills/` and are served once. The
+    Claude rendering resolves the command prefix only, the canonical sources already
     being in that agent's format. Both use `npm run` as the command prefix in the owning
     repository and `npm run -C <package-path>` in a subtree consumer, and a runner that
     discovers `.claude/skills/` is served once rather than twice. The
@@ -410,11 +417,13 @@ values must be non-negative integers, with the narrower bounds stated below.
     message decoration for forge-driven closure. Fingerprint deduplication, claim
     arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
-    `runner-codex.ts`). The runner contract is the output markers — `TASK_COMPLETE`,
+    `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`). The runner contract is
+    the output markers — `TASK_COMPLETE`,
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
     rendering behavior inside the adapter. Any runner honoring the contract is
-    substitutable, and none of them owns the interactive agent's skill directory.
+    substitutable. The Claude runner uses the interactive agent's skill directory as its
+    own discovery path, so the shared-skill sync deduplicates that target.
 31. Everything the orchestration knows about the repository it runs in — which staged
     paths select fast pre-commit checks, which commands verify a merge, which paths make
     each check relevant, which suites prove a cycle's

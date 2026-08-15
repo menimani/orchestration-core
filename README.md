@@ -15,8 +15,9 @@ specific failure; the comments in the source name the incident rather than the p
 - Node 23.6 or later — the TypeScript sources are executed natively, with no build step
 - git
 - Bash on Windows (for example, Git Bash), with `bash` available on `PATH` — the bundled
-  Codex runner uses it to launch the Codex CLI safely
-- An agent CLI (the bundled runner adapter drives [Codex](https://openai.com/codex/))
+  runners use it to launch npm command shims safely
+- An agent CLI (the bundled runner adapters drive
+  [Codex](https://openai.com/codex/) or [Claude Code](https://docs.anthropic.com/en/docs/claude-code))
 - A forge CLI (the bundled forge adapter drives GitHub through `gh`)
 
 ## How a run works
@@ -67,8 +68,9 @@ cycle on the old core instead of merging local divergence.
 That same boundary syncs the skills declared in `skills/manifest.json` into every
 directory an agent working in the repository reads them from. The selected runner adapter
 supplies one — the bundled Codex adapter uses `.agents/skills/` and rewrites the sources
-into Codex's own form — and `.claude/skills/` receives them for the interactive agent a
-person drives, in the canonical form that agent already speaks. Serving only the runner
+into Codex's own form, while the Claude adapter uses `.claude/skills/` in canonical form —
+and `.claude/skills/` receives them for the interactive agent a person drives. When Claude
+is the runner, that shared destination is rendered only once. Serving only the runner
 meant that selecting Codex silently took every shared workflow away from the person, so
 one destination failing no longer costs the others theirs. Loop commands are rendered for
 the installed package location (`npm run` here, `npm run -C orchestration/ts` in the
@@ -88,7 +90,7 @@ carry the consumer-selected parts of that:
 | Adapter | Selector | Valid selector value | Bundled implementation | Replace it to… |
 |---------|----------|----------------------|------------------------|----------------|
 | forge   | `FORGE`  | `github`             | `forge-github` (`gh`)  | move to Gitea, GitLab, … |
-| runner  | `RUNNER` | `codex`              | `runner-codex`         | drive a different agent CLI |
+| runner  | `RUNNER` | `codex`, `claude`    | `runner-codex`, `runner-claude` | drive a different agent CLI |
 | project | discovery or `PROJECT` | project name | none — you write it | describe *your* repository |
 
 The project adapter is the one you must supply. It lives **outside** this package so a
@@ -234,6 +236,9 @@ git subtree pull --prefix=orchestration/ts \
 | `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work; `TASK_EFFORT` applies to queued tasks without a per-task override, while review-spawned fixes always use high effort |
+| `RUNNER` | codex | Agent CLI adapter; accepts `codex` or `claude` |
+| `RUNNER_CLAUDE_MODEL` | claude-opus-5 | Base Claude model used when `RUNNER=claude` and no task-specific model is set |
+| `RUNNER_CLAUDE_MODEL_MINIMAL` / `LOW` / `MEDIUM` / `HIGH` | `RUNNER_CLAUDE_MODEL` | Optional model selected for the matching reasoning effort when `RUNNER=claude` |
 | `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
 | `INTEGRATION_BRANCH` | empty | Empty keeps the direct single-worktree layout; a branch name freezes the daemon checkout and makes this separate branch the task base, merge target, gate target, and PR source |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |

@@ -723,6 +723,26 @@ describe('claimIssue', () => {
       readFileSync(join(paths.tasksDir, `${taskId}.md`), 'utf8') + `\n${requirement}\n`)
   }
 
+  it('preserves all three paragraphs of a delegated issue in the materialized task', async () => {
+    const description = [
+      'Deliver Part A and Part B together.',
+      '',
+      'Keep the existing queue behavior while implementing both parts.',
+      '',
+      'The final paragraph must survive into the worker task requirement.',
+    ].join('\n')
+    const published = await publishDelegatedTask(forge, paths, description, 'user-task')
+    const issue = await forge.getIssue(published.issueNumber)
+
+    expect(issue.body).toContain('The final paragraph must survive into the worker task requirement.')
+
+    const result = await claimIssue(forge, paths, issue, 'worker-a', appendRequirement)
+    if (result.outcome !== 'claimed') throw new Error(`expected a claim, got ${result.outcome}`)
+    const spec = readFileSync(specFile(paths, result.taskId), 'utf8')
+    expect(spec).toContain(description)
+    expect(spec).toContain('The final paragraph must survive into the worker task requirement.')
+  })
+
   it('claims same-file findings into one task while preserving each requirement', async () => {
     const descriptions = [
       '[BUG] `src/a/b.ts` rejects an empty value',

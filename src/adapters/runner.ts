@@ -44,13 +44,28 @@ export interface Runner {
   start(options: RunnerStartOptions): Promise<number>
 }
 
-export async function loadRunner(name: string): Promise<Runner> {
+export interface RunnerLoadOptions {
+  runnerClaudeModel?: string | undefined
+  runnerClaudeModelMinimal?: string | undefined
+  runnerClaudeModelLow?: string | undefined
+  runnerClaudeModelMedium?: string | undefined
+  runnerClaudeModelHigh?: string | undefined
+}
+
+export async function loadRunner(
+  name: string,
+  options: RunnerLoadOptions = {},
+): Promise<Runner> {
   switch (name) {
     case 'codex': {
       const mod = await import('./runner-codex.ts')
       return mod.createCodexRunner()
     }
+    case 'claude': {
+      const mod = await import('./runner-claude.ts')
+      return mod.createClaudeRunner(options)
+    }
     default:
-      throw new Error(`Unknown RUNNER '${name}' (supported: codex)`)
+      throw new Error(`Unknown RUNNER '${name}' (supported: codex, claude)`)
   }
 }
