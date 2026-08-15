@@ -88,8 +88,9 @@ values must be non-negative integers, with the narrower bounds stated below.
    completed task may additionally report `NO_CHANGE_WARRANTED` on its own line when its
    investigation proves the requested change is already unnecessary.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
-   `scan` for scans and start with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes,
-   scan findings, review-origin fixes, and delegated work. Listings sort chronologically.
+   `scan` for scans, are `review-c<n>` for automatic reviews of cycle `<n>`, and start
+   with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes, scan findings, review-origin
+   fixes, and delegated work. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
    task is queued, running, completed, or retryable after failure. If an identical
@@ -167,6 +168,8 @@ values must be non-negative integers, with the narrower bounds stated below.
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
    entry. Light-gate attribution cost (a suite break at the gate names no task) is
    accepted and documented; the gate stops the loop rather than promote a failing tip.
+   A missing-toolchain repair that fails also stops the gate and reports the adapter's
+   remediation message without running the subsequent suite step.
 9a. A merge check that passes counts only where its directory satisfies its own declared
     dependencies. A worktree sits inside the checkout it was cut from, so Node resolves
     anything the worktree lacks from the parent's `node_modules`: an install that stopped
@@ -212,7 +215,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
     (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
-    counter once, at the gate, only when every expected scan completed successfully.
+    counter once, at the gate, only when every expected scan completed successfully. A
+    scan launch failure stops the loop without advancing the cycle number, and a cycle
+    missing any expected yield stops rather than advancing to another cycle or completion.
     For parallel scans, sections in the rendered `scan-template.md` are Markdown ATX
     headings whose text begins with a number and period (for example, `### 1. Tests`),
     and every section number must be unique; headings inside fenced code blocks do not
