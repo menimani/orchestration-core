@@ -142,29 +142,38 @@ export async function startLoopReplacement(
       if (result.ok) replacement.release()
       resolve(result)
     }
+    const fail = (result: LoopRestartResult): void => {
+      if (settled) return
+      let terminationError: string | undefined
+      let cleanupError: string | undefined
+      try {
+        os.terminateProcessTree(pid)
+      } catch (error) {
+        terminationError = errorSummary(error)
+      }
+      try {
+        if (os.processTreeIsAlive(pid)) {
+          cleanupError = terminationError ?? `Could not stop process tree ${pid}.`
+        }
+      } catch (error) {
+        cleanupError = errorSummary(error)
+      }
+      finish(cleanupError === undefined ? result : {
+        ...result,
+        error: `${result.error ?? 'replacement startup failed'}; replacement cleanup failed: ${cleanupError}`,
+      })
+    }
     const onError = (error: Error): void => {
       spawnError = errorSummary(error)
-      finish({ ok: false, pid, error: spawnError })
+      fail({ ok: false, pid, error: spawnError })
     }
     const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
       const outcome = code === null ? `signal ${signal ?? 'unknown'}` : `exit code ${code}`
-      finish({
+      fail({
         ok: false,
         pid,
         error: spawnError ?? `replacement exited before becoming ready (${outcome})`,
       })
-    }
-    const terminateAndFinish = (result: LoopRestartResult): void => {
-      try {
-        replacement.terminate()
-      } catch (error) {
-        finish({
-          ...result,
-          error: `${result.error ?? 'replacement startup failed'}; replacement cleanup failed: ${errorSummary(error)}`,
-        })
-        return
-      }
-      finish(result)
     }
     const poll = setInterval(() => {
       if (!existsSync(readyFile)) return
@@ -175,7 +184,7 @@ export async function startLoopReplacement(
         return
       }
       if (owner !== `${pid}`) {
-        terminateAndFinish({
+        fail({
           ok: false,
           pid,
           error: `replacement published an unexpected PID (${owner || 'empty'})`,
@@ -183,19 +192,19 @@ export async function startLoopReplacement(
         return
       }
       if (!replacement.isAlive()) {
-        finish({ ok: false, pid, error: 'replacement exited before becoming ready' })
+        fail({ ok: false, pid, error: 'replacement exited before becoming ready' })
         return
       }
       try {
         runtime.onReady?.(pid)
       } catch (error) {
-        terminateAndFinish({ ok: false, pid, error: errorSummary(error) })
+        fail({ ok: false, pid, error: errorSummary(error) })
         return
       }
       finish({ ok: true, pid })
     }, 10)
     const timeout = setTimeout(() => {
-      terminateAndFinish({
+      fail({
         ok: false,
         pid,
         error: 'replacement did not become ready before the startup timeout',
