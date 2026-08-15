@@ -1048,6 +1048,26 @@ describe('claimIssue', () => {
     expect(after.labels).toContain(LABEL_READY)
   })
 
+  it('releases its assignment when the lifecycle changes immediately after assignment', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` changes during assignment')
+    const issue = await forge.getIssue(issueNumber)
+    const assignIssue = forge.assignIssue.bind(forge)
+    const removeLabel = forge.removeLabel.bind(forge)
+    forge.assignIssue = async (number, assignee) => {
+      await assignIssue(number, assignee)
+      if (number === issueNumber) await removeLabel(number, LABEL_READY)
+    }
+
+    const result = await claimIssue(forge, paths, issue, 'worker-a', appendRequirement)
+
+    expect(result).toEqual({ outcome: 'lost-race', issueNumber })
+    const after = await forge.getIssue(issueNumber)
+    expect(after.assignees).toEqual([])
+    expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
   it('releases the assignment when the first post-assignment read fails', async () => {
     const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks during claim verification')
     const issue = await forge.getIssue(issueNumber)
