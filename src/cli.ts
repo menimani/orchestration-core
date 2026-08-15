@@ -578,6 +578,10 @@ const cmdMerge: Command = async (paths, args) => {
       project: await loadProject(paths.root),
       closesIssues: linkedIssues,
       forge,
+      onMergeStart: () => console.log(`Merging ${taskId}`),
+      onMergeSkipped: (reason) => console.log(
+        `Skipped ${taskId}: ${reason === 'active' ? 'merge already in progress' : 'merge already succeeded'}`,
+      ),
       onNoChange: async () => {
         if (linkedIssues.length > 0) {
           await Promise.all(linkedIssues.map((linkedIssue) =>

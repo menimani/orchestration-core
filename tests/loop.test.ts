@@ -25,6 +25,7 @@ import {
   type OrchPaths,
 } from '../src/paths.ts'
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
+import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { enqueueTask } from '../src/tasks.ts'
@@ -2791,6 +2792,34 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
+  it('skips a task whose merge is already active without counting a failure', async () => {
+    const taskId = '20260815_125258_037_auto-merge-race'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const guardDir = join(paths.queueDir, 'merge-guards', taskId)
+    mkdirSync(guardDir, { recursive: true })
+    writeFileSync(join(guardDir, 'owner.json'), `${JSON.stringify({
+      state: 'active',
+      pid: process.pid,
+      startIdentity: currentProcessStartIdentity(),
+    })}\n`)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged).toContain('Skipped 037_auto    merge already in progress')
+    expect(logged.some((line) => line.startsWith('Merging 037_auto'))).toBe(false)
+    expect(logged.some((line) => line.startsWith('Failed 037_auto'))).toBe(false)
+  })
+
   it('terminalizes a no-change task while preserving failures and invalidating the cycle', async () => {
     const taskId = '20260814_144959_066_auto-already-resolved'
     const initialHead = initializeGitRepo()
