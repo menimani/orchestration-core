@@ -388,6 +388,38 @@ describe('GitHub forge JSON schemas', () => {
     ]])
   })
 
+  it.each([
+    'no pull requests found for branch "task/branch"',
+    'no open pull requests found for branch "task/branch"',
+    'GraphQL: Could not resolve to a PullRequest with the number of 12. (repository.pullRequest)',
+  ])('reports none only when gh confirms the pull request is missing: %s', async (stderr) => {
+    const command: GithubCommand = async () => {
+      const error = new Error('Command failed: gh pr view') as Error & { stderr: string }
+      error.stderr = stderr
+      throw error
+    }
+
+    await expect(createGithubForge('repo-root', command).prStatus({
+      kind: 'branch', value: 'task/branch',
+    })).resolves.toEqual({
+      state: 'none', isDraft: false, url: '', headSha: '', checks: [],
+    })
+  })
+
+  it.each([
+    'failed to connect to github.com',
+    'HTTP 503: Service Unavailable',
+    'GraphQL: Resource not accessible by integration',
+  ])('rethrows a gh pr view outage instead of reporting none: %s', async (stderr) => {
+    const failure = new Error('Command failed: gh pr view') as Error & { stderr: string }
+    failure.stderr = stderr
+    const command: GithubCommand = async () => { throw failure }
+
+    await expect(createGithubForge('repo-root', command).prStatus({
+      kind: 'branch', value: 'task/branch',
+    })).rejects.toBe(failure)
+  })
+
   it('queries the GraphQL reset when a rate-limit error does not report one', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {
