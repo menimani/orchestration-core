@@ -158,16 +158,17 @@ async function acquireLock() {
     const owner = readLockOwner()
     if (!owner.alive) {
       reclaimAbandonedLock()
-      continue
-    }
-    if (!announced) {
+    } else if (!announced) {
       console.log(`Another worktree is running the test suite; waiting for its repository lock (${owner.diagnostic}).`)
       announced = true
     }
-    if (performance.now() - waitStartedAt >= waitLimit) {
+    const remainingWait = waitLimit - (performance.now() - waitStartedAt)
+    if (remainingWait <= 0) {
       throw new Error(`Timed out after ${waitLimit}ms waiting for the repository test lock. Lock owner: ${owner.diagnostic}.`)
     }
-    await new Promise((resolveWait) => setTimeout(resolveWait, retryMilliseconds))
+    await new Promise((resolveWait) => setTimeout(
+      resolveWait, Math.min(retryMilliseconds, remainingWait),
+    ))
   }
 }
 
