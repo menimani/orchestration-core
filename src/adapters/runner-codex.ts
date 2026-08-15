@@ -89,8 +89,8 @@ export function createCodexRunner(): Runner {
   return {
     sharedSkills: {
       // `.claude/skills` was this runner's former discovery path, but it is not a legacy
-      // root: the interactive agent a person drives reads it, and the core keeps it
-      // filled. Claiming it here emptied it whenever Codex was the selected runner.
+      // root: a consumer may still select that interactive-agent target independently.
+      // Claiming it here would empty it whenever Codex was the selected runner.
       destinationRoot: (repoRoot) => join(repoRoot, '.agents', 'skills'),
       renderFile: renderSharedSkillFile,
     },

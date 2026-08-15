@@ -265,14 +265,14 @@ values must be non-negative integers, with the narrower bounds stated below.
     working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
     the cycle proceed unchanged so local divergence is resolved by the consumer.
     At the same boundary, the package manifest's skills are rendered into every
-    directory an agent working in the repository discovers skills in: the selected
-    runner's, supplied by its adapter, and `.claude/skills/` for the interactive agent a
-    person drives. The Codex adapter renders into repository root `.agents/skills/`; the
-    Claude adapter and interactive agent share `.claude/skills/` and are served once. The
-    Claude rendering resolves the command prefix only, the canonical sources already
-    being in that agent's format. Both use `npm run` as the command prefix in the owning
-    repository and `npm run -C <package-path>` in a subtree consumer, and a runner that
-    discovers `.claude/skills/` is served once rather than twice. The
+    directory selected by an agent adapter. The runner supplies its target, and the
+    project adapter supplies targets for additional interactive agents. The Codex adapter
+    renders into repository root `.agents/skills/`; this repository's project adapter
+    selects the Claude adapter, which renders into `.claude/skills/` and resolves only the
+    command prefix because the canonical sources already use that agent's format. Both use
+    `npm run` as the command prefix in the owning repository and
+    `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
+    served once. The
     sync replaces only a tree whose content matches its recorded last output; consumer
     divergence is warned and retained, and skills absent from the manifest are untouched.
     A destination that cannot be served is reported without costing the others theirs.
@@ -430,8 +430,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
     rendering behavior inside the adapter. Any runner honoring the contract is
-    substitutable. The Claude runner uses the interactive agent's skill directory as its
-    own discovery path, so the shared-skill sync deduplicates that target.
+    substitutable. Additional interactive-agent skill destinations and rendering are
+    selected by the consumer's project adapter rather than assumed by the core. The Claude
+    runner and an interactive Claude adapter may share a destination, which is deduplicated.
 31. Everything the orchestration knows about the repository it runs in — which staged
     paths select fast pre-commit checks, which commands verify a merge, which paths make
     each check relevant, which suites prove a cycle's

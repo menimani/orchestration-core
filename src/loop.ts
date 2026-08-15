@@ -194,6 +194,7 @@ export function createLoop(deps: LoopDeps) {
       config,
       rawForge,
       runner,
+      project,
       cycle,
       (name, subject, detail = '') => event(name, subject, detail),
     ))
