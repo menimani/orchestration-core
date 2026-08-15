@@ -17,7 +17,7 @@ import {
 } from './ids.ts'
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError,
-  NoChangeReconciliationError,
+  NoChangeReconciliationError, RebaseConflictError,
   OrchestrationDepsInstallError,
   type OrchestrationDepsRuntime,
 } from './merge.ts'
@@ -49,6 +49,7 @@ import {
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
+  completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
   recordIssueCompletions, recordIssuesForTask, recordIssuePromotions, releaseIssueClaim,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
@@ -2044,6 +2045,43 @@ export function createLoop(deps: LoopDeps) {
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
         if (error instanceof OrchestrationDepsInstallError) throw error
         event('Failed', shortTaskId(taskId), `log ${shortLogPath(mergeLog)}`)
+        if (error instanceof RebaseConflictError) {
+          noteMergeFailure(mergeLog)
+          try {
+            const terminalized = await transitionStatus(paths, taskId, 'completed', 'failed')
+            if (!terminalized) {
+              throw new Error('task status changed before rebase-conflict abandonment')
+            }
+            if (linkedIssues.length > 0) {
+              prepareIssueReleaseIntent(paths, taskId, linkedIssues)
+            }
+            cleanupTask(paths, taskId, undefined, false)
+            if (linkedIssues.length === 0) {
+              dropClaimedTaskMaterialization(paths, taskId)
+            } else {
+              completeIssueReleaseIntent(paths, taskId)
+              dropClaimedTaskMaterialization(paths, taskId, true)
+              if (remoteOperationsAvailable) {
+                const failures = await reconcileIssueReleaseIntent(forge, paths, taskId)
+                if (failures.length > 0) {
+                  throw new IssueReleaseReconciliationError(failures)
+                }
+              }
+            }
+            if (linkedIssues.length === 0) {
+              event('Abandoned', shortTaskId(taskId), 'rebase conflict')
+            } else if (remoteOperationsAvailable) {
+              event('Released', shortTaskId(taskId), 'rebase conflict abandoned')
+            } else {
+              event('Abandoned', shortTaskId(taskId), 'rebase conflict; issue release pending')
+            }
+          } catch (abandonmentError) {
+            if (!(abandonmentError instanceof ForgeRateLimitError)) {
+              event('WARN', `${shortTaskId(taskId)} rebase conflict was abandoned but cleanup or issue release failed: ${errorSummary(abandonmentError)}`)
+            }
+          }
+          return
+        }
         const abandoned = noteMergeFailure(mergeLog)
         if (abandoned && linkedIssues.length > 1 && remoteOperationsAvailable) {
           try {
