@@ -1411,6 +1411,32 @@ describe('cycle gate', () => {
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('concludes an empty run without retrying pull request creation', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/stale\n')
+    forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: true,
+      autoReview: true,
+      ciGateEnabled: true,
+    })
+    loop.initializeSessionStateForBranch()
+    const createPr = vi.fn(async () => 'https://example.test/pull/1')
+    fakeForge.createPr = createPr
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(createPr).not.toHaveBeenCalled()
+    expect(logged).toContain('CYCLE_COMPLETE: 1/3')
+    expect(logged).toContain('LOOP_DONE: no changes')
+    expect(logged).toContain('Completed Loop        no changes')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+  })
+
   it('retains empty-cap session state when promotion fails, then retries', async () => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
