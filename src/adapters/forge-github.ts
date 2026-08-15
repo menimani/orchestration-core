@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
@@ -157,6 +160,17 @@ async function gh(repoRoot: string, args: string[]): Promise<string> {
     maxBuffer: 16 * 1024 * 1024,
   })
   return stdout
+}
+
+async function withBodyFile<T>(body: string, action: (bodyFile: string) => Promise<T>): Promise<T> {
+  const directory = await mkdtemp(join(tmpdir(), 'orch-gh-body-'))
+  const bodyFile = join(directory, 'body.md')
+  try {
+    await writeFile(bodyFile, body, 'utf8')
+    return await action(bodyFile)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 }
 
 function commandErrorText(error: unknown): string {
@@ -426,13 +440,15 @@ export function createGithubForge(
 
     async createIssue(options: CreateIssueOptions): Promise<number> {
       const repository = await issueQueueRepository()
-      const args = [
-        'issue', 'create', '--repo', repository,
-        '--title', options.title, '--body', options.body,
-      ]
-      for (const label of options.labels) args.push('--label', label)
-      for (const assignee of options.assignees ?? []) args.push('--assignee', assignee)
-      const stdout = await checkedGh(repoRoot, args)
+      const stdout = await withBodyFile(options.body, async (bodyFile) => {
+        const args = [
+          'issue', 'create', '--repo', repository,
+          '--title', options.title, '--body-file', bodyFile,
+        ]
+        for (const label of options.labels) args.push('--label', label)
+        for (const assignee of options.assignees ?? []) args.push('--assignee', assignee)
+        return checkedGh(repoRoot, args)
+      })
       const match = /\/issues\/(\d+)\s*$/.exec(stdout.trim())
       if (match === null) {
         throw new Error(`gh issue create returned no issue URL: ${stdout.trim()}`)
@@ -452,12 +468,14 @@ export function createGithubForge(
       ).map((candidate) => candidate.name)
       const labels = options.optionalLabels.filter((label) => available.includes(label))
 
-      const args = [
-        'issue', 'create', '--repo', options.repository,
-        '--title', options.title, '--body', options.body,
-      ]
-      for (const label of labels) args.push('--label', label)
-      const stdout = await checkedGh(repoRoot, args)
+      const stdout = await withBodyFile(options.body, async (bodyFile) => {
+        const args = [
+          'issue', 'create', '--repo', options.repository,
+          '--title', options.title, '--body-file', bodyFile,
+        ]
+        for (const label of labels) args.push('--label', label)
+        return checkedGh(repoRoot, args)
+      })
       const url = stdout.split(/\r?\n/).map((line) => line.trim())
         .find((line) => ISSUE_URL_PATTERN.test(line))
       if (url === undefined) {

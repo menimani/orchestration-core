@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   createGithubForge, workflowRunForDispatch, type GithubCommand, type GithubWorkflowRun,
@@ -167,8 +168,12 @@ describe('GitHub upstream issue creation', () => {
     { available: [], expectedLabel: false },
   ])('applies the optional label only when it exists', async ({ available, expectedLabel }) => {
     const calls: string[][] = []
+    let submittedBody: string | undefined
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
+      if (args[0] === 'issue') {
+        submittedBody = readFileSync(args[args.indexOf('--body-file') + 1]!, 'utf8')
+      }
       return args[0] === 'label'
         ? JSON.stringify(available)
         : 'https://github.com/menimani/orchestration-core/issues/42\n'
@@ -190,13 +195,39 @@ describe('GitHub upstream issue creation', () => {
     ])
     expect(calls[1]).toEqual([
       'issue', 'create', '--repo', 'menimani/orchestration-core',
-      '--title', 'Core defect report', '--body', 'Report body',
+      '--title', 'Core defect report', '--body-file', expect.any(String),
       ...(expectedLabel ? ['--label', 'upstream:report'] : []),
     ])
+    expect(submittedBody).toBe('Report body')
   })
 })
 
 describe('GitHub issue queue repository targeting', () => {
+  it('submits a multi-paragraph issue body without putting it on the command line', async () => {
+    const body = [
+      'First paragraph defines Part A.',
+      '',
+      'Second paragraph defines Part B.',
+      '',
+      'Final paragraph contains the completion criteria.',
+    ].join('\n')
+    let submittedBody: string | undefined
+    const command: GithubCommand = async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'consumer/project' })
+      expect(args).not.toContain('--body')
+      const bodyFile = args[args.indexOf('--body-file') + 1]
+      if (bodyFile === undefined) throw new Error('expected an issue body file')
+      submittedBody = readFileSync(bodyFile, 'utf8')
+      return 'https://github.com/consumer/project/issues/42\n'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.createIssue({ title: 'Three-part task', body, labels: [QUEUE_LABELS[0]!.name] })
+
+    expect(submittedBody).toBe(body)
+    expect(submittedBody).toContain('Final paragraph contains the completion criteria.')
+  })
+
   it('lists labels once and creates only the missing loop labels', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {
