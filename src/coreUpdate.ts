@@ -70,29 +70,28 @@ function syncSkills(
   runtime: CoreUpdateRuntime,
 ): void {
   const sharedSkills = [runner.sharedSkills, ...(project.sharedSkills ?? [])]
-  const skippedDestinations: string[] = []
   if (isConsumer) {
-    try {
-      for (const target of sharedSkillManagedTargets(repoRoot, packageRoot, sharedSkills)) {
-        const managedPaths = repositoryPaths(repoRoot, target.managedPaths)
-        const alreadyStaged = runtime.git(repoRoot, [
+    for (const target of sharedSkillManagedTargets(repoRoot, packageRoot, sharedSkills)) {
+      const managedPaths = repositoryPaths(repoRoot, target.managedPaths)
+      let alreadyStaged: string
+      try {
+        alreadyStaged = runtime.git(repoRoot, [
           'diff', '--cached', '--name-only', '--', ...managedPaths,
         ]).trim()
-        if (alreadyStaged !== '') {
-          event('WARN',
-            `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
-          skippedDestinations.push(target.destinationRoot)
-        }
+      } catch (error) {
+        throw new Error(`shared skill sync could not verify a clean managed index: ${summary(error)}`)
       }
-    } catch (error) {
-      event('WARN', `shared skill sync could not be committed: ${summary(error)}`)
-      return
+      if (alreadyStaged !== '') {
+        throw new Error(
+          `shared skill sync requires a clean managed index: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`,
+        )
+      }
     }
   }
 
   let result: ReturnType<typeof syncSharedSkills>
   try {
-    result = syncSharedSkills(repoRoot, packageRoot, sharedSkills, undefined, skippedDestinations)
+    result = syncSharedSkills(repoRoot, packageRoot, sharedSkills)
   } catch (error) {
     event('WARN', `shared skill sync failed: ${summary(error)}`)
     return
@@ -110,17 +109,17 @@ function syncSkills(
   if (isConsumer) {
     const managed = repositoryPaths(repoRoot, result.managedPaths)
     const removed = repositoryPaths(repoRoot, result.removedPaths)
-    try {
-      const scope = [...managed, ...removed]
-      if (scope.length > 0) {
-        const alreadyStaged = runtime.git(repoRoot, [
-          'diff', '--cached', '--name-only', '--', ...scope,
-        ]).trim()
-        if (alreadyStaged !== '') {
-          event('WARN',
-            `shared skill sync could not be committed: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`)
-          return
-        }
+    const scope = [...managed, ...removed]
+    if (scope.length > 0) {
+      const alreadyStaged = runtime.git(repoRoot, [
+        'diff', '--cached', '--name-only', '--', ...scope,
+      ]).trim()
+      if (alreadyStaged !== '') {
+        throw new Error(
+          `shared skill sync requires a clean managed index: staged changes exist at ${alreadyStaged.replaceAll(/\r?\n/g, ', ')}`,
+        )
+      }
+      try {
         if (managed.length > 0) runtime.git(repoRoot, ['add', '-f', '--', ...managed])
         const trackedRemoved = removed.length === 0
           ? []
@@ -140,10 +139,9 @@ function syncSkills(
             ])
           }
         }
+      } catch (error) {
+        throw new Error(`shared skill sync could not be committed: ${summary(error)}`)
       }
-    } catch (error) {
-      event('WARN', `shared skill sync could not be committed: ${summary(error)}`)
-      return
     }
   }
 
@@ -217,21 +215,25 @@ export async function updateCoreBeforeCycle(
   let upstream: string
   try {
     upstream = runtime.git(paths.repoRoot, ['rev-parse', 'FETCH_HEAD']).trim()
-    if (upstream === imported) return finish('continue')
-    runtime.git(paths.repoRoot, ['merge-base', '--is-ancestor', imported, upstream])
+    if (upstream !== imported) {
+      runtime.git(paths.repoRoot, ['merge-base', '--is-ancestor', imported, upstream])
+    }
   } catch {
     warn(event,
       `core update skipped: imported ${imported.slice(0, 8)} is not behind ${config.upstreamBranch}`)
     return finish('continue')
   }
+  if (upstream === imported) return finish('continue')
 
+  let dirty: boolean
   try {
-    if (runtime.git(paths.repoRoot, ['status', '--porcelain']).trim() !== '') {
-      warn(event, 'core update skipped: working tree is dirty')
-      return finish('continue')
-    }
+    dirty = runtime.git(paths.repoRoot, ['status', '--porcelain']).trim() !== ''
   } catch (error) {
     warn(event, `core update status check failed: ${summary(error)}`)
+    return finish('continue')
+  }
+  if (dirty) {
+    warn(event, 'core update skipped: working tree is dirty')
     return finish('continue')
   }
 
