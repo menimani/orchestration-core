@@ -558,6 +558,24 @@ describe('loop daemon ownership', () => {
     expect(result.stderr).toContain('Could not start the loop: Loop is already running')
   })
 
+  it('does not replace a live daemon that owns a legacy bare-PID lock', () => {
+    mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
+    writeFileSync(daemonFile('loop.pid'), `${process.pid}\n`)
+
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain(`Loop is already running (PID=${process.pid})`)
+    expect(result.stdout).not.toContain('Removing stale PID file')
+    expect(readFileSync(daemonFile('loop.pid'), 'utf8')).toBe(`${process.pid}\n`)
+  })
+
   it('reclaims a loop marker when its live PID belongs to a different process start', () => {
     const paths = orchPaths(repoRoot)
     writeFileSync(

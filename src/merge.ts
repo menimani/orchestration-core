@@ -13,7 +13,9 @@ import {
   branchName, isInspectionTaskId, logFile, packageFile, worktreeDir, PACKAGE_ROOT,
   type OrchPaths,
 } from './paths.ts'
-import { forgetTaskProcess } from './processRegistry.ts'
+import {
+  forgetTaskProcess, taskProcessPid, terminableTaskProcessPid,
+} from './processRegistry.ts'
 import { execShellSync } from './shell.ts'
 import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
@@ -429,14 +431,30 @@ export function removeTemporaryWorktree(
 }
 
 function stopCompletedRunner(paths: OrchPaths, taskId: string, pid: number): void {
+  const terminablePid = terminableTaskProcessPid(paths, taskId)
+  if (terminablePid === undefined) {
+    // A dead or replaced owner is already gone. An owner that remains visible only in
+    // the blocking view lacks the identity needed to make termination safe.
+    if (taskProcessPid(paths, taskId) !== undefined) {
+      throw new MergeError(
+        `Could not verify completed runner ${pid}; task state was retained.`,
+      )
+    }
+    return
+  }
+  if (terminablePid !== pid) {
+    throw new MergeError(`Completed runner ownership changed; task state was retained.`)
+  }
   try {
-    operatingSystem.terminateProcessTree(pid)
-    if (operatingSystem.processTreeIsAlive(pid)) {
-      throw new Error(`Process tree ${pid} is still alive.`)
+    operatingSystem.terminateProcessTree(terminablePid)
+    if (operatingSystem.processTreeIsAlive(terminablePid)) {
+      throw new Error(`Process tree ${terminablePid} is still alive.`)
     }
     forgetTaskProcess(paths, taskId)
   } catch {
-    throw new MergeError(`Could not stop completed runner ${pid}; task state was retained.`)
+    throw new MergeError(
+      `Could not stop completed runner ${terminablePid}; task state was retained.`,
+    )
   }
 }
 
