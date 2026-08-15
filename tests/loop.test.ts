@@ -25,6 +25,7 @@ import {
   type OrchPaths,
 } from '../src/paths.ts'
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
+import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { enqueueTask } from '../src/tasks.ts'
@@ -2791,6 +2792,79 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
+  it('abandons a task after its first conflicting rebase and never retries it', async () => {
+    const taskId = '20260815_181908_194_auto-rebase-conflict'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+    const runHead = git(['rev-parse', 'HEAD'])
+    expect(runHead).not.toBe(initialHead)
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'conflicting fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssueForTask(paths, taskId, issueNumber)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(['branch', '--list', branchName(taskId)])).toBe('')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    await expect(fakeForge.getIssue(issueNumber)).resolves.toMatchObject({
+      assignees: [],
+      labels: expect.arrayContaining([LABEL_FINDING, LABEL_READY]),
+    })
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
+    expect(logged).toContain('Released 194_auto    rebase conflict abandoned')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
+  })
+
+  it('skips a task whose merge is already active without counting a failure', async () => {
+    const taskId = '20260815_125258_037_auto-merge-race'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const guardDir = join(paths.queueDir, 'merge-guards', taskId)
+    mkdirSync(guardDir, { recursive: true })
+    writeFileSync(join(guardDir, 'owner.json'), `${JSON.stringify({
+      state: 'active',
+      pid: process.pid,
+      startIdentity: currentProcessStartIdentity(),
+    })}\n`)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged).toContain('Skipped 037_auto    merge already in progress')
+    expect(logged.some((line) => line.startsWith('Merging 037_auto'))).toBe(false)
+    expect(logged.some((line) => line.startsWith('Failed 037_auto'))).toBe(false)
+  })
+
   it('terminalizes a no-change task while preserving failures and invalidating the cycle', async () => {
     const taskId = '20260814_144959_066_auto-already-resolved'
     const initialHead = initializeGitRepo()

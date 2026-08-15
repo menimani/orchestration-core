@@ -1,9 +1,10 @@
 import { execFileSync, execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, rmdirSync,
+  writeFileSync,
 } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import { operatingSystem } from './adapters/os.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
@@ -19,6 +20,7 @@ import {
 import { execShellSync } from './shell.ts'
 import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
+import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
   removeWorktreeWithFallback, type WorktreeRemovalRuntime,
 } from './worktree.ts'
@@ -30,6 +32,9 @@ export class MergeError extends Error {
     this.keepWorktree = keepWorktree
   }
 }
+
+/** A stale local task cannot be refreshed and must not be selected for merge again. */
+export class RebaseConflictError extends MergeError {}
 
 /** Remote bookkeeping for a valid no-change verdict failed and should be retried. */
 export class NoChangeReconciliationError extends MergeError {}
@@ -64,6 +69,10 @@ export interface MergeOptions {
   onNoChange?: (() => Promise<void>) | undefined
   /** Worktree cleanup implementation; tests replace it to exercise retained cleanup state. */
   worktreeRemovalRuntime?: WorktreeRemovalRuntime | undefined
+  /** Called only after this process has acquired the per-task merge guard. */
+  onMergeStart?: (() => void) | undefined
+  /** Report an idempotent attempt without treating it as a merge failure. */
+  onMergeSkipped?: ((reason: 'active' | 'succeeded') => void) | undefined
 }
 
 export interface RemoteMergeOptions extends MergeOptions {
@@ -81,6 +90,7 @@ export interface NoChangeOptions {
 export type MergeTaskResult =
   | { outcome: 'merged'; mergeCommit: string }
   | { outcome: 'no-change' }
+  | { outcome: 'skipped'; reason: 'active' | 'succeeded' }
 
 export interface OrchestrationDepsRuntime {
   install: (cwd: string) => void
@@ -301,7 +311,7 @@ function rebaseTaskOntoRunTip(
     } catch {
       // nothing to abort
     }
-    throw new MergeError(
+    throw new RebaseConflictError(
       `A conflict occurred while rebasing the task onto ${currentBranch}; the rebase was aborted.`,
     )
   }
@@ -587,12 +597,91 @@ export async function completeTaskWithoutChanges(
   )
 }
 
-/**
- * Merge a completed task into the current branch.
- * Uncommitted changes or a missing deliverable stop the merge and keep the worktree,
- * because removing it would lose work an agent forgot to commit.
- */
-export async function mergeTask(
+interface MergeGuardOwner {
+  state: 'active'
+  pid: number
+  startIdentity: string | null
+}
+
+function mergeGuardDir(paths: OrchPaths, taskId: string): string {
+  return join(paths.queueDir, 'merge-guards', taskId)
+}
+
+function activeMergeGuardOwner(dir: string): MergeGuardOwner | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(dir, 'owner.json'), 'utf8')) as Partial<MergeGuardOwner>
+    if (value.state !== 'active' || !Number.isInteger(value.pid) || Number(value.pid) < 1) {
+      return undefined
+    }
+    return {
+      state: 'active',
+      pid: Number(value.pid),
+      startIdentity: typeof value.startIdentity === 'string' ? value.startIdentity : null,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function acquireMergeGuard(
+  paths: OrchPaths,
+  taskId: string,
+): { acquired: true; file: string; owner: MergeGuardOwner } | {
+  acquired: false
+  reason: 'active' | 'succeeded'
+} {
+  const dir = mergeGuardDir(paths, taskId)
+  mkdirSync(dirname(dir), { recursive: true })
+  const owner: MergeGuardOwner = {
+    state: 'active', pid: process.pid, startIdentity: currentProcessStartIdentity(),
+  }
+  for (;;) {
+    try {
+      mkdirSync(dir)
+      writeFileSync(join(dir, 'owner.json'), `${JSON.stringify(owner)}\n`, { flag: 'wx' })
+      return { acquired: true, file: dir, owner }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
+      const recorded = activeMergeGuardOwner(dir)
+      // An ownerless directory is the narrow acquisition window of another process.
+      if (recorded === undefined) return { acquired: false, reason: 'active' }
+      if (lockOwnerIsCurrent(recorded.pid, recorded.startIdentity)) {
+        return { acquired: false, reason: 'active' }
+      }
+      // Removing the owner before the directory makes stale reclamation safe between
+      // multiple waiters: rmdir can never remove a replacement's non-empty guard.
+      try {
+        rmSync(join(dir, 'owner.json'))
+        rmdirSync(dir)
+      } catch {
+        // A concurrent owner changed the marker; retry against its current state.
+      }
+    }
+  }
+}
+
+function finishMergeGuard(
+  guard: { file: string; owner: MergeGuardOwner },
+  succeeded: boolean,
+): void {
+  let ownsGuard = false
+  try {
+    ownsGuard = readFileSync(join(guard.file, 'owner.json'), 'utf8').trim()
+      === JSON.stringify(guard.owner)
+  } catch {
+    return
+  }
+  if (!ownsGuard) return
+  if (!succeeded) {
+    rmSync(guard.file, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+    return
+  }
+  writeFileSync(join(guard.file, 'succeeded'), '')
+  rmSync(join(guard.file, 'owner.json'), { force: true })
+}
+
+async function mergeTaskWithGuardHeld(
   paths: OrchPaths,
   taskId: string,
   options: MergeOptions,
@@ -709,6 +798,43 @@ export async function mergeTask(
     io, depsEvent, options,
   )
   return { outcome: 'merged', mergeCommit: finalizedCommit }
+}
+
+/**
+ * Merge a completed task into the current branch. A durable per-task guard makes the
+ * operation idempotent across the daemon and CLI; failures release it for a real retry.
+ * Uncommitted changes or a missing deliverable stop the merge and keep the worktree.
+ */
+export async function mergeTask(
+  paths: OrchPaths,
+  taskId: string,
+  options: MergeOptions,
+): Promise<MergeTaskResult> {
+  const status = readStatus(paths, taskId)
+  if (status?.status === 'merged' || status?.status === 'no-change') {
+    options.onMergeSkipped?.('succeeded')
+    return { outcome: 'skipped', reason: 'succeeded' }
+  }
+  const acquired = acquireMergeGuard(paths, taskId)
+  if (!acquired.acquired) {
+    options.onMergeSkipped?.(acquired.reason)
+    return { outcome: 'skipped', reason: acquired.reason }
+  }
+  let succeeded = false
+  try {
+    const guardedStatus = readStatus(paths, taskId)
+    if (guardedStatus?.status === 'merged' || guardedStatus?.status === 'no-change') {
+      succeeded = true
+      options.onMergeSkipped?.('succeeded')
+      return { outcome: 'skipped', reason: 'succeeded' }
+    }
+    options.onMergeStart?.()
+    const result = await mergeTaskWithGuardHeld(paths, taskId, options)
+    succeeded = result.outcome === 'merged' || result.outcome === 'no-change'
+    return result
+  } finally {
+    finishMergeGuard(acquired, succeeded)
+  }
 }
 
 /** Merge an already-fetched worker branch through the same selected checks as a local task. */

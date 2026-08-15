@@ -156,7 +156,9 @@ values must be non-negative integers, with the narrower bounds stated below.
 9. Before its merge gate, a completed local task branch is rebased onto the current run
    branch tip. This refresh is retained when a check fails, so the next attempt does not
    test the same stale branch again. A conflicting rebase is aborted and keeps both the
-   task worktree and run branch clean. Pre-merge tests are chosen from the paths the
+   task worktree and run branch clean. The task is abandoned after that first counted
+   merge failure: its worktree and branch are removed, and linked issues return to ready
+   before another poll can select it again. Pre-merge tests are chosen from the paths the
    rebased worktree touched. `TASK_GATE=full`
    asks the project adapter for its full merge checks; `TASK_GATE=light` asks it for
    reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
@@ -177,10 +179,15 @@ values must be non-negative integers, with the narrower bounds stated below.
     restores it, and a busy backup left after successful activation is only warned about.
 10. `MAX_CONSECUTIVE_MERGE_FAILURES` (default 3) merge failures in a row stop the loop;
     a completed task remains eligible for merge on later polls, and any successful merge
-    resets the count. Re-claiming completed-but-unmerged work requests that merge instead
-    of silently treating the task as already processed. When the project adapter classifies
-    an infrastructure failure, or the merge log names an unreachable registry, say which —
-    "tests failed" misattributes an environment failure to the task's diff.
+    resets the count. A durable per-task guard skips an attempt while that task's merge is
+    active or after it succeeded, without changing the failure count; a failed attempt
+    releases the guard so a later poll can retry. A conflicting pre-merge rebase is
+    terminal for that task and contributes at most one failure to this count; ordinary
+    gate failures remain retryable. Re-claiming completed-but-unmerged work
+    requests that merge instead of silently treating the task as already processed. When
+    the project adapter classifies an infrastructure failure, or the merge log names an
+    unreachable registry, say which — "tests failed" misattributes an environment failure
+    to the task's diff.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
 11a. After a local or remote task merge, a first-parent change to this package's
