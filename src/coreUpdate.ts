@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
+import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
 import { sharedSkillManagedTargets, syncSharedSkills } from './sharedSkills.ts'
@@ -63,14 +64,16 @@ function syncSkills(
   repoRoot: string,
   packageRoot: string,
   runner: Runner,
+  project: ProjectAdapter,
   isConsumer: boolean,
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime,
 ): void {
+  const sharedSkills = [runner.sharedSkills, ...(project.sharedSkills ?? [])]
   const skippedDestinations: string[] = []
   if (isConsumer) {
     try {
-      for (const target of sharedSkillManagedTargets(repoRoot, packageRoot, runner)) {
+      for (const target of sharedSkillManagedTargets(repoRoot, packageRoot, sharedSkills)) {
         const managedPaths = repositoryPaths(repoRoot, target.managedPaths)
         const alreadyStaged = runtime.git(repoRoot, [
           'diff', '--cached', '--name-only', '--', ...managedPaths,
@@ -89,7 +92,7 @@ function syncSkills(
 
   let result: ReturnType<typeof syncSharedSkills>
   try {
-    result = syncSharedSkills(repoRoot, packageRoot, runner, undefined, skippedDestinations)
+    result = syncSharedSkills(repoRoot, packageRoot, sharedSkills, undefined, skippedDestinations)
   } catch (error) {
     event('WARN', `shared skill sync failed: ${summary(error)}`)
     return
@@ -160,6 +163,7 @@ export async function updateCoreBeforeCycle(
     'coreAutoUpdate' | 'upstreamRemote' | 'upstreamBranch' | 'integrationBranch'>,
   forge: Forge,
   runner: Runner,
+  project: ProjectAdapter,
   cycle: number,
   event: CoreUpdateEvent,
   runtime: CoreUpdateRuntime = defaultRuntime,
@@ -175,12 +179,12 @@ export async function updateCoreBeforeCycle(
   // consumers. Only the owning repository receives local, ignored generated copies.
   if (prefix === undefined) {
     if (relative(paths.repoRoot, packageRoot) === '') {
-      syncSkills(paths.repoRoot, packageRoot, runner, false, event, runtime)
+      syncSkills(paths.repoRoot, packageRoot, runner, project, false, event, runtime)
     }
     return 'continue'
   }
   const finish = (outcome: CoreUpdateOutcome): CoreUpdateOutcome => {
-    syncSkills(paths.repoRoot, packageRoot, runner, true, event, runtime)
+    syncSkills(paths.repoRoot, packageRoot, runner, project, true, event, runtime)
     return outcome
   }
   if (config.upstreamRemote.trim() === '') {
@@ -246,7 +250,7 @@ export async function updateCoreBeforeCycle(
     return finish('continue')
   }
 
-  syncSkills(paths.repoRoot, packageRoot, runner, true, event, runtime)
+  syncSkills(paths.repoRoot, packageRoot, runner, project, true, event, runtime)
   const newHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   const changed = runtime.git(paths.repoRoot, [
     'diff', '--name-only', oldHead, newHead, '--', prefix,

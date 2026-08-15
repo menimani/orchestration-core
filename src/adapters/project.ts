@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, dirname, extname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import ts from 'typescript'
+import type { SharedSkillsAdapter } from './shared-skills.ts'
 
 // The project adapter carries everything the orchestration knows about the repository
 // it runs in: which checks verify a merge, which suites prove a cycle's tip, and which
@@ -102,6 +103,8 @@ export interface PullRequestPresentation {
 
 export interface ProjectAdapter {
   name: string
+  /** Additional agents a person may drive in this repository, independent of the runner. */
+  sharedSkills?: SharedSkillsAdapter[]
   /** Manual production deployment, when this repository has one. */
   deployment?: { workflow: string; revisionUrl: string }
   /** Whether pull requests are expected to receive CI checks. Omit when unknown. */

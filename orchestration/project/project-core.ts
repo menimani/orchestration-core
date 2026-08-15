@@ -1,4 +1,5 @@
 import type { MergeCheck, ProjectAdapter, SuiteStep } from '../../src/adapters/project.ts'
+import { createClaudeSharedSkills } from '../../src/adapters/shared-skills-claude.ts'
 
 // The package this adapter gates is the same one running the loop, so both gates are the
 // package's own checks: its source-language rule, the type checker the sources are
@@ -15,6 +16,7 @@ const SUITE = 'npm test -- --pool=threads --poolOptions.threads.singleThread'
 
 export const coreProject: ProjectAdapter = {
   name: 'core',
+  sharedSkills: [createClaudeSharedSkills()],
   verifyDependencyIsolation: true,
   integrationWorktreeSetup: [{
     label: 'Core dependencies',

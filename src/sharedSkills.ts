@@ -5,8 +5,7 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
-import { packageCommandPrefix } from './paths.ts'
-import type { Runner, RunnerSharedSkillRenderOptions } from './adapters/runner.ts'
+import type { SharedSkillRenderOptions, SharedSkillsAdapter } from './adapters/shared-skills.ts'
 
 const STATE_FILE = '.orchestration-core-sync.json'
 
@@ -20,7 +19,7 @@ const STATE_FILE = '.orchestration-core-sync.json'
 interface SharedSkillTarget {
   destinationRoot: string
   legacyRoots: readonly string[]
-  renderFile(contents: Buffer, options: RunnerSharedSkillRenderOptions): Buffer
+  renderFile(contents: Buffer, options: SharedSkillRenderOptions): Buffer
 }
 
 interface SharedSkillsManifest {
@@ -59,10 +58,10 @@ export interface SharedSkillManagedTarget {
 export function sharedSkillManagedTargets(
   repoRoot: string,
   packageRoot: string,
-  runner: Runner,
+  adapters: readonly SharedSkillsAdapter[],
 ): SharedSkillManagedTarget[] {
   const manifest = readManifest(packageRoot)
-  return skillTargets(repoRoot, runner).map((target) => {
+  return skillTargets(repoRoot, adapters).map((target) => {
     const paths = [join(target.destinationRoot, STATE_FILE)]
     paths.push(...manifest.skills.map((skill) => join(target.destinationRoot, skill)))
     for (const legacyRoot of target.legacyRoots) {
@@ -148,35 +147,26 @@ function renderedSkill(
   }))
 }
 
-/**
- * The interactive agent a person drives in the repository. The canonical skills are
- * authored in its format already — frontmatter, `!`command`` preambles and `/skill`
- * invocations are its own conventions — so only the command prefix is resolved here.
- */
-function interactiveAgentTarget(repoRoot: string): SharedSkillTarget {
-  return {
-    destinationRoot: join(repoRoot, '.claude', 'skills'),
-    legacyRoots: [],
-    renderFile: (contents, options) => Buffer.from(contents.toString('utf8').replaceAll(
-      options.commandPrefixPlaceholder,
-      packageCommandPrefix(options.repoRoot, options.packageRoot),
-    )),
-  }
-}
-
 /** Every directory this repository's skills must appear in, each listed once. */
-function skillTargets(repoRoot: string, runner: Runner): SharedSkillTarget[] {
-  const runnerTarget: SharedSkillTarget = {
-    destinationRoot: runner.sharedSkills.destinationRoot(repoRoot),
-    legacyRoots: runner.sharedSkills.legacyRoots?.(repoRoot) ?? [],
-    renderFile: (contents, options) => runner.sharedSkills.renderFile(contents, options),
+function skillTargets(
+  repoRoot: string,
+  adapters: readonly SharedSkillsAdapter[],
+): SharedSkillTarget[] {
+  const targets: SharedSkillTarget[] = []
+  for (const adapter of adapters) {
+    const target: SharedSkillTarget = {
+      destinationRoot: adapter.destinationRoot(repoRoot),
+      legacyRoots: adapter.legacyRoots?.(repoRoot) ?? [],
+      renderFile: (contents, options) => adapter.renderFile(contents, options),
+    }
+    // One directory has one reader format. A duplicate adapter cannot safely render it
+    // again because whichever target ran second would overwrite the first description.
+    if (targets.some((existing) => relative(
+      existing.destinationRoot, target.destinationRoot,
+    ) === '')) continue
+    targets.push(target)
   }
-  const interactive = interactiveAgentTarget(repoRoot)
-  // A runner that reads the interactive agent's directory is that agent: rendering the
-  // same directory twice would leave whichever target ran second describing the tree.
-  return relative(runnerTarget.destinationRoot, interactive.destinationRoot) === ''
-    ? [runnerTarget]
-    : [runnerTarget, interactive]
+  return targets
 }
 
 function hashFiles(files: readonly RenderedFile[]): string {
@@ -360,7 +350,7 @@ function syncTarget(
 export function syncSharedSkills(
   repoRoot: string,
   packageRoot: string,
-  runner: Runner,
+  adapters: readonly SharedSkillsAdapter[],
   os: OperatingSystem = operatingSystem,
   skippedDestinationRoots: readonly string[] = [],
 ): SharedSkillsSyncResult {
@@ -368,7 +358,7 @@ export function syncSharedSkills(
     installed: [], updated: [], conflicts: [], migrationConflicts: [],
     removedPaths: [], changedPaths: [], managedPaths: [], failures: [],
   }
-  for (const target of skillTargets(repoRoot, runner)) {
+  for (const target of skillTargets(repoRoot, adapters)) {
     if (skippedDestinationRoots.some((root) => relative(root, target.destinationRoot) === '')) {
       continue
     }
