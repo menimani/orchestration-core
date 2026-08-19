@@ -235,6 +235,7 @@ describe('createCodexRunner', () => {
     expect(mocks.spawn).toHaveBeenCalledWith('codex', [
       'exec',
       '--dangerously-bypass-approvals-and-sandbox',
+      '--disable', 'multi_agent',
       '--output-last-message', 'final-message.txt',
       '--model', 'gpt-5-codex',
       '--config', 'model_reasoning_effort=low',
@@ -259,6 +260,7 @@ describe('createCodexRunner', () => {
         '-c', 'exec codex "$@"', 'codex',
         'exec',
         '--dangerously-bypass-approvals-and-sandbox',
+        '--disable', 'multi_agent',
         '--output-last-message', 'final-message.txt',
         '--config', 'model_reasoning_effort=high',
         '-',
