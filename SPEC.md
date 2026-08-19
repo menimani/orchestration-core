@@ -68,7 +68,7 @@ values must be non-negative integers, with the narrower bounds stated below.
 | `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
-| `REVIEW_EFFORT` | `high` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
+| `REVIEW_EFFORT` | `medium` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
 | `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter. |
 | `RUNNER_CLAUDE_MODEL` | `claude-opus-5` | Base model for the Claude runner when no task-specific model override applies. |
 | `RUNNER_CLAUDE_MODEL_MINIMAL`, `RUNNER_CLAUDE_MODEL_LOW`, `RUNNER_CLAUDE_MODEL_MEDIUM`, `RUNNER_CLAUDE_MODEL_HIGH` | `RUNNER_CLAUDE_MODEL` | Optional Claude model mapping for each runner-neutral reasoning effort. |
@@ -232,10 +232,10 @@ values must be non-negative integers, with the narrower bounds stated below.
     `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop).
-14. Effort defaults: scans and automatic reviews run the runner at high reasoning
-    effort, and queued tasks at medium. Fixes spawned by an automatic review are the
-    exception: they always run at high effort because they repair findings that escaped
-    the original implementation. `SCAN_EFFORT`, `TASK_EFFORT`, and `REVIEW_EFFORT`
+14. Effort defaults: scans, queued tasks, and automatic reviews all run the runner at
+    medium reasoning effort. Fixes spawned by an automatic review are the exception: they
+    always run at high effort because they repair findings that escaped the original
+    implementation. `SCAN_EFFORT`, `TASK_EFFORT`, and `REVIEW_EFFORT`
     accept `minimal`, `low`, `medium`, or `high` and override their respective defaults;
     `TASK_EFFORT` applies to queued tasks that do not have a per-task override, so it does
     not replace the high-effort review-fix override. `SCAN_MODEL` and `TASK_MODEL`
