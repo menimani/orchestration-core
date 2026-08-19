@@ -11,10 +11,15 @@ import type {
 // message lands in --output-last-message, which is the only place the core reads
 // completion markers from. Effort maps to the codex-specific
 // `model_reasoning_effort` config key here, not in the core.
+//
+// A worker never delegates to another agent, so `multi_agent` only adds its primary-agent
+// framing to the request. Codex enables it by default, and every request carries the whole
+// transcript, so the framing is paid once per turn rather than once per task.
 function buildArgs(options: RunnerStartOptions): string[] {
   const args = [
     'exec',
     '--dangerously-bypass-approvals-and-sandbox',
+    '--disable', 'multi_agent',
     '--output-last-message', options.finalMessageFile,
   ]
   if (options.model !== undefined && options.model !== '') {

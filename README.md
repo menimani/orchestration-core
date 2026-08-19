@@ -237,7 +237,7 @@ git subtree pull --prefix=orchestration/ts \
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
 | `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
-| `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | high / medium / high | Reasoning effort per kind of work; `TASK_EFFORT` applies to queued tasks without a per-task override, while review-spawned fixes always use high effort |
+| `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | medium / medium / medium | Reasoning effort per kind of work; `TASK_EFFORT` applies to queued tasks without a per-task override, while review-spawned fixes always use high effort |
 | `RUNNER` | codex | Agent CLI adapter; accepts `codex` or `claude` |
 | `RUNNER_CLAUDE_MODEL` | claude-opus-5 | Base Claude model used when `RUNNER=claude` and no task-specific model is set |
 | `RUNNER_CLAUDE_MODEL_MINIMAL` / `LOW` / `MEDIUM` / `HIGH` | `RUNNER_CLAUDE_MODEL` | Optional model selected for the matching reasoning effort when `RUNNER=claude` |
