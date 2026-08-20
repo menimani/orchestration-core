@@ -58,6 +58,15 @@ from or equivalent to `orchestration/tests/*.sh`.
   marker as an exact standalone line, while a background loop writes that exact line to
   `logs/loop-markers.log`. The corresponding result is represented separately by an
   aligned display event in `loop.log`.
+- Every command accepts a global `--repo <path>` option. When present, Git resolves the
+  named path to its repository root and the CLI verifies both that it is a Git repository
+  and that its root contains an `orchestration/` directory before dispatch. Without the
+  option, repository discovery from the working directory is unchanged. All commands
+  accept one repository; `loop-status` additionally accepts repeated `--repo` options.
+  For two or more repositories it emits one line per repository naming the root, loop
+  running state, recorded run branch, queued count, and in-flight count. Its existing
+  detailed output is unchanged for a single repository. Paths are supplied per command;
+  the core stores no repository registry, configuration inventory, or checkout list.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
