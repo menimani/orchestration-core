@@ -94,7 +94,9 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
     '',
   ].join('\n'))
 
-  const launcher = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+  const launcher = spawnSync(process.execPath, [
+    CLI, 'loop', '--approve-mode', 'local', '--daemon',
+  ], {
     cwd: root,
     encoding: 'utf8',
     env: {

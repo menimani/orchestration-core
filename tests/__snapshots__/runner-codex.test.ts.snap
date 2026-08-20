@@ -337,10 +337,14 @@ The loop commits and merges on its own, so start it on a topic branch, never on 
 ## Starting
 
 \`\`\`bash
-npm run loop -- --daemon
+npm run loop -- --approve-mode local --daemon
 \`\`\`
 
 \`--daemon\` is what puts it in the background; without it the loop holds the terminal.
+The command approves the default local queue explicitly. If
+\`ISSUE_QUEUE_ENABLED=true\`, replace \`local\` with \`issue\`; the loop refuses a mismatch.
+It prints the resolved configuration before asking for terminal confirmation or checking
+the non-interactive approval flag.
 Settings go in front of the command:
 
 | Variable | Default | Effect |
