@@ -112,6 +112,25 @@ describe('status files', () => {
     expect(readStatus(paths, 'task-stale')?.status).toBe('completed')
   })
 
+  it('times out instead of busy-looping when a stale lock cannot be removed', async () => {
+    const taskId = 'task-stale-blocked'
+    const lockDir = join(paths.statusDir, `.${taskId}.lock`)
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'pid'), '2147483647\n')
+    writeFileSync(join(lockDir, 'blocker'), 'cannot remove directory\n')
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+    const now = Date.now()
+    let elapsed = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now + elapsed++ * 1_000)
+
+    await expect(writeStatus(paths, taskId, 'completed')).rejects.toThrow(
+      `Timed out waiting for the status lock: ${taskId}`,
+    )
+
+    expect(existsSync(lockDir)).toBe(true)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+  })
+
   it('uses the operating-system liveness verdict before reclaiming a lock', async () => {
     const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
     const lockDir = join(paths.statusDir, '.adapter-lock.lock')

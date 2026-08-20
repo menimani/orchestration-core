@@ -649,6 +649,8 @@ interface MergeGuardOwner {
 }
 
 const MALFORMED_MERGE_GUARD_MAX_AGE_MS = 30_000
+const MERGE_GUARD_RECLAIM_TIMEOUT_MS = 10_000
+const MERGE_GUARD_RECLAIM_RETRY_MS = 10
 
 function mergeGuardDir(paths: OrchPaths, taskId: string): string {
   return join(paths.queueDir, 'merge-guards', taskId)
@@ -680,6 +682,15 @@ function malformedMergeGuardIsStale(dir: string): boolean {
   }
 }
 
+function mergeGuardRemovalWasVerified(dir: string): boolean {
+  try {
+    statSync(dir)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
 function publishMergeGuard(dir: string, owner: MergeGuardOwner): boolean {
   const pendingOwner = `${dir}.owner-${process.pid}-${randomUUID()}.json`
   try {
@@ -702,7 +713,7 @@ function publishMergeGuard(dir: string, owner: MergeGuardOwner): boolean {
   }
 }
 
-function reclaimMalformedMergeGuard(dir: string): void {
+function reclaimMalformedMergeGuard(dir: string): boolean {
   try {
     rmSync(join(dir, 'owner.json'))
   } catch {
@@ -713,15 +724,19 @@ function reclaimMalformedMergeGuard(dir: string): void {
   } catch {
     // A concurrent waiter reclaimed it, or a marker now makes the directory non-empty.
   }
+  return mergeGuardRemovalWasVerified(dir)
+}
+
+type MergeGuardAcquisition = { acquired: true; file: string; owner: MergeGuardOwner } | {
+  acquired: false
+  reason: 'active' | 'succeeded'
 }
 
 function acquireMergeGuard(
   paths: OrchPaths,
   taskId: string,
-): { acquired: true; file: string; owner: MergeGuardOwner } | {
-  acquired: false
-  reason: 'active' | 'succeeded'
-} {
+  reclaimDeadline?: number,
+): MergeGuardAcquisition | Promise<MergeGuardAcquisition> {
   const dir = mergeGuardDir(paths, taskId)
   mkdirSync(dirname(dir), { recursive: true })
   const owner: MergeGuardOwner = {
@@ -736,13 +751,24 @@ function acquireMergeGuard(
     if (recorded === undefined) {
       // Atomic publication means a fresh ownerless or malformed directory may belong to
       // an older binary still acquiring its guard. Recover it only after that window ends.
-      if (!malformedMergeGuardIsStale(dir)) return { acquired: false, reason: 'active' }
-      reclaimMalformedMergeGuard(dir)
-      continue
+      if (reclaimDeadline === undefined) {
+        if (!malformedMergeGuardIsStale(dir)) return { acquired: false, reason: 'active' }
+        reclaimDeadline = Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      }
+      if (reclaimMalformedMergeGuard(dir)) {
+        reclaimDeadline = undefined
+        continue
+      }
+      if (Date.now() >= reclaimDeadline) {
+        throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
+      }
+      return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
     }
     if (lockOwnerIsCurrent(recorded.pid, recorded.startIdentity)) {
       return { acquired: false, reason: 'active' }
     }
+    reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
     // Removing the owner before the directory makes stale reclamation safe between
     // multiple waiters: rmdir can never remove a replacement's non-empty guard.
     try {
@@ -751,6 +777,15 @@ function acquireMergeGuard(
     } catch {
       // A concurrent owner changed the marker; retry against its current state.
     }
+    if (mergeGuardRemovalWasVerified(dir)) {
+      reclaimDeadline = undefined
+      continue
+    }
+    if (Date.now() >= reclaimDeadline) {
+      throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
+    }
+    return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+      .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
   }
 }
 
@@ -919,7 +954,10 @@ export async function mergeTask(
     options.onMergeSkipped?.('succeeded')
     return { outcome: 'skipped', reason: 'succeeded' }
   }
-  const acquired = acquireMergeGuard(paths, taskId)
+  const acquisition = acquireMergeGuard(paths, taskId)
+  // Preserve the established synchronous fast path: only failed stale reclamation
+  // yields while it backs off. Some callers inspect repository state immediately.
+  const acquired = acquisition instanceof Promise ? await acquisition : acquisition
   if (!acquired.acquired) {
     options.onMergeSkipped?.(acquired.reason)
     return { outcome: 'skipped', reason: acquired.reason }

@@ -70,6 +70,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+const STATUS_LOCK_WAIT_MS = 10_000
+const STATUS_LOCK_RETRY_MS = 10
+
 function lockIsAged(dir: string): boolean {
   try {
     return Date.now() - statSync(dir).mtimeMs >= 10_000
@@ -78,12 +81,25 @@ function lockIsAged(dir: string): boolean {
   }
 }
 
+function lockRemovalWasVerified(dir: string): boolean {
+  try {
+    statSync(dir)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
 async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<string> {
   const dir = lockDir(paths, taskId)
   const pidFile = join(dir, 'pid')
   const identityFile = join(dir, 'start-identity')
   const owner = JSON.stringify(currentProcessStartIdentity())
-  for (let attempts = 0; ; attempts++) {
+  const deadline = Date.now() + STATUS_LOCK_WAIT_MS
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for the status lock: ${taskId}`)
+    }
     try {
       mkdirSync(dir)
     } catch (error) {
@@ -120,6 +136,10 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
         } catch {
           // another waiter won the reclaim
         }
+        // A persistent filesystem error can leave the stale directory behind. Verify
+        // reclamation and use the same bounded, sleeping retry as ordinary contention.
+        if (lockRemovalWasVerified(dir)) continue
+        await sleep(STATUS_LOCK_RETRY_MS)
         continue
       }
       if (!validOwner && lockIsAged(dir)) {
@@ -129,12 +149,11 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
         } catch {
           // another waiter won the reclaim
         }
+        if (lockRemovalWasVerified(dir)) continue
+        await sleep(STATUS_LOCK_RETRY_MS)
         continue
       }
-      if (attempts >= 1000) {
-        throw new Error(`Timed out waiting for the status lock: ${taskId}`)
-      }
-      await sleep(10)
+      await sleep(STATUS_LOCK_RETRY_MS)
       continue
     }
 
