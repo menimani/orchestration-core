@@ -1568,7 +1568,8 @@ export async function claimIssueGroup(
 
 /**
  * Return leases whose holder went quiet: in-progress issues not updated for the lease
- * window go back to ready, unassigned. A locally merged task instead refreshes its
+ * window go back to ready, unassigned. Ready issues stranded with an assignee are
+ * repaired after the same window. A locally merged task instead refreshes its
  * issue until promotion closes it; a forge-visible merge marker protects the same
  * issue in other checkouts. A crashed worker leaves no other trace — on a single
  * machine a leftover worktree is visible, across machines only this is.
@@ -1589,7 +1590,36 @@ export async function reapStaleLeases(
     throw new IssueReleaseReconciliationError(releaseFailures)
   }
   const reaped: number[] = []
-  const openIssues = knownOpenFindings ?? await forge.listOpenIssues(LABEL_IN_PROGRESS)
+  const openIssues = knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING)
+  for (const issue of openIssues.filter((candidate) =>
+    candidate.labels.includes(LABEL_READY)
+      && !candidate.labels.includes(LABEL_IN_PROGRESS)
+      && candidate.assignees.length > 0)) {
+    const ageMs = now.getTime() - new Date(issue.updatedAt).getTime()
+    if (ageMs < leaseHours * 3600 * 1000) continue
+    const repaired = await withIssueCoordination(forge, issue.number, async () => {
+      const current = await forge.getIssue(issue.number)
+      const currentAgeMs = now.getTime() - new Date(current.updatedAt).getTime()
+      if (current.state !== 'open'
+        || !current.labels.includes(LABEL_READY)
+        || current.labels.includes(LABEL_IN_PROGRESS)
+        || current.assignees.length === 0
+        || currentAgeMs < leaseHours * 3600 * 1000
+        || current.assignees.length !== issue.assignees.length
+        || current.assignees.some((assignee) => !issue.assignees.includes(assignee))) {
+        return false
+      }
+      for (const assignee of current.assignees) {
+        await forge.unassignIssue(issue.number, assignee)
+      }
+      const released = await forge.getIssue(issue.number)
+      if (released.assignees.length !== 0) {
+        throw new Error(`Issue #${issue.number} still has assignees after ready-lease repair`)
+      }
+      return true
+    })
+    if (repaired) reaped.push(issue.number)
+  }
   for (const issue of openIssues.filter((candidate) =>
     candidate.labels.includes(LABEL_IN_PROGRESS)
       && (!candidate.labels.includes(LABEL_MERGE_FAILED)

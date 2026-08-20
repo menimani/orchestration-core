@@ -1491,6 +1491,34 @@ describe('reapStaleLeases', () => {
     expect(liveAfter.labels).toContain(LABEL_IN_PROGRESS)
   })
 
+  it('clears assignees from a stale issue stranded in ready', async () => {
+    const base = new Date('2026-08-08T12:00:00Z')
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const stranded = await forge.createIssue({
+      title: 'stranded ready', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_READY], assignees: ['worker-gone'],
+    })
+
+    expect(await reapStaleLeases(forge, paths, 3, base)).toEqual([stranded])
+    const repaired = await forge.getIssue(stranded)
+    expect(repaired.assignees).toEqual([])
+    expect(repaired.labels).toEqual([LABEL_FINDING, LABEL_READY])
+  })
+
+  it('leaves an unassigned ready issue untouched', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const ready = await forge.createIssue({
+      title: 'clean ready', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const before = await forge.getIssue(ready)
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+    expect(await forge.getIssue(ready)).toEqual(before)
+  })
+
   it('immediately retries when adding ready fails after unassignment', async () => {
     const now = new Date('2026-08-08T12:00:00Z')
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
