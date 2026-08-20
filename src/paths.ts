@@ -32,9 +32,11 @@ export function packageFile(...segments: string[]): string {
 
 export function packageCommandPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT): string {
   const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
-  const packageArgument = packageDirectory.includes(' ')
-    ? `"${packageDirectory}"`
-    : packageDirectory
+  // These commands are rendered into Bash instructions (including Git Bash on
+  // Windows). Quote every directory so shell metacharacters are always data; a
+  // literal apostrophe is represented by ending the quote, escaping it, and
+  // reopening the quote.
+  const packageArgument = `'${packageDirectory.replaceAll("'", "'\\''")}'`
   return packageDirectory === '' ? 'npm run' : `npm run -C ${packageArgument}`
 }
 

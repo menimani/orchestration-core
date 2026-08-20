@@ -214,12 +214,24 @@ describe('package script commands', () => {
 
   it('selects the package directory when it is installed as a subtree', () => {
     expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'ts')))
-      .toBe('npm run -C orchestration/ts stop')
+      .toBe("npm run -C 'orchestration/ts' stop")
   })
 
-  it('quotes a subtree package directory containing spaces', () => {
+  it('shell-quotes a subtree package directory containing spaces', () => {
     expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'core package')))
-      .toBe('npm run -C "orchestration/core package" stop')
+      .toBe("npm run -C 'orchestration/core package' stop")
+  })
+
+  it.each([
+    ['core;false', "'orchestration/core;false'"],
+    ['core&false', "'orchestration/core&false'"],
+    ['core$(false)', "'orchestration/core$(false)'"],
+    ['core`false`', "'orchestration/core`false`'"],
+    ['core!false', "'orchestration/core!false'"],
+    ["core'package", "'orchestration/core'\\''package'"],
+  ])('shell-quotes Bash and Windows Git Bash metacharacters in %s', (directory, quoted) => {
+    expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', directory)))
+      .toBe(`npm run -C ${quoted} stop`)
   })
 })
 
