@@ -280,6 +280,52 @@ describe('remote task adoption', () => {
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
   })
 
+  it('retries promotion persistence after the remote merge was already applied', async () => {
+    const task = pushWorkerBranch('20260809_000000_008_auto-retry-promotion-persistence')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const promotionPath = join(paths.queueDir, 'issue-promotion')
+    writeFileSync(promotionPath, 'temporarily unavailable\n')
+    let mergeChecks = 0
+    const project: ProjectAdapter = {
+      ...stubProject,
+      mergeChecks: () => [{
+        label: 'Count merge checks',
+        cwd: '',
+        command: 'node -e "process.exit(0)"',
+        appliesTo: () => {
+          mergeChecks += 1
+          return true
+        },
+      }],
+      cycleSuite: () => [],
+    }
+    const loop = makeLoop(project)
+
+    await loop.adoptRemoteTasks()
+
+    const mergedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_READY)
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_FAILED)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
+    expect(logged).toContain(
+      `WARN could not persist adopted issue #${issueNumber}; retrying next poll`,
+    )
+
+    rmSync(promotionPath)
+    await loop.adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(mergedHead)
+    expect(mergeChecks).toBe(1)
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({
+      issueNumber,
+      mergeCommit: mergedHead,
+      runBranch: 'main',
+    })
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_FAILED)
+  })
+
   it('persists adoption and stops when post-merge dependency synchronization fails', async () => {
     const task = pushWorkerBranch('20260809_000000_007_auto-persisted-before-return')
     writeFileSync(join(workerRoot, 'package.json'), '{"private":true}\n')

@@ -544,36 +544,58 @@ export function createLoop(deps: LoopDeps) {
         }
 
         const runBranch = git(['branch', '--show-current']).trim()
-        const mergeCommit = await mergeRemoteTask(
-          paths,
-          issue.number,
-          remote,
-          report.branch,
-          report.head,
-          {
-            taskGate: config.taskGate,
-            testCmd: config.testCmd === '' ? undefined : config.testCmd,
-            skipAutoTest: config.skipAutoTest,
-            project,
-            forge: rawForge,
-            outputFile: mergeLog,
-            orchestrationDepsRuntime,
-            onOrchestrationDepsEvent: orchestrationDepsEvent,
-            beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
-            closesIssues: adoptionIssues.map((candidate) => candidate.number),
-            onMerged: (mergedCommit) => {
-              writeFileSync(mergeFailureFile, '0\n')
-              recordIssuesForTask(
-                paths, taskId, adoptionIssues.map((candidate) => candidate.number),
-              )
-              recordIssuePromotions(paths, taskId, mergedCommit, runBranch)
-              const cycle = readCount(scanCountFile)
-              if (cycle > 0) {
-                rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
-              }
+        let appliedMergeCommit: string | undefined
+        let promotionPersistenceError: unknown
+        const persistPromotion = (mergedCommit: string): void => {
+          appliedMergeCommit = mergedCommit
+          try {
+            writeFileSync(mergeFailureFile, '0\n')
+            recordIssuesForTask(
+              paths, taskId, adoptionIssues.map((candidate) => candidate.number),
+            )
+            recordIssuePromotions(paths, taskId, mergedCommit, runBranch)
+            const cycle = readCount(scanCountFile)
+            if (cycle > 0) {
+              rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+            }
+          } catch (error) {
+            promotionPersistenceError = error
+            throw error
+          }
+        }
+        let mergeCommit: string
+        try {
+          mergeCommit = await mergeRemoteTask(
+            paths,
+            issue.number,
+            remote,
+            report.branch,
+            report.head,
+            {
+              taskGate: config.taskGate,
+              testCmd: config.testCmd === '' ? undefined : config.testCmd,
+              skipAutoTest: config.skipAutoTest,
+              project,
+              forge: rawForge,
+              outputFile: mergeLog,
+              orchestrationDepsRuntime,
+              onOrchestrationDepsEvent: orchestrationDepsEvent,
+              beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
+              closesIssues: adoptionIssues.map((candidate) => candidate.number),
+              onMerged: persistPromotion,
             },
-          },
-        )
+          )
+        } catch (error) {
+          if (appliedMergeCommit === undefined || error !== promotionPersistenceError) throw error
+          try {
+            persistPromotion(appliedMergeCommit)
+            mergeCommit = appliedMergeCommit
+          } catch (retryError) {
+            appendFileSync(mergeLog, `${errorSummary(retryError)}\n`)
+            event('WARN', `could not persist adopted issue #${issue.number}; retrying next poll`)
+            continue
+          }
+        }
         try {
           await Promise.all(adoptionIssues.map((candidate) =>
             updateAdoptedIssue(candidate, taskId, mergeCommit, runBranch)))
@@ -1909,7 +1931,7 @@ export function createLoop(deps: LoopDeps) {
         }
         if (emptyPrGate) {
           writeFileSync(resumeFlag, '')
-        } else if (config.autoReview) {
+        } else if (config.reviewEnabled && config.autoReview) {
           if (!runAutoReview(currentScans, cycleIsFinal(currentScans))) return 'continue'
           writeFileSync(resumeFlag, '')
         } else if (config.reviewEnabled) {

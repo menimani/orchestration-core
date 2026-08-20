@@ -1653,6 +1653,20 @@ describe('cycle gate', () => {
     expect(await loop.triggerScanIfIdle()).toBe('done')
   })
 
+  it('skips automatic review when review is disabled', async () => {
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: false,
+      autoReview: true,
+      maxScanCycles: 1,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(readdirSync(paths.tasksDir).some((name) => name.includes('_review-c1'))).toBe(false)
+  })
+
   it('completes and promotes when no source can produce more work', async () => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
