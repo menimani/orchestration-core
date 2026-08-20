@@ -1114,6 +1114,16 @@ export async function reconcileIssueReleaseIntents(
   paths: OrchPaths,
   options: IssueReleaseOptions = {},
 ): Promise<IssueReleaseFailure[]> {
+  const preparationDirectory = releasePreparationDir(paths)
+  if (existsSync(preparationDirectory)) {
+    for (const taskId of readdirSync(preparationDirectory).filter((name) =>
+      !name.startsWith('.'))) {
+      // cleanupTask removes the status only after the worktree and branch are gone.
+      // Once that durable boundary has been crossed, an interrupted caller can no
+      // longer roll cleanup back, so finish publishing its prepared release here.
+      if (readStatus(paths, taskId) === undefined) completeIssueReleaseIntent(paths, taskId)
+    }
+  }
   const directory = releaseIntentDir(paths)
   if (!existsSync(directory)) return []
   const failures: IssueReleaseFailure[] = []
