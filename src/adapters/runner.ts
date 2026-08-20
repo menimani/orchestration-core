@@ -37,16 +37,13 @@ export interface Runner {
 }
 
 export interface RunnerLoadOptions {
-  runnerClaudeModel?: string | undefined
-  runnerClaudeModelMinimal?: string | undefined
-  runnerClaudeModelLow?: string | undefined
-  runnerClaudeModelMedium?: string | undefined
-  runnerClaudeModelHigh?: string | undefined
+  /** Environment available to the selected runner adapter. */
+  env: NodeJS.ProcessEnv
 }
 
 export async function loadRunner(
   name: string,
-  options: RunnerLoadOptions = {},
+  options: RunnerLoadOptions = { env: process.env },
 ): Promise<Runner> {
   switch (name) {
     case 'codex': {

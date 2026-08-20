@@ -246,6 +246,10 @@ file with `npm run config -- list`, `npm run config -- get TASK_GATE`,
 `npm run config -- set TASK_GATE light`, and `npm run config -- unset TASK_GATE`; use the
 equivalent package-prefixed command for a subtree installation.
 
+The Claude-specific model variables in the table are the exception: the Claude adapter
+reads them directly from the process environment when it is loaded, so they are not
+settings in `orchestration/config.json`.
+
 Configuration commands publish updates atomically through a temporary file in the same
 directory, so readers cannot observe a partial write. The file is checked when a setting
 is used and reparsed only after its modification time changes. A malformed file or an
