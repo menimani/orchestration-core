@@ -74,6 +74,25 @@ describe('backlog process lock', () => {
       .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
   })
 
+  it('permits a later acquisition when released-lock removal fails', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    const removeDirectory = operatingSystem.removeDirectory.bind(operatingSystem)
+    let removalFailed = false
+    vi.spyOn(operatingSystem, 'removeDirectory').mockImplementation((path) => {
+      if (!removalFailed && path.startsWith(`${lockDir}.released.`)) {
+        removalFailed = true
+        throw new Error('removal failed')
+      }
+      removeDirectory(path)
+    })
+
+    expect(withBacklogLock(backlog, () => 'first')).toBe('first')
+    expect(removalFailed).toBe(true)
+    expect(withBacklogLock(backlog, () => 'second')).toBe('second')
+    expect(existsSync(lockDir)).toBe(false)
+  })
+
   it('reclaims a lock when its live PID belongs to a different process start', () => {
     const backlog = join(paths.queueDir, 'backlog.txt')
     const lockDir = `${backlog}.lock`
