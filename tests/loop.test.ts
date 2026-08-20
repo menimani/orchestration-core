@@ -10,8 +10,7 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
-  recordIssueForTask,
-  recordIssuePromotion, recordIssueReleaseIntent, recordIssuesForTask,
+  recordIssuePromotions, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
@@ -516,7 +515,7 @@ describe('forge poll budget', () => {
       autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 1,
     })
     loop.initializeSessionStateForBranch()
-    recordIssueForTask(paths, completedTask, 17)
+    recordIssuesForTask(paths, completedTask, [17])
     fakeForge.listLabels = vi.fn().mockRejectedValue(new Error('forge unavailable'))
 
     expect(await loop.poll()).toBe('continue')
@@ -536,7 +535,7 @@ describe('forge poll budget', () => {
     initializeGitRepo()
     writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# claimed issue task\n')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:2\n`)
-    recordIssueForTask(paths, taskId, 42)
+    recordIssuesForTask(paths, taskId, [42])
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -1944,8 +1943,8 @@ describe('remote issue queue idle detection', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'locally merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
-    recordIssueForTask(paths, 'merged-task', issueNumber)
-    recordIssuePromotion(paths, 'merged-task', 'abc123', 'feature/run-9')
+    recordIssuesForTask(paths, 'merged-task', [issueNumber])
+    recordIssuePromotions(paths, 'merged-task', 'abc123', 'feature/run-9')
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
@@ -2916,7 +2915,7 @@ describe('completed task merge recovery', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'conflicting fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
 
     expect(await loop.poll()).toBe('continue')
 
@@ -2984,7 +2983,7 @@ describe('completed task merge recovery', () => {
       title: 'already resolved finding', body: '',
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
@@ -3031,7 +3030,7 @@ describe('completed task merge recovery', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'duplicate fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     const getIssue = fakeForge.getIssue.bind(fakeForge)
     let unavailable = true
     fakeForge.getIssue = async (number) => {
@@ -3081,7 +3080,7 @@ describe('completed task merge recovery', () => {
       title: 'transient reconciliation', body: '',
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
     const getIssue = fakeForge.getIssue.bind(fakeForge)
     let unavailable = true
@@ -3162,7 +3161,7 @@ describe('completed task merge recovery', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'stale merged fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
 
     expect(await loop.poll()).toBe('continue')
     const mergedStatus = readStatus(paths, taskId)
@@ -3214,7 +3213,7 @@ describe('completed task merge recovery', () => {
     })
     const issue = fakeForge.issues.get(issueNumber)
     if (issue !== undefined) issue.updatedAt = '2026-08-01T00:00:00.000Z'
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     const commentIssue = fakeForge.commentIssue.bind(fakeForge)
     let attempts = 0
     fakeForge.commentIssue = async (...args) => {
@@ -3267,7 +3266,7 @@ describe('completed task merge recovery', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'pending fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
 
     expect(await loop.poll()).toBe('continue')
     expect(readStatus(paths, taskId)?.status).toBe('completed')

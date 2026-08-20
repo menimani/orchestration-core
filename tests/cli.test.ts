@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { issueCompletionForIssue, recordIssueForTask } from '../src/issueQueue.ts'
+import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
 import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
@@ -283,7 +283,7 @@ describe('manual merge', () => {
     git(['add', '-A'], worktree)
     git(['commit', '-qm', 'fix: complete linked task'], worktree)
     await writeStatus(paths, taskId, 'completed')
-    recordIssueForTask(paths, taskId, 197)
+    recordIssuesForTask(paths, taskId, [197])
     writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '3\n')
     const runBranch = git(['branch', '--show-current']).trim()
 
@@ -352,7 +352,7 @@ describe('manual merge', () => {
     writeFileSync(finalMessageFile(paths, taskId),
       'The requested behavior is already present.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
     await writeStatus(paths, taskId, 'completed')
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
 
     let issueState: 'open' | 'closed' = 'open'
     const forge = {

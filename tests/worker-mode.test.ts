@@ -9,7 +9,7 @@ import { loadConfig } from '../src/config.ts'
 import { createLoop } from '../src/loop.ts'
 import {
   buildIssueBody, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY,
-  recordIssueForTask, recordIssuesForTask,
+  recordIssuesForTask,
 } from '../src/issueQueue.ts'
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
@@ -60,7 +60,7 @@ async function claimedIssue(taskId: string, inspect = false): Promise<number> {
     labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     assignees: [forge.user],
   })
-  recordIssueForTask(paths, taskId, issueNumber)
+  recordIssuesForTask(paths, taskId, [issueNumber])
   if (inspect) {
     const inspectDir = join(paths.queueDir, 'inspect')
     mkdirSync(inspectDir, { recursive: true })
