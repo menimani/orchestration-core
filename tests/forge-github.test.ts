@@ -544,6 +544,40 @@ describe('GitHub forge JSON schemas', () => {
     })
   })
 
+  it('drops and reports stale closed entries from an open issue listing', async () => {
+    const reports: string[] = []
+    const forge = createGithubForge(
+      'repo-root',
+      async (_root, args) => {
+        if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+        if (args[0] === 'api') return JSON.stringify({ permission: 'write' })
+        return JSON.stringify([
+          openIssueFixture,
+          { ...openIssueFixture, number: 358, state: 'CLOSED' },
+          { ...openIssueFixture, number: 359 },
+        ])
+      },
+      (message) => reports.push(message),
+    )
+
+    await expect(forge.listOpenIssues('loop:ready')).resolves.toMatchObject([
+      { number: 357, state: 'open' },
+      { number: 359, state: 'open' },
+    ])
+    expect(reports).toEqual([
+      'dropped issue #358 with state CLOSED from open issue listing',
+    ])
+  })
+
+  it('still rejects an open issue listing malformed beyond a stale state', async () => {
+    const forge = forgeReturning([
+      openIssueFixture,
+      { ...openIssueFixture, number: 358, state: 'CLOSED', title: 42 },
+    ])
+
+    await expect(forge.listOpenIssues('loop:ready')).rejects.toThrow('[1].title')
+  })
+
   it('validates and normalizes the current user response', async () => {
     await expect(forgeReturning({ login: 'worker-one', avatar_url: 'future-field' }).currentUser())
       .resolves.toBe('worker-one')

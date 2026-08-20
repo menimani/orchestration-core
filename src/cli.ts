@@ -1224,7 +1224,11 @@ async function runLoopDaemon(
     )
     const topology = prepareBranchTopology(paths, config.integrationBranch)
     const loopPaths = topology.paths
-    const forge = await loadForge(config.forge, loopPaths.repoRoot)
+    const forge = await loadForge(
+      config.forge,
+      loopPaths.repoRoot,
+      (message) => log(formatEventLine('WARN', 'forge', message)),
+    )
     const runner = await loadRunner(config.runner, config)
     const projectModule = await import('./adapters/project.ts')
     const projectRoot = topology.integrationBranch === undefined
