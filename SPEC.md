@@ -275,7 +275,13 @@ values must be non-negative integers, with the narrower bounds stated below.
     served once. The
     sync replaces only a tree whose content matches its recorded last output; consumer
     divergence is warned and retained, and skills absent from the manifest are untouched.
-    A destination that cannot be served is reported without costing the others theirs.
+    In a subtree consumer, before writing any destination, the sync verifies that every
+    managed destination has no staged changes. An unverifiable or non-clean managed index
+    is fatal and stops the cycle before any destination is served. A destination rendering
+    failure is reported without costing the others theirs. The sync then stages all managed
+    updates and removals and commits them as one scoped commit; a staging, inspection, or
+    commit failure is fatal and stops the cycle before task dispatch, retaining any staged
+    output for diagnosis.
     Shared canonical sources do not live below a runner skill directory, so a subtree
     exposes no nested duplicate of a shared skill.
 
