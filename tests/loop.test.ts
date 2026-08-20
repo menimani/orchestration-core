@@ -28,6 +28,7 @@ import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { enqueueTask } from '../src/tasks.ts'
+import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -88,6 +89,7 @@ function makeLoop(
   clock: () => Date = () => new Date(2026, 7, 8, 12, 0, 0),
   runner: Runner = makeRunner(),
   enqueueTaskImpl: NonNullable<LoopDeps['enqueueTask']> = enqueueTask,
+  terminateTaskProcesses?: () => TaskProcessTermination,
 ): Loop {
   const config = { ...loadConfig({}), ...overrides }
   return createLoop({
@@ -100,6 +102,7 @@ function makeLoop(
     now: clock,
     orchestrationDepsRuntime,
     enqueueTask: enqueueTaskImpl,
+    terminateTaskProcesses,
   })
 }
 
@@ -3073,6 +3076,88 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
+  function makeDependencyChangingTask(taskId: string): string {
+    initializeGitRepo()
+    writeFileSync(join(repoRoot, 'package.json'), '{"private":true}\n')
+    writeFileSync(join(repoRoot, 'package-lock.json'), '{"lockfileVersion":3}\n')
+    git(['add', 'package.json', 'package-lock.json'])
+    git(['commit', '-m', 'chore: add dependency manifests'])
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(
+      join(worktree, 'package-lock.json'),
+      '{"lockfileVersion":3,"packages":{"node_modules/new-dependency":{}}}\n',
+    )
+    execFileSync('git', ['add', 'package-lock.json'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: update dependencies'], { cwd: worktree })
+    return worktree
+  }
+
+  it('skips dependency installation when a task process tree survives', async () => {
+    const taskId = '20260820_181834_032_auto-dependency-installation'
+    makeDependencyChangingTask(taskId)
+    const oldDependency = join(repoRoot, 'node_modules', 'old-dependency', 'package.json')
+    mkdirSync(dirname(oldDependency), { recursive: true })
+    writeFileSync(oldDependency, '{}\n')
+    const install = vi.fn(() => rmSync(join(repoRoot, 'node_modules'), {
+      recursive: true, force: true,
+    }))
+    const survivor = {
+      taskId: '20260820_181800_031_auto-parallel-worker', pid: 43120,
+      error: 'Could not stop process tree 43120.',
+    }
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      { install, packageRoot: repoRoot },
+      undefined,
+      undefined,
+      undefined,
+      () => ({ terminated: [], failures: [survivor] }),
+    )
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(install).not.toHaveBeenCalled()
+    expect(readFileSync(oldDependency, 'utf8')).toBe('{}\n')
+    expect(logText()).toContain(
+      'dependency installation skipped; process tree 031_auto PID 43120 survived',
+    )
+    expect(logged).toContain(
+      'Skipped orchestration deps  after 032_auto; a live task process tree survived',
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('installs dependencies after every task process tree stops cleanly', async () => {
+    const taskId = '20260820_181835_033_auto-clean-dependency-installation'
+    makeDependencyChangingTask(taskId)
+    const install = vi.fn()
+    const stopped = {
+      taskId: '20260820_181801_034_auto-parallel-worker', pid: 43121,
+    }
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      { install, packageRoot: repoRoot },
+      undefined,
+      undefined,
+      undefined,
+      () => ({ terminated: [stopped], failures: [] }),
+    )
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(install).toHaveBeenCalledOnce()
+    expect(install).toHaveBeenCalledWith(repoRoot)
+    expect(logText()).toContain(
+      'Stopped 034_auto    process tree PID 43121 before dependency installation',
+    )
+    expect(logged).toContain('Installed orchestration deps  after 033_auto')
+  })
+
   it('abandons a task after its first conflicting rebase and never retries it', async () => {
     const taskId = '20260815_181908_194_auto-rebase-conflict'
     const initialHead = initializeGitRepo()

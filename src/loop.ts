@@ -31,6 +31,9 @@ import { readStatus, transitionStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
+  terminateLiveTaskProcesses, type TaskProcessTermination,
+} from './taskProcesses.ts'
+import {
   frameUntrustedText, frameVerifiedRequirement, readTemplate, repositoryInspectionPreamble,
   reviewScopeTemplateValues,
 } from './templates.ts'
@@ -72,6 +75,7 @@ export interface LoopDeps {
   marker?: ((line: string) => void) | undefined
   now: () => Date
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
+  terminateTaskProcesses?: (() => TaskProcessTermination) | undefined
   enqueueTask?: typeof enqueueTask
   updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
   projectAdapterChanged?: () => boolean
@@ -126,6 +130,7 @@ export function createLoop(deps: LoopDeps) {
   const {
     paths, config, forge: rawForge, runner, project, log, marker = log, now,
     orchestrationDepsRuntime,
+    terminateTaskProcesses = () => terminateLiveTaskProcesses(paths),
     enqueueTask: enqueueTaskImpl = enqueueTask,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
@@ -291,9 +296,25 @@ export function createLoop(deps: LoopDeps) {
     return true
   }
 
-  function orchestrationDepsEvent(name: 'Installed' | 'WARN', subject: string): void {
-    if (name === 'Installed') event(name, 'orchestration deps', subject)
+  function orchestrationDepsEvent(
+    name: 'Installed' | 'Skipped' | 'WARN', subject: string,
+  ): void {
+    if (name === 'Installed' || name === 'Skipped') event(name, 'orchestration deps', subject)
     else event(name, subject)
+  }
+
+  function stopTaskProcessesBeforeDependencyInstall(): boolean {
+    const result = terminateTaskProcesses()
+    for (const task of result.terminated) {
+      event('Stopped', shortTaskId(task.taskId),
+        `process tree PID ${task.pid} before dependency installation`)
+    }
+    for (const failure of result.failures) {
+      event('WARN',
+        `dependency installation skipped; process tree ${shortTaskId(failure.taskId)} `
+        + `PID ${failure.pid} survived: ${failure.error}`)
+    }
+    return result.failures.length === 0
   }
 
   function warning(callSite: string, operation: string, subject: string): void {
@@ -538,6 +559,7 @@ export function createLoop(deps: LoopDeps) {
             outputFile: mergeLog,
             orchestrationDepsRuntime,
             onOrchestrationDepsEvent: orchestrationDepsEvent,
+            beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
             closesIssues: adoptionIssues.map((candidate) => candidate.number),
             onMerged: (mergedCommit) => {
               writeFileSync(mergeFailureFile, '0\n')
@@ -2112,6 +2134,7 @@ export function createLoop(deps: LoopDeps) {
           outputFile: mergeLog,
           orchestrationDepsRuntime,
           onOrchestrationDepsEvent: orchestrationDepsEvent,
+          beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
           onMergeStart: () => event('Merging', shortTaskId(taskId)),
           onMergeSkipped: (reason) => event(
             'Skipped', shortTaskId(taskId),
