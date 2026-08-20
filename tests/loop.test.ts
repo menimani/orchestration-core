@@ -10,6 +10,7 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
+  issueReleaseIntentForTask, issueReleasePreparationForTask, prepareIssueReleaseIntent,
   recordIssuePromotions, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
@@ -2024,6 +2025,38 @@ describe('remote issue queue idle detection', () => {
     expect(readFileSync(failureFile, 'utf8')).toBe('0\n')
     expect(logText()).toContain('Recovered reconciling persisted issue releases after 0 minutes')
     expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(false)
+  })
+
+  it('promotes a prepared release after local cleanup removed the task status', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      workerMode: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'interrupted cleanup release', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    recordIssuesForTask(paths, 'task-release', [issueNumber])
+    writeRawStatus('task-release', 'failed')
+    prepareIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    rmSync(statusFile(paths, 'task-release'))
+    expect(readStatus(paths, 'task-release')).toBeUndefined()
+
+    await loop.poll()
+
+    expect(issueReleasePreparationForTask(paths, 'task-release')).toEqual([])
+    expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([])
+    await expect(fakeForge.getIssue(issueNumber)).resolves.toMatchObject({
+      state: 'open',
+      assignees: [],
+      labels: expect.arrayContaining([LABEL_FINDING, LABEL_READY]),
+    })
+    expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
   it('logs changed remote work immediately and unchanged work at most every ten minutes', async () => {

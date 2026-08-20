@@ -89,6 +89,7 @@ describe('cleanup command', () => {
       assignees: [forge.user],
     })
     recordIssuesForTask(paths, taskId, [issueNumber])
+    writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, pid: null }))
     prepareIssueReleaseIntent(paths, taskId, [issueNumber])
 
     await expect(reconcileIssueReleaseIntents(forge, paths)).resolves.toEqual([])
