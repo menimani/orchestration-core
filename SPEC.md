@@ -330,9 +330,18 @@ are not parsed by `loadConfig` and are not operator-file settings.
     command prefix because the canonical sources already use that agent's format. Both use
     `npm run` as the command prefix in the owning repository and
     `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
-    served once. The
-    sync replaces only a tree whose content matches its recorded last output; consumer
-    divergence is warned and retained, and skills absent from the manifest are untouched.
+    served once. The renderer supplies one named
+    `{{ORCHESTRATION_PROJECT_GUIDANCE}}` injection point at the end of every shared
+    `SKILL.md`. For skill `<name>`, it reads the repository-owned fragment
+    `orchestration/project/skills/<name>.md`, outside a consumer's vendored package
+    subtree, and inserts it with Markdown separation. An absent fragment renders the point
+    to no bytes, preserving the prior output exactly. The sync replaces only a tree
+    recorded in its
+    `.orchestration-core-sync.json` managed index is core-owned, and a clean sync overwrites
+    edits, deletions, and added support files in its rendered tree; repository-specific
+    additions belong in the fragment. A skill absent from the managed index is
+    repository-owned and remains
+    entirely untouched.
     In a subtree consumer, before writing any destination, the sync verifies that every
     managed destination has no staged changes. An unverifiable or non-clean managed index
     is fatal and stops the cycle before any destination is served. A destination rendering

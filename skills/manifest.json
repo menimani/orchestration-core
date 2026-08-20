@@ -1,6 +1,7 @@
 {
   "commandPrefixPlaceholder": "{{ORCHESTRATION_COMMAND_PREFIX}}",
   "packagePathPrefixPlaceholder": "{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}",
+  "projectGuidancePlaceholder": "{{ORCHESTRATION_PROJECT_GUIDANCE}}",
   "skills": [
     "git-commit",
     "git-merge",
