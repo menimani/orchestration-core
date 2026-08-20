@@ -624,6 +624,39 @@ describe('loop daemon ownership', () => {
     expect(result.stdout).toContain('MAX_SCAN_CYCLES=0')
   })
 
+  it('reports the Claude models resolved for scan, task, and review efforts', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop', '--approve-mode', 'local'],
+      {
+        cwd: repoRoot,
+        env: {
+          ...CORE_ENV,
+          AUTO_PR: 'false',
+          ISSUE_QUEUE_ENABLED: 'false',
+          MAX_SCAN_CYCLES: '0',
+          RUNNER: 'claude',
+          RUNNER_CLAUDE_MODEL: 'claude-base',
+          RUNNER_CLAUDE_MODEL_MINIMAL: 'claude-scan',
+          RUNNER_CLAUDE_MODEL_LOW: 'claude-review',
+          RUNNER_CLAUDE_MODEL_HIGH: 'claude-task',
+          SCAN_EFFORT: 'minimal',
+          TASK_EFFORT: 'high',
+          REVIEW_EFFORT: 'low',
+        },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('scan: model=claude-scan effort=minimal')
+    expect(result.stdout).toContain('task: model=claude-task effort=high')
+    expect(result.stdout).toContain('review: model=claude-review effort=low')
+    expect(result.stdout).not.toContain('(runner default)')
+  })
+
   it('does not report a background daemon as started when the PID lock is held', () => {
     mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
     writeFileSync(daemonFile('loop.pid'), processMarkerText(processMarker(process.pid)))

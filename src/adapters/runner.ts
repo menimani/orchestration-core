@@ -27,12 +27,16 @@ export interface RunnerStartOptions {
   model?: string | undefined
 }
 
+export type RunnerModelOptions = Pick<RunnerStartOptions, 'effort' | 'model'>
+
 export type RunnerSharedSkillRenderOptions = SharedSkillRenderOptions
 export type RunnerSharedSkills = SharedSkillsAdapter
 
 export interface Runner {
   /** Runner-specific repository skill discovery and rendering behavior. */
   sharedSkills: RunnerSharedSkills
+  /** Resolve the model the adapter will pass to its runner, if it passes one explicitly. */
+  resolveModel?(options: RunnerModelOptions): string | undefined
   /** Start the agent process detached; resolve with its PID once spawned. */
   start(options: RunnerStartOptions): Promise<number>
 }

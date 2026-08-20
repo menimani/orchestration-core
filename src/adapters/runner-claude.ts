@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { createClaudeSharedSkills } from './shared-skills-claude.ts'
 import { startWindowsProcess } from './windows-process.ts'
 import type {
-  ReasoningEffort, Runner, RunnerLoadOptions, RunnerStartOptions,
+  ReasoningEffort, Runner, RunnerLoadOptions, RunnerModelOptions, RunnerStartOptions,
 } from './runner.ts'
 
 const DEFAULT_MODEL = 'claude-opus-5'
@@ -29,11 +29,7 @@ function effortModels(options: RunnerLoadOptions): Record<ReasoningEffort, strin
 // Claude print mode reads the task specification from standard input. It has no
 // output-last-message option, so the detached wrapper below tees stdout to the transcript
 // and publishes it atomically as the final-message file only after Claude exits.
-function buildArgs(
-  options: RunnerStartOptions,
-  models: Record<ReasoningEffort, string>,
-): string[] {
-  const model = configuredModel(options.model, models[options.effort])
+function buildArgs(model: string): string[] {
   return ['-p', '--permission-mode', 'bypassPermissions', '--model', model]
 }
 
@@ -92,14 +88,17 @@ export function createClaudeRunner(
   options: RunnerLoadOptions = { env: process.env },
 ): Runner {
   const models = effortModels(options)
+  const resolveModel = (modelOptions: RunnerModelOptions): string =>
+    configuredModel(modelOptions.model, models[modelOptions.effort])
   return {
     sharedSkills: createClaudeSharedSkills(),
+    resolveModel,
     start(startOptions: RunnerStartOptions): Promise<number> {
       const wrapperArgs = [
         fileURLToPath(import.meta.url),
         WRAPPER_ARGUMENT,
         startOptions.finalMessageFile,
-        ...buildArgs(startOptions, models),
+        ...buildArgs(resolveModel(startOptions)),
       ]
 
       if (process.platform === 'win32') {

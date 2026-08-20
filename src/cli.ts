@@ -7,7 +7,7 @@ import {
 import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
-import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
+import { loadRunner, type ReasoningEffort, type Runner } from './adapters/runner.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
@@ -115,15 +115,17 @@ function displayConfigValue(value: LoopConfig[keyof LoopConfig]): string {
 }
 
 function resolvedRunnerModel(
+  runner: Runner,
   configured: string,
+  effort: ReasoningEffort,
 ): string {
-  if (configured !== '') return configured
-  return '(runner default)'
+  return runner.resolveModel?.({ model: configured, effort }) ?? '(runner default)'
 }
 
 function reportResolvedLoopConfig(
   paths: OrchPaths,
   config: LoopConfig,
+  runner: Runner,
   report: (line: string) => void,
 ): void {
   const runBranch = config.integrationBranch || execFileSync(
@@ -138,9 +140,9 @@ function reportResolvedLoopConfig(
   report(`  queue mode: ${queueMode(config)}`)
   report(`  run branch: ${runBranch}`)
   report(`  runner: ${config.runner}`)
-  report(`  scan: model=${resolvedRunnerModel(config.scanModel)} effort=${config.scanEffort}`)
-  report(`  task: model=${resolvedRunnerModel(config.taskModel)} effort=${config.taskEffort}`)
-  report(`  review: model=${resolvedRunnerModel(config.taskModel)} effort=${config.reviewEffort}`)
+  report(`  scan: model=${resolvedRunnerModel(runner, config.scanModel, config.scanEffort)} effort=${config.scanEffort}`)
+  report(`  task: model=${resolvedRunnerModel(runner, config.taskModel, config.taskEffort)} effort=${config.taskEffort}`)
+  report(`  review: model=${resolvedRunnerModel(runner, config.taskModel, config.reviewEffort)} effort=${config.reviewEffort}`)
   report('  changed from defaults:')
   let changed = false
   for (const key of Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[]) {
@@ -935,7 +937,10 @@ const cmdLoop: Command = async (paths, args) => {
     }
     // A daemon child inherits the launcher's approved mode. The launcher already
     // reported it, and raw child output would bypass the aligned daemon log helper.
-    if (markerOutput === undefined) reportResolvedLoopConfig(paths, config, console.log)
+    if (markerOutput === undefined) {
+      const runner = await loadRunner(config.runner, { env: process.env })
+      reportResolvedLoopConfig(paths, config, runner, console.log)
+    }
     if (!await approveLoopStart(config, approvedMode)) return 1
   } catch (error) {
     console.error(`ERROR: ${errorSummary(error)}`)
