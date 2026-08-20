@@ -89,15 +89,9 @@ function syncSkills(
     }
   }
 
-  let result: ReturnType<typeof syncSharedSkills>
-  try {
-    result = syncSharedSkills(repoRoot, packageRoot, sharedSkills)
-  } catch (error) {
-    event('WARN', `shared skill sync failed: ${summary(error)}`)
-    return
-  }
-  for (const failure of result.failures) {
-    event('WARN', `shared skill sync failed: ${failure}`)
+  const result = syncSharedSkills(repoRoot, packageRoot, sharedSkills)
+  if (result.failures.length > 0) {
+    throw new Error(`shared skill sync failed: ${result.failures.join('; ')}`)
   }
   for (const skill of result.conflicts) {
     event('WARN', `shared skill ${skill} differs from the last synced copy; left unchanged`)
@@ -245,8 +239,29 @@ export async function updateCoreBeforeCycle(
   } catch (error) {
     try {
       runtime.git(paths.repoRoot, ['merge', '--abort'])
-    } catch {
-      // A subtree failure before merge creation has nothing to abort.
+    } catch (abortError) {
+      throw new Error(
+        `core update pull failed and merge abort failed: ${summary(abortError)}; `
+        + `pull failure: ${summary(error)}`,
+      )
+    }
+    let recoveredHead: string
+    let recoveredStatus: string
+    try {
+      recoveredHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+      recoveredStatus = runtime.git(paths.repoRoot, ['status', '--porcelain']).trim()
+    } catch (verificationError) {
+      throw new Error(
+        `core update pull failed and recovery could not be verified: ${summary(verificationError)}; `
+        + `pull failure: ${summary(error)}`,
+      )
+    }
+    if (recoveredHead !== oldHead || recoveredStatus !== '') {
+      throw new Error(
+        `core update pull failed and merge abort did not restore the repository: expected HEAD `
+        + `${oldHead.slice(0, 8)}, found ${recoveredHead.slice(0, 8)}; `
+        + `working tree ${recoveredStatus === '' ? 'clean' : `dirty (${recoveredStatus.replaceAll(/\r?\n/g, ', ')})`}`,
+      )
     }
     warn(event, `core update pull conflicted; continuing on old code: ${summary(error)}`)
     return finish('continue')

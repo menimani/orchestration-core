@@ -75,10 +75,11 @@ function makeLoop(
   coreConfig: ReturnType<typeof config>,
   runtime: CoreUpdateRuntime = { packageRoot, git },
   forge: Forge = makeFakeForge(),
+  runnerOverride?: Runner,
 ) {
   mkdirSync(join(paths.root, 'templates'), { recursive: true })
   writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
-  const runner: Runner = {
+  const runner: Runner = runnerOverride ?? {
     sharedSkills: fakeRunnerSharedSkills,
     start: async (options) => {
       runnerStarts.push(options.specFile)
@@ -321,6 +322,25 @@ describe('pre-cycle core update', () => {
     )
   })
 
+  it('stops before starting a cycle when a shared skill target fails to synchronize', async () => {
+    const start = vi.fn(async () => process.pid)
+    const failingRunner: Runner = {
+      sharedSkills: {
+        ...fakeRunnerSharedSkills,
+        renderFile: () => { throw new Error('simulated target failure') },
+      },
+      start,
+    }
+    const loop = makeLoop(config(), undefined, undefined, failingRunner)
+
+    await expect(loop.poll()).rejects.toThrow(
+      'shared skill sync failed: simulated target failure',
+    )
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(events.some((line) => line.includes('simulated target failure'))).toBe(false)
+  })
+
   it('pulls core changes but preserves and reports a committed consumer skill divergence', async () => {
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     writeFileSync(installed, 'consumer command\n')
@@ -441,6 +461,27 @@ describe('pre-cycle core update', () => {
     expect(events.some((line) => line.startsWith(
       'WARN core update pull conflicted; continuing on old code:',
     )), events.join('\n')).toBe(true)
+  })
+
+  it('stops when a failed core pull cannot confirm a successful merge abort', async () => {
+    writeFileSync(join(packageRoot, 'core.txt'), 'consumer version\n')
+    commit(repoRoot, 'fix: local core divergence')
+    advanceUpstream('upstream version\n')
+    const abortFailureGit = (root: string, args: string[]): string => {
+      if (args[0] === 'merge' && args[1] === '--abort') {
+        git(root, args)
+        throw new Error('simulated abort failure')
+      }
+      return git(root, args)
+    }
+    const loop = makeLoop(config(), { packageRoot, git: abortFailureGit })
+
+    await expect(loop.poll()).rejects.toThrow(
+      'core update pull failed and merge abort failed: simulated abort failure',
+    )
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
+    expect(runnerStarts).toHaveLength(0)
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
   })
 
   it('skips the check entirely when CORE_AUTO_UPDATE=false', async () => {
