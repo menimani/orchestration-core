@@ -63,6 +63,8 @@ import { LOOP_STARTUP_RESULT_FILE_ENV } from './internalEnvironment.ts'
 
 type Command = (paths: OrchPaths, args: string[]) => Promise<number>
 
+type QueueMode = 'local' | 'issue'
+
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high'])
 
 async function loadProject(pathsRoot: string) {
@@ -88,6 +90,135 @@ const RECOVERY_LOCK_STALE_MS = 10_000
 const RECOVERY_LOCK_TIMEOUT_MS = 10_000
 const RECOVERY_LOCK_POLL_MS = 10
 const LOOP_STARTUP_TIMEOUT_MS = 30_000
+
+const CONFIG_ENV_NAMES: Readonly<Record<keyof LoopConfig, string>> = {
+  maxParallel: 'MAX_PARALLEL',
+  pollIntervalSeconds: 'POLL_INTERVAL',
+  autoMerge: 'AUTO_MERGE',
+  testCmd: 'TEST_CMD',
+  skipAutoTest: 'SKIP_AUTO_TEST',
+  maxGrowthDepth: 'MAX_GROWTH_DEPTH',
+  maxTotalTasks: 'MAX_TOTAL_TASKS',
+  scanEnabled: 'SCAN_ENABLED',
+  maxScanCycles: 'MAX_SCAN_CYCLES',
+  maxCiFixAttempts: 'MAX_CI_FIX_ATTEMPTS',
+  maxEmptyScans: 'MAX_EMPTY_SCANS',
+  autoPr: 'AUTO_PR',
+  reviewEnabled: 'REVIEW_ENABLED',
+  ciGateEnabled: 'CI_GATE_ENABLED',
+  autoReview: 'AUTO_REVIEW',
+  maxReviewRounds: 'MAX_REVIEW_ROUNDS',
+  reviewEveryNCycles: 'REVIEW_EVERY_N_CYCLES',
+  maxFinalReviewRounds: 'MAX_FINAL_REVIEW_ROUNDS',
+  maxBurstFailures: 'MAX_BURST_FAILURES',
+  maxConsecutiveMergeFailures: 'MAX_CONSECUTIVE_MERGE_FAILURES',
+  scanEffort: 'SCAN_EFFORT',
+  taskEffort: 'TASK_EFFORT',
+  reviewEffort: 'REVIEW_EFFORT',
+  scanModel: 'SCAN_MODEL',
+  taskModel: 'TASK_MODEL',
+  scanParallel: 'SCAN_PARALLEL',
+  taskGate: 'TASK_GATE',
+  forge: 'FORGE',
+  runner: 'RUNNER',
+  runnerClaudeModel: 'RUNNER_CLAUDE_MODEL',
+  runnerClaudeModelMinimal: 'RUNNER_CLAUDE_MODEL_MINIMAL',
+  runnerClaudeModelLow: 'RUNNER_CLAUDE_MODEL_LOW',
+  runnerClaudeModelMedium: 'RUNNER_CLAUDE_MODEL_MEDIUM',
+  runnerClaudeModelHigh: 'RUNNER_CLAUDE_MODEL_HIGH',
+  issueQueueEnabled: 'ISSUE_QUEUE_ENABLED',
+  workerMode: 'WORKER_MODE',
+  issueLeaseHours: 'ISSUE_LEASE_HOURS',
+  coreAutoUpdate: 'CORE_AUTO_UPDATE',
+  upstreamRemote: 'UPSTREAM_REMOTE',
+  upstreamBranch: 'UPSTREAM_BRANCH',
+  integrationBranch: 'INTEGRATION_BRANCH',
+}
+
+function queueMode(config: LoopConfig): QueueMode {
+  return config.issueQueueEnabled ? 'issue' : 'local'
+}
+
+function displayConfigValue(value: LoopConfig[keyof LoopConfig]): string {
+  if (value === '') return '(empty)'
+  return String(value)
+}
+
+function resolvedRunnerModel(
+  config: LoopConfig,
+  configured: string,
+  effort: ReasoningEffort,
+): string {
+  if (configured !== '') return configured
+  if (config.runner !== 'claude') return '(runner default)'
+  return {
+    minimal: config.runnerClaudeModelMinimal,
+    low: config.runnerClaudeModelLow,
+    medium: config.runnerClaudeModelMedium,
+    high: config.runnerClaudeModelHigh,
+  }[effort]
+}
+
+function reportResolvedLoopConfig(
+  paths: OrchPaths,
+  config: LoopConfig,
+  report: (line: string) => void,
+): void {
+  const runBranch = config.integrationBranch || execFileSync(
+    'git', ['branch', '--show-current'], {
+      cwd: paths.repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  ).trim()
+  const defaults = loadConfig({})
+  report('Resolved loop configuration:')
+  report(`  queue mode: ${queueMode(config)}`)
+  report(`  run branch: ${runBranch}`)
+  report(`  runner: ${config.runner}`)
+  report(`  scan: model=${resolvedRunnerModel(config, config.scanModel, config.scanEffort)} effort=${config.scanEffort}`)
+  report(`  task: model=${resolvedRunnerModel(config, config.taskModel, config.taskEffort)} effort=${config.taskEffort}`)
+  report(`  review: model=${resolvedRunnerModel(config, config.taskModel, config.reviewEffort)} effort=${config.reviewEffort}`)
+  report('  changed from defaults:')
+  let changed = false
+  for (const key of Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[]) {
+    if (config[key] === defaults[key]) continue
+    report(`    ${CONFIG_ENV_NAMES[key]}=${displayConfigValue(config[key])}`)
+    changed = true
+  }
+  if (!changed) report('    (none)')
+}
+
+async function approveLoopStart(
+  config: LoopConfig,
+  approvedMode: string | undefined,
+): Promise<boolean> {
+  const resolvedMode = queueMode(config)
+  if (process.stdin.isTTY !== true) {
+    if (approvedMode === undefined) {
+      console.error(
+        `Refusing non-interactive start: pass --approve-mode ${resolvedMode} to approve the resolved queue mode.`,
+      )
+      return false
+    }
+    if (approvedMode !== resolvedMode) {
+      console.error(
+        `Refusing start: approved queue mode '${approvedMode}' does not match resolved queue mode '${resolvedMode}'.`,
+      )
+      return false
+    }
+    return true
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    const answer = await rl.question('Start the loop with this configuration? [y/N] ')
+    const approved = /^(?:y|yes)$/i.test(answer.trim())
+    if (!approved) console.error('Refusing start: configuration was not approved.')
+    return approved
+  } finally {
+    rl.close()
+  }
+}
 
 interface LoopStartupResult {
   status: 'ready' | 'error'
@@ -727,10 +858,50 @@ const cmdStop: Command = async (paths) => {
 
 const cmdLoop: Command = async (paths, args) => {
   const loopLog = join(paths.logsDir, 'loop.log')
-  if (args[0] === '--daemon' || args[0] === '-d') {
+  let daemonMode = false
+  let markerOutput: string | undefined
+  let approvedMode: string | undefined
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === '--daemon' || arg === '-d') daemonMode = true
+    else if (arg === '--marker-output') {
+      markerOutput = args[++i]
+      if (markerOutput === undefined) {
+        console.error('Usage: loop [--daemon] [--approve-mode local|issue]')
+        return 1
+      }
+    } else if (arg === '--approve-mode') {
+      approvedMode = args[++i]
+      if (approvedMode === undefined) {
+        console.error('Usage: loop [--daemon] [--approve-mode local|issue]')
+        return 1
+      }
+    } else {
+      console.error(`Unknown option: ${arg}`)
+      console.error('Usage: loop [--daemon] [--approve-mode local|issue]')
+      return 1
+    }
+  }
+
+  let config: LoopConfig
+  try {
+    config = loadConfig()
+    // A daemon child inherits the launcher's approved mode. The launcher already
+    // reported it, and raw child output would bypass the aligned daemon log helper.
+    if (markerOutput === undefined) reportResolvedLoopConfig(paths, config, console.log)
+    if (!await approveLoopStart(config, approvedMode)) return 1
+  } catch (error) {
+    console.error(`ERROR: ${errorSummary(error)}`)
+    return 1
+  }
+  // The command registry resolves paths without creating them so a refused start is
+  // side-effect free. Approval is the boundary after which the loop may prepare state.
+  orchPaths(paths.repoRoot)
+
+  if (daemonMode) {
     // run-branch.txt is updated by the child after this descriptor is opened. Use the
     // branch it is about to record so a new run rotates immediately, not on its restart.
-    const configuredIntegrationBranch = loadConfig().integrationBranch
+    const configuredIntegrationBranch = config.integrationBranch
     const runBranch = configuredIntegrationBranch || execFileSync(
       'git', ['branch', '--show-current'], {
         cwd: paths.repoRoot,
@@ -744,7 +915,10 @@ const cmdLoop: Command = async (paths, args) => {
       paths.logsDir,
       `.loop-startup-${process.pid}-${randomUUID()}.json`,
     )
-    const daemonArgs = [packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog]
+    const daemonArgs = [
+      packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
+      '--approve-mode', queueMode(config),
+    ]
     // The daemon must work on the repository this launcher was pointed at. Starting it
     // in the package directory instead made it resolve its own checkout as the
     // repository, which put the startup dependency install inside the very package the
@@ -772,7 +946,6 @@ const cmdLoop: Command = async (paths, args) => {
     console.log(`Stop: ${packageScriptCommand(paths.repoRoot, 'stop')}`)
     return 0
   }
-  const markerOutput = args[0] === '--marker-output' ? args[1] : undefined
   const startupResultFile = process.env[LOOP_STARTUP_RESULT_FILE_ENV]
   delete process.env[LOOP_STARTUP_RESULT_FILE_ENV]
   let startupReported = false
@@ -782,7 +955,6 @@ const cmdLoop: Command = async (paths, args) => {
     publishLoopStartupResult(startupResultFile, result)
   }
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
-  let config: LoopConfig | undefined
   let startupError: string | undefined
   const log = (message: string, error = false): void => {
     if (startupError === undefined && message.startsWith('ERROR:')) {
@@ -794,7 +966,7 @@ const cmdLoop: Command = async (paths, args) => {
       : 0
     for (const line of loopLogLines(message, {
       currentCycle,
-      cycleCap: config?.maxScanCycles ?? 0,
+      cycleCap: config.maxScanCycles,
     })) write(line)
   }
   const marker = (message: string): void => {
@@ -802,7 +974,6 @@ const cmdLoop: Command = async (paths, args) => {
     else appendFileSync(markerOutput, `${message}\n`)
   }
   try {
-    config = loadConfig()
     const result = await runLoopDaemon(paths, log, marker, config, () => {
       reportStartup({
         status: 'ready',
@@ -1197,7 +1368,7 @@ async function main(): Promise<number> {
     console.error(`Available commands: ${Object.keys(commands).join(', ')}`)
     return 1
   }
-  const paths = orchPaths(repoRoot())
+  const paths = orchPaths(repoRoot(), commandName !== 'loop')
   try {
     return await command(paths, args)
   } catch (error) {

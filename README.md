@@ -161,7 +161,7 @@ commits and merges on its own. On POSIX shells:
 
 ```bash
 MAX_SCAN_CYCLES=12 MAX_PARALLEL=8 AUTO_REVIEW=true \
-  node orchestration/ts/src/cli.ts loop --daemon
+  node orchestration/ts/src/cli.ts loop --approve-mode local --daemon
 ```
 
 On Windows PowerShell (with `bash` on `PATH` as described above):
@@ -170,7 +170,7 @@ On Windows PowerShell (with `bash` on `PATH` as described above):
 $env:MAX_SCAN_CYCLES = '12'
 $env:MAX_PARALLEL = '8'
 $env:AUTO_REVIEW = 'true'
-node orchestration/ts/src/cli.ts loop --daemon
+node orchestration/ts/src/cli.ts loop --approve-mode local --daemon
 ```
 
 The default branch layout remains direct: the topic branch where the daemon starts is
@@ -179,8 +179,15 @@ single-worktree shape for consumers whose source is not the loop. Repositories w
 loop runs its own source can freeze the daemon checkout by naming a separate run branch:
 
 ```bash
-INTEGRATION_BRANCH=feature/current-run node src/cli.ts loop --daemon
+INTEGRATION_BRANCH=feature/current-run node src/cli.ts loop --approve-mode local --daemon
 ```
+
+Every start prints the resolved queue mode, run branch, runner models and efforts, and
+settings that differ from their defaults. In a terminal, the loop starts only after an
+explicit `y` or `yes`. A non-interactive caller must pass `--approve-mode local` for the
+default local backlog or `--approve-mode issue` when `ISSUE_QUEUE_ENABLED=true`. A
+missing flag or a flag that does not match the resolved mode exits non-zero before the
+loop touches the queue, worktrees, or forge.
 
 With `INTEGRATION_BRANCH` set, the original repository checkout is the daemon worktree
 and stays on its exact starting commit until the run ends. The loop creates or resumes
