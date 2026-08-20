@@ -22,7 +22,7 @@ import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
-  removeWorktreeWithFallback, type WorktreeRemovalRuntime,
+  removalFailureDetail, removeWorktreeWithFallback, type WorktreeRemovalRuntime,
 } from './worktree.ts'
 
 export class MergeError extends Error {
@@ -273,13 +273,50 @@ function removeFinishedWorktree(
   completion: string,
 ): boolean {
   const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
-  if (result.fallback === undefined) return true
   if (result.fallbackFailure !== undefined) {
     log(`WARN: ${completion}, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
     return false
   }
-  log(`Worktree removal needed the ${result.fallback}: ${worktree} (${result.gitFailure})`)
-  return true
+  if (result.fallback !== undefined) {
+    log(`Worktree removal needed the ${result.fallback}: ${worktree} (${result.gitFailure})`)
+  }
+  if (result.pruneFailure !== undefined) {
+    log(`WARN: worktree metadata pruning failed for ${worktree}: ${result.pruneFailure}`)
+  }
+
+  try {
+    const registered = runtime.git(paths.repoRoot, ['worktree', 'list', '--porcelain', '-z'])
+      .split('\0').some((field) => {
+        if (!field.startsWith('worktree ')) return false
+        return runtime.os.worktreePathFor(field.slice('worktree '.length)).comparisonKey
+          === runtime.os.worktreePathFor(worktree).comparisonKey
+      })
+    if (!registered) return true
+  } catch (error) {
+    log(`WARN: could not verify worktree metadata removal for ${worktree}: ${removalFailureDetail(error)}`)
+    return false
+  }
+  log(`WARN: the removed worktree is still registered and has to be pruned by hand: ${worktree}`)
+  return false
+}
+
+function removeAndVerifyTaskBranch(repoRoot: string, branch: string): boolean {
+  try {
+    git(repoRoot, ['branch', '-d', branch])
+  } catch {
+    try {
+      git(repoRoot, ['branch', '-D', branch])
+    } catch {
+      // Verification below distinguishes an already absent branch from a failed removal.
+    }
+  }
+  try {
+    return git(repoRoot, [
+      'for-each-ref', '--format=%(refname)', `refs/heads/${branch}`,
+    ]).trim() === ''
+  } catch {
+    return false
+  }
 }
 
 export function removeMergedWorktree(
@@ -453,10 +490,11 @@ export function removeTemporaryWorktree(
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
   const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
-  if (result.fallbackFailure === undefined) return
+  if (result.fallbackFailure === undefined && result.pruneFailure === undefined) return
+  const pruneDetail = result.pruneFailure === undefined ? '' : `; prune: ${result.pruneFailure}`
   throw new MergeError(
     `Could not remove temporary worktree ${worktree}; merge was not applied. `
-    + `(git: ${result.gitFailure}; fallback: ${result.fallbackFailure})`,
+    + `(git: ${result.gitFailure}; fallback: ${result.fallbackFailure}${pruneDetail})`,
   )
 }
 
@@ -536,18 +574,11 @@ async function finalizeLocalMerge(
   const worktreeRemoved = removeMergedWorktree(
     paths, worktree, io.out, options.worktreeRemovalRuntime,
   )
-  try {
-    git(paths.repoRoot, ['branch', '-d', branch])
-  } catch {
-    try {
-      git(paths.repoRoot, ['branch', '-D', branch])
-    } catch {
-      // an inspection task's branch may already be gone
-    }
-  }
-  io.out(worktreeRemoved
+  const branchRemoved = removeAndVerifyTaskBranch(paths.repoRoot, branch)
+  io.out(worktreeRemoved && branchRemoved
     ? `Merged ${taskId} and removed the worktree.`
-    : `Merged ${taskId}; manual worktree cleanup remains: ${worktree}`)
+    : `Merged ${taskId}; manual worktree cleanup remains: ${worktree}`
+      + (branchRemoved ? '' : `; task branch remains: ${branch}`))
   return mergeCommit
 }
 
@@ -571,18 +602,11 @@ async function finalizeNoChange(
     paths, worktree, io.out, options.worktreeRemovalRuntime ?? worktreeRemovalRuntime,
     'task completed without changes',
   )
-  try {
-    git(paths.repoRoot, ['branch', '-d', branch])
-  } catch {
-    try {
-      git(paths.repoRoot, ['branch', '-D', branch])
-    } catch {
-      // The task branch may already be gone after an interrupted cleanup.
-    }
-  }
-  io.out(worktreeRemoved
+  const branchRemoved = removeAndVerifyTaskBranch(paths.repoRoot, branch)
+  io.out(worktreeRemoved && branchRemoved
     ? `Completed ${taskId} without changes and removed the worktree.`
-    : `Completed ${taskId} without changes; manual worktree cleanup remains: ${worktree}`)
+    : `Completed ${taskId} without changes; manual worktree cleanup remains: ${worktree}`
+      + (branchRemoved ? '' : `; task branch remains: ${branch}`))
 }
 
 /**
