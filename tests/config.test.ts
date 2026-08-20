@@ -41,6 +41,7 @@ describe('loadConfig', () => {
       reviewEveryNCycles: 1,
       maxFinalReviewRounds: 4,
       maxBurstFailures: 3,
+      maxIssueRetries: 3,
       maxConsecutiveMergeFailures: 3,
       scanEffort: 'medium',
       taskEffort: 'medium',
@@ -65,6 +66,7 @@ describe('loadConfig', () => {
   it('reads overrides from the environment', () => {
     const config = loadConfig({
       MAX_PARALLEL: '12',
+      MAX_ISSUE_RETRIES: '5',
       REVIEW_EVERY_N_CYCLES: '3',
       TASK_GATE: 'light',
       AUTO_REVIEW: 'true',
@@ -80,6 +82,7 @@ describe('loadConfig', () => {
       INTEGRATION_BRANCH: 'integration/run',
     })
     expect(config.maxParallel).toBe(12)
+    expect(config.maxIssueRetries).toBe(5)
     expect(config.reviewEveryNCycles).toBe(3)
     expect(config.taskGate).toBe('light')
     expect(config.autoReview).toBe(true)

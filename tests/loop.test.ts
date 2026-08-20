@@ -12,7 +12,7 @@ import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
   recordIssuePromotions, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
-  LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
+  LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
@@ -562,6 +562,32 @@ describe('forge poll budget', () => {
     expect(issue.assignees).toEqual([])
     expect(issueNumbersForTask(paths, failedTaskId)).toEqual([])
     expect(existsSync(join(paths.tasksDir, `${failedTaskId}.md`))).toBe(false)
+  })
+
+  it('parks a repeatedly failing issue and stops the loop at its retry bound', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+      maxIssueRetries: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: '[BUG] `src/retry.ts` persistent failure',
+      body: buildIssueBody('[BUG] `src/retry.ts` persistent failure', 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    await loop.poll()
+    const failedTaskId = readdirSync(paths.statusDir)[0]!.replace(/\.json$/, '')
+    writeRawStatus(failedTaskId, 'failed')
+    expect(await loop.poll()).toBe('continue')
+
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_RETRY_EXHAUSTED)
+    expect(issue.labels).not.toContain(LABEL_READY)
+    expect(issue.assignees).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(`Parked #${issueNumber}`)
   })
 
   it('persists a failed-task release and stops after three failed reconciliations', async () => {

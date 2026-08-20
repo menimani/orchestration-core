@@ -24,6 +24,7 @@ export const LABEL_READY = 'loop:ready'
 export const LABEL_IN_PROGRESS = 'loop:in-progress'
 export const LABEL_MERGE_READY = 'loop:merge-ready'
 export const LABEL_MERGE_FAILED = 'loop:merge-failed'
+export const LABEL_RETRY_EXHAUSTED = 'loop:retry-exhausted'
 export const LABEL_UNTRUSTED_AUTHOR = 'loop:untrusted-author'
 export const LABEL_GROUP_SINGLETON = 'loop:group-singleton'
 export const QUEUE_LABELS = [
@@ -32,6 +33,10 @@ export const QUEUE_LABELS = [
   { name: LABEL_IN_PROGRESS, description: 'Claimed loop work; the assignee holds the lease' },
   { name: LABEL_MERGE_READY, description: 'Completed worker branch waiting for the merger' },
   { name: LABEL_MERGE_FAILED, description: 'Worker branch that the merger could not adopt' },
+  {
+    name: LABEL_RETRY_EXHAUSTED,
+    description: 'Task failed repeatedly; parked until an operator returns it to ready',
+  },
   {
     name: LABEL_UNTRUSTED_AUTHOR,
     description: 'Finding authored by an account without repository write access; inspect manually',
@@ -43,6 +48,7 @@ export const QUEUE_LABELS = [
 ] as const
 const LIFECYCLE_LABELS = [
   LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
+  LABEL_RETRY_EXHAUSTED,
 ] as const
 type LifecycleLabel = typeof LIFECYCLE_LABELS[number]
 const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
@@ -808,6 +814,47 @@ function releasePreparationFile(paths: OrchPaths, taskId: string): string {
   return join(releasePreparationDir(paths), taskId)
 }
 
+function failureCountDir(paths: OrchPaths): string {
+  return join(paths.queueDir, 'issue-failure-count')
+}
+
+function failureCountFile(paths: OrchPaths, issueNumber: number): string {
+  return join(failureCountDir(paths), String(issueNumber))
+}
+
+export function issueFailureCount(paths: OrchPaths, issueNumber: number): number {
+  const file = failureCountFile(paths, issueNumber)
+  if (!existsSync(file)) return 0
+  const value = Number(readFileSync(file, 'utf8').trim())
+  return Number.isSafeInteger(value) && value > 0 ? value : 0
+}
+
+/** Count one terminal task failure for each issue before its claim is released. */
+export function recordIssueFailure(paths: OrchPaths, taskId: string): number[] {
+  const issueNumbers = issueNumbersForTask(paths, taskId)
+  if (issueNumbers.length === 0) return []
+  mkdirSync(failureCountDir(paths), { recursive: true })
+  return issueNumbers.map((issueNumber) => {
+    const count = issueFailureCount(paths, issueNumber) + 1
+    const file = failureCountFile(paths, issueNumber)
+    const temporaryFile = `${file}.${process.pid}.tmp`
+    try {
+      writeFileSync(temporaryFile, `${count}\n`)
+      renameSync(temporaryFile, file)
+    } finally {
+      rmSync(temporaryFile, { force: true })
+    }
+    return count
+  })
+}
+
+/** A completed task breaks the issue's consecutive failure streak. */
+export function clearIssueFailureCounts(paths: OrchPaths, taskId: string): void {
+  for (const issueNumber of issueNumbersForTask(paths, taskId)) {
+    rmSync(failureCountFile(paths, issueNumber), { force: true })
+  }
+}
+
 export function recordIssuesForTask(
   paths: OrchPaths,
   taskId: string,
@@ -980,6 +1027,39 @@ export async function returnIssueToReady(
   })
 }
 
+/** Remove a repeatedly failing issue from the claimable lifecycle. */
+async function parkIssue(forge: Forge, issueNumber: number): Promise<boolean> {
+  return withIssueCoordination(forge, issueNumber, async () => {
+    const issue = await forge.getIssue(issueNumber)
+    if (issue.state !== 'open') return false
+    const alreadyParked = issueHasExactlyLifecycleLabel(issue, LABEL_RETRY_EXHAUSTED)
+      && issue.assignees.length === 0
+    for (const assignee of issue.assignees) await forge.unassignIssue(issueNumber, assignee)
+    if (!issue.labels.includes(LABEL_RETRY_EXHAUSTED)) {
+      await forge.addLabel(issueNumber, LABEL_RETRY_EXHAUSTED)
+    }
+    for (const label of LIFECYCLE_LABELS) {
+      if (label !== LABEL_RETRY_EXHAUSTED && issue.labels.includes(label)) {
+        await forge.removeLabel(issueNumber, label)
+      }
+    }
+    const parked = await forge.getIssue(issueNumber)
+    if (parked.state === 'open'
+      && (parked.assignees.length !== 0
+        || !issueHasExactlyLifecycleLabel(parked, LABEL_RETRY_EXHAUSTED))) {
+      throw new Error(
+        `Issue #${issueNumber} did not reach the single ${LABEL_RETRY_EXHAUSTED} lifecycle state`,
+      )
+    }
+    return !alreadyParked
+  })
+}
+
+export interface IssueReleaseOptions {
+  maxIssueRetries?: number
+  onPark?: (issueNumber: number, failures: number) => void
+}
+
 export interface IssueReleaseFailure {
   issueNumber: number
   error: unknown
@@ -1004,12 +1084,20 @@ export async function reconcileIssueReleaseIntent(
   forge: Forge,
   paths: OrchPaths,
   taskId: string,
+  options: IssueReleaseOptions = {},
 ): Promise<IssueReleaseFailure[]> {
   const issueNumbers = issueReleaseIntentForTask(paths, taskId)
   if (issueNumbers.length === 0) return []
   const keepSingleton = issueNumbers.length > 1
-  const results = await Promise.allSettled(issueNumbers.map((issueNumber) =>
-    returnIssueToReady(forge, issueNumber, keepSingleton)))
+  const results = await Promise.allSettled(issueNumbers.map(async (issueNumber) => {
+    const failures = issueFailureCount(paths, issueNumber)
+    if (failures >= (options.maxIssueRetries ?? Number.POSITIVE_INFINITY)) {
+      const newlyParked = await parkIssue(forge, issueNumber)
+      if (newlyParked) options.onPark?.(issueNumber, failures)
+      return
+    }
+    await returnIssueToReady(forge, issueNumber, keepSingleton)
+  }))
   const failures = results.flatMap((result, index) => result.status === 'rejected'
     ? [{ issueNumber: issueNumbers[index]!, error: result.reason }]
     : [])
@@ -1024,12 +1112,13 @@ export async function reconcileIssueReleaseIntent(
 export async function reconcileIssueReleaseIntents(
   forge: Forge,
   paths: OrchPaths,
+  options: IssueReleaseOptions = {},
 ): Promise<IssueReleaseFailure[]> {
   const directory = releaseIntentDir(paths)
   if (!existsSync(directory)) return []
   const failures: IssueReleaseFailure[] = []
   for (const taskId of readdirSync(directory).filter((name) => !name.startsWith('.'))) {
-    failures.push(...await reconcileIssueReleaseIntent(forge, paths, taskId))
+    failures.push(...await reconcileIssueReleaseIntent(forge, paths, taskId, options))
   }
   return failures
 }
@@ -1550,8 +1639,9 @@ export async function reapStaleLeases(
   hasMergeMarker: (issue: ForgeIssue) => Promise<boolean> = async (issue) =>
     (await forge.listIssueComments(issue.number)).some((comment) =>
       comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
+  releaseOptions: IssueReleaseOptions = {},
 ): Promise<number[]> {
-  const releaseFailures = await reconcileIssueReleaseIntents(forge, paths)
+  const releaseFailures = await reconcileIssueReleaseIntents(forge, paths, releaseOptions)
   if (releaseFailures.length > 0) {
     throw new IssueReleaseReconciliationError(releaseFailures)
   }

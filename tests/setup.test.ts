@@ -54,7 +54,7 @@ describe('setup verification', () => {
       'PASS: all 0 adapter-referenced paths exist',
       'PASS: current branch can push to origin/topic',
       'PASS: core.hooksPath is orchestration/ts/.githooks',
-      'PASS: all 7 loop labels exist',
+      'PASS: all 8 loop labels exist',
     ])
   })
 

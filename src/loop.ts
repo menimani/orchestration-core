@@ -50,7 +50,8 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
-  recordIssueCompletions, recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
+  clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
+  recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
@@ -2040,6 +2041,13 @@ export function createLoop(deps: LoopDeps) {
     const mergeAttempts = new Set<string>()
     const locallyRunningIssues = new Set<number>()
     let issueReconciliationPending = false
+    const issueReleaseOptions = {
+      maxIssueRetries: config.maxIssueRetries,
+      onPark: (issueNumber: number, failures: number) => {
+        event('Parked', `#${issueNumber}`, `${failures} consecutive task failures`)
+        writeFileSync(stopFile, '')
+      },
+    }
 
     const reconcileMergedIssues = async (
       taskId: string,
@@ -2085,6 +2093,7 @@ export function createLoop(deps: LoopDeps) {
     const mergeCompletedTask = async (taskId: string): Promise<void> => {
       if (!config.autoMerge || mergeAttempts.has(taskId)
         || !existsSync(join(scannedDir, taskId))) return
+      clearIssueFailureCounts(paths, taskId)
       mergeAttempts.add(taskId)
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
       const linkedIssues = issueNumbersForTask(paths, taskId)
@@ -2168,7 +2177,9 @@ export function createLoop(deps: LoopDeps) {
               completeIssueReleaseIntent(paths, taskId)
               dropClaimedTaskMaterialization(paths, taskId, true)
               if (remoteOperationsAvailable) {
-                const failures = await reconcileIssueReleaseIntent(forge, paths, taskId)
+                const failures = await reconcileIssueReleaseIntent(
+                  forge, paths, taskId, issueReleaseOptions,
+                )
                 if (failures.length > 0) {
                   throw new IssueReleaseReconciliationError(failures)
                 }
@@ -2248,9 +2259,14 @@ export function createLoop(deps: LoopDeps) {
       // silence. Say so, once per task, and keep the count for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
+      if (status === 'failed' && !existsSync(failedFlag)) {
+        recordIssueFailure(paths, taskId)
+      }
       if (failedIssues.length > 0 && remoteOperationsAvailable) {
         recordIssueReleaseIntent(paths, taskId, failedIssues)
-        const failures = await reconcileIssueReleaseIntent(forge, paths, taskId)
+        const failures = await reconcileIssueReleaseIntent(
+          forge, paths, taskId, issueReleaseOptions,
+        )
         if (failures.length === 0) {
           event('Released', shortTaskId(taskId), 'grouped task failed')
         } else {
@@ -2274,6 +2290,7 @@ export function createLoop(deps: LoopDeps) {
       }
 
       const scannedFlag = join(scannedDir, taskId)
+      if (status === 'completed') clearIssueFailureCounts(paths, taskId)
       if (status === 'completed' && !existsSync(scannedFlag)
         && (!config.issueQueueEnabled || remoteOperationsAvailable)) {
         const depthFile = join(scannedDir, `${taskId}.depth`)
@@ -2368,6 +2385,7 @@ export function createLoop(deps: LoopDeps) {
             locallyRunningIssues,
             openFindings,
             issueHasMergeMarker,
+            issueReleaseOptions,
           )
           if (readCount(issueReleaseFailureFile) > 0) {
             writeFileSync(issueReleaseFailureFile, '0\n')
@@ -2458,10 +2476,13 @@ export function createLoop(deps: LoopDeps) {
         } catch (error) {
           const issueNumbers = issueNumbersForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumbers.length > 0) {
+            recordIssueFailure(paths, entry.taskId)
             let released = false
             if (remoteOperationsAvailable) {
               recordIssueReleaseIntent(paths, entry.taskId, issueNumbers)
-              const failures = await reconcileIssueReleaseIntent(forge, paths, entry.taskId)
+              const failures = await reconcileIssueReleaseIntent(
+                forge, paths, entry.taskId, issueReleaseOptions,
+              )
               if (failures.length === 0) {
                 released = true
                 event('Released', shortTaskId(entry.taskId), 'startup failed')

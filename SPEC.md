@@ -397,6 +397,12 @@ values must be non-negative integers, with the narrower bounds stated below.
     the cause is the environment (network, credentials, runner CLI), and every task
     started meanwhile burns tokens reaching the same wall. Work that never ran leaves no
     diff, so nothing downstream can notice it is missing; the loop must.
+19a. In issue-queue mode, every failed-task release increments a persistent per-issue
+     consecutive failure count in the queue directory. Before `MAX_ISSUE_RETRIES`
+     (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and
+     parked under the exclusive `loop:retry-exhausted` lifecycle label, and the loop logs
+     a `Parked` event before stopping. A completed task clears the counts for its linked
+     issues.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks.
 
@@ -575,7 +581,8 @@ so authorship and verified ancestry must both hold.
     so partial implementation cannot close an unaddressed finding. A grouped task that
     fails, cannot start, or reaches abandoned merge handling returns every member to ready,
     unassigned, with `loop:group-singleton`; those findings are claimed individually on
-    retry rather than recreating the failed group. Fingerprints and their ledger remain per
+    retry rather than recreating the failed group. A failed task parks a member instead
+    once its per-issue retry bound is reached. Fingerprints and their ledger remain per
     finding.
 
     Worker daemons claim a ready issue or group by self-assignment. The forge login is the
@@ -651,8 +658,9 @@ so authorship and verified ancestry must both hold.
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
-    `loop:merge-ready` → closed or `loop:merge-failed`; inspections and accepted no-change
-    verdicts take the intentional `loop:in-progress` → closed shortcut.
+    `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
+    `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and
+    accepted no-change verdicts take the intentional `loop:in-progress` → closed shortcut.
 
 ## Test parity
 

@@ -29,6 +29,7 @@ export interface LoopConfig {
   reviewEveryNCycles: number
   maxFinalReviewRounds: number
   maxBurstFailures: number
+  maxIssueRetries: number
   maxConsecutiveMergeFailures: number
   scanEffort: ReasoningEffort
   taskEffort: ReasoningEffort
@@ -97,6 +98,7 @@ export const CONFIG_ENV_NAMES: Readonly<Record<keyof LoopConfig, string>> = {
   reviewEveryNCycles: 'REVIEW_EVERY_N_CYCLES',
   maxFinalReviewRounds: 'MAX_FINAL_REVIEW_ROUNDS',
   maxBurstFailures: 'MAX_BURST_FAILURES',
+  maxIssueRetries: 'MAX_ISSUE_RETRIES',
   maxConsecutiveMergeFailures: 'MAX_CONSECUTIVE_MERGE_FAILURES',
   scanEffort: 'SCAN_EFFORT',
   taskEffort: 'TASK_EFFORT',
@@ -226,6 +228,7 @@ function resolveConfig(env: NodeJS.ProcessEnv): LoopConfig {
     reviewEveryNCycles,
     maxFinalReviewRounds: num(env, 'MAX_FINAL_REVIEW_ROUNDS', 4),
     maxBurstFailures: num(env, 'MAX_BURST_FAILURES', 3),
+    maxIssueRetries: num(env, 'MAX_ISSUE_RETRIES', 3),
     maxConsecutiveMergeFailures: num(env, 'MAX_CONSECUTIVE_MERGE_FAILURES', 3),
     scanEffort: effort(env, 'SCAN_EFFORT', 'medium'),
     taskEffort: effort(env, 'TASK_EFFORT', 'medium'),
