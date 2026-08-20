@@ -12,7 +12,6 @@ import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
 } from './tasks.ts'
-import { frameVerifiedRequirement } from './templates.ts'
 
 // The issue queue: scan findings become forge issues, workers claim them, and the
 // merge that lands a fix closes its issue through the promotion PR. This is the
@@ -809,10 +808,6 @@ function releasePreparationFile(paths: OrchPaths, taskId: string): string {
   return join(releasePreparationDir(paths), taskId)
 }
 
-export function recordIssueForTask(paths: OrchPaths, taskId: string, issueNumber: number): void {
-  recordIssuesForTask(paths, taskId, [issueNumber])
-}
-
 export function recordIssuesForTask(
   paths: OrchPaths,
   taskId: string,
@@ -1128,15 +1123,6 @@ export function issuePromotionForIssue(
 }
 
 /** Persist the merge identity independently of task status until promotion closes its issue. */
-export function recordIssuePromotion(
-  paths: OrchPaths,
-  taskId: string,
-  mergeCommit: string,
-  runBranch: string,
-): number | undefined {
-  return recordIssuePromotions(paths, taskId, mergeCommit, runBranch)[0]
-}
-
 export function recordIssuePromotions(
   paths: OrchPaths,
   taskId: string,
@@ -1414,26 +1400,6 @@ async function claimRemoteIssue(
     return { outcome: 'unparseable', issueNumber: issue.number, reason }
   }
   return { outcome: 'claimed', issue: claimed, parsed: bodyParse.parsed }
-}
-
-/**
- * Claim one ready issue and materialize it as a local task. Assignment is the
- * exclusivity primitive; because a forge allows several assignees, a simultaneous
- * claim is settled deterministically — the lexicographically first login wins and
- * every loser removes itself — so both sides compute the same verdict without a lock.
- * The login is the worker identity: concurrently claiming processes must use distinct
- * forge accounts because assignment cannot distinguish processes sharing an account.
- */
-export async function claimIssue(
-  forge: Forge,
-  paths: OrchPaths,
-  issue: ForgeIssue,
-  me: string,
-  appendRequirements: (taskId: string, requirement: string) => void,
-): Promise<ClaimResult> {
-  return claimIssueGroup(forge, paths, [issue], me, (taskId, requirements) => {
-    appendRequirements(taskId, frameVerifiedRequirement(requirements[0]!.requirement))
-  })
 }
 
 export interface ClaimedRequirement {
