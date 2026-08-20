@@ -1,12 +1,14 @@
 import type { ChildProcess } from 'node:child_process'
+import fs from 'node:fs'
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { withBacklogLock } from '../src/backlog.ts'
+import { dequeueBacklog, withBacklogLock } from '../src/backlog.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
@@ -91,6 +93,35 @@ describe('backlog process lock', () => {
     expect(removalFailed).toBe(true)
     expect(withBacklogLock(backlog, () => 'second')).toBe('second')
     expect(existsSync(lockDir)).toBe(false)
+  })
+
+  it('returns dequeued work and recovers when owned-lock release fails', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    writeFileSync(backlog, 'first-task:0\nsecond-task:0\n')
+    const originalRename = fs.renameSync
+    let releaseFailed = false
+    fs.renameSync = function (source, destination) {
+      if (!releaseFailed && source === lockDir) {
+        releaseFailed = true
+        const error = new Error('release failed') as NodeJS.ErrnoException
+        error.code = 'EPERM'
+        throw error
+      }
+      return originalRename(source, destination)
+    }
+    syncBuiltinESMExports()
+
+    try {
+      expect(dequeueBacklog(backlog)).toBe('first-task:0')
+      expect(releaseFailed).toBe(true)
+      expect(dequeueBacklog(backlog)).toBe('second-task:0')
+      expect(readFileSync(backlog, 'utf8')).toBe('')
+      expect(existsSync(lockDir)).toBe(false)
+    } finally {
+      fs.renameSync = originalRename
+      syncBuiltinESMExports()
+    }
   })
 
   it('reclaims a lock when its live PID belongs to a different process start', () => {
