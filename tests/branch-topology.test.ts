@@ -388,4 +388,25 @@ describe('integration branch topology', () => {
       'WARN default branch merge conflicted; continuing:',
     ))).toBe(true)
   })
+
+  it('stops when a default-branch conflict cannot confirm a successful merge abort', () => {
+    const topology = prepareBranchTopology(paths, 'integration/run')
+    commit(
+      topology.paths.repoRoot, 'tracked.txt', 'integration version\n',
+      'feat: integration version',
+    )
+    pushRemoteDefaultChange('tracked.txt', 'default version\n')
+    const abortFailureGit = (root: string, args: string[]): string => {
+      if (args[0] === 'merge' && args[1] === '--abort') {
+        git(root, args)
+        throw new Error('simulated abort failure')
+      }
+      return git(root, args)
+    }
+
+    expect(() => absorbDefaultBranch(topology.paths, vi.fn(), abortFailureGit)).toThrow(
+      'default branch merge failed and merge abort failed: simulated abort failure',
+    )
+    expect(git(topology.paths.repoRoot, ['status', '--porcelain'])).toBe('')
+  })
 })

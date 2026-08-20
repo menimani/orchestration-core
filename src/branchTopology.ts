@@ -184,19 +184,20 @@ function errorSummary(error: unknown): string {
 export function absorbDefaultBranch(
   paths: OrchPaths,
   event: (name: 'Updated' | 'WARN', subject: string, detail?: string) => void,
+  gitCommand: (cwd: string, args: string[]) => string = git,
 ): void {
   let remote: string
   let baseCommit: string
   let baseRef: string
   try {
     remote = currentBranchTrackingRemote(paths.repoRoot)
-    const advertised = git(paths.repoRoot, [
+    const advertised = gitCommand(paths.repoRoot, [
       'ls-remote', '--symref', remote, 'HEAD',
     ])
     const branch = /^ref:\s+refs\/heads\/([^\s]+)\s+HEAD$/m.exec(advertised)?.[1]
     if (branch === undefined) throw new Error(`${remote} does not advertise a default branch`)
-    git(paths.repoRoot, ['fetch', '--quiet', remote, branch])
-    baseCommit = git(paths.repoRoot, ['rev-parse', 'FETCH_HEAD']).trim()
+    gitCommand(paths.repoRoot, ['fetch', '--quiet', remote, branch])
+    baseCommit = gitCommand(paths.repoRoot, ['rev-parse', 'FETCH_HEAD']).trim()
     baseRef = `${remote}/${branch}`
   } catch (error) {
     event('WARN', `default branch update failed; continuing: ${errorSummary(error)}`)
@@ -204,13 +205,13 @@ export function absorbDefaultBranch(
   }
 
   try {
-    git(paths.repoRoot, ['merge-base', '--is-ancestor', baseCommit, 'HEAD'])
+    gitCommand(paths.repoRoot, ['merge-base', '--is-ancestor', baseCommit, 'HEAD'])
     return
   } catch {
     // A merge is needed.
   }
   try {
-    if (git(paths.repoRoot, ['status', '--porcelain']).trim() !== '') {
+    if (gitCommand(paths.repoRoot, ['status', '--porcelain']).trim() !== '') {
       event('WARN', 'default branch update skipped: integration worktree is dirty')
       return
     }
@@ -218,15 +219,37 @@ export function absorbDefaultBranch(
     event('WARN', `default branch status check failed; continuing: ${errorSummary(error)}`)
     return
   }
+  const oldHead = gitCommand(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   try {
-    git(paths.repoRoot, ['merge', '--no-edit', baseCommit])
-    git(paths.repoRoot, ['merge-base', '--is-ancestor', baseCommit, 'HEAD'])
+    gitCommand(paths.repoRoot, ['merge', '--no-edit', baseCommit])
+    gitCommand(paths.repoRoot, ['merge-base', '--is-ancestor', baseCommit, 'HEAD'])
     event('Updated', 'default branch', baseRef)
   } catch (error) {
     try {
-      git(paths.repoRoot, ['merge', '--abort'])
-    } catch {
-      // A failure before Git created merge state has nothing to abort.
+      gitCommand(paths.repoRoot, ['merge', '--abort'])
+    } catch (abortError) {
+      throw new Error(
+        `default branch merge failed and merge abort failed: ${errorSummary(abortError)}; `
+        + `merge failure: ${errorSummary(error)}`,
+      )
+    }
+    let recoveredHead: string
+    let recoveredStatus: string
+    try {
+      recoveredHead = gitCommand(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+      recoveredStatus = gitCommand(paths.repoRoot, ['status', '--porcelain']).trim()
+    } catch (verificationError) {
+      throw new Error(
+        `default branch merge failed and recovery could not be verified: `
+        + `${errorSummary(verificationError)}; merge failure: ${errorSummary(error)}`,
+      )
+    }
+    if (recoveredHead !== oldHead || recoveredStatus !== '') {
+      throw new Error(
+        `default branch merge failed and merge abort did not restore the repository: expected HEAD `
+        + `${oldHead.slice(0, 8)}, found ${recoveredHead.slice(0, 8)}; `
+        + `working tree ${recoveredStatus === '' ? 'clean' : `dirty (${recoveredStatus.replaceAll(/\r?\n/g, ', ')})`}`,
+      )
     }
     event('WARN', `default branch merge conflicted; continuing: ${errorSummary(error)}`)
   }
