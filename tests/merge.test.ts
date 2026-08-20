@@ -368,6 +368,28 @@ describe('mergeTask', () => {
     expect(existsSync(guard)).toBe(false)
   })
 
+  it('fails safely when a stale merge guard cannot be removed', async () => {
+    const taskId = '20260820_135042_003_user-blocked-stale-guard'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mkdirSync(guard, { recursive: true })
+    writeFileSync(join(guard, 'owner.json'), `${JSON.stringify({
+      state: 'active', pid: 2147483647, startIdentity: null,
+    })}\n`)
+    writeFileSync(join(guard, 'blocker'), 'cannot remove directory\n')
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+    const now = Date.now()
+    let elapsed = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now + elapsed++ * 1_000)
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    })).rejects.toThrow(`Could not remove stale merge guard: ${taskId}`)
+
+    expect(existsSync(guard)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
   it('merges a committed task, removes its worktree and branch, and records merged', async () => {
     const taskId = '20260808_000000_001_user-adds-a-file'
     const worktree = await makeCompletedTask(taskId, { commit: true })
