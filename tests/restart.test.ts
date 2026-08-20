@@ -178,6 +178,32 @@ describe('loop replacement startup', () => {
     expect(launchDaemon).toHaveBeenCalledOnce()
   })
 
+  it('terminates the replacement tree when publishing readiness fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    const child = fakeChild(43217)
+    const os = fakeOperatingSystem(child, () => {
+      setTimeout(() => writeFileSync(readyFile, '43217\n'), 0)
+    })
+
+    await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      onReady: () => { throw new Error('could not publish replacement PID') },
+      startupTimeoutMs: 1_000,
+    })).resolves.toEqual({
+      ok: false,
+      pid: 43217,
+      error: 'could not publish replacement PID',
+    })
+    expect(os.terminateProcessTree).toHaveBeenCalledWith(43217)
+    expect(os.processTreeIsAlive).toHaveBeenCalledWith(43217)
+    expect(child.unref).not.toHaveBeenCalled()
+  })
+
   it('returns replacement cleanup failures after the startup timeout', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
     fixtureRoots.push(root)
