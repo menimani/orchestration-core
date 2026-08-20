@@ -561,7 +561,7 @@ const cmdStart: Command = async (paths, args) => {
       return 1
     }
   }
-  const runner = await loadRunner(config.runner, { env: process.env })
+  const runner = await loadRunner(config.runner, { env: process.env, repoRoot: paths.repoRoot })
   const project = await loadProject(paths.root)
   const result = await startTask(paths, runner, taskId, {
     effort,
@@ -1229,7 +1229,7 @@ async function runLoopDaemon(
       loopPaths.repoRoot,
       (message) => log(formatEventLine('WARN', 'forge', message)),
     )
-    const runner = await loadRunner(config.runner, { env: process.env })
+    const runner = await loadRunner(config.runner, { env: process.env, repoRoot: loopPaths.repoRoot })
     const projectModule = await import('./adapters/project.ts')
     const projectRoot = topology.integrationBranch === undefined
       ? paths.root
