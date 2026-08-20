@@ -285,6 +285,13 @@ function syncTarget(
   const reported = (skill: string): string =>
     `${repositoryPath.replaceAll('\\', '/')}/${skill}`
   const stateFile = join(destinationRoot, STATE_FILE)
+  // Rendering can fail independently for each skill. Finish it for the whole target
+  // before migrating or replacing anything so failed rendering cannot leave an updated
+  // directory paired with its stale state hash.
+  const desiredSkills = manifest.skills.map((skill) => {
+    const files = renderedSkill(packageRoot, skill, manifest, repoRoot, target)
+    return { skill, files, hash: hashFiles(files) }
+  })
   const migration = migrateLegacySkills(target.legacyRoots, destinationRoot, os)
   mkdirSync(destinationRoot, { recursive: true })
   const state = readState(stateFile)
@@ -295,12 +302,8 @@ function syncTarget(
   const changedPaths: string[] = [...migration.changedPaths]
   const managedPaths: string[] = []
 
-  for (const skill of manifest.skills) {
+  for (const { skill, files: desiredFiles, hash: desiredHash } of desiredSkills) {
     const destination = join(destinationRoot, skill)
-    const desiredFiles = renderedSkill(
-      packageRoot, skill, manifest, repoRoot, target,
-    )
-    const desiredHash = hashFiles(desiredFiles)
     const previousHash = state.skills[skill]
     if (existsSync(destination)) {
       if (!lstatSync(destination).isDirectory()) {
