@@ -75,10 +75,11 @@ function makeLoop(
   coreConfig: ReturnType<typeof config>,
   runtime: CoreUpdateRuntime = { packageRoot, git },
   forge: Forge = makeFakeForge(),
+  runnerOverride?: Runner,
 ) {
   mkdirSync(join(paths.root, 'templates'), { recursive: true })
   writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
-  const runner: Runner = {
+  const runner: Runner = runnerOverride ?? {
     sharedSkills: fakeRunnerSharedSkills,
     start: async (options) => {
       runnerStarts.push(options.specFile)
@@ -251,7 +252,7 @@ describe('pre-cycle core update', () => {
     expect(await loop.poll(), events.join('\n')).toBe('continue')
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
-      .toBe('version one: npm run -C orchestration/ts loop\n')
+      .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
     expect(events).toContain('Updated skill installed .agents/skills/loop-start')
@@ -260,7 +261,7 @@ describe('pre-cycle core update', () => {
     expect(events).toContain('Updated skill installed .claude/skills/loop-start')
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
-      .toBe('version one: npm run -C orchestration/ts loop\n')
+      .toBe("version one: npm run -C 'orchestration/ts' loop\n")
   })
 
   it('refreshes shared skills at the consumer root in the same clean update boundary', async () => {
@@ -271,7 +272,7 @@ describe('pre-cycle core update', () => {
     expect(await loop.poll(), events.join('\n')).toBe('restart')
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
-      .toBe('version two: npm run -C orchestration/ts loop-status\n')
+      .toBe("version two: npm run -C 'orchestration/ts' loop-status\n")
     expect(existsSync(join(packageRoot, '.agents', 'skills', 'loop-start'))).toBe(false)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
     expect(events).toContain('Updated skill refreshed .agents/skills/loop-start')
@@ -299,10 +300,10 @@ describe('pre-cycle core update', () => {
     expect(await loop.poll(), events.join('\n')).toBe('continue')
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
-      .toBe('version one: npm run -C orchestration/ts loop\n')
+      .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
-      .toBe('version one: npm run -C orchestration/ts loop\n')
+      .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
   })
@@ -319,6 +320,25 @@ describe('pre-cycle core update', () => {
     expect(events).toContain(
       'WARN shared skill .claude/skills/loop-start differs from the last synced copy; left unchanged',
     )
+  })
+
+  it('stops before starting a cycle when a shared skill target fails to synchronize', async () => {
+    const start = vi.fn(async () => process.pid)
+    const failingRunner: Runner = {
+      sharedSkills: {
+        ...fakeRunnerSharedSkills,
+        renderFile: () => { throw new Error('simulated target failure') },
+      },
+      start,
+    }
+    const loop = makeLoop(config(), undefined, undefined, failingRunner)
+
+    await expect(loop.poll()).rejects.toThrow(
+      'shared skill sync failed: simulated target failure',
+    )
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(events.some((line) => line.includes('simulated target failure'))).toBe(false)
   })
 
   it('pulls core changes but preserves and reports a committed consumer skill divergence', async () => {
@@ -351,10 +371,10 @@ describe('pre-cycle core update', () => {
       'shared skill sync requires a clean managed index',
     )
     expect(readFileSync(installed, 'utf8').replaceAll('\r', ''))
-      .toBe('version one: npm run -C orchestration/ts loop\n')
+      .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
-      .toBe('version one: npm run -C orchestration/ts loop\n')
+      .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(git(repoRoot, ['show', ':.agents/skills/loop-start/SKILL.md'])
       .replaceAll('\r', ''))
       .toBe('staged consumer command')
@@ -401,7 +421,7 @@ describe('pre-cycle core update', () => {
     expect(await loop.poll(), events.join('\n')).toBe('continue')
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
       .replaceAll('\r', ''))
-      .toBe('version two: npm run -C orchestration/ts loop-status\n')
+      .toBe("version two: npm run -C 'orchestration/ts' loop-status\n")
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
     expect(git(repoRoot, ['show', ':.claude/skills/verify-changes/SKILL.md'])
       .replaceAll('\r', ''))
@@ -441,6 +461,27 @@ describe('pre-cycle core update', () => {
     expect(events.some((line) => line.startsWith(
       'WARN core update pull conflicted; continuing on old code:',
     )), events.join('\n')).toBe(true)
+  })
+
+  it('stops when a failed core pull cannot confirm a successful merge abort', async () => {
+    writeFileSync(join(packageRoot, 'core.txt'), 'consumer version\n')
+    commit(repoRoot, 'fix: local core divergence')
+    advanceUpstream('upstream version\n')
+    const abortFailureGit = (root: string, args: string[]): string => {
+      if (args[0] === 'merge' && args[1] === '--abort') {
+        git(root, args)
+        throw new Error('simulated abort failure')
+      }
+      return git(root, args)
+    }
+    const loop = makeLoop(config(), { packageRoot, git: abortFailureGit })
+
+    await expect(loop.poll()).rejects.toThrow(
+      'core update pull failed and merge abort failed: simulated abort failure',
+    )
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
+    expect(runnerStarts).toHaveLength(0)
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
   })
 
   it('skips the check entirely when CORE_AUTO_UPDATE=false', async () => {

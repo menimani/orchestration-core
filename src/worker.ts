@@ -126,7 +126,10 @@ export function verifyWorkerModeSupported(paths: OrchPaths, env: NodeJS.ProcessE
 function launchDaemon(paths: OrchPaths, env: NodeJS.ProcessEnv): number {
   const result = spawnSync(
     process.execPath,
-    [checkoutPackageFile(paths, 'src', 'cli.ts'), 'loop', '--daemon'],
+    [
+      checkoutPackageFile(paths, 'src', 'cli.ts'), 'loop',
+      '--approve-mode', 'issue', '--daemon',
+    ],
     {
       cwd: paths.repoRoot,
       env,

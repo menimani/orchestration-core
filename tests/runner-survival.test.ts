@@ -4,9 +4,12 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
+import {
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
+} from '../src/restart.ts'
 import { TestProcessRegistry } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -31,6 +34,17 @@ function processIsAlive(pid: number): boolean {
   } catch {
     return false
   }
+}
+
+function environmentWithoutRestartHandover(): NodeJS.ProcessEnv {
+  const {
+    [LOOP_RESTART_PREDECESSOR_PID_ENV]: predecessorPid,
+    [LOOP_RESTART_READY_FILE_ENV]: readyFile,
+    ...rest
+  } = process.env
+  void predecessorPid
+  void readyFile
+  return rest
 }
 
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
@@ -94,11 +108,13 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
     '',
   ].join('\n'))
 
-  const launcher = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+  const launcher = spawnSync(process.execPath, [
+    CLI, 'loop', '--approve-mode', 'local', '--daemon',
+  ], {
     cwd: root,
     encoding: 'utf8',
     env: {
-      ...process.env,
+      ...environmentWithoutRestartHandover(),
       AUTO_PR: 'false',
       CORE_AUTO_UPDATE: 'false',
       ISSUE_QUEUE_ENABLED: 'false',
@@ -143,4 +159,48 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
   mkdirSync(dirname(stopFile), { recursive: true })
   writeFileSync(stopFile, '')
   await waitUntil(() => !processIsAlive(daemonPid), 'CLI daemon did not stop')
+})
+
+it('does not pass consumed restart handover variables to child processes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch runner-survival-'))
+  fixtureRoots.push(root)
+  const readyFile = join(root, 'restart.ready')
+  const inheritedEnvironmentFile = join(root, 'inherited-environment.json')
+  const script = join(root, 'signal-and-spawn.ts')
+  const probe = join(root, 'environment-probe.cjs')
+  writeFileSync(probe, [
+    "const { writeFileSync } = require('node:fs')",
+    'writeFileSync(process.argv[2], JSON.stringify({',
+    '  readyFile: process.env.ORCHESTRATION_LOOP_RESTART_READY_FILE,',
+    '  predecessorPid: process.env.ORCHESTRATION_LOOP_RESTART_PREDECESSOR_PID,',
+    '}))',
+    '',
+  ].join('\n'))
+  writeFileSync(script, [
+    "import { spawnSync } from 'node:child_process'",
+    `import { signalLoopRestartReady } from ${JSON.stringify(
+      pathToFileURL(CLI.replace(/cli\.ts$/, 'restart.ts')).href,
+    )}`,
+    'signalLoopRestartReady()',
+    `const child = spawnSync(process.execPath, [${JSON.stringify(probe)}, ${JSON.stringify(
+      inheritedEnvironmentFile,
+    )}])`,
+    'if (child.status !== 0) process.exit(child.status ?? 1)',
+    '',
+  ].join('\n'))
+
+  const result = spawnSync(process.execPath, [script], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...environmentWithoutRestartHandover(),
+      [LOOP_RESTART_READY_FILE_ENV]: readyFile,
+      [LOOP_RESTART_PREDECESSOR_PID_ENV]: `${process.pid}`,
+    },
+    windowsHide: true,
+  })
+
+  expect(result.status, result.stderr).toBe(0)
+  expect(readFileSync(readyFile, 'utf8')).toMatch(/^\d+\n$/)
+  expect(JSON.parse(readFileSync(inheritedEnvironmentFile, 'utf8'))).toEqual({})
 })

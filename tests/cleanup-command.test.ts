@@ -11,8 +11,7 @@ import {
   completeIssueReleaseIntent, issueNumbersForTask, issueReleaseIntentForTask,
   issueReleasePreparationForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY, prepareIssueReleaseIntent,
-  reapStaleLeases, reconcileIssueReleaseIntents, recordIssueForTask, recordIssueReleaseIntent,
-  recordIssuesForTask,
+  reapStaleLeases, reconcileIssueReleaseIntents, recordIssueReleaseIntent, recordIssuesForTask,
 } from '../src/issueQueue.ts'
 import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
@@ -57,7 +56,7 @@ describe('cleanup command', () => {
   })
 
   it('does not contact the forge when the issue queue is disabled', async () => {
-    recordIssueForTask(paths, taskId, 41)
+    recordIssuesForTask(paths, taskId, [41])
     const commandRuntime = runtime({ issueQueueEnabled: () => false })
 
     await expect(runCleanupCommand(paths, [taskId], commandRuntime)).resolves.toBe(0)
@@ -89,7 +88,8 @@ describe('cleanup command', () => {
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
       assignees: [forge.user],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, pid: null }))
     prepareIssueReleaseIntent(paths, taskId, [issueNumber])
 
     await expect(reconcileIssueReleaseIntents(forge, paths)).resolves.toEqual([])
@@ -146,7 +146,7 @@ describe('cleanup command', () => {
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
       assignees: ['worker-a', 'worker-c'],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     writeFileSync(specFile(paths, taskId), '# claimed task\n')
     const commandRuntime = runtime({ loadForge: vi.fn(async () => forge) })
 

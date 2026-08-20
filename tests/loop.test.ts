@@ -10,10 +10,10 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
-  recordIssueForTask,
-  recordIssuePromotion, recordIssueReleaseIntent, recordIssuesForTask,
+  issueReleaseIntentForTask, issueReleasePreparationForTask, prepareIssueReleaseIntent,
+  recordIssuePromotions, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
-  LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
+  LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
@@ -29,6 +29,7 @@ import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { enqueueTask } from '../src/tasks.ts'
+import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -89,6 +90,7 @@ function makeLoop(
   clock: () => Date = () => new Date(2026, 7, 8, 12, 0, 0),
   runner: Runner = makeRunner(),
   enqueueTaskImpl: NonNullable<LoopDeps['enqueueTask']> = enqueueTask,
+  terminateTaskProcesses?: () => TaskProcessTermination,
 ): Loop {
   const config = { ...loadConfig({}), ...overrides }
   return createLoop({
@@ -101,6 +103,7 @@ function makeLoop(
     now: clock,
     orchestrationDepsRuntime,
     enqueueTask: enqueueTaskImpl,
+    terminateTaskProcesses,
   })
 }
 
@@ -173,6 +176,106 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(repoRoot, { recursive: true, force: true })
+})
+
+describe('live loop configuration', () => {
+  function loopWithConfig(config: LoopConfig): Loop {
+    return createLoop({
+      paths,
+      config,
+      forge: makeForge(),
+      runner: makeRunner(),
+      project: stubProject,
+      log: (line) => logged.push(line),
+      now: () => new Date(2026, 7, 8, 12, 0, 0),
+    })
+  }
+
+  it('uses a changed live setting on the next poll and reports it', async () => {
+    initializeGitRepo()
+    const filePath = join(paths.root, 'config.json')
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 1, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    const loop = loopWithConfig(config)
+    loop.initializeSessionStateForBranch()
+    const taskIds = [
+      '20260820_000001_001_auto-first-live-task',
+      '20260820_000002_002_auto-second-live-task',
+    ]
+    for (const taskId of taskIds) writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# task\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskIds[0]}:0\n${taskIds[1]}:0\n`)
+
+    expect(await loop.poll()).toBe('continue')
+    expect(runnerStarts).toHaveLength(1)
+
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 12, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(2)
+    expect(logged).toContain("MAX_PARALLEL changed from '1' to '12'")
+  })
+
+  it('keeps a pinned setting and reports why its file change was ignored', () => {
+    const filePath = join(paths.root, 'config.json')
+    writeFileSync(filePath, JSON.stringify({ FORGE: 'github' }))
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    expect(config.forge).toBe('github')
+
+    writeFileSync(filePath, JSON.stringify({ FORGE: 'another-forge-provider' }))
+
+    expect(config.forge).toBe('github')
+    expect(logText()).toContain(
+      "Ignored FORGE change from 'github' to 'another-forge-provider'",
+    )
+    expect(logText()).toContain('in-flight work owned by a component no longer in use')
+  })
+
+  it('stops polling when a live configuration update is invalid', async () => {
+    initializeGitRepo()
+    const filePath = join(paths.root, 'config.json')
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 1, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    const loop = loopWithConfig(config)
+    loop.initializeSessionStateForBranch()
+    const taskId = '20260820_000003_003_auto-invalid-live-configuration'
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# task\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:0\n`)
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 0, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+
+    await expect(loop.poll()).rejects.toThrow(
+      `Invalid configuration file ${filePath} (setting: MAX_PARALLEL)`,
+    )
+    expect(runnerStarts).toHaveLength(0)
+    expect(logText()).toMatch(/setting: MAX_PARALLEL.*must be at least 1/)
+  })
+
+  it('retains the existing loop behavior when the configuration file is absent', async () => {
+    const config = loadConfig({
+      SCAN_ENABLED: 'false', AUTO_PR: 'false', REVIEW_ENABLED: 'false',
+    }, { filePath: join(paths.root, 'missing-config.json') })
+    const loop = loopWithConfig(config)
+
+    expect(config.maxParallel).toBe(3)
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+    expect(runnerStarts).toHaveLength(0)
+  })
 })
 
 describe('daemon startup', () => {
@@ -259,6 +362,59 @@ describe('daemon startup', () => {
     })
 
     expect(install).not.toHaveBeenCalled()
+  })
+})
+
+describe('stranded run branch startup report', () => {
+  const currentRun = 'chore/loop-20260820-core-run12'
+  const previousRun = 'chore/loop-20260814-core-run11'
+
+  function startCurrentRun(): ReturnType<typeof makeLoop> {
+    git(['switch', '-c', currentRun, 'main'])
+    return makeLoop({ integrationBranch: currentRun })
+  }
+
+  it('reports commits stranded on a remote run branch', () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    git(['switch', '-c', previousRun])
+    writeFileSync(join(repoRoot, 'stranded.txt'), 'unfinished work\n')
+    git(['add', 'stranded.txt'])
+    git(['commit', '-m', 'feat: stranded work'])
+    git(['push', 'origin', previousRun])
+    git(['switch', 'main'])
+    git(['branch', '-D', previousRun])
+
+    const loop = startCurrentRun()
+    loop.reportStrandedRunBranches()
+
+    expect(logged).toContain(
+      `WARN stranded run branch ${previousRun} has 1 commit not on main`,
+    )
+  })
+
+  it('stays silent for a fully merged run branch', () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    git(['branch', previousRun, 'main'])
+
+    const loop = startCurrentRun()
+    loop.reportStrandedRunBranches()
+
+    expect(logged).toEqual([])
+  })
+
+  it('never reports the current run branch', () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    const loop = startCurrentRun()
+    writeFileSync(join(repoRoot, 'current-run.txt'), 'current work\n')
+    git(['add', 'current-run.txt'])
+    git(['commit', '-m', 'feat: current run work'])
+
+    loop.reportStrandedRunBranches()
+
+    expect(logged).toEqual([])
   })
 })
 
@@ -412,6 +568,32 @@ describe('forge poll budget', () => {
     expect(existsSync(join(paths.tasksDir, `${failedTaskId}.md`))).toBe(false)
   })
 
+  it('parks a repeatedly failing issue and stops the loop at its retry bound', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+      maxIssueRetries: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: '[BUG] `src/retry.ts` persistent failure',
+      body: buildIssueBody('[BUG] `src/retry.ts` persistent failure', 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    await loop.poll()
+    const failedTaskId = readdirSync(paths.statusDir)[0]!.replace(/\.json$/, '')
+    writeRawStatus(failedTaskId, 'failed')
+    expect(await loop.poll()).toBe('continue')
+
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_RETRY_EXHAUSTED)
+    expect(issue.labels).not.toContain(LABEL_READY)
+    expect(issue.assignees).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(`Parked #${issueNumber}`)
+  })
+
   it('persists a failed-task release and stops after three failed reconciliations', async () => {
     initializeGitRepo()
     const loop = makeLoop({
@@ -516,7 +698,7 @@ describe('forge poll budget', () => {
       autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 1,
     })
     loop.initializeSessionStateForBranch()
-    recordIssueForTask(paths, completedTask, 17)
+    recordIssuesForTask(paths, completedTask, [17])
     fakeForge.listLabels = vi.fn().mockRejectedValue(new Error('forge unavailable'))
 
     expect(await loop.poll()).toBe('continue')
@@ -536,7 +718,7 @@ describe('forge poll budget', () => {
     initializeGitRepo()
     writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# claimed issue task\n')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:2\n`)
-    recordIssueForTask(paths, taskId, 42)
+    recordIssuesForTask(paths, taskId, [42])
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -1471,6 +1653,20 @@ describe('cycle gate', () => {
     expect(await loop.triggerScanIfIdle()).toBe('done')
   })
 
+  it('skips automatic review when review is disabled', async () => {
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: false,
+      autoReview: true,
+      maxScanCycles: 1,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(readdirSync(paths.tasksDir).some((name) => name.includes('_review-c1'))).toBe(false)
+  })
+
   it('completes and promotes when no source can produce more work', async () => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
@@ -1845,6 +2041,38 @@ describe('remote issue queue idle detection', () => {
     expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(false)
   })
 
+  it('promotes a prepared release after local cleanup removed the task status', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      workerMode: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'interrupted cleanup release', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    recordIssuesForTask(paths, 'task-release', [issueNumber])
+    writeRawStatus('task-release', 'failed')
+    prepareIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    rmSync(statusFile(paths, 'task-release'))
+    expect(readStatus(paths, 'task-release')).toBeUndefined()
+
+    await loop.poll()
+
+    expect(issueReleasePreparationForTask(paths, 'task-release')).toEqual([])
+    expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([])
+    await expect(fakeForge.getIssue(issueNumber)).resolves.toMatchObject({
+      state: 'open',
+      assignees: [],
+      labels: expect.arrayContaining([LABEL_FINDING, LABEL_READY]),
+    })
+    expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
   it('logs changed remote work immediately and unchanged work at most every ten minutes', async () => {
     let current = new Date(2026, 7, 8, 12, 0, 0)
     const loop = makeLoop({
@@ -1944,8 +2172,8 @@ describe('remote issue queue idle detection', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'locally merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
-    recordIssueForTask(paths, 'merged-task', issueNumber)
-    recordIssuePromotion(paths, 'merged-task', 'abc123', 'feature/run-9')
+    recordIssuesForTask(paths, 'merged-task', [issueNumber])
+    recordIssuePromotions(paths, 'merged-task', 'abc123', 'feature/run-9')
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
@@ -2895,6 +3123,88 @@ describe('completion marker output', () => {
 })
 
 describe('completed task merge recovery', () => {
+  function makeDependencyChangingTask(taskId: string): string {
+    initializeGitRepo()
+    writeFileSync(join(repoRoot, 'package.json'), '{"private":true}\n')
+    writeFileSync(join(repoRoot, 'package-lock.json'), '{"lockfileVersion":3}\n')
+    git(['add', 'package.json', 'package-lock.json'])
+    git(['commit', '-m', 'chore: add dependency manifests'])
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(
+      join(worktree, 'package-lock.json'),
+      '{"lockfileVersion":3,"packages":{"node_modules/new-dependency":{}}}\n',
+    )
+    execFileSync('git', ['add', 'package-lock.json'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: update dependencies'], { cwd: worktree })
+    return worktree
+  }
+
+  it('skips dependency installation when a task process tree survives', async () => {
+    const taskId = '20260820_181834_032_auto-dependency-installation'
+    makeDependencyChangingTask(taskId)
+    const oldDependency = join(repoRoot, 'node_modules', 'old-dependency', 'package.json')
+    mkdirSync(dirname(oldDependency), { recursive: true })
+    writeFileSync(oldDependency, '{}\n')
+    const install = vi.fn(() => rmSync(join(repoRoot, 'node_modules'), {
+      recursive: true, force: true,
+    }))
+    const survivor = {
+      taskId: '20260820_181800_031_auto-parallel-worker', pid: 43120,
+      error: 'Could not stop process tree 43120.',
+    }
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      { install, packageRoot: repoRoot },
+      undefined,
+      undefined,
+      undefined,
+      () => ({ terminated: [], failures: [survivor] }),
+    )
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(install).not.toHaveBeenCalled()
+    expect(readFileSync(oldDependency, 'utf8')).toBe('{}\n')
+    expect(logText()).toContain(
+      'dependency installation skipped; process tree 031_auto PID 43120 survived',
+    )
+    expect(logged).toContain(
+      'Skipped orchestration deps  after 032_auto; a live task process tree survived',
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('installs dependencies after every task process tree stops cleanly', async () => {
+    const taskId = '20260820_181835_033_auto-clean-dependency-installation'
+    makeDependencyChangingTask(taskId)
+    const install = vi.fn()
+    const stopped = {
+      taskId: '20260820_181801_034_auto-parallel-worker', pid: 43121,
+    }
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      { install, packageRoot: repoRoot },
+      undefined,
+      undefined,
+      undefined,
+      () => ({ terminated: [stopped], failures: [] }),
+    )
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(install).toHaveBeenCalledOnce()
+    expect(install).toHaveBeenCalledWith(repoRoot)
+    expect(logText()).toContain(
+      'Stopped 034_auto    process tree PID 43121 before dependency installation',
+    )
+    expect(logged).toContain('Installed orchestration deps  after 033_auto')
+  })
+
   it('abandons a task after its first conflicting rebase and never retries it', async () => {
     const taskId = '20260815_181908_194_auto-rebase-conflict'
     const initialHead = initializeGitRepo()
@@ -2916,7 +3226,7 @@ describe('completed task merge recovery', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'conflicting fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
 
     expect(await loop.poll()).toBe('continue')
 
@@ -2984,7 +3294,7 @@ describe('completed task merge recovery', () => {
       title: 'already resolved finding', body: '',
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
@@ -3031,7 +3341,7 @@ describe('completed task merge recovery', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'duplicate fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     const getIssue = fakeForge.getIssue.bind(fakeForge)
     let unavailable = true
     fakeForge.getIssue = async (number) => {
@@ -3081,7 +3391,7 @@ describe('completed task merge recovery', () => {
       title: 'transient reconciliation', body: '',
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
     const getIssue = fakeForge.getIssue.bind(fakeForge)
     let unavailable = true
@@ -3162,7 +3472,7 @@ describe('completed task merge recovery', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'stale merged fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
 
     expect(await loop.poll()).toBe('continue')
     const mergedStatus = readStatus(paths, taskId)
@@ -3214,7 +3524,7 @@ describe('completed task merge recovery', () => {
     })
     const issue = fakeForge.issues.get(issueNumber)
     if (issue !== undefined) issue.updatedAt = '2026-08-01T00:00:00.000Z'
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
     const commentIssue = fakeForge.commentIssue.bind(fakeForge)
     let attempts = 0
     fakeForge.commentIssue = async (...args) => {
@@ -3267,7 +3577,7 @@ describe('completed task merge recovery', () => {
     const issueNumber = await fakeForge.createIssue({
       title: 'pending fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
     })
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
 
     expect(await loop.poll()).toBe('continue')
     expect(readStatus(paths, taskId)?.status).toBe('completed')

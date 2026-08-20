@@ -89,8 +89,13 @@ export function signalLoopRestartReady(
   os: OperatingSystem = operatingSystem,
 ): void {
   const readyFile = env[LOOP_RESTART_READY_FILE_ENV]
-  if (readyFile === undefined || readyFile === '') return
-  writeFileSync(readyFile, `${os.processTreeRootPid(env)}\n`, { flag: 'wx' })
+  try {
+    if (readyFile === undefined || readyFile === '') return
+    writeFileSync(readyFile, `${os.processTreeRootPid(env)}\n`, { flag: 'wx' })
+  } finally {
+    delete env[LOOP_RESTART_READY_FILE_ENV]
+    delete env[LOOP_RESTART_PREDECESSOR_PID_ENV]
+  }
 }
 
 function errorSummary(error: unknown): string {

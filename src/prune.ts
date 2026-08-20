@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, toNamespacedPath } from 'node:path'
 import { logFile, worktreeDir, type OrchPaths } from './paths.ts'
 
 // Deletes what finished tasks leave behind: logs, status files, generated specs, and
@@ -33,7 +33,14 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
   const remove = (...files: string[]): void => {
     for (const file of files) {
       if (!existsSync(file)) continue
-      if (!options.dryRun) rmSync(file, { force: true })
+      if (!options.dryRun) {
+        try {
+          rmSync(file, { recursive: true, force: true, maxRetries: 3 })
+        } catch (error) {
+          if (process.platform !== 'win32') throw error
+          rmSync(toNamespacedPath(file), { recursive: true, force: true, maxRetries: 3 })
+        }
+      }
       report.removed.push(file)
     }
   }
@@ -73,7 +80,6 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
     const spec = join(paths.tasksDir, `${taskId}.md`)
     const specTracked = trackedSpecs.has(`orchestration/tasks/${taskId}.md`)
     remove(
-      file,
       logFile(paths, taskId),
       join(paths.logsDir, `${taskId}.final`),
       join(paths.logsDir, `${taskId}.merge.log`),
@@ -82,7 +88,9 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
       join(paths.queueDir, 'effort', taskId),
       join(paths.queueDir, 'inspect', taskId),
       join(paths.queueDir, 'heartbeat', taskId),
+      join(paths.queueDir, 'merge-guards', taskId),
       ...(specTracked ? [] : [spec]),
+      file,
     )
     report.prunedTasks += 1
   }

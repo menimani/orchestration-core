@@ -7,7 +7,7 @@ import {
 import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
-import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
+import { loadRunner, type ReasoningEffort, type Runner } from './adapters/runner.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
@@ -16,7 +16,11 @@ import {
 import { cleanupTask } from './cleanup.ts'
 import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
-import { loadConfig, type LoopConfig } from './config.ts'
+import {
+  CONFIG_ENV_NAMES, loadConfig, validateConfigFileValues,
+  type ConfigEvent, type LoopConfig,
+} from './config.ts'
+import { writeConfigFile } from './configFile.ts'
 import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
@@ -63,6 +67,8 @@ import { LOOP_STARTUP_RESULT_FILE_ENV } from './internalEnvironment.ts'
 
 type Command = (paths: OrchPaths, args: string[]) => Promise<number>
 
+type QueueMode = 'local' | 'issue'
+
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high'])
 
 async function loadProject(pathsRoot: string) {
@@ -77,6 +83,10 @@ function repoRoot(): string {
   }).trim()
 }
 
+function loadRepositoryConfig(paths: OrchPaths, env: NodeJS.ProcessEnv = process.env): LoopConfig {
+  return loadConfig(env, { filePath: join(paths.root, 'config.json') })
+}
+
 interface RecoveryLockOwner {
   pid: number
   startIdentity?: string | null
@@ -88,6 +98,91 @@ const RECOVERY_LOCK_STALE_MS = 10_000
 const RECOVERY_LOCK_TIMEOUT_MS = 10_000
 const RECOVERY_LOCK_POLL_MS = 10
 const LOOP_STARTUP_TIMEOUT_MS = 30_000
+
+function queueMode(config: LoopConfig): QueueMode {
+  return config.issueQueueEnabled ? 'issue' : 'local'
+}
+
+function configEventLine(event: ConfigEvent): string {
+  const name = event.type === 'changed' ? 'Changed'
+    : event.type === 'ignored' ? 'Ignored' : 'ERROR'
+  return formatEventLine(name, 'config', event.message)
+}
+
+function displayConfigValue(value: LoopConfig[keyof LoopConfig]): string {
+  if (value === '') return '(empty)'
+  return String(value)
+}
+
+function resolvedRunnerModel(
+  runner: Runner,
+  configured: string,
+  effort: ReasoningEffort,
+): string {
+  return runner.resolveModel?.({ model: configured, effort }) ?? '(runner default)'
+}
+
+function reportResolvedLoopConfig(
+  paths: OrchPaths,
+  config: LoopConfig,
+  runner: Runner,
+  report: (line: string) => void,
+): void {
+  const runBranch = config.integrationBranch || execFileSync(
+    'git', ['branch', '--show-current'], {
+      cwd: paths.repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  ).trim()
+  const defaults = loadConfig({}, { filePath: false })
+  report('Resolved loop configuration:')
+  report(`  queue mode: ${queueMode(config)}`)
+  report(`  run branch: ${runBranch}`)
+  report(`  runner: ${config.runner}`)
+  report(`  scan: model=${resolvedRunnerModel(runner, config.scanModel, config.scanEffort)} effort=${config.scanEffort}`)
+  report(`  task: model=${resolvedRunnerModel(runner, config.taskModel, config.taskEffort)} effort=${config.taskEffort}`)
+  report(`  review: model=${resolvedRunnerModel(runner, config.taskModel, config.reviewEffort)} effort=${config.reviewEffort}`)
+  report('  changed from defaults:')
+  let changed = false
+  for (const key of Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[]) {
+    if (config[key] === defaults[key]) continue
+    report(`    ${CONFIG_ENV_NAMES[key]}=${displayConfigValue(config[key])}`)
+    changed = true
+  }
+  if (!changed) report('    (none)')
+}
+
+async function approveLoopStart(
+  config: LoopConfig,
+  approvedMode: string | undefined,
+): Promise<boolean> {
+  const resolvedMode = queueMode(config)
+  if (process.stdin.isTTY !== true) {
+    if (approvedMode === undefined) {
+      console.error(
+        `Refusing non-interactive start: pass --approve-mode ${resolvedMode} to approve the resolved queue mode.`,
+      )
+      return false
+    }
+    if (approvedMode !== resolvedMode) {
+      console.error(
+        `Refusing start: approved queue mode '${approvedMode}' does not match resolved queue mode '${resolvedMode}'.`,
+      )
+      return false
+    }
+    return true
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    const answer = await rl.question('Start the loop with this configuration? [y/N] ')
+    const approved = /^(?:y|yes)$/i.test(answer.trim())
+    if (!approved) console.error('Refusing start: configuration was not approved.')
+    return approved
+  } finally {
+    rl.close()
+  }
+}
 
 interface LoopStartupResult {
   status: 'ready' | 'error'
@@ -298,7 +393,7 @@ const cmdInit: Command = async (paths, args) => {
     console.error('Usage: init [project-name]')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const forge = await loadForge(config.forge, paths.repoRoot)
   const { initializeRepository } = await import('./initialize.ts')
   const result = await initializeRepository(paths, forge, args[0])
@@ -321,7 +416,7 @@ const cmdVerifySetup: Command = async (paths, args) => {
     console.error('Usage: verify-setup')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const forge = await loadForge(config.forge, paths.repoRoot)
   const { verifyRepositorySetup } = await import('./setup.ts')
   return await verifyRepositorySetup(paths, forge, { env: process.env }) ? 0 : 1
@@ -357,6 +452,14 @@ const cmdEnqueue: Command = async (paths, args) => {
 }
 
 const cmdDelegate: Command = async (paths, args) => {
+  const usage = 'Usage: delegate "<description>" [--effort minimal|low|medium|high] [--inspect]'
+  const firstArg = args[0]
+  if (firstArg?.startsWith('-') === true && firstArg !== '--effort' && firstArg !== '--inspect') {
+    console.error(`ERROR: unknown option: ${firstArg}`)
+    console.error(usage)
+    return 1
+  }
+
   let description = ''
   let effort: ReasoningEffort | undefined
   let inspect = false
@@ -379,13 +482,13 @@ const cmdDelegate: Command = async (paths, args) => {
     }
   }
   if (description.trim() === '') {
-    console.error('Usage: delegate "<description>" [--effort minimal|low|medium|high] [--inspect]')
+    console.error(usage)
     return 1
   }
 
   const result = await delegateTaskVisible(paths, description, { effort, inspect }, {
     loadForge: async () => {
-      const config = loadConfig()
+      const config = loadRepositoryConfig(paths)
       return loadForge(config.forge, paths.repoRoot)
     },
     warn: (message) => console.warn(message),
@@ -430,7 +533,7 @@ const cmdReportUpstream: Command = async (paths, args) => {
       }
     },
     loadForge: async () => {
-      const config = loadConfig()
+      const config = loadRepositoryConfig(paths)
       return loadForge(config.forge, paths.repoRoot)
     },
   })
@@ -442,7 +545,7 @@ const cmdStart: Command = async (paths, args) => {
     console.error('Usage: start <task-id> [--effort minimal|low|medium|high] [--model <model>]')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   let effort = config.taskEffort
   let model = config.taskModel
   for (let i = 1; i < args.length; i++) {
@@ -460,7 +563,7 @@ const cmdStart: Command = async (paths, args) => {
       return 1
     }
   }
-  const runner = await loadRunner(config.runner, config)
+  const runner = await loadRunner(config.runner, { env: process.env, repoRoot: paths.repoRoot })
   const project = await loadProject(paths.root)
   const result = await startTask(paths, runner, taskId, {
     effort,
@@ -518,7 +621,7 @@ const cmdDeploy: Command = async (paths, args) => {
     console.error('Usage: deploy')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const project = await loadProject(paths.root)
   if (project.deployment === undefined) {
     console.error(`Project '${project.name}' does not define a deployment.`)
@@ -552,7 +655,7 @@ const cmdMerge: Command = async (paths, args) => {
       return 1
     }
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   if (!autoYes) {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
     const answer = await rl.question(`Merge task/${taskId} into the current branch? [y/N] `)
@@ -628,7 +731,7 @@ const cmdMerge: Command = async (paths, args) => {
 
 const cmdCleanup: Command = async (paths, args) => {
   let config: LoopConfig | undefined
-  const cleanupConfig = (): LoopConfig => config ??= loadConfig()
+  const cleanupConfig = (): LoopConfig => config ??= loadRepositoryConfig(paths)
   return runCleanupCommand(paths, args, {
     issueQueueEnabled: () => cleanupConfig().issueQueueEnabled,
     loadForge: () => loadForge(cleanupConfig().forge, paths.repoRoot),
@@ -725,12 +828,132 @@ const cmdStop: Command = async (paths) => {
   return success ? 0 : 1
 }
 
+function readConfigFileForCommand(filePath: string): Record<string, unknown> {
+  if (!existsSync(filePath)) return {}
+  const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('The configuration file must contain a JSON object.')
+  }
+  return parsed as Record<string, unknown>
+}
+
+function commandConfigValue(name: string, raw: string): unknown {
+  const key = (Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[])
+    .find((candidate) => CONFIG_ENV_NAMES[candidate] === name)
+  if (key === undefined) throw new Error(`Unknown configuration setting '${name}'.`)
+  const sample = loadConfig({}, { filePath: false })[key]
+  if (typeof sample === 'boolean') {
+    if (raw !== 'true' && raw !== 'false') {
+      throw new Error(`${name} must be 'true' or 'false', got '${raw}'`)
+    }
+    return raw === 'true'
+  }
+  if (typeof sample === 'number') {
+    const value = Number(raw)
+    if (!Number.isInteger(value)) throw new Error(`${name} must be an integer, got '${raw}'`)
+    return value
+  }
+  return raw
+}
+
+const cmdConfig: Command = async (paths, args) => {
+  const filePath = join(paths.root, 'config.json')
+  const action = args[0] ?? 'list'
+  const values = readConfigFileForCommand(filePath)
+  if (action === 'list' && args.length <= 1) {
+    console.log(JSON.stringify(values, null, 2))
+    return 0
+  }
+  if (action === 'get' && args.length === 2) {
+    const name = args[1]!
+    const key = (Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[])
+      .find((candidate) => CONFIG_ENV_NAMES[candidate] === name)
+    if (key === undefined) throw new Error(`Unknown configuration setting '${name}'.`)
+    console.log(String(loadConfig(process.env, { filePath })[key]))
+    return 0
+  }
+  if (action === 'set' && args.length === 3) {
+    const name = args[1]!
+    const proposed = { ...values, [name]: commandConfigValue(name, args[2]!) }
+    validateConfigFileValues(proposed)
+    writeConfigFile(filePath, proposed)
+    console.log(`Set ${name} in ${relative(paths.repoRoot, filePath)}.`)
+    return 0
+  }
+  if (action === 'unset' && args.length === 2) {
+    const name = args[1]!
+    if (![...Object.values(CONFIG_ENV_NAMES)].includes(name)) {
+      throw new Error(`Unknown configuration setting '${name}'.`)
+    }
+    delete values[name]
+    validateConfigFileValues(values)
+    writeConfigFile(filePath, values)
+    console.log(`Unset ${name} in ${relative(paths.repoRoot, filePath)}.`)
+    return 0
+  }
+  console.error('Usage: config [list|get <SETTING>|set <SETTING> <value>|unset <SETTING>]')
+  return 1
+}
+
 const cmdLoop: Command = async (paths, args) => {
   const loopLog = join(paths.logsDir, 'loop.log')
-  if (args[0] === '--daemon' || args[0] === '-d') {
+  let daemonMode = false
+  let markerOutput: string | undefined
+  let approvedMode: string | undefined
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === '--daemon' || arg === '-d') daemonMode = true
+    else if (arg === '--marker-output') {
+      markerOutput = args[++i]
+      if (markerOutput === undefined) {
+        console.error('Usage: loop [--daemon] [--approve-mode local|issue]')
+        return 1
+      }
+    } else if (arg === '--approve-mode') {
+      approvedMode = args[++i]
+      if (approvedMode === undefined) {
+        console.error('Usage: loop [--daemon] [--approve-mode local|issue]')
+        return 1
+      }
+    } else {
+      console.error(`Unknown option: ${arg}`)
+      console.error('Usage: loop [--daemon] [--approve-mode local|issue]')
+      return 1
+    }
+  }
+
+  const pendingConfigEvents: ConfigEvent[] = []
+  let handleConfigEvent = (event: ConfigEvent): void => {
+    pendingConfigEvents.push(event)
+  }
+  let config: LoopConfig
+  try {
+    config = loadConfig(process.env, {
+      filePath: join(paths.root, 'config.json'),
+      onEvent: (event) => handleConfigEvent(event),
+    })
+    if (markerOutput === undefined) {
+      for (const event of pendingConfigEvents.splice(0)) console.error(configEventLine(event))
+    }
+    // A daemon child inherits the launcher's approved mode. The launcher already
+    // reported it, and raw child output would bypass the aligned daemon log helper.
+    if (markerOutput === undefined) {
+      const runner = await loadRunner(config.runner, { env: process.env })
+      reportResolvedLoopConfig(paths, config, runner, console.log)
+    }
+    if (!await approveLoopStart(config, approvedMode)) return 1
+  } catch (error) {
+    console.error(`ERROR: ${errorSummary(error)}`)
+    return 1
+  }
+  // The command registry resolves paths without creating them so a refused start is
+  // side-effect free. Approval is the boundary after which the loop may prepare state.
+  orchPaths(paths.repoRoot)
+
+  if (daemonMode) {
     // run-branch.txt is updated by the child after this descriptor is opened. Use the
     // branch it is about to record so a new run rotates immediately, not on its restart.
-    const configuredIntegrationBranch = loadConfig().integrationBranch
+    const configuredIntegrationBranch = config.integrationBranch
     const runBranch = configuredIntegrationBranch || execFileSync(
       'git', ['branch', '--show-current'], {
         cwd: paths.repoRoot,
@@ -744,7 +967,10 @@ const cmdLoop: Command = async (paths, args) => {
       paths.logsDir,
       `.loop-startup-${process.pid}-${randomUUID()}.json`,
     )
-    const daemonArgs = [packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog]
+    const daemonArgs = [
+      packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
+      '--approve-mode', queueMode(config),
+    ]
     // The daemon must work on the repository this launcher was pointed at. Starting it
     // in the package directory instead made it resolve its own checkout as the
     // repository, which put the startup dependency install inside the very package the
@@ -772,7 +998,6 @@ const cmdLoop: Command = async (paths, args) => {
     console.log(`Stop: ${packageScriptCommand(paths.repoRoot, 'stop')}`)
     return 0
   }
-  const markerOutput = args[0] === '--marker-output' ? args[1] : undefined
   const startupResultFile = process.env[LOOP_STARTUP_RESULT_FILE_ENV]
   delete process.env[LOOP_STARTUP_RESULT_FILE_ENV]
   let startupReported = false
@@ -782,7 +1007,6 @@ const cmdLoop: Command = async (paths, args) => {
     publishLoopStartupResult(startupResultFile, result)
   }
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
-  let config: LoopConfig | undefined
   let startupError: string | undefined
   const log = (message: string, error = false): void => {
     if (startupError === undefined && message.startsWith('ERROR:')) {
@@ -794,15 +1018,16 @@ const cmdLoop: Command = async (paths, args) => {
       : 0
     for (const line of loopLogLines(message, {
       currentCycle,
-      cycleCap: config?.maxScanCycles ?? 0,
+      cycleCap: config.maxScanCycles,
     })) write(line)
   }
+  handleConfigEvent = (event): void => log(configEventLine(event), event.type === 'error')
+  for (const event of pendingConfigEvents.splice(0)) handleConfigEvent(event)
   const marker = (message: string): void => {
     if (markerOutput === undefined) console.log(message)
     else appendFileSync(markerOutput, `${message}\n`)
   }
   try {
-    config = loadConfig()
     const result = await runLoopDaemon(paths, log, marker, config, () => {
       reportStartup({
         status: 'ready',
@@ -856,7 +1081,7 @@ const cmdCiWait: Command = async (paths, args) => {
     timeoutSeconds = Number(timeout)
   }
 
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const forge = await loadForge(config.forge, paths.repoRoot)
   return waitForCi(forge, Number(prNumber), { timeoutSeconds })
 }
@@ -1004,8 +1229,12 @@ async function runLoopDaemon(
     )
     const topology = prepareBranchTopology(paths, config.integrationBranch)
     const loopPaths = topology.paths
-    const forge = await loadForge(config.forge, loopPaths.repoRoot)
-    const runner = await loadRunner(config.runner, config)
+    const forge = await loadForge(
+      config.forge,
+      loopPaths.repoRoot,
+      (message) => log(formatEventLine('WARN', 'forge', message)),
+    )
+    const runner = await loadRunner(config.runner, { env: process.env, repoRoot: loopPaths.repoRoot })
     const projectModule = await import('./adapters/project.ts')
     const projectRoot = topology.integrationBranch === undefined
       ? paths.root
@@ -1043,6 +1272,7 @@ async function runLoopDaemon(
     await loop.initializeIssueQueue()
 
     loop.initializeSessionStateForBranch()
+    loop.reportStrandedRunBranches()
     signalLoopRestartReady()
     ready()
 
@@ -1141,7 +1371,7 @@ const cmdShipped: Command = async (paths, args) => {
     console.error('The loop is running and records its own ending; shipped is for runs promoted by hand.')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
   const currentCycle = existsSync(scanCountFile)
@@ -1183,6 +1413,7 @@ const commands: Record<string, Command> = {
   'loop-status': cmdLoopStatus,
   'shipped': cmdShipped,
   'stop': cmdStop,
+  'config': cmdConfig,
 }
 
 async function main(): Promise<number> {
@@ -1197,7 +1428,7 @@ async function main(): Promise<number> {
     console.error(`Available commands: ${Object.keys(commands).join(', ')}`)
     return 1
   }
-  const paths = orchPaths(repoRoot())
+  const paths = orchPaths(repoRoot(), commandName !== 'loop')
   try {
     return await command(paths, args)
   } catch (error) {

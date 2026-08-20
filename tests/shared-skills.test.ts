@@ -59,7 +59,7 @@ describe('shared skill sync', () => {
       '.claude/skills/git-commit', '.claude/skills/loop-start',
     ])
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
-      .toBe('npm run -C orchestration/ts loop -- --daemon\n')
+      .toBe("npm run -C 'orchestration/ts' loop -- --daemon\n")
     expect(existsSync(join(repoRoot, '.agents', 'skills', 'verify-changes'))).toBe(false)
     expect(existsSync(join(packageRoot, '.agents', 'skills'))).toBe(false)
   })
@@ -114,8 +114,43 @@ describe('shared skill sync', () => {
 
     expect(result.updated).toEqual(['.agents/skills/loop-start', '.claude/skills/loop-start'])
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
-      .toBe('version two: npm run -C orchestration/ts loop\n')
+      .toBe("version two: npm run -C 'orchestration/ts' loop\n")
     expect(readFileSync(localSkill, 'utf8')).toBe('repository gates\n')
+  })
+
+  it('renders every skill before mutation so a failed render can be retried', () => {
+    syncSharedSkills(repoRoot, packageRoot, [runner.sharedSkills])
+    writeSkill('git-commit', 'updated commit instructions\n')
+    writeSkill('loop-start', 'updated loop instructions\n')
+    const failingAdapter = {
+      ...runner.sharedSkills,
+      renderFile: (contents: Buffer, options: Parameters<
+        typeof runner.sharedSkills.renderFile
+      >[1]) => {
+        if (contents.toString('utf8').includes('updated loop')) {
+          throw new Error('second skill could not render')
+        }
+        return runner.sharedSkills.renderFile(contents, options)
+      },
+    }
+
+    const failed = syncSharedSkills(repoRoot, packageRoot, [failingAdapter])
+
+    expect(failed.failures).toEqual(['second skill could not render'])
+    expect(failed.changedPaths).toEqual([])
+    expect(readFileSync(
+      join(repoRoot, '.agents', 'skills', 'git-commit', 'SKILL.md'), 'utf8',
+    )).toBe('Commit without a command.\n')
+
+    const retried = syncSharedSkills(repoRoot, packageRoot, [runner.sharedSkills])
+
+    expect(retried.conflicts).toEqual([])
+    expect(retried.updated).toEqual([
+      '.agents/skills/git-commit', '.agents/skills/loop-start',
+    ])
+    expect(readFileSync(
+      join(repoRoot, '.agents', 'skills', 'git-commit', 'SKILL.md'), 'utf8',
+    )).toBe('updated commit instructions\n')
   })
 
   it('reports and preserves a generated skill that the consumer changed', () => {
@@ -281,7 +316,7 @@ describe('shared skill sync', () => {
 
     expect(result.installed).toEqual(['.claude/skills/git-commit', '.claude/skills/loop-start'])
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
-      .toBe('npm run -C orchestration/ts loop -- --daemon\n')
+      .toBe("npm run -C 'orchestration/ts' loop -- --daemon\n")
   })
 
   it('serves the Claude runner without touching an unlisted repository skill', () => {

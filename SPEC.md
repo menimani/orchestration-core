@@ -15,6 +15,14 @@ from or equivalent to `orchestration/tests/*.sh`.
 - TypeScript executed natively by Node >= 23.6 (type stripping): no build step, no
   `enum`/`namespace`/parameter properties or other non-erasable syntax.
 - `tsc --noEmit` joins the repository checks; vitest runs the test suite.
+- Before a foreground loop enters its first cycle, or a background launcher spawns its
+  daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
+  runner models and reasoning efforts, and every setting whose resolved value differs
+  from its default. A terminal start requires an explicit `y` or `yes`; every other
+  answer refuses the start. A non-terminal start requires `--approve-mode local` or
+  `--approve-mode issue`, and the named mode must match `ISSUE_QUEUE_ENABLED`. Missing
+  or mismatched approval exits non-zero before queue, worktree, or forge access, with a
+  mismatch naming both the approved and resolved modes.
 - No `jq` dependency anywhere (this deletes the Windows-jq-CRLF bug class; the invariant
   it protected — values read from status files compare clean — still holds and is tested).
 - Core subtree updates default on. The daemon logs whether `CORE_AUTO_UPDATE` is on or
@@ -57,10 +65,45 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 ### Retained runtime configuration
 
-`loadConfig` keeps the environment-variable surface from the pre-rewrite launcher.
-Missing and empty values use the defaults below. Boolean values accept only the exact
+`loadConfig` keeps the runner-neutral environment-variable surface from the pre-rewrite
+launcher. The operator file is `orchestration/config.json`; its keys are the existing
+uppercase setting names. Resolution order is file, then environment, then the defaults
+below. A missing file therefore preserves the previous behavior and existing launch
+commands remain valid. Use
+`npm run config -- list`, `get <SETTING>`, `set <SETTING> <value>`, or `unset <SETTING>`
+(with the installed package's command prefix) to read and update it. The command writes a
+temporary file in the same directory and renames it into place atomically, so the loop
+cannot observe a partially written file.
+
+The loop caches the observed file version against its modification time and resolves a
+setting when it is referenced. File values pass through the same validation as environment
+values. A malformed file or a value that fails that validation stops the run; the error
+reports the file, the affected setting (or the file contents when JSON cannot identify a
+setting), and the validation or parse failure. It never answers from an earlier parse or
+the environment after observing a broken file. Changes to valid live values are recorded
+in the loop event log with the setting name and old and new values.
+
+Seven settings are pinned at loop startup. A file change to one is reported as ignored and
+the startup value remains active for the run:
+
+| Setting | Why it is pinned |
+|---------|------------------|
+| `FORGE` | Switching forge leaves in-flight work owned by a component no longer in use. |
+| `RUNNER` | Switching runner leaves in-flight work owned by a component no longer in use. |
+| `ISSUE_QUEUE_ENABLED` | Changing queue mode strands issues claimed under the old mode. |
+| `WORKER_MODE` | Changing worker mode strands issues claimed under the old mode. |
+| `INTEGRATION_BRANCH` | Changing it splits one run across branches. |
+| `UPSTREAM_REMOTE` | Changing it pulls a different core into a run already based on the original source. |
+| `UPSTREAM_BRANCH` | Changing it pulls a different core into a run already based on the original source. |
+
+Every other setting is live. Missing and empty environment values use the defaults below.
+Boolean values accept only the exact
 lowercase values `true` and `false`; every other non-empty value is rejected. Numeric
 values must be non-negative integers, with the narrower bounds stated below.
+
+The Claude adapter reads `RUNNER_CLAUDE_MODEL` and its four per-effort variants directly
+from the process environment when the runner is loaded. These runner-specific variables
+are not parsed by `loadConfig` and are not operator-file settings.
 
 | Variable | Default | Contract |
 |----------|---------|----------|
@@ -69,7 +112,7 @@ values must be non-negative integers, with the narrower bounds stated below.
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
 | `REVIEW_EFFORT` | `medium` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
-| `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter. |
+| `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter, or an external adapter module. |
 | `RUNNER_CLAUDE_MODEL` | `claude-opus-5` | Base model for the Claude runner when no task-specific model override applies. |
 | `RUNNER_CLAUDE_MODEL_MINIMAL`, `RUNNER_CLAUDE_MODEL_LOW`, `RUNNER_CLAUDE_MODEL_MEDIUM`, `RUNNER_CLAUDE_MODEL_HIGH` | `RUNNER_CLAUDE_MODEL` | Optional Claude model mapping for each runner-neutral reasoning effort. |
 | `MAX_PARALLEL` | `3` | Limit concurrently running queued-task processes and shared-issue claim capacity. It must be at least 1; scan fan-out is controlled separately by `SCAN_PARALLEL`. |
@@ -96,6 +139,12 @@ values must be non-negative integers, with the narrower bounds stated below.
    task is queued, running, completed, or retryable after failure. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
    creates a fresh task and updates the index; completed advisories remain deduplicated.
+   When generating a task specification, the description's leading category selects a
+   project pitfall list: `[TEST]` selects `templates/pitfalls/tests.md`, `[DOCS]` selects
+   `templates/pitfalls/docs.md`, and every other description selects
+   `templates/pitfalls/code.md`. When the selected file exists, its contents follow the
+   shared task requirements in the generated specification; when it does not exist, no
+   pitfall list is added.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
    `task/<id>`. The direct layout is the default because a consumer whose source lives
    outside the loop gains no safety from another checkout. With `INTEGRATION_BRANCH`
@@ -275,7 +324,13 @@ values must be non-negative integers, with the narrower bounds stated below.
     served once. The
     sync replaces only a tree whose content matches its recorded last output; consumer
     divergence is warned and retained, and skills absent from the manifest are untouched.
-    A destination that cannot be served is reported without costing the others theirs.
+    In a subtree consumer, before writing any destination, the sync verifies that every
+    managed destination has no staged changes. An unverifiable or non-clean managed index
+    is fatal and stops the cycle before any destination is served. A destination rendering
+    failure is reported without costing the others theirs. The sync then stages all managed
+    updates and removals and commits them as one scoped commit; a staging, inspection, or
+    commit failure is fatal and stops the cycle before task dispatch, retaining any staged
+    output for diagnosis.
     Shared canonical sources do not live below a runner skill directory, so a subtree
     exposes no nested duplicate of a shared skill.
 
@@ -353,6 +408,12 @@ values must be non-negative integers, with the narrower bounds stated below.
     the cause is the environment (network, credentials, runner CLI), and every task
     started meanwhile burns tokens reaching the same wall. Work that never ran leaves no
     diff, so nothing downstream can notice it is missing; the loop must.
+19a. In issue-queue mode, every failed-task release increments a persistent per-issue
+     consecutive failure count in the queue directory. Before `MAX_ISSUE_RETRIES`
+     (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and
+     parked under the exclusive `loop:retry-exhausted` lifecycle label, and the loop logs
+     a `Parked` event before stopping. A completed task clears the counts for its linked
+     issues.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks.
 
@@ -409,8 +470,11 @@ values must be non-negative integers, with the narrower bounds stated below.
 ## Adapter seams (new in the rewrite)
 
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
-    `forge-github.ts`; gitea/gitlab implementations can be added without touching the
-    core). The interface returns normalized values only: PR state plus check records with
+    `forge-github.ts`; any other selector loads an external package, file URL, absolute
+    path, or consumer-repository-relative module). External modules export a `Forge`
+    as default or `forge`, or a `createForge(repoRoot, report)` factory, so gitea/gitlab
+    implementations can be added without touching the core. The interface returns
+    normalized values only: PR state plus check records with
     `name`, `conclusion`, and `startedAt`, which is an ISO timestamp when the forge reports
     one and otherwise an empty string. For each check name, CI waiting discards only
     timestamped records older than the newest `startedAt`: it retains every record tied
@@ -425,7 +489,9 @@ values must be non-negative integers, with the narrower bounds stated below.
     message decoration for forge-driven closure. Fingerprint deduplication, claim
     arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
-    `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`). The runner contract is
+    `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`; any other selector
+    resolves like an external forge module). External modules export a `Runner` as default
+    or `runner`, or a `createRunner(options)` factory. The runner contract is
     the output markers — `TASK_COMPLETE`,
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
@@ -467,6 +533,17 @@ values must be non-negative integers, with the narrower bounds stated below.
     through `adapters/os.ts`. Callers receive intent-level process-tree, directory, and
     worktree-path operations from either `os-windows.ts` or `os-posix.ts`; there is no
     OS selector or platform field in the contract.
+32a. `deploy` accepts no arguments and uses the current branch, the project adapter's
+    deployment workflow and revision URL, and a request-unique dispatch token. It
+    dispatches that workflow and identifies only the run returned for the same workflow,
+    ref, and token. Run discovery is polled for at most five minutes; after discovery,
+    only that run id is polled for at most thirty minutes. Both use five-second polling
+    capped to the remaining deadline. The run must complete with conclusion `success`,
+    and the revision endpoint must return a successful response. Its trimmed body is
+    compared exactly with the run's `headSha`. The command reports the workflow success
+    and revision `PASS` or `FAIL`, and exits zero only for an exact revision match;
+    invalid usage, a missing deployment declaration, either timeout, an unsuccessful
+    workflow or revision response, and a revision mismatch exit non-zero.
 
 ## The issue queue (new in the rewrite, opt-in)
 
@@ -531,7 +608,8 @@ so authorship and verified ancestry must both hold.
     so partial implementation cannot close an unaddressed finding. A grouped task that
     fails, cannot start, or reaches abandoned merge handling returns every member to ready,
     unassigned, with `loop:group-singleton`; those findings are claimed individually on
-    retry rather than recreating the failed group. Fingerprints and their ledger remain per
+    retry rather than recreating the failed group. A failed task parks a member instead
+    once its per-issue retry bound is reached. Fingerprints and their ledger remain per
     finding.
 
     Worker daemons claim a ready issue or group by self-assignment. The forge login is the
@@ -607,8 +685,9 @@ so authorship and verified ancestry must both hold.
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
-    `loop:merge-ready` → closed or `loop:merge-failed`; inspections and accepted no-change
-    verdicts take the intentional `loop:in-progress` → closed shortcut.
+    `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
+    `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and
+    accepted no-change verdicts take the intentional `loop:in-progress` → closed shortcut.
 
 ## Test parity
 

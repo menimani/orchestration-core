@@ -3,6 +3,8 @@
 // shape, so porting to Gitea or GitLab means implementing this interface and nothing
 // else. SPEC.md item 29.
 
+import { externalAdapterSpecifier } from './external.ts'
+
 export type PrState = 'open' | 'closed' | 'merged' | 'none'
 
 export type CheckConclusion = 'success' | 'failure' | 'pending' | 'skipped'
@@ -149,13 +151,44 @@ export interface Forge {
   closeIssue(issueNumber: number, comment: string): Promise<void>
 }
 
-export async function loadForge(name: string, repoRoot: string): Promise<Forge> {
+export interface ExternalForgeModule {
+  /** A ready-to-use adapter. */
+  default?: Forge
+  /** A named ready-to-use adapter. */
+  forge?: Forge
+  /** A factory for adapters that need repository context or a warning sink. */
+  createForge?: (
+    repoRoot: string,
+    report: (message: string) => void,
+  ) => Forge | Promise<Forge>
+}
+
+export async function loadForge(
+  name: string,
+  repoRoot: string,
+  report: (message: string) => void = () => {},
+): Promise<Forge> {
   switch (name) {
     case 'github': {
       const mod = await import('./forge-github.ts')
-      return mod.createGithubForge(repoRoot)
+      return mod.createGithubForge(repoRoot, undefined, report)
     }
-    default:
-      throw new Error(`Unknown FORGE '${name}' (supported: github)`)
+    default: {
+      let mod: ExternalForgeModule
+      try {
+        mod = await import(externalAdapterSpecifier(name, repoRoot)) as ExternalForgeModule
+      } catch (error) {
+        throw new Error(
+          `Unknown FORGE '${name}' (supported: github). Could not load external adapter: ${(error as Error).message}`,
+          { cause: error },
+        )
+      }
+      const forge = mod.default ?? mod.forge
+      if (forge !== undefined) return forge
+      if (mod.createForge !== undefined) return mod.createForge(repoRoot, report)
+      throw new Error(
+        `External FORGE '${name}' must export default, forge, or createForge`,
+      )
+    }
   }
 }

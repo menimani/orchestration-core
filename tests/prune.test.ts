@@ -2,9 +2,25 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { pruneTasks } from '../src/prune.ts'
+
+const fsMockState = vi.hoisted(() => ({ removalFailurePath: undefined as string | undefined }))
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    rmSync: vi.fn((path: Parameters<typeof actual.rmSync>[0], options?: Parameters<typeof actual.rmSync>[1]) => {
+      if (fsMockState.removalFailurePath !== undefined
+          && String(path).includes(fsMockState.removalFailurePath)) {
+        throw new Error('simulated removal failure')
+      }
+      actual.rmSync(path, options)
+    }),
+  }
+})
 
 let repoRoot: string
 let paths: OrchPaths
@@ -30,6 +46,7 @@ function makeTask(id: string, status: string, age: 'old' | 'new'): void {
 }
 
 beforeEach(() => {
+  fsMockState.removalFailurePath = undefined
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-prune-'))
   paths = orchPaths(repoRoot)
   git(['init', '-q'])
@@ -100,6 +117,28 @@ describe('pruneTasks', () => {
     ]) {
       expect(existsSync(retained), `artifact should be retained: ${retained}`).toBe(true)
     }
+  })
+
+  it('removes the merge guard directory for a pruned task', () => {
+    makeTask(OLD_MERGED, 'merged', 'old')
+    const mergeGuard = join(paths.queueDir, 'merge-guards', OLD_MERGED)
+    mkdirSync(mergeGuard, { recursive: true })
+    writeFileSync(join(mergeGuard, 'succeeded'), '')
+
+    const report = pruneTasks(paths, { days: 14, dryRun: false })
+
+    expect(report.removed).toContain(mergeGuard)
+    expect(existsSync(mergeGuard)).toBe(false)
+  })
+
+  it('retains the status file when removing an earlier artifact fails', () => {
+    makeTask(OLD_MERGED, 'merged', 'old')
+    fsMockState.removalFailurePath = `${OLD_MERGED}.log`
+
+    expect(() => pruneTasks(paths, { days: 14, dryRun: false }))
+      .toThrow('simulated removal failure')
+
+    expect(existsSync(join(paths.statusDir, `${OLD_MERGED}.json`))).toBe(true)
   })
 
   it('prunes old finished tasks and keeps everything protected', () => {

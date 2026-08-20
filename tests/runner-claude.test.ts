@@ -98,7 +98,7 @@ describe('createClaudeRunner', () => {
       'allowed-tools: Bash',
       '---',
       '',
-      'Run /git-review, then npm run -C orchestration/ts loop-status.',
+      "Run /git-review, then npm run -C 'orchestration/ts' loop-status.",
       '',
     ].join('\n'))
   })
@@ -115,11 +115,13 @@ describe('createClaudeRunner', () => {
     const child = mockChild(4321)
     mocks.spawn.mockReturnValue(child)
     const runner = createClaudeRunner({
-      runnerClaudeModel: 'claude-base',
-      runnerClaudeModelMinimal: 'claude-minimal',
-      runnerClaudeModelLow: 'claude-low',
-      runnerClaudeModelMedium: 'claude-medium',
-      runnerClaudeModelHigh: 'claude-high',
+      env: {
+        RUNNER_CLAUDE_MODEL: 'claude-base',
+        RUNNER_CLAUDE_MODEL_MINIMAL: 'claude-minimal',
+        RUNNER_CLAUDE_MODEL_LOW: 'claude-low',
+        RUNNER_CLAUDE_MODEL_MEDIUM: 'claude-medium',
+        RUNNER_CLAUDE_MODEL_HIGH: 'claude-high',
+      },
     })
 
     const started = runner.start({ ...options, effort })
@@ -151,11 +153,27 @@ describe('createClaudeRunner', () => {
     mocks.spawn.mockReturnValue(child)
 
     const started = createClaudeRunner({
-      runnerClaudeModelHigh: 'claude-high',
+      env: { RUNNER_CLAUDE_MODEL_HIGH: 'claude-high' },
     }).start({ ...options, model: 'task-model' })
 
     expect(mocks.spawn.mock.calls[0]?.[1]).toContain('task-model')
     expect(mocks.spawn.mock.calls[0]?.[1]).not.toContain('claude-high')
+    child.emit('spawn')
+    await expect(started).resolves.toBe(1234)
+  })
+
+  it('uses the configured base model for missing and empty effort variants', async () => {
+    const child = mockChild()
+    mocks.spawn.mockReturnValue(child)
+
+    const started = createClaudeRunner({
+      env: {
+        RUNNER_CLAUDE_MODEL: 'claude-base',
+        RUNNER_CLAUDE_MODEL_HIGH: '',
+      },
+    }).start(options)
+
+    expect(mocks.spawn.mock.calls[0]?.[1]).toContain('claude-base')
     child.emit('spawn')
     await expect(started).resolves.toBe(1234)
   })

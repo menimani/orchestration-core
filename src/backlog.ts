@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync,
-  writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join, toNamespacedPath } from 'node:path'
+import { dirname, join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import {
   currentProcessStartIdentity, decodeProcessStartIdentity, encodeProcessStartIdentity,
@@ -14,6 +13,7 @@ const LOCK_RETRY_MS = 10
 const OWNER_GRACE_MS = 30_000
 const MAX_LOCK_RETRIES = Math.ceil(OWNER_GRACE_MS / LOCK_RETRY_MS)
 const sleepBuffer = new SharedArrayBuffer(4)
+const releasedOwnedLockTokens = new Set<string>()
 
 function ownerText(lockDir: string): string {
   try {
@@ -36,6 +36,7 @@ function lockOwnerIsStale(lockDir: string): boolean {
   const [pidRaw, createdRaw, token, ...extra] = ownerText(lockDir).split(/\s+/)
   const pid = Number(pidRaw)
   const created = Number(createdRaw)
+  if (token !== undefined && releasedOwnedLockTokens.has(token)) return true
   if (
     !/^[1-9]\d*$/.test(pidRaw ?? '')
     || !/^\d+$/.test(createdRaw ?? '')
@@ -68,13 +69,28 @@ function ownedLock(lockDir: string): string {
 
 function releaseOwnedLock(lockDir: string, token: string): void {
   if (ownerText(lockDir).split(/\s+/)[2] !== token) return
+
+  const displaced = `${lockDir}.released.${process.pid}-${randomUUID()}`
   try {
-    // Empty-directory removal cannot erase a successor: if one publishes after the
-    // owner file disappears, its metadata makes this operation fail instead.
-    rmSync(toNamespacedPath(join(lockDir, 'owner')), { force: true })
-    rmdirSync(toNamespacedPath(lockDir))
+    renameSync(lockDir, displaced)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    // The mutation has already committed. Keep its result observable and let the next
+    // acquisition reclaim this exact token even while this process remains alive.
+    releasedOwnedLockTokens.add(token)
+    return
+  }
+  releasedOwnedLockTokens.delete(token)
+
+  // Revalidate after the atomic displacement so a racing replacement is never erased.
+  if (ownerText(displaced).split(/\s+/)[2] !== token) {
+    if (!existsSync(lockDir)) renameSync(displaced, lockDir)
+    return
+  }
+  try {
+    operatingSystem.removeDirectory(displaced)
   } catch {
-    // Ownership has already ended or a successor won the publication race.
+    // The public lock name is already free; removal of the private remnant is best effort.
   }
 }
 

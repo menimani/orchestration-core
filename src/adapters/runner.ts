@@ -7,6 +7,7 @@
 // Markers anywhere else (the transcript log) are ignored by the core. SPEC.md item 30.
 
 import type { SharedSkillRenderOptions, SharedSkillsAdapter } from './shared-skills.ts'
+import { externalAdapterSpecifier } from './external.ts'
 
 export type { SharedSkillRenderOptions, SharedSkillsAdapter } from './shared-skills.ts'
 
@@ -26,27 +27,39 @@ export interface RunnerStartOptions {
   model?: string | undefined
 }
 
+export type RunnerModelOptions = Pick<RunnerStartOptions, 'effort' | 'model'>
+
 export type RunnerSharedSkillRenderOptions = SharedSkillRenderOptions
 export type RunnerSharedSkills = SharedSkillsAdapter
 
 export interface Runner {
   /** Runner-specific repository skill discovery and rendering behavior. */
   sharedSkills: RunnerSharedSkills
+  /** Resolve the model the adapter will pass to its runner, if it passes one explicitly. */
+  resolveModel?(options: RunnerModelOptions): string | undefined
   /** Start the agent process detached; resolve with its PID once spawned. */
   start(options: RunnerStartOptions): Promise<number>
 }
 
 export interface RunnerLoadOptions {
-  runnerClaudeModel?: string | undefined
-  runnerClaudeModelMinimal?: string | undefined
-  runnerClaudeModelLow?: string | undefined
-  runnerClaudeModelMedium?: string | undefined
-  runnerClaudeModelHigh?: string | undefined
+  /** Environment available to the selected runner adapter. */
+  env: NodeJS.ProcessEnv
+  /** Consumer repository root used to resolve relative external adapter selectors. */
+  repoRoot?: string
+}
+
+export interface ExternalRunnerModule {
+  /** A ready-to-use adapter. */
+  default?: Runner
+  /** A named ready-to-use adapter. */
+  runner?: Runner
+  /** A factory for adapters that need loader options. */
+  createRunner?: (options: RunnerLoadOptions) => Runner | Promise<Runner>
 }
 
 export async function loadRunner(
   name: string,
-  options: RunnerLoadOptions = {},
+  options: RunnerLoadOptions = { env: process.env },
 ): Promise<Runner> {
   switch (name) {
     case 'codex': {
@@ -57,7 +70,24 @@ export async function loadRunner(
       const mod = await import('./runner-claude.ts')
       return mod.createClaudeRunner(options)
     }
-    default:
-      throw new Error(`Unknown RUNNER '${name}' (supported: codex, claude)`)
+    default: {
+      let mod: ExternalRunnerModule
+      try {
+        mod = await import(
+          externalAdapterSpecifier(name, options.repoRoot ?? process.cwd())
+        ) as ExternalRunnerModule
+      } catch (error) {
+        throw new Error(
+          `Unknown RUNNER '${name}' (supported: codex, claude). Could not load external adapter: ${(error as Error).message}`,
+          { cause: error },
+        )
+      }
+      const runner = mod.default ?? mod.runner
+      if (runner !== undefined) return runner
+      if (mod.createRunner !== undefined) return mod.createRunner(options)
+      throw new Error(
+        `External RUNNER '${name}' must export default, runner, or createRunner`,
+      )
+    }
   }
 }

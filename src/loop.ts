@@ -31,6 +31,9 @@ import { readStatus, transitionStatus } from './status.ts'
 import { startTask } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
+  terminateLiveTaskProcesses, type TaskProcessTermination,
+} from './taskProcesses.ts'
+import {
   frameUntrustedText, frameVerifiedRequirement, readTemplate, repositoryInspectionPreamble,
   reviewScopeTemplateValues,
 } from './templates.ts'
@@ -50,7 +53,8 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
-  recordIssueCompletions, recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
+  clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
+  recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
@@ -71,6 +75,7 @@ export interface LoopDeps {
   marker?: ((line: string) => void) | undefined
   now: () => Date
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
+  terminateTaskProcesses?: (() => TaskProcessTermination) | undefined
   enqueueTask?: typeof enqueueTask
   updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
   projectAdapterChanged?: () => boolean
@@ -125,6 +130,7 @@ export function createLoop(deps: LoopDeps) {
   const {
     paths, config, forge: rawForge, runner, project, log, marker = log, now,
     orchestrationDepsRuntime,
+    terminateTaskProcesses = () => terminateLiveTaskProcesses(paths),
     enqueueTask: enqueueTaskImpl = enqueueTask,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
@@ -290,9 +296,25 @@ export function createLoop(deps: LoopDeps) {
     return true
   }
 
-  function orchestrationDepsEvent(name: 'Installed' | 'WARN', subject: string): void {
-    if (name === 'Installed') event(name, 'orchestration deps', subject)
+  function orchestrationDepsEvent(
+    name: 'Installed' | 'Skipped' | 'WARN', subject: string,
+  ): void {
+    if (name === 'Installed' || name === 'Skipped') event(name, 'orchestration deps', subject)
     else event(name, subject)
+  }
+
+  function stopTaskProcessesBeforeDependencyInstall(): boolean {
+    const result = terminateTaskProcesses()
+    for (const task of result.terminated) {
+      event('Stopped', shortTaskId(task.taskId),
+        `process tree PID ${task.pid} before dependency installation`)
+    }
+    for (const failure of result.failures) {
+      event('WARN',
+        `dependency installation skipped; process tree ${shortTaskId(failure.taskId)} `
+        + `PID ${failure.pid} survived: ${failure.error}`)
+    }
+    return result.failures.length === 0
   }
 
   function warning(callSite: string, operation: string, subject: string): void {
@@ -522,35 +544,58 @@ export function createLoop(deps: LoopDeps) {
         }
 
         const runBranch = git(['branch', '--show-current']).trim()
-        const mergeCommit = await mergeRemoteTask(
-          paths,
-          issue.number,
-          remote,
-          report.branch,
-          report.head,
-          {
-            taskGate: config.taskGate,
-            testCmd: config.testCmd === '' ? undefined : config.testCmd,
-            skipAutoTest: config.skipAutoTest,
-            project,
-            forge: rawForge,
-            outputFile: mergeLog,
-            orchestrationDepsRuntime,
-            onOrchestrationDepsEvent: orchestrationDepsEvent,
-            closesIssues: adoptionIssues.map((candidate) => candidate.number),
-            onMerged: (mergedCommit) => {
-              writeFileSync(mergeFailureFile, '0\n')
-              recordIssuesForTask(
-                paths, taskId, adoptionIssues.map((candidate) => candidate.number),
-              )
-              recordIssuePromotions(paths, taskId, mergedCommit, runBranch)
-              const cycle = readCount(scanCountFile)
-              if (cycle > 0) {
-                rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
-              }
+        let appliedMergeCommit: string | undefined
+        let promotionPersistenceError: unknown
+        const persistPromotion = (mergedCommit: string): void => {
+          appliedMergeCommit = mergedCommit
+          try {
+            writeFileSync(mergeFailureFile, '0\n')
+            recordIssuesForTask(
+              paths, taskId, adoptionIssues.map((candidate) => candidate.number),
+            )
+            recordIssuePromotions(paths, taskId, mergedCommit, runBranch)
+            const cycle = readCount(scanCountFile)
+            if (cycle > 0) {
+              rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+            }
+          } catch (error) {
+            promotionPersistenceError = error
+            throw error
+          }
+        }
+        let mergeCommit: string
+        try {
+          mergeCommit = await mergeRemoteTask(
+            paths,
+            issue.number,
+            remote,
+            report.branch,
+            report.head,
+            {
+              taskGate: config.taskGate,
+              testCmd: config.testCmd === '' ? undefined : config.testCmd,
+              skipAutoTest: config.skipAutoTest,
+              project,
+              forge: rawForge,
+              outputFile: mergeLog,
+              orchestrationDepsRuntime,
+              onOrchestrationDepsEvent: orchestrationDepsEvent,
+              beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
+              closesIssues: adoptionIssues.map((candidate) => candidate.number),
+              onMerged: persistPromotion,
             },
-          },
-        )
+          )
+        } catch (error) {
+          if (appliedMergeCommit === undefined || error !== promotionPersistenceError) throw error
+          try {
+            persistPromotion(appliedMergeCommit)
+            mergeCommit = appliedMergeCommit
+          } catch (retryError) {
+            appendFileSync(mergeLog, `${errorSummary(retryError)}\n`)
+            event('WARN', `could not persist adopted issue #${issue.number}; retrying next poll`)
+            continue
+          }
+        }
         try {
           await Promise.all(adoptionIssues.map((candidate) =>
             updateAdoptedIssue(candidate, taskId, mergeCommit, runBranch)))
@@ -1293,6 +1338,96 @@ export function createLoop(deps: LoopDeps) {
     writeFileSync(runBranchFile, `${currentBranch}\n`)
   }
 
+  /**
+   * Warn about earlier branches from the same integration-run series which still carry
+   * commits absent from the advertised default branch. Remote objects are fetched
+   * without a destination ref, so this observation never creates, advances, or deletes
+   * a branch.
+   */
+  function reportStrandedRunBranches(): void {
+    try {
+      const currentBranch = gitIn(paths.repoRoot, ['branch', '--show-current']).trim()
+      const runName = /^(.*(?:^|\/)loop-)\d{8}(-.+-run)\d+$/.exec(currentBranch)
+      if (runName === null) return
+
+      const escapeRegex = (value: string): string =>
+        value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const runBranchPattern = new RegExp(
+        `^${escapeRegex(runName[1]!)}\\d{8}${escapeRegex(runName[2]!)}\\d+$`,
+      )
+      const remote = currentBranchTrackingRemote(paths.repoRoot)
+      const remoteListing = gitIn(paths.repoRoot, [
+        'ls-remote', '--symref', remote, 'HEAD', 'refs/heads/*',
+      ])
+      const defaultBranch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(remoteListing)?.[1]
+      if (defaultBranch === undefined) {
+        throw new Error(`${remote} does not advertise a default branch`)
+      }
+
+      const tips = new Map<string, Set<string>>()
+      const addTip = (branch: string, tip: string): void => {
+        if (branch === currentBranch || !runBranchPattern.test(branch)) return
+        const branchTips = tips.get(branch) ?? new Set<string>()
+        branchTips.add(tip)
+        tips.set(branch, branchTips)
+      }
+      for (const branch of gitIn(paths.repoRoot, [
+        'for-each-ref', '--format=%(refname:short)', 'refs/heads/',
+      ]).split(/\r?\n/).filter(Boolean)) {
+        addTip(branch, branch)
+      }
+
+      const remoteHeads = new Map<string, string>()
+      for (const line of remoteListing.split(/\r?\n/)) {
+        const match = /^([0-9a-fA-F]+)\trefs\/heads\/(.+)$/.exec(line)
+        if (match === null) continue
+        remoteHeads.set(match[2]!, match[1]!)
+        addTip(match[2]!, match[1]!)
+      }
+      const defaultTip = remoteHeads.get(defaultBranch)
+      if (defaultTip === undefined) {
+        throw new Error(`could not resolve ${remote}/${defaultBranch}`)
+      }
+
+      const requiredObjects = new Set([defaultTip, ...[...tips.values()].flatMap((refs) =>
+        [...refs].filter((ref) => /^[0-9a-fA-F]+$/.test(ref)))])
+      const missingObjects = [...requiredObjects].filter((object) => {
+        try {
+          gitIn(paths.repoRoot, ['cat-file', '-e', `${object}^{commit}`])
+          return false
+        } catch {
+          return true
+        }
+      })
+      if (missingObjects.length > 0) {
+        gitIn(paths.repoRoot, [
+          'fetch', '--no-tags', '--no-write-fetch-head', remote,
+          ...missingObjects,
+        ])
+      }
+
+      for (const [branch, branchTips] of [...tips].sort(([left], [right]) =>
+        left.localeCompare(right))) {
+        try {
+          const counts = [...branchTips].map((tip) => Number(gitIn(
+            paths.repoRoot, ['rev-list', '--count', `${defaultTip}..${tip}`],
+          ).trim()))
+          const count = Math.max(...counts)
+          if (count > 0) {
+            event(
+              'WARN',
+              `stranded run branch ${branch} has ${count} commit${count === 1 ? '' : 's'} not on ${defaultBranch}`,
+            )
+          }
+        } catch (error) {
+          event('WARN', `stranded run branch ${branch} could not be checked; continuing: ${errorSummary(error)}`)
+        }
+      }
+    } catch (error) {
+      event('WARN', `stranded run branch check failed; continuing: ${errorSummary(error)}`)
+    }
+  }
+
   /** Fail startup before work begins when this run can never publish its branch. */
   function validatePushTarget(): boolean {
     if (!config.autoPr && !config.workerMode) return true
@@ -1796,7 +1931,7 @@ export function createLoop(deps: LoopDeps) {
         }
         if (emptyPrGate) {
           writeFileSync(resumeFlag, '')
-        } else if (config.autoReview) {
+        } else if (config.reviewEnabled && config.autoReview) {
           if (!runAutoReview(currentScans, cycleIsFinal(currentScans))) return 'continue'
           writeFileSync(resumeFlag, '')
         } else if (config.reviewEnabled) {
@@ -1950,6 +2085,13 @@ export function createLoop(deps: LoopDeps) {
     const mergeAttempts = new Set<string>()
     const locallyRunningIssues = new Set<number>()
     let issueReconciliationPending = false
+    const issueReleaseOptions = {
+      maxIssueRetries: config.maxIssueRetries,
+      onPark: (issueNumber: number, failures: number) => {
+        event('Parked', `#${issueNumber}`, `${failures} consecutive task failures`)
+        writeFileSync(stopFile, '')
+      },
+    }
 
     const reconcileMergedIssues = async (
       taskId: string,
@@ -1995,6 +2137,7 @@ export function createLoop(deps: LoopDeps) {
     const mergeCompletedTask = async (taskId: string): Promise<void> => {
       if (!config.autoMerge || mergeAttempts.has(taskId)
         || !existsSync(join(scannedDir, taskId))) return
+      clearIssueFailureCounts(paths, taskId)
       mergeAttempts.add(taskId)
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
       const linkedIssues = issueNumbersForTask(paths, taskId)
@@ -2013,6 +2156,7 @@ export function createLoop(deps: LoopDeps) {
           outputFile: mergeLog,
           orchestrationDepsRuntime,
           onOrchestrationDepsEvent: orchestrationDepsEvent,
+          beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
           onMergeStart: () => event('Merging', shortTaskId(taskId)),
           onMergeSkipped: (reason) => event(
             'Skipped', shortTaskId(taskId),
@@ -2078,7 +2222,9 @@ export function createLoop(deps: LoopDeps) {
               completeIssueReleaseIntent(paths, taskId)
               dropClaimedTaskMaterialization(paths, taskId, true)
               if (remoteOperationsAvailable) {
-                const failures = await reconcileIssueReleaseIntent(forge, paths, taskId)
+                const failures = await reconcileIssueReleaseIntent(
+                  forge, paths, taskId, issueReleaseOptions,
+                )
                 if (failures.length > 0) {
                   throw new IssueReleaseReconciliationError(failures)
                 }
@@ -2158,9 +2304,14 @@ export function createLoop(deps: LoopDeps) {
       // silence. Say so, once per task, and keep the count for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
+      if (status === 'failed' && !existsSync(failedFlag)) {
+        recordIssueFailure(paths, taskId)
+      }
       if (failedIssues.length > 0 && remoteOperationsAvailable) {
         recordIssueReleaseIntent(paths, taskId, failedIssues)
-        const failures = await reconcileIssueReleaseIntent(forge, paths, taskId)
+        const failures = await reconcileIssueReleaseIntent(
+          forge, paths, taskId, issueReleaseOptions,
+        )
         if (failures.length === 0) {
           event('Released', shortTaskId(taskId), 'grouped task failed')
         } else {
@@ -2184,6 +2335,7 @@ export function createLoop(deps: LoopDeps) {
       }
 
       const scannedFlag = join(scannedDir, taskId)
+      if (status === 'completed') clearIssueFailureCounts(paths, taskId)
       if (status === 'completed' && !existsSync(scannedFlag)
         && (!config.issueQueueEnabled || remoteOperationsAvailable)) {
         const depthFile = join(scannedDir, `${taskId}.depth`)
@@ -2278,6 +2430,7 @@ export function createLoop(deps: LoopDeps) {
             locallyRunningIssues,
             openFindings,
             issueHasMergeMarker,
+            issueReleaseOptions,
           )
           if (readCount(issueReleaseFailureFile) > 0) {
             writeFileSync(issueReleaseFailureFile, '0\n')
@@ -2368,10 +2521,13 @@ export function createLoop(deps: LoopDeps) {
         } catch (error) {
           const issueNumbers = issueNumbersForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumbers.length > 0) {
+            recordIssueFailure(paths, entry.taskId)
             let released = false
             if (remoteOperationsAvailable) {
               recordIssueReleaseIntent(paths, entry.taskId, issueNumbers)
-              const failures = await reconcileIssueReleaseIntent(forge, paths, entry.taskId)
+              const failures = await reconcileIssueReleaseIntent(
+                forge, paths, entry.taskId, issueReleaseOptions,
+              )
               if (failures.length === 0) {
                 released = true
                 event('Released', shortTaskId(entry.taskId), 'startup failed')
@@ -2484,6 +2640,7 @@ export function createLoop(deps: LoopDeps) {
     initializeIssueQueue,
     validatePushTarget,
     initializeSessionStateForBranch,
+    reportStrandedRunBranches,
     cleanupSessionState,
     restartSubject: () => restartSubject,
     // exported for tests

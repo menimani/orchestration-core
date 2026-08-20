@@ -1,14 +1,14 @@
 import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process'
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync,
-  writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
+  utimesSync, writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { issueCompletionForIssue, recordIssueForTask } from '../src/issueQueue.ts'
+import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
 import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
@@ -249,6 +249,29 @@ describe('report-upstream arguments', () => {
   })
 })
 
+describe('delegate arguments', () => {
+  it('rejects an unknown leading flag without creating or publishing a task', () => {
+    const result = spawnSync(process.execPath, [CLI, 'delegate', '--hlep'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'true', FORGE: 'missing' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('ERROR: unknown option: --hlep')
+    expect(result.stderr).toContain(
+      'Usage: delegate "<description>" [--effort minimal|low|medium|high] [--inspect]',
+    )
+    expect(result.stderr).not.toContain('Unknown FORGE')
+
+    const paths = orchPaths(repoRoot, false)
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+    expect(readdirSync(paths.queueDir)).toEqual([])
+  })
+})
+
 describe('logs', () => {
   it('returns a failure when a log follower cannot read a regular file', () => {
     const paths = orchPaths(repoRoot)
@@ -283,7 +306,7 @@ describe('manual merge', () => {
     git(['add', '-A'], worktree)
     git(['commit', '-qm', 'fix: complete linked task'], worktree)
     await writeStatus(paths, taskId, 'completed')
-    recordIssueForTask(paths, taskId, 197)
+    recordIssuesForTask(paths, taskId, [197])
     writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '3\n')
     const runBranch = git(['branch', '--show-current']).trim()
 
@@ -352,7 +375,7 @@ describe('manual merge', () => {
     writeFileSync(finalMessageFile(paths, taskId),
       'The requested behavior is already present.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
     await writeStatus(paths, taskId, 'completed')
-    recordIssueForTask(paths, taskId, issueNumber)
+    recordIssuesForTask(paths, taskId, [issueNumber])
 
     let issueState: 'open' | 'closed' = 'open'
     const forge = {
@@ -541,11 +564,104 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('refuses a non-interactive start without an approved mode before side effects', () => {
+    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('queue mode: local')
+    expect(result.stderr).toContain('pass --approve-mode local')
+    expect(existsSync(join(repoRoot, 'orchestration', 'queue'))).toBe(false)
+    expect(existsSync(join(repoRoot, 'orchestration', 'worktrees'))).toBe(false)
+  })
+
+  it('refuses a non-interactive start when the approved mode differs', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop', '--approve-mode', 'local'],
+      {
+        cwd: repoRoot,
+        env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("approved queue mode 'local'")
+    expect(result.stderr).toContain("resolved queue mode 'issue'")
+    expect(existsSync(join(repoRoot, 'orchestration', 'queue'))).toBe(false)
+    expect(existsSync(join(repoRoot, 'orchestration', 'worktrees'))).toBe(false)
+  })
+
+  it('accepts a non-interactive start when the approved mode agrees', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop', '--approve-mode', 'local'],
+      {
+        cwd: repoRoot,
+        env: {
+          ...CORE_ENV,
+          AUTO_PR: 'false',
+          ISSUE_QUEUE_ENABLED: 'false',
+          MAX_SCAN_CYCLES: '0',
+          SCAN_ENABLED: 'true',
+        },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Resolved loop configuration:')
+    expect(result.stdout).toContain('MAX_SCAN_CYCLES=0')
+  })
+
+  it('reports the Claude models resolved for scan, task, and review efforts', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop', '--approve-mode', 'local'],
+      {
+        cwd: repoRoot,
+        env: {
+          ...CORE_ENV,
+          AUTO_PR: 'false',
+          ISSUE_QUEUE_ENABLED: 'false',
+          MAX_SCAN_CYCLES: '0',
+          RUNNER: 'claude',
+          RUNNER_CLAUDE_MODEL: 'claude-base',
+          RUNNER_CLAUDE_MODEL_MINIMAL: 'claude-scan',
+          RUNNER_CLAUDE_MODEL_LOW: 'claude-review',
+          RUNNER_CLAUDE_MODEL_HIGH: 'claude-task',
+          SCAN_EFFORT: 'minimal',
+          TASK_EFFORT: 'high',
+          REVIEW_EFFORT: 'low',
+        },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('scan: model=claude-scan effort=minimal')
+    expect(result.stdout).toContain('task: model=claude-task effort=high')
+    expect(result.stdout).toContain('review: model=claude-review effort=low')
+    expect(result.stdout).not.toContain('(runner default)')
+  })
+
   it('does not report a background daemon as started when the PID lock is held', () => {
     mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
     writeFileSync(daemonFile('loop.pid'), processMarkerText(processMarker(process.pid)))
 
-    const result = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local', '--daemon'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
       encoding: 'utf8',
@@ -562,7 +678,7 @@ describe('loop daemon ownership', () => {
     mkdirSync(dirname(daemonFile('loop.pid')), { recursive: true })
     writeFileSync(daemonFile('loop.pid'), `${process.pid}\n`)
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
       encoding: 'utf8',
@@ -584,7 +700,7 @@ describe('loop daemon ownership', () => {
     )
     mkdirSync(join(paths.worktreesDir, 'orphan-after-reused-loop-pid'))
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
       encoding: 'utf8',
@@ -599,7 +715,7 @@ describe('loop daemon ownership', () => {
   })
 
   it('returns a background daemon initialization error to its launcher', () => {
-    const result = spawnSync(process.execPath, [CLI, 'loop', '--daemon'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'issue', '--daemon'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
       encoding: 'utf8',
@@ -655,7 +771,7 @@ describe('loop daemon ownership', () => {
     git(['commit', '-qm', 'fix: update integration adapter'])
     git(['switch', '-q', '-c', 'daemon/run', 'HEAD~1'])
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: {
         ...INHERITED_ENV,
@@ -714,7 +830,7 @@ describe('loop daemon ownership', () => {
     ].join('\n'))
 
     expect(existsSync(join(packageModules, 'typescript'))).toBe(false)
-    const result = spawnSync(process.execPath, [wrapper, 'loop'], {
+    const result = spawnSync(process.execPath, [wrapper, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: {
         ...CORE_ENV,
@@ -744,7 +860,7 @@ describe('loop daemon ownership', () => {
     // A task's process lives in the registry, not in the record.
     recordTaskProcess(paths, taskId, process.pid)
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
       encoding: 'utf8',
@@ -765,7 +881,7 @@ describe('loop daemon ownership', () => {
     const orphan = join(paths.worktreesDir, 'orphan-without-status')
     mkdirSync(orphan, { recursive: true })
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
       encoding: 'utf8',
@@ -807,7 +923,7 @@ describe('loop daemon ownership', () => {
       '',
     ].join('\n'))
 
-    const children = Array.from({ length: 6 }, () => testProcesses.spawn(process.execPath, [wrapper, 'loop'], {
+    const children = Array.from({ length: 6 }, () => testProcesses.spawn(process.execPath, [wrapper, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: {
         ...CORE_ENV,
@@ -866,7 +982,7 @@ describe('loop daemon ownership', () => {
       '',
     ].join('\n'))
 
-    const children = Array.from({ length: 6 }, () => testProcesses.spawn(process.execPath, [wrapper, 'loop'], {
+    const children = Array.from({ length: 6 }, () => testProcesses.spawn(process.execPath, [wrapper, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: {
         ...CORE_ENV,
@@ -908,7 +1024,7 @@ describe('loop daemon ownership', () => {
     utimesSync(recovery, past, past)
     mkdirSync(join(paths.worktreesDir, 'orphan-after-recovery'))
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
       encoding: 'utf8',
@@ -933,7 +1049,7 @@ describe('loop daemon ownership', () => {
     }))
     mkdirSync(join(paths.worktreesDir, 'orphan-after-owner-recovery'))
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
       encoding: 'utf8',
@@ -959,7 +1075,7 @@ describe('loop daemon ownership', () => {
     }))
     mkdirSync(join(paths.worktreesDir, 'orphan-after-reused-pid-recovery'))
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
       encoding: 'utf8',
@@ -979,7 +1095,7 @@ describe('loop daemon ownership', () => {
     writeFileSync(daemonFile('run-branch.txt'), `${git(['branch', '--show-current']).trim()}\n`)
     writeFileSync(daemonFile('merge-failure-count.txt'), '2\n')
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: {
         ...CORE_ENV,
@@ -1009,7 +1125,7 @@ describe('loop daemon ownership', () => {
 
     const result = spawnSync(
       process.execPath,
-      [CLI, 'loop', '--marker-output', markerLog],
+      [CLI, 'loop', '--approve-mode', 'local', '--marker-output', markerLog],
       {
         cwd: repoRoot,
         env: {
@@ -1030,7 +1146,8 @@ describe('loop daemon ownership', () => {
     )
 
     const marker = `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`
-    const loopLogLines = result.stdout.split(/\r?\n/).filter((line) => line !== '')
+    const loopLogLines = result.stdout.split(/\r?\n/).filter((line) =>
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop /.test(line))
     expect(result.status).toBe(0)
     expect(readFileSync(markerLog, 'utf8')).toBe(`${marker}\n`)
     expect(loopLogLines).not.toContain(marker)
@@ -1046,7 +1163,7 @@ describe('loop daemon ownership', () => {
     mkdirSync(dirname(daemonFile('merge-failure-count.txt')), { recursive: true })
     writeFileSync(daemonFile('merge-failure-count.txt'), '3\n')
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'issue'], {
       cwd: repoRoot,
       env: { ...CORE_ENV, FORGE: 'missing', ISSUE_QUEUE_ENABLED: 'true' },
       encoding: 'utf8',
@@ -1065,7 +1182,7 @@ describe('loop daemon ownership', () => {
     mkdirSync(dirname(daemonFile('cycle-cap.txt')), { recursive: true })
     writeFileSync(daemonFile('cycle-cap.txt'), '99\n')
 
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: {
         ...CORE_ENV,
@@ -1087,7 +1204,7 @@ describe('loop daemon ownership', () => {
   })
 
   it('states when automatic core updates are disabled', () => {
-    const result = spawnSync(process.execPath, [CLI, 'loop'], {
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
       env: {
         ...CORE_ENV,

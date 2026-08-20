@@ -1,8 +1,8 @@
 import { execFileSync, execSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, rmdirSync,
-  writeFileSync,
+  renameSync, statSync, writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
@@ -22,7 +22,7 @@ import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
-  removeWorktreeWithFallback, type WorktreeRemovalRuntime,
+  removalFailureDetail, removeWorktreeWithFallback, type WorktreeRemovalRuntime,
 } from './worktree.ts'
 
 export class MergeError extends Error {
@@ -65,6 +65,8 @@ export interface MergeOptions {
   outputFile?: string | undefined
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   onOrchestrationDepsEvent?: OrchestrationDepsEvent | undefined
+  /** Return false to leave the current dependency tree untouched for this merge. */
+  beforeOrchestrationDepsInstall?: (() => boolean) | undefined
   /** Close or otherwise reconcile linked work before accepting a no-change verdict. */
   onNoChange?: (() => Promise<void>) | undefined
   /** Worktree cleanup implementation; tests replace it to exercise retained cleanup state. */
@@ -101,7 +103,9 @@ export interface OrchestrationDepsRuntime {
   packageRoot?: string
 }
 
-export type OrchestrationDepsEvent = (name: 'Installed' | 'WARN', subject: string) => void
+export type OrchestrationDepsEvent = (
+  name: 'Installed' | 'Skipped' | 'WARN', subject: string,
+) => void
 
 const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
   install: (cwd) => {
@@ -153,8 +157,13 @@ function installOrchestrationDeps(
   subject: string,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime,
+  beforeInstall?: (() => boolean) | undefined,
 ): void {
   const root = runtime.packageRoot ?? PACKAGE_ROOT
+  if (beforeInstall?.() === false) {
+    event('Skipped', `${subject}; a live task process tree survived`)
+    return
+  }
   try {
     runtime.install(root)
     const lockHash = orchestrationLockHash(root)
@@ -167,7 +176,8 @@ function installOrchestrationDeps(
   } catch (error) {
     throw new OrchestrationDepsInstallError(
       `Orchestration dependency installation ${subject} failed in ${root}: `
-      + `${installFailureSummary(error)}. Run "npm ci --no-audit --no-fund" in ${root}, `
+      + `${installFailureSummary(error)}. The checkout may now be missing dependencies. `
+      + `Run "npm ci --no-audit --no-fund" in ${root}, `
       + 'then restart the loop.',
     )
   }
@@ -179,6 +189,7 @@ function syncOrchestrationDepsAfterMerge(
   taskId: string,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
+  beforeInstall?: (() => boolean) | undefined,
 ): void {
   const [, firstParent, secondParent] = git(paths.repoRoot, [
     'rev-list', '--parents', '-n', '1', mergeCommit,
@@ -189,7 +200,7 @@ function syncOrchestrationDepsAfterMerge(
   ]).split(/\r?\n/).filter((path) => path !== '')
   const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
   if (!changed.some((path) => manifests.has(resolve(paths.repoRoot, path)))) return
-  installOrchestrationDeps(`after ${shortTaskId(taskId)}`, event, runtime)
+  installOrchestrationDeps(`after ${shortTaskId(taskId)}`, event, runtime, beforeInstall)
 }
 
 function orchestrationDepsMissing(root: string): boolean {
@@ -262,13 +273,50 @@ function removeFinishedWorktree(
   completion: string,
 ): boolean {
   const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
-  if (result.fallback === undefined) return true
   if (result.fallbackFailure !== undefined) {
     log(`WARN: ${completion}, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
     return false
   }
-  log(`Worktree removal needed the ${result.fallback}: ${worktree} (${result.gitFailure})`)
-  return true
+  if (result.fallback !== undefined) {
+    log(`Worktree removal needed the ${result.fallback}: ${worktree} (${result.gitFailure})`)
+  }
+  if (result.pruneFailure !== undefined) {
+    log(`WARN: worktree metadata pruning failed for ${worktree}: ${result.pruneFailure}`)
+  }
+
+  try {
+    const registered = runtime.git(paths.repoRoot, ['worktree', 'list', '--porcelain', '-z'])
+      .split('\0').some((field) => {
+        if (!field.startsWith('worktree ')) return false
+        return runtime.os.worktreePathFor(field.slice('worktree '.length)).comparisonKey
+          === runtime.os.worktreePathFor(worktree).comparisonKey
+      })
+    if (!registered) return true
+  } catch (error) {
+    log(`WARN: could not verify worktree metadata removal for ${worktree}: ${removalFailureDetail(error)}`)
+    return false
+  }
+  log(`WARN: the removed worktree is still registered and has to be pruned by hand: ${worktree}`)
+  return false
+}
+
+function removeAndVerifyTaskBranch(repoRoot: string, branch: string): boolean {
+  try {
+    git(repoRoot, ['branch', '-d', branch])
+  } catch {
+    try {
+      git(repoRoot, ['branch', '-D', branch])
+    } catch {
+      // Verification below distinguishes an already absent branch from a failed removal.
+    }
+  }
+  try {
+    return git(repoRoot, [
+      'for-each-ref', '--format=%(refname)', `refs/heads/${branch}`,
+    ]).trim() === ''
+  } catch {
+    return false
+  }
 }
 
 export function removeMergedWorktree(
@@ -442,10 +490,11 @@ export function removeTemporaryWorktree(
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
   const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
-  if (result.fallbackFailure === undefined) return
+  if (result.fallbackFailure === undefined && result.pruneFailure === undefined) return
+  const pruneDetail = result.pruneFailure === undefined ? '' : `; prune: ${result.pruneFailure}`
   throw new MergeError(
     `Could not remove temporary worktree ${worktree}; merge was not applied. `
-    + `(git: ${result.gitFailure}; fallback: ${result.fallbackFailure})`,
+    + `(git: ${result.gitFailure}; fallback: ${result.fallbackFailure}${pruneDetail})`,
   )
 }
 
@@ -516,6 +565,7 @@ async function finalizeLocalMerge(
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+    options.beforeOrchestrationDepsInstall,
   )
 
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
@@ -524,18 +574,11 @@ async function finalizeLocalMerge(
   const worktreeRemoved = removeMergedWorktree(
     paths, worktree, io.out, options.worktreeRemovalRuntime,
   )
-  try {
-    git(paths.repoRoot, ['branch', '-d', branch])
-  } catch {
-    try {
-      git(paths.repoRoot, ['branch', '-D', branch])
-    } catch {
-      // an inspection task's branch may already be gone
-    }
-  }
-  io.out(worktreeRemoved
+  const branchRemoved = removeAndVerifyTaskBranch(paths.repoRoot, branch)
+  io.out(worktreeRemoved && branchRemoved
     ? `Merged ${taskId} and removed the worktree.`
-    : `Merged ${taskId}; manual worktree cleanup remains: ${worktree}`)
+    : `Merged ${taskId}; manual worktree cleanup remains: ${worktree}`
+      + (branchRemoved ? '' : `; task branch remains: ${branch}`))
   return mergeCommit
 }
 
@@ -559,18 +602,11 @@ async function finalizeNoChange(
     paths, worktree, io.out, options.worktreeRemovalRuntime ?? worktreeRemovalRuntime,
     'task completed without changes',
   )
-  try {
-    git(paths.repoRoot, ['branch', '-d', branch])
-  } catch {
-    try {
-      git(paths.repoRoot, ['branch', '-D', branch])
-    } catch {
-      // The task branch may already be gone after an interrupted cleanup.
-    }
-  }
-  io.out(worktreeRemoved
+  const branchRemoved = removeAndVerifyTaskBranch(paths.repoRoot, branch)
+  io.out(worktreeRemoved && branchRemoved
     ? `Completed ${taskId} without changes and removed the worktree.`
-    : `Completed ${taskId} without changes; manual worktree cleanup remains: ${worktree}`)
+    : `Completed ${taskId} without changes; manual worktree cleanup remains: ${worktree}`
+      + (branchRemoved ? '' : `; task branch remains: ${branch}`))
 }
 
 /**
@@ -612,6 +648,10 @@ interface MergeGuardOwner {
   startIdentity: string | null
 }
 
+const MALFORMED_MERGE_GUARD_MAX_AGE_MS = 30_000
+const MERGE_GUARD_RECLAIM_TIMEOUT_MS = 10_000
+const MERGE_GUARD_RECLAIM_RETRY_MS = 10
+
 function mergeGuardDir(paths: OrchPaths, taskId: string): string {
   return join(paths.queueDir, 'merge-guards', taskId)
 }
@@ -632,47 +672,125 @@ function activeMergeGuardOwner(dir: string): MergeGuardOwner | undefined {
   }
 }
 
+function malformedMergeGuardIsStale(dir: string): boolean {
+  try {
+    const ownerFile = join(dir, 'owner.json')
+    const modifiedAt = statSync(existsSync(ownerFile) ? ownerFile : dir).mtimeMs
+    return Date.now() - modifiedAt >= MALFORMED_MERGE_GUARD_MAX_AGE_MS
+  } catch {
+    return false
+  }
+}
+
+function mergeGuardRemovalWasVerified(dir: string): boolean {
+  try {
+    statSync(dir)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
+function publishMergeGuard(dir: string, owner: MergeGuardOwner): boolean {
+  const pendingOwner = `${dir}.owner-${process.pid}-${randomUUID()}.json`
+  try {
+    mkdirSync(dir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw error
+  }
+  try {
+    writeFileSync(pendingOwner, `${JSON.stringify(owner)}\n`, { flag: 'wx' })
+    renameSync(pendingOwner, join(dir, 'owner.json'))
+    return true
+  } catch (error) {
+    // We created this directory and no observer can acquire it while it exists. Remove
+    // both pieces so an ordinary I/O failure does not become a permanent active guard.
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+    throw error
+  } finally {
+    rmSync(pendingOwner, { force: true, maxRetries: 3, retryDelay: 50 })
+  }
+}
+
+function reclaimMalformedMergeGuard(dir: string): boolean {
+  try {
+    rmSync(join(dir, 'owner.json'))
+  } catch {
+    // The owner may be missing rather than malformed.
+  }
+  try {
+    rmdirSync(dir)
+  } catch {
+    // A concurrent waiter reclaimed it, or a marker now makes the directory non-empty.
+  }
+  return mergeGuardRemovalWasVerified(dir)
+}
+
+type MergeGuardAcquisition = { acquired: true; file: string; owner: MergeGuardOwner } | {
+  acquired: false
+  reason: 'active' | 'succeeded'
+}
+
 function acquireMergeGuard(
   paths: OrchPaths,
   taskId: string,
-): { acquired: true; file: string; owner: MergeGuardOwner } | {
-  acquired: false
-  reason: 'active' | 'succeeded'
-} {
+  reclaimDeadline?: number,
+): MergeGuardAcquisition | Promise<MergeGuardAcquisition> {
   const dir = mergeGuardDir(paths, taskId)
   mkdirSync(dirname(dir), { recursive: true })
   const owner: MergeGuardOwner = {
     state: 'active', pid: process.pid, startIdentity: currentProcessStartIdentity(),
   }
   for (;;) {
-    try {
-      mkdirSync(dir)
-      writeFileSync(join(dir, 'owner.json'), `${JSON.stringify(owner)}\n`, { flag: 'wx' })
+    if (publishMergeGuard(dir, owner)) {
       return { acquired: true, file: dir, owner }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
-      const recorded = activeMergeGuardOwner(dir)
-      // An ownerless directory is the narrow acquisition window of another process.
-      if (recorded === undefined) return { acquired: false, reason: 'active' }
-      if (lockOwnerIsCurrent(recorded.pid, recorded.startIdentity)) {
-        return { acquired: false, reason: 'active' }
-      }
-      // Removing the owner before the directory makes stale reclamation safe between
-      // multiple waiters: rmdir can never remove a replacement's non-empty guard.
-      try {
-        rmSync(join(dir, 'owner.json'))
-        rmdirSync(dir)
-      } catch {
-        // A concurrent owner changed the marker; retry against its current state.
-      }
     }
+    if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
+    const recorded = activeMergeGuardOwner(dir)
+    if (recorded === undefined) {
+      // Atomic publication means a fresh ownerless or malformed directory may belong to
+      // an older binary still acquiring its guard. Recover it only after that window ends.
+      if (reclaimDeadline === undefined) {
+        if (!malformedMergeGuardIsStale(dir)) return { acquired: false, reason: 'active' }
+        reclaimDeadline = Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      }
+      if (reclaimMalformedMergeGuard(dir)) {
+        reclaimDeadline = undefined
+        continue
+      }
+      if (Date.now() >= reclaimDeadline) {
+        throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
+      }
+      return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+    }
+    if (lockOwnerIsCurrent(recorded.pid, recorded.startIdentity)) {
+      return { acquired: false, reason: 'active' }
+    }
+    reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+    // Removing the owner before the directory makes stale reclamation safe between
+    // multiple waiters: rmdir can never remove a replacement's non-empty guard.
+    try {
+      rmSync(join(dir, 'owner.json'))
+      rmdirSync(dir)
+    } catch {
+      // A concurrent owner changed the marker; retry against its current state.
+    }
+    if (mergeGuardRemovalWasVerified(dir)) {
+      reclaimDeadline = undefined
+      continue
+    }
+    if (Date.now() >= reclaimDeadline) {
+      throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
+    }
+    return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+      .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
   }
 }
 
 function finishMergeGuard(
   guard: { file: string; owner: MergeGuardOwner },
-  succeeded: boolean,
 ): void {
   let ownsGuard = false
   try {
@@ -682,12 +800,15 @@ function finishMergeGuard(
     return
   }
   if (!ownsGuard) return
-  if (!succeeded) {
-    rmSync(guard.file, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
-    return
+  const retiredGuard = `${guard.file}.retired-${randomUUID()}`
+  // Renaming the whole guard is the release operation. Once it succeeds, a failed
+  // cleanup cannot leave this daemon's live PID at the well-known path or block a retry.
+  renameSync(guard.file, retiredGuard)
+  try {
+    rmSync(retiredGuard, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+  } catch {
+    // The guard is already released; leave its uniquely named remains for later cleanup.
   }
-  writeFileSync(join(guard.file, 'succeeded'), '')
-  rmSync(join(guard.file, 'owner.json'), { force: true })
 }
 
 async function mergeTaskWithGuardHeld(
@@ -697,7 +818,7 @@ async function mergeTaskWithGuardHeld(
 ): Promise<MergeTaskResult> {
   const io = mergeIo(options.outputFile)
   const depsEvent = options.onOrchestrationDepsEvent
-    ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
+    ?? ((name: 'Installed' | 'Skipped' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
 
   const status = readStatus(paths, taskId)
   if (status === undefined) {
@@ -833,25 +954,24 @@ export async function mergeTask(
     options.onMergeSkipped?.('succeeded')
     return { outcome: 'skipped', reason: 'succeeded' }
   }
-  const acquired = acquireMergeGuard(paths, taskId)
+  const acquisition = acquireMergeGuard(paths, taskId)
+  // Preserve the established synchronous fast path: only failed stale reclamation
+  // yields while it backs off. Some callers inspect repository state immediately.
+  const acquired = acquisition instanceof Promise ? await acquisition : acquisition
   if (!acquired.acquired) {
     options.onMergeSkipped?.(acquired.reason)
     return { outcome: 'skipped', reason: acquired.reason }
   }
-  let succeeded = false
   try {
     const guardedStatus = readStatus(paths, taskId)
     if (guardedStatus?.status === 'merged' || guardedStatus?.status === 'no-change') {
-      succeeded = true
       options.onMergeSkipped?.('succeeded')
       return { outcome: 'skipped', reason: 'succeeded' }
     }
     options.onMergeStart?.()
-    const result = await mergeTaskWithGuardHeld(paths, taskId, options)
-    succeeded = result.outcome === 'merged' || result.outcome === 'no-change'
-    return result
+    return await mergeTaskWithGuardHeld(paths, taskId, options)
   } finally {
-    finishMergeGuard(acquired, succeeded)
+    finishMergeGuard(acquired)
   }
 }
 
@@ -888,7 +1008,7 @@ export async function mergeRemoteTask(
   const worktree = join(paths.worktreesDir, `.adopt-${issueNumber}-${process.pid}-${Date.now()}`)
   const io = mergeIo(options.outputFile)
   const depsEvent = options.onOrchestrationDepsEvent
-    ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
+    ?? ((name: 'Installed' | 'Skipped' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
   const baseMergeMessage = `Merge ${taskId} via orchestration`
   if (options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
@@ -912,6 +1032,7 @@ export async function mergeRemoteTask(
     options.onMerged?.(appliedCommit)
     syncOrchestrationDepsAfterMerge(
       paths, appliedCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+      options.beforeOrchestrationDepsInstall,
     )
     return appliedCommit
   }
@@ -948,6 +1069,7 @@ export async function mergeRemoteTask(
   options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+    options.beforeOrchestrationDepsInstall,
   )
   return mergeCommit
 }
