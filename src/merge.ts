@@ -732,7 +732,6 @@ function acquireMergeGuard(
 
 function finishMergeGuard(
   guard: { file: string; owner: MergeGuardOwner },
-  succeeded: boolean,
 ): void {
   let ownsGuard = false
   try {
@@ -742,12 +741,15 @@ function finishMergeGuard(
     return
   }
   if (!ownsGuard) return
-  if (!succeeded) {
-    rmSync(guard.file, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
-    return
+  const retiredGuard = `${guard.file}.retired-${randomUUID()}`
+  // Renaming the whole guard is the release operation. Once it succeeds, a failed
+  // cleanup cannot leave this daemon's live PID at the well-known path or block a retry.
+  renameSync(guard.file, retiredGuard)
+  try {
+    rmSync(retiredGuard, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+  } catch {
+    // The guard is already released; leave its uniquely named remains for later cleanup.
   }
-  writeFileSync(join(guard.file, 'succeeded'), '')
-  rmSync(join(guard.file, 'owner.json'), { force: true })
 }
 
 async function mergeTaskWithGuardHeld(
@@ -898,20 +900,16 @@ export async function mergeTask(
     options.onMergeSkipped?.(acquired.reason)
     return { outcome: 'skipped', reason: acquired.reason }
   }
-  let succeeded = false
   try {
     const guardedStatus = readStatus(paths, taskId)
     if (guardedStatus?.status === 'merged' || guardedStatus?.status === 'no-change') {
-      succeeded = true
       options.onMergeSkipped?.('succeeded')
       return { outcome: 'skipped', reason: 'succeeded' }
     }
     options.onMergeStart?.()
-    const result = await mergeTaskWithGuardHeld(paths, taskId, options)
-    succeeded = result.outcome === 'merged' || result.outcome === 'no-change'
-    return result
+    return await mergeTaskWithGuardHeld(paths, taskId, options)
   } finally {
-    finishMergeGuard(acquired, succeeded)
+    finishMergeGuard(acquired)
   }
 }
 
