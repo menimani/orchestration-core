@@ -458,6 +458,14 @@ const cmdEnqueue: Command = async (paths, args) => {
 }
 
 const cmdDelegate: Command = async (paths, args) => {
+  const usage = 'Usage: delegate "<description>" [--effort minimal|low|medium|high] [--inspect]'
+  const firstArg = args[0]
+  if (firstArg?.startsWith('-') === true && firstArg !== '--effort' && firstArg !== '--inspect') {
+    console.error(`ERROR: unknown option: ${firstArg}`)
+    console.error(usage)
+    return 1
+  }
+
   let description = ''
   let effort: ReasoningEffort | undefined
   let inspect = false
@@ -480,7 +488,7 @@ const cmdDelegate: Command = async (paths, args) => {
     }
   }
   if (description.trim() === '') {
-    console.error('Usage: delegate "<description>" [--effort minimal|low|medium|high] [--inspect]')
+    console.error(usage)
     return 1
   }
 

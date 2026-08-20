@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process'
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync,
-  writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
+  utimesSync, writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -246,6 +246,29 @@ describe('report-upstream arguments', () => {
     expect(result.stdout).toContain('Title:\nCore defect reported by ')
     expect(result.stdout).toContain('Body:\n## Requirement\n\nA safely previewed defect.')
     expect(result.stderr).not.toContain('Unknown FORGE')
+  })
+})
+
+describe('delegate arguments', () => {
+  it('rejects an unknown leading flag without creating or publishing a task', () => {
+    const result = spawnSync(process.execPath, [CLI, 'delegate', '--hlep'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'true', FORGE: 'missing' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('ERROR: unknown option: --hlep')
+    expect(result.stderr).toContain(
+      'Usage: delegate "<description>" [--effort minimal|low|medium|high] [--inspect]',
+    )
+    expect(result.stderr).not.toContain('Unknown FORGE')
+
+    const paths = orchPaths(repoRoot, false)
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+    expect(readdirSync(paths.queueDir)).toEqual([])
   })
 })
 
