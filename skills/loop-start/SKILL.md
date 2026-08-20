@@ -29,7 +29,21 @@ The command approves the default local queue explicitly. If
 `ISSUE_QUEUE_ENABLED=true`, replace `local` with `issue`; the loop refuses a mismatch.
 It prints the resolved configuration before asking for terminal confirmation or checking
 the non-interactive approval flag.
-Settings go in front of the command:
+Settings may go in front of the command, or in `orchestration/config.json` under the same
+uppercase names. Manage that file with `{{ORCHESTRATION_COMMAND_PREFIX}} config -- list`,
+`get <SETTING>`, `set <SETTING> <value>`, and `unset <SETTING>`; do not hand-edit it. File
+values take precedence over environment variables, which take precedence over defaults.
+The loop picks up valid file changes at the next use and logs old and new values; malformed
+or invalid updates keep the last good value.
+
+`FORGE` and `RUNNER` stay pinned because changing the owning component abandons in-flight
+work. `ISSUE_QUEUE_ENABLED` and `WORKER_MODE` stay pinned because mode changes strand
+claimed issues. `INTEGRATION_BRANCH` stays pinned to avoid splitting a run across branches.
+`UPSTREAM_REMOTE` and `UPSTREAM_BRANCH` stay pinned so the run cannot switch the core source
+it was built on. Changes to these seven settings are logged as ignored until restart; every
+other setting is live.
+
+Settings:
 
 | Variable | Default | Effect |
 |----------|---------|--------|

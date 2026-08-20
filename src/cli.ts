@@ -4,7 +4,7 @@ import {
   appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync,
   statSync, writeFileSync,
 } from 'node:fs'
-import { join, relative, toNamespacedPath } from 'node:path'
+import { dirname, join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
@@ -16,7 +16,10 @@ import {
 import { cleanupTask } from './cleanup.ts'
 import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
-import { loadConfig, type LoopConfig } from './config.ts'
+import {
+  CONFIG_ENV_NAMES, loadConfig, validateConfigFileValues,
+  type ConfigEvent, type LoopConfig,
+} from './config.ts'
 import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
@@ -79,6 +82,10 @@ function repoRoot(): string {
   }).trim()
 }
 
+function loadRepositoryConfig(paths: OrchPaths, env: NodeJS.ProcessEnv = process.env): LoopConfig {
+  return loadConfig(env, { filePath: join(paths.root, 'config.json') })
+}
+
 interface RecoveryLockOwner {
   pid: number
   startIdentity?: string | null
@@ -91,52 +98,14 @@ const RECOVERY_LOCK_TIMEOUT_MS = 10_000
 const RECOVERY_LOCK_POLL_MS = 10
 const LOOP_STARTUP_TIMEOUT_MS = 30_000
 
-const CONFIG_ENV_NAMES: Readonly<Record<keyof LoopConfig, string>> = {
-  maxParallel: 'MAX_PARALLEL',
-  pollIntervalSeconds: 'POLL_INTERVAL',
-  autoMerge: 'AUTO_MERGE',
-  testCmd: 'TEST_CMD',
-  skipAutoTest: 'SKIP_AUTO_TEST',
-  maxGrowthDepth: 'MAX_GROWTH_DEPTH',
-  maxTotalTasks: 'MAX_TOTAL_TASKS',
-  scanEnabled: 'SCAN_ENABLED',
-  maxScanCycles: 'MAX_SCAN_CYCLES',
-  maxCiFixAttempts: 'MAX_CI_FIX_ATTEMPTS',
-  maxEmptyScans: 'MAX_EMPTY_SCANS',
-  autoPr: 'AUTO_PR',
-  reviewEnabled: 'REVIEW_ENABLED',
-  ciGateEnabled: 'CI_GATE_ENABLED',
-  autoReview: 'AUTO_REVIEW',
-  maxReviewRounds: 'MAX_REVIEW_ROUNDS',
-  reviewEveryNCycles: 'REVIEW_EVERY_N_CYCLES',
-  maxFinalReviewRounds: 'MAX_FINAL_REVIEW_ROUNDS',
-  maxBurstFailures: 'MAX_BURST_FAILURES',
-  maxConsecutiveMergeFailures: 'MAX_CONSECUTIVE_MERGE_FAILURES',
-  scanEffort: 'SCAN_EFFORT',
-  taskEffort: 'TASK_EFFORT',
-  reviewEffort: 'REVIEW_EFFORT',
-  scanModel: 'SCAN_MODEL',
-  taskModel: 'TASK_MODEL',
-  scanParallel: 'SCAN_PARALLEL',
-  taskGate: 'TASK_GATE',
-  forge: 'FORGE',
-  runner: 'RUNNER',
-  runnerClaudeModel: 'RUNNER_CLAUDE_MODEL',
-  runnerClaudeModelMinimal: 'RUNNER_CLAUDE_MODEL_MINIMAL',
-  runnerClaudeModelLow: 'RUNNER_CLAUDE_MODEL_LOW',
-  runnerClaudeModelMedium: 'RUNNER_CLAUDE_MODEL_MEDIUM',
-  runnerClaudeModelHigh: 'RUNNER_CLAUDE_MODEL_HIGH',
-  issueQueueEnabled: 'ISSUE_QUEUE_ENABLED',
-  workerMode: 'WORKER_MODE',
-  issueLeaseHours: 'ISSUE_LEASE_HOURS',
-  coreAutoUpdate: 'CORE_AUTO_UPDATE',
-  upstreamRemote: 'UPSTREAM_REMOTE',
-  upstreamBranch: 'UPSTREAM_BRANCH',
-  integrationBranch: 'INTEGRATION_BRANCH',
-}
-
 function queueMode(config: LoopConfig): QueueMode {
   return config.issueQueueEnabled ? 'issue' : 'local'
+}
+
+function configEventLine(event: ConfigEvent): string {
+  const name = event.type === 'changed' ? 'Changed'
+    : event.type === 'ignored' ? 'Ignored' : 'ERROR'
+  return formatEventLine(name, 'config', event.message)
 }
 
 function displayConfigValue(value: LoopConfig[keyof LoopConfig]): string {
@@ -171,7 +140,7 @@ function reportResolvedLoopConfig(
       windowsHide: true,
     },
   ).trim()
-  const defaults = loadConfig({})
+  const defaults = loadConfig({}, { filePath: false })
   report('Resolved loop configuration:')
   report(`  queue mode: ${queueMode(config)}`)
   report(`  run branch: ${runBranch}`)
@@ -429,7 +398,7 @@ const cmdInit: Command = async (paths, args) => {
     console.error('Usage: init [project-name]')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const forge = await loadForge(config.forge, paths.repoRoot)
   const { initializeRepository } = await import('./initialize.ts')
   const result = await initializeRepository(paths, forge, args[0])
@@ -452,7 +421,7 @@ const cmdVerifySetup: Command = async (paths, args) => {
     console.error('Usage: verify-setup')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const forge = await loadForge(config.forge, paths.repoRoot)
   const { verifyRepositorySetup } = await import('./setup.ts')
   return await verifyRepositorySetup(paths, forge, { env: process.env }) ? 0 : 1
@@ -516,7 +485,7 @@ const cmdDelegate: Command = async (paths, args) => {
 
   const result = await delegateTaskVisible(paths, description, { effort, inspect }, {
     loadForge: async () => {
-      const config = loadConfig()
+      const config = loadRepositoryConfig(paths)
       return loadForge(config.forge, paths.repoRoot)
     },
     warn: (message) => console.warn(message),
@@ -561,7 +530,7 @@ const cmdReportUpstream: Command = async (paths, args) => {
       }
     },
     loadForge: async () => {
-      const config = loadConfig()
+      const config = loadRepositoryConfig(paths)
       return loadForge(config.forge, paths.repoRoot)
     },
   })
@@ -573,7 +542,7 @@ const cmdStart: Command = async (paths, args) => {
     console.error('Usage: start <task-id> [--effort minimal|low|medium|high] [--model <model>]')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   let effort = config.taskEffort
   let model = config.taskModel
   for (let i = 1; i < args.length; i++) {
@@ -649,7 +618,7 @@ const cmdDeploy: Command = async (paths, args) => {
     console.error('Usage: deploy')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const project = await loadProject(paths.root)
   if (project.deployment === undefined) {
     console.error(`Project '${project.name}' does not define a deployment.`)
@@ -683,7 +652,7 @@ const cmdMerge: Command = async (paths, args) => {
       return 1
     }
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   if (!autoYes) {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
     const answer = await rl.question(`Merge task/${taskId} into the current branch? [y/N] `)
@@ -759,7 +728,7 @@ const cmdMerge: Command = async (paths, args) => {
 
 const cmdCleanup: Command = async (paths, args) => {
   let config: LoopConfig | undefined
-  const cleanupConfig = (): LoopConfig => config ??= loadConfig()
+  const cleanupConfig = (): LoopConfig => config ??= loadRepositoryConfig(paths)
   return runCleanupCommand(paths, args, {
     issueQueueEnabled: () => cleanupConfig().issueQueueEnabled,
     loadForge: () => loadForge(cleanupConfig().forge, paths.repoRoot),
@@ -856,6 +825,80 @@ const cmdStop: Command = async (paths) => {
   return success ? 0 : 1
 }
 
+function readConfigFileForCommand(filePath: string): Record<string, unknown> {
+  if (!existsSync(filePath)) return {}
+  const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('The configuration file must contain a JSON object.')
+  }
+  return parsed as Record<string, unknown>
+}
+
+function commandConfigValue(name: string, raw: string): unknown {
+  const key = (Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[])
+    .find((candidate) => CONFIG_ENV_NAMES[candidate] === name)
+  if (key === undefined) throw new Error(`Unknown configuration setting '${name}'.`)
+  const sample = loadConfig({}, { filePath: false })[key]
+  if (typeof sample === 'boolean') {
+    if (raw !== 'true' && raw !== 'false') {
+      throw new Error(`${name} must be 'true' or 'false', got '${raw}'`)
+    }
+    return raw === 'true'
+  }
+  if (typeof sample === 'number') {
+    const value = Number(raw)
+    if (!Number.isInteger(value)) throw new Error(`${name} must be an integer, got '${raw}'`)
+    return value
+  }
+  return raw
+}
+
+function writeConfigFile(filePath: string, values: Record<string, unknown>): void {
+  mkdirSync(dirname(filePath), { recursive: true })
+  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`
+  writeFileSync(temporary, `${JSON.stringify(values, null, 2)}\n`, { flag: 'wx' })
+  renameSync(temporary, filePath)
+}
+
+const cmdConfig: Command = async (paths, args) => {
+  const filePath = join(paths.root, 'config.json')
+  const action = args[0] ?? 'list'
+  const values = readConfigFileForCommand(filePath)
+  if (action === 'list' && args.length <= 1) {
+    console.log(JSON.stringify(values, null, 2))
+    return 0
+  }
+  if (action === 'get' && args.length === 2) {
+    const name = args[1]!
+    const key = (Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[])
+      .find((candidate) => CONFIG_ENV_NAMES[candidate] === name)
+    if (key === undefined) throw new Error(`Unknown configuration setting '${name}'.`)
+    console.log(String(loadConfig(process.env, { filePath })[key]))
+    return 0
+  }
+  if (action === 'set' && args.length === 3) {
+    const name = args[1]!
+    const proposed = { ...values, [name]: commandConfigValue(name, args[2]!) }
+    validateConfigFileValues(proposed)
+    writeConfigFile(filePath, proposed)
+    console.log(`Set ${name} in ${relative(paths.repoRoot, filePath)}.`)
+    return 0
+  }
+  if (action === 'unset' && args.length === 2) {
+    const name = args[1]!
+    if (![...Object.values(CONFIG_ENV_NAMES)].includes(name)) {
+      throw new Error(`Unknown configuration setting '${name}'.`)
+    }
+    delete values[name]
+    validateConfigFileValues(values)
+    writeConfigFile(filePath, values)
+    console.log(`Unset ${name} in ${relative(paths.repoRoot, filePath)}.`)
+    return 0
+  }
+  console.error('Usage: config [list|get <SETTING>|set <SETTING> <value>|unset <SETTING>]')
+  return 1
+}
+
 const cmdLoop: Command = async (paths, args) => {
   const loopLog = join(paths.logsDir, 'loop.log')
   let daemonMode = false
@@ -883,9 +926,19 @@ const cmdLoop: Command = async (paths, args) => {
     }
   }
 
+  const pendingConfigEvents: ConfigEvent[] = []
+  let handleConfigEvent = (event: ConfigEvent): void => {
+    pendingConfigEvents.push(event)
+  }
   let config: LoopConfig
   try {
-    config = loadConfig()
+    config = loadConfig(process.env, {
+      filePath: join(paths.root, 'config.json'),
+      onEvent: (event) => handleConfigEvent(event),
+    })
+    if (markerOutput === undefined) {
+      for (const event of pendingConfigEvents.splice(0)) console.error(configEventLine(event))
+    }
     // A daemon child inherits the launcher's approved mode. The launcher already
     // reported it, and raw child output would bypass the aligned daemon log helper.
     if (markerOutput === undefined) reportResolvedLoopConfig(paths, config, console.log)
@@ -969,6 +1022,8 @@ const cmdLoop: Command = async (paths, args) => {
       cycleCap: config.maxScanCycles,
     })) write(line)
   }
+  handleConfigEvent = (event): void => log(configEventLine(event), event.type === 'error')
+  for (const event of pendingConfigEvents.splice(0)) handleConfigEvent(event)
   const marker = (message: string): void => {
     if (markerOutput === undefined) console.log(message)
     else appendFileSync(markerOutput, `${message}\n`)
@@ -1027,7 +1082,7 @@ const cmdCiWait: Command = async (paths, args) => {
     timeoutSeconds = Number(timeout)
   }
 
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const forge = await loadForge(config.forge, paths.repoRoot)
   return waitForCi(forge, Number(prNumber), { timeoutSeconds })
 }
@@ -1313,7 +1368,7 @@ const cmdShipped: Command = async (paths, args) => {
     console.error('The loop is running and records its own ending; shipped is for runs promoted by hand.')
     return 1
   }
-  const config = loadConfig()
+  const config = loadRepositoryConfig(paths)
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
   const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
   const currentCycle = existsSync(scanCountFile)
@@ -1355,6 +1410,7 @@ const commands: Record<string, Command> = {
   'loop-status': cmdLoopStatus,
   'shipped': cmdShipped,
   'stop': cmdStop,
+  'config': cmdConfig,
 }
 
 async function main(): Promise<number> {

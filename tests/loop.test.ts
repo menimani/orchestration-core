@@ -174,6 +174,80 @@ afterEach(() => {
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
+describe('live loop configuration', () => {
+  function loopWithConfig(config: LoopConfig): Loop {
+    return createLoop({
+      paths,
+      config,
+      forge: makeForge(),
+      runner: makeRunner(),
+      project: stubProject,
+      log: (line) => logged.push(line),
+      now: () => new Date(2026, 7, 8, 12, 0, 0),
+    })
+  }
+
+  it('uses a changed live setting on the next poll and reports it', async () => {
+    initializeGitRepo()
+    const filePath = join(paths.root, 'config.json')
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 1, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    const loop = loopWithConfig(config)
+    loop.initializeSessionStateForBranch()
+    const taskIds = [
+      '20260820_000001_001_auto-first-live-task',
+      '20260820_000002_002_auto-second-live-task',
+    ]
+    for (const taskId of taskIds) writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# task\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskIds[0]}:0\n${taskIds[1]}:0\n`)
+
+    expect(await loop.poll()).toBe('continue')
+    expect(runnerStarts).toHaveLength(1)
+
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 12, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(2)
+    expect(logged).toContain("MAX_PARALLEL changed from '1' to '12'")
+  })
+
+  it('keeps a pinned setting and reports why its file change was ignored', () => {
+    const filePath = join(paths.root, 'config.json')
+    writeFileSync(filePath, JSON.stringify({ FORGE: 'github' }))
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    expect(config.forge).toBe('github')
+
+    writeFileSync(filePath, JSON.stringify({ FORGE: 'another-forge-provider' }))
+
+    expect(config.forge).toBe('github')
+    expect(logText()).toContain(
+      "Ignored FORGE change from 'github' to 'another-forge-provider'",
+    )
+    expect(logText()).toContain('in-flight work owned by a component no longer in use')
+  })
+
+  it('retains the existing loop behavior when the configuration file is absent', async () => {
+    const config = loadConfig({
+      SCAN_ENABLED: 'false', AUTO_PR: 'false', REVIEW_ENABLED: 'false',
+    }, { filePath: join(paths.root, 'missing-config.json') })
+    const loop = loopWithConfig(config)
+
+    expect(config.maxParallel).toBe(3)
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+    expect(runnerStarts).toHaveLength(0)
+  })
+})
+
 describe('daemon startup', () => {
   function fixturePackageRoot(): string {
     return join(repoRoot, 'orchestration', 'ts')

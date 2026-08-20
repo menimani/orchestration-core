@@ -16,6 +16,7 @@
     "loop": "node src/cli.ts loop",
     "worker": "node src/cli.ts worker",
     "loop-status": "node src/cli.ts loop-status",
+    "config": "node src/cli.ts config",
     "queue": "node src/cli.ts queue",
     "stop": "node src/cli.ts stop",
     "delegate": "node src/cli.ts delegate",
