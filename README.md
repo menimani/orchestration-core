@@ -252,9 +252,11 @@ file with `npm run config -- list`, `npm run config -- get TASK_GATE`,
 `npm run config -- set TASK_GATE light`, and `npm run config -- unset TASK_GATE`; use the
 equivalent package-prefixed command for a subtree installation.
 
-The Claude-specific model variables in the table are the exception: the Claude adapter
+The Claude-specific model variables in the table are exceptions: the Claude adapter
 reads them directly from the process environment when it is loaded, so they are not
-settings in `orchestration/config.json`.
+settings in `orchestration/config.json`. `UPSTREAM_REPO` is also environment-only: it
+overrides the package `upstreamRepo` value for the `report-upstream` command and cannot
+be stored in `orchestration/config.json`.
 
 Configuration commands publish updates atomically through a temporary file in the same
 directory, so readers cannot observe a partial write. The file is checked when a setting
@@ -286,7 +288,7 @@ settings update at their next use.
 | `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
 | `INTEGRATION_BRANCH` | empty | Empty keeps the direct single-worktree layout; a branch name freezes the daemon checkout and makes this separate branch the task base, merge target, gate target, and PR source |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |
-| `UPSTREAM_REPO` | package `upstreamRepo` | GitHub `owner/repository` where `report-upstream` files the report |
+| `UPSTREAM_REPO` | package `upstreamRepo` | Environment-only override for the GitHub `owner/repository` where `report-upstream` files the report |
 | `UPSTREAM_BRANCH` | main | Shared-core branch to compare and pull |
 
 ## Shared backlog and workers
