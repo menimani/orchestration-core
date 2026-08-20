@@ -11,16 +11,17 @@ import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels,
   commentOnIssueMerge, fingerprintOf, groupReadyFindings, heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
-  IssueReleaseReconciliationError,
+  issueFailureCount, IssueReleaseReconciliationError,
   missingRequirementCompletionMarkers, parseIssueBody,
   publishDelegatedTask, publishFinding, reapStaleLeases,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
-  recordIssueCompletions, recordIssueReleaseIntent, recordIssuesForTask,
+  clearIssueFailureCounts, reconcileIssueReleaseIntent, recordIssueCompletions,
+  recordIssueFailure, recordIssueReleaseIntent, recordIssuesForTask,
   recordIssuePromotions,
   releaseIssueClaim,
   returnIssueToReady, LABEL_FINDING,
   LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
-  LABEL_MERGE_READY, LABEL_READY, LABEL_UNTRUSTED_AUTHOR,
+  LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
   type ClaimedRequirement,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc } from '../src/ids.ts'
@@ -1295,6 +1296,44 @@ describe('claimIssueGroup', () => {
 })
 
 describe('issue claim release', () => {
+  it('parks an issue when consecutive failed-task releases reach the retry bound', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'persistently failing issue', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'failed-task', [issueNumber])
+    recordIssueFailure(paths, 'failed-task')
+    recordIssueFailure(paths, 'failed-task')
+    recordIssueFailure(paths, 'failed-task')
+    recordIssueReleaseIntent(paths, 'failed-task', [issueNumber])
+    const parked: Array<[number, number]> = []
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'failed-task', {
+      maxIssueRetries: 3,
+      onPark: (number, failures) => parked.push([number, failures]),
+    })).resolves.toEqual([])
+
+    const issue = await forge.getIssue(issueNumber)
+    expect(issueFailureCount(paths, issueNumber)).toBe(3)
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toContain(LABEL_RETRY_EXHAUSTED)
+    expect(issue.labels).not.toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(parked).toEqual([[issueNumber, 3]])
+  })
+
+  it('clears an issue failure streak when its task completes successfully', () => {
+    const issueNumber = 42
+    recordIssuesForTask(paths, 'successful-task', [issueNumber])
+    recordIssueFailure(paths, 'successful-task')
+    recordIssueFailure(paths, 'successful-task')
+    expect(issueFailureCount(paths, issueNumber)).toBe(2)
+
+    clearIssueFailureCounts(paths, 'successful-task')
+
+    expect(issueFailureCount(paths, issueNumber)).toBe(0)
+  })
+
   it('does not claim an issue with conflicting lifecycle labels', async () => {
     const issueNumber = await forge.createIssue({
       title: 'conflicting ready issue',
