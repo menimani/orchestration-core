@@ -904,7 +904,7 @@ describe('mergeTask', () => {
       },
       onOrchestrationDepsEvent: event,
     })).rejects.toThrow(
-      `Orchestration dependency installation after 012_user failed in ${join(repoRoot, 'orchestration', 'ts')}: registry unavailable. Run "npm ci --no-audit --no-fund" in ${join(repoRoot, 'orchestration', 'ts')}, then restart the loop.`,
+      `Orchestration dependency installation after 012_user failed in ${join(repoRoot, 'orchestration', 'ts')}: registry unavailable. The checkout may now be missing dependencies. Run "npm ci --no-audit --no-fund" in ${join(repoRoot, 'orchestration', 'ts')}, then restart the loop.`,
     )
 
     expect(event).not.toHaveBeenCalled()

@@ -65,6 +65,8 @@ export interface MergeOptions {
   outputFile?: string | undefined
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   onOrchestrationDepsEvent?: OrchestrationDepsEvent | undefined
+  /** Return false to leave the current dependency tree untouched for this merge. */
+  beforeOrchestrationDepsInstall?: (() => boolean) | undefined
   /** Close or otherwise reconcile linked work before accepting a no-change verdict. */
   onNoChange?: (() => Promise<void>) | undefined
   /** Worktree cleanup implementation; tests replace it to exercise retained cleanup state. */
@@ -101,7 +103,9 @@ export interface OrchestrationDepsRuntime {
   packageRoot?: string
 }
 
-export type OrchestrationDepsEvent = (name: 'Installed' | 'WARN', subject: string) => void
+export type OrchestrationDepsEvent = (
+  name: 'Installed' | 'Skipped' | 'WARN', subject: string,
+) => void
 
 const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
   install: (cwd) => {
@@ -153,8 +157,13 @@ function installOrchestrationDeps(
   subject: string,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime,
+  beforeInstall?: (() => boolean) | undefined,
 ): void {
   const root = runtime.packageRoot ?? PACKAGE_ROOT
+  if (beforeInstall?.() === false) {
+    event('Skipped', `${subject}; a live task process tree survived`)
+    return
+  }
   try {
     runtime.install(root)
     const lockHash = orchestrationLockHash(root)
@@ -167,7 +176,8 @@ function installOrchestrationDeps(
   } catch (error) {
     throw new OrchestrationDepsInstallError(
       `Orchestration dependency installation ${subject} failed in ${root}: `
-      + `${installFailureSummary(error)}. Run "npm ci --no-audit --no-fund" in ${root}, `
+      + `${installFailureSummary(error)}. The checkout may now be missing dependencies. `
+      + `Run "npm ci --no-audit --no-fund" in ${root}, `
       + 'then restart the loop.',
     )
   }
@@ -179,6 +189,7 @@ function syncOrchestrationDepsAfterMerge(
   taskId: string,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
+  beforeInstall?: (() => boolean) | undefined,
 ): void {
   const [, firstParent, secondParent] = git(paths.repoRoot, [
     'rev-list', '--parents', '-n', '1', mergeCommit,
@@ -189,7 +200,7 @@ function syncOrchestrationDepsAfterMerge(
   ]).split(/\r?\n/).filter((path) => path !== '')
   const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
   if (!changed.some((path) => manifests.has(resolve(paths.repoRoot, path)))) return
-  installOrchestrationDeps(`after ${shortTaskId(taskId)}`, event, runtime)
+  installOrchestrationDeps(`after ${shortTaskId(taskId)}`, event, runtime, beforeInstall)
 }
 
 function orchestrationDepsMissing(root: string): boolean {
@@ -516,6 +527,7 @@ async function finalizeLocalMerge(
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+    options.beforeOrchestrationDepsInstall,
   )
 
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
@@ -745,7 +757,7 @@ async function mergeTaskWithGuardHeld(
 ): Promise<MergeTaskResult> {
   const io = mergeIo(options.outputFile)
   const depsEvent = options.onOrchestrationDepsEvent
-    ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
+    ?? ((name: 'Installed' | 'Skipped' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
 
   const status = readStatus(paths, taskId)
   if (status === undefined) {
@@ -936,7 +948,7 @@ export async function mergeRemoteTask(
   const worktree = join(paths.worktreesDir, `.adopt-${issueNumber}-${process.pid}-${Date.now()}`)
   const io = mergeIo(options.outputFile)
   const depsEvent = options.onOrchestrationDepsEvent
-    ?? ((name: 'Installed' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
+    ?? ((name: 'Installed' | 'Skipped' | 'WARN', subject: string) => io.out(`${name} ${subject}`))
   const baseMergeMessage = `Merge ${taskId} via orchestration`
   if (options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
@@ -960,6 +972,7 @@ export async function mergeRemoteTask(
     options.onMerged?.(appliedCommit)
     syncOrchestrationDepsAfterMerge(
       paths, appliedCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+      options.beforeOrchestrationDepsInstall,
     )
     return appliedCommit
   }
@@ -996,6 +1009,7 @@ export async function mergeRemoteTask(
   options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+    options.beforeOrchestrationDepsInstall,
   )
   return mergeCommit
 }
