@@ -11,6 +11,10 @@ Current state:
 
 !`{{ORCHESTRATION_COMMAND_PREFIX}} loop-status`
 
+To inspect repositories other than the working directory, pass `-- --repo <path>`.
+Repeat `--repo <path>` in the same `loop-status` invocation to get one fleet-status line
+per repository. The core does not remember repository paths between invocations.
+
 ## Before starting
 
 A second loop against the same repository will fight the first over the queue and the
@@ -23,6 +27,9 @@ The loop commits and merges on its own, so start it on a topic branch, never on 
 ```bash
 {{ORCHESTRATION_COMMAND_PREFIX}} loop -- --approve-mode local --daemon
 ```
+
+Add `--repo <path>` after `--` to start the loop for an explicitly named repository.
+The path must resolve to a Git repository containing `orchestration/`.
 
 `--daemon` is what puts it in the background; without it the loop holds the terminal.
 The command approves the default local queue explicitly. If

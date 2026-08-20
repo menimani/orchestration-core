@@ -228,6 +228,20 @@ head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pul
 checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
 and verifies the revision that actually came up.
 
+Every command accepts `--repo <path>` to act on that repository instead of the repository
+containing the working directory. The path may name the repository or a directory inside
+it; the CLI resolves its Git root and requires that root to contain `orchestration/`.
+Without `--repo`, repository discovery is unchanged. Repeat the option for fleet status:
+
+```bash
+npm run loop-status -- --repo ../service-a --repo ../service-b
+```
+
+With multiple repositories, `loop-status` prints one named line per repository with its
+running state, run branch, queued count, and in-flight count. With zero or one explicit
+repository, it retains the existing detailed single-repository output. Repository paths
+are supplied per invocation; the core keeps no repository registry or checkout inventory.
+
 If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
 subtree installation). The command requires exactly one positive PR number, optionally
