@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
@@ -164,9 +165,16 @@ function releaseStatusLock(paths: OrchPaths, taskId: string, owner: string): voi
     return
   }
   if (recordedPid !== String(process.pid) || recordedOwner !== owner) return
-  rmSync(identityFile)
-  rmSync(pidFile)
-  rmdirSync(dir)
+  const releasedDir = join(paths.statusDir, `.${taskId}.lock.released-${randomUUID()}`)
+  // Renaming the whole lock is the release operation. Once it succeeds, failures
+  // while removing the retired metadata cannot leave a live-looking owner at the
+  // well-known lock path or block the next writer.
+  renameSync(dir, releasedDir)
+  try {
+    rmSync(releasedDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 })
+  } catch {
+    // The lock is already released; leave its uniquely named remains for later cleanup.
+  }
 }
 
 function writeStatusUnlocked(
