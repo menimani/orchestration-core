@@ -98,7 +98,7 @@ describe('createClaudeRunner', () => {
       'allowed-tools: Bash',
       '---',
       '',
-      'Run /git-review, then npm run -C orchestration/ts loop-status.',
+      "Run /git-review, then npm run -C 'orchestration/ts' loop-status.",
       '',
     ].join('\n'))
   })

@@ -59,7 +59,7 @@ describe('shared skill sync', () => {
       '.claude/skills/git-commit', '.claude/skills/loop-start',
     ])
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
-      .toBe('npm run -C orchestration/ts loop -- --daemon\n')
+      .toBe("npm run -C 'orchestration/ts' loop -- --daemon\n")
     expect(existsSync(join(repoRoot, '.agents', 'skills', 'verify-changes'))).toBe(false)
     expect(existsSync(join(packageRoot, '.agents', 'skills'))).toBe(false)
   })
@@ -114,7 +114,7 @@ describe('shared skill sync', () => {
 
     expect(result.updated).toEqual(['.agents/skills/loop-start', '.claude/skills/loop-start'])
     expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
-      .toBe('version two: npm run -C orchestration/ts loop\n')
+      .toBe("version two: npm run -C 'orchestration/ts' loop\n")
     expect(readFileSync(localSkill, 'utf8')).toBe('repository gates\n')
   })
 
@@ -281,7 +281,7 @@ describe('shared skill sync', () => {
 
     expect(result.installed).toEqual(['.claude/skills/git-commit', '.claude/skills/loop-start'])
     expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
-      .toBe('npm run -C orchestration/ts loop -- --daemon\n')
+      .toBe("npm run -C 'orchestration/ts' loop -- --daemon\n")
   })
 
   it('serves the Claude runner without touching an unlisted repository skill', () => {
