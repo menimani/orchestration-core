@@ -149,11 +149,15 @@ export interface Forge {
   closeIssue(issueNumber: number, comment: string): Promise<void>
 }
 
-export async function loadForge(name: string, repoRoot: string): Promise<Forge> {
+export async function loadForge(
+  name: string,
+  repoRoot: string,
+  report: (message: string) => void = () => {},
+): Promise<Forge> {
   switch (name) {
     case 'github': {
       const mod = await import('./forge-github.ts')
-      return mod.createGithubForge(repoRoot)
+      return mod.createGithubForge(repoRoot, undefined, report)
     }
     default:
       throw new Error(`Unknown FORGE '${name}' (supported: github)`)

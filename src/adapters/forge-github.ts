@@ -70,7 +70,7 @@ const githubIssueSchema = z.object({
   updatedAt: z.string(),
 })
 
-const openGithubIssueListSchema = z.array(githubIssueSchema.extend({ state: z.literal('OPEN') }))
+const githubIssueListSchema = z.array(githubIssueSchema)
 const closedGithubIssueListSchema = z.array(githubIssueSchema.extend({ state: z.literal('CLOSED') }))
 const issueCommentsSchema = z.object({
   comments: z.array(z.object({
@@ -207,10 +207,12 @@ function githubPrBody(body: string): string {
 }
 
 export type GithubCommand = (repoRoot: string, args: string[]) => Promise<string>
+export type GithubForgeReport = (message: string) => void
 
 export function createGithubForge(
   repoRoot: string = process.cwd(),
   runGh: GithubCommand = gh,
+  report: GithubForgeReport = () => {},
 ): Forge {
   const checkedGh: GithubCommand = async (root, args) => {
     try {
@@ -531,8 +533,13 @@ export function createGithubForge(
         '--json', 'number,state,title,body,author,labels,assignees,updatedAt']
       const stdout = await checkedGh(repoRoot, args)
       const permissionCache = new Map<string, Promise<boolean>>()
-      return Promise.all(parseGhJson(args, stdout, openGithubIssueListSchema)
-        .map((issue) => normalizeIssue(issue, permissionCache)))
+      const issues = parseGhJson(args, stdout, githubIssueListSchema)
+        .filter((issue) => {
+          if (issue.state === 'OPEN') return true
+          report(`dropped issue #${issue.number} with state ${issue.state} from open issue listing`)
+          return false
+        })
+      return Promise.all(issues.map((issue) => normalizeIssue(issue, permissionCache)))
     },
 
     async listClosedIssues(label: string): Promise<ForgeIssue[]> {
