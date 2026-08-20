@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process'
 import {
   closeSync, openSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createClaudeSharedSkills } from './shared-skills-claude.ts'
 import { startWindowsProcess } from './windows-process.ts'

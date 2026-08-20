@@ -4,7 +4,7 @@ import {
   appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync,
   statSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join, relative, toNamespacedPath } from 'node:path'
+import { join, relative, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadRunner, type ReasoningEffort } from './adapters/runner.ts'
