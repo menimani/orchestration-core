@@ -70,14 +70,17 @@ operator file is `orchestration/config.json`; its keys are the existing uppercas
 names. Resolution order is file, then environment, then the defaults below. A missing file
 therefore preserves the previous behavior and existing launch commands remain valid. Use
 `npm run config -- list`, `get <SETTING>`, `set <SETTING> <value>`, or `unset <SETTING>`
-(with the installed package's command prefix) to read and update it atomically.
+(with the installed package's command prefix) to read and update it. The command writes a
+temporary file in the same directory and renames it into place atomically, so the loop
+cannot observe a partially written file.
 
-The loop caches a successful JSON parse against the file modification time and resolves a
-setting when it is referenced. A malformed file is reported and leaves the last successful
-parse active, or falls back to environment and defaults before the first successful parse.
-File values pass through the same validation as environment values. Rejected live values
-are reported and retain the previous valid value. Changes to live values are recorded in
-the loop event log with the setting name and old and new values.
+The loop caches the observed file version against its modification time and resolves a
+setting when it is referenced. File values pass through the same validation as environment
+values. A malformed file or a value that fails that validation stops the run; the error
+reports the file, the affected setting (or the file contents when JSON cannot identify a
+setting), and the validation or parse failure. It never answers from an earlier parse or
+the environment after observing a broken file. Changes to valid live values are recorded
+in the loop event log with the setting name and old and new values.
 
 Seven settings are pinned at loop startup. A file change to one is reported as ignored and
 the startup value remains active for the run:

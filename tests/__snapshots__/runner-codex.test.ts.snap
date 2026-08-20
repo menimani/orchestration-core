@@ -349,8 +349,10 @@ Settings may go in front of the command, or in \`orchestration/config.json\` und
 uppercase names. Manage that file with \`npm run config -- list\`,
 \`get <SETTING>\`, \`set <SETTING> <value>\`, and \`unset <SETTING>\`; do not hand-edit it. File
 values take precedence over environment variables, which take precedence over defaults.
-The loop picks up valid file changes at the next use and logs old and new values; malformed
-or invalid updates keep the last good value.
+The configuration command writes through a temporary file and renames it atomically. The
+loop picks up valid file changes at the next use and logs old and new values; a malformed
+file or invalid value stops the run and reports the file, setting, and failure instead of
+using the last good or environment value.
 
 \`FORGE\` and \`RUNNER\` stay pinned because changing the owning component abandons in-flight
 work. \`ISSUE_QUEUE_ENABLED\` and \`WORKER_MODE\` stay pinned because mode changes strand

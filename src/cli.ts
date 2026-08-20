@@ -20,6 +20,7 @@ import {
   CONFIG_ENV_NAMES, loadConfig, validateConfigFileValues,
   type ConfigEvent, type LoopConfig,
 } from './config.ts'
+import { writeConfigFile } from './configFile.ts'
 import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
@@ -851,13 +852,6 @@ function commandConfigValue(name: string, raw: string): unknown {
     return value
   }
   return raw
-}
-
-function writeConfigFile(filePath: string, values: Record<string, unknown>): void {
-  mkdirSync(dirname(filePath), { recursive: true })
-  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`
-  writeFileSync(temporary, `${JSON.stringify(values, null, 2)}\n`, { flag: 'wx' })
-  renameSync(temporary, filePath)
 }
 
 const cmdConfig: Command = async (paths, args) => {
