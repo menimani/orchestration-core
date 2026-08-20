@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync,
-  writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join, toNamespacedPath } from 'node:path'
+import { dirname, join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import {
   currentProcessStartIdentity, decodeProcessStartIdentity, encodeProcessStartIdentity,
@@ -68,13 +67,24 @@ function ownedLock(lockDir: string): string {
 
 function releaseOwnedLock(lockDir: string, token: string): void {
   if (ownerText(lockDir).split(/\s+/)[2] !== token) return
+
+  const displaced = `${lockDir}.released.${process.pid}-${randomUUID()}`
   try {
-    // Empty-directory removal cannot erase a successor: if one publishes after the
-    // owner file disappears, its metadata makes this operation fail instead.
-    rmSync(toNamespacedPath(join(lockDir, 'owner')), { force: true })
-    rmdirSync(toNamespacedPath(lockDir))
+    renameSync(lockDir, displaced)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+
+  // Revalidate after the atomic displacement so a racing replacement is never erased.
+  if (ownerText(displaced).split(/\s+/)[2] !== token) {
+    if (!existsSync(lockDir)) renameSync(displaced, lockDir)
+    return
+  }
+  try {
+    operatingSystem.removeDirectory(displaced)
   } catch {
-    // Ownership has already ended or a successor won the publication race.
+    // The public lock name is already free; removal of the private remnant is best effort.
   }
 }
 
