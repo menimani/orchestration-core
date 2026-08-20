@@ -80,7 +80,6 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
     const spec = join(paths.tasksDir, `${taskId}.md`)
     const specTracked = trackedSpecs.has(`orchestration/tasks/${taskId}.md`)
     remove(
-      file,
       logFile(paths, taskId),
       join(paths.logsDir, `${taskId}.final`),
       join(paths.logsDir, `${taskId}.merge.log`),
@@ -91,6 +90,7 @@ export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport
       join(paths.queueDir, 'heartbeat', taskId),
       join(paths.queueDir, 'merge-guards', taskId),
       ...(specTracked ? [] : [spec]),
+      file,
     )
     report.prunedTasks += 1
   }
