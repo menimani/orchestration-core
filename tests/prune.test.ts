@@ -102,6 +102,18 @@ describe('pruneTasks', () => {
     }
   })
 
+  it('removes the merge guard directory for a pruned task', () => {
+    makeTask(OLD_MERGED, 'merged', 'old')
+    const mergeGuard = join(paths.queueDir, 'merge-guards', OLD_MERGED)
+    mkdirSync(mergeGuard, { recursive: true })
+    writeFileSync(join(mergeGuard, 'succeeded'), '')
+
+    const report = pruneTasks(paths, { days: 14, dryRun: false })
+
+    expect(report.removed).toContain(mergeGuard)
+    expect(existsSync(mergeGuard)).toBe(false)
+  })
+
   it('prunes old finished tasks and keeps everything protected', () => {
     setUpFixtures()
     pruneTasks(paths, { days: 14, dryRun: false })
