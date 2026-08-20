@@ -134,6 +134,12 @@ values must be non-negative integers, with the narrower bounds stated below.
    task is queued, running, completed, or retryable after failure. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
    creates a fresh task and updates the index; completed advisories remain deduplicated.
+   When generating a task specification, the description's leading category selects a
+   project pitfall list: `[TEST]` selects `templates/pitfalls/tests.md`, `[DOCS]` selects
+   `templates/pitfalls/docs.md`, and every other description selects
+   `templates/pitfalls/code.md`. When the selected file exists, its contents follow the
+   shared task requirements in the generated specification; when it does not exist, no
+   pitfall list is added.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
    `task/<id>`. The direct layout is the default because a consumer whose source lives
    outside the loop gains no safety from another checkout. With `INTEGRATION_BRANCH`
