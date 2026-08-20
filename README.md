@@ -239,6 +239,22 @@ git subtree pull --prefix=orchestration/ts \
 
 ## Settings worth knowing
 
+Runtime settings can be stored in `orchestration/config.json`, using the uppercase names
+below. The loop resolves file values first, then environment variables, then defaults, so
+existing launch commands and repositories without the file behave unchanged. Manage the
+file with `npm run config -- list`, `npm run config -- get TASK_GATE`,
+`npm run config -- set TASK_GATE light`, and `npm run config -- unset TASK_GATE`; use the
+equivalent package-prefixed command for a subtree installation.
+
+The file is checked when a setting is used and reparsed only after its modification time
+changes. Malformed or invalid updates are logged and keep the last good value. Live changes
+are also logged with their old and new values. `FORGE` and `RUNNER` are pinned because
+switching their owning component abandons in-flight work; `ISSUE_QUEUE_ENABLED` and
+`WORKER_MODE` are pinned because changing modes strands claims; `INTEGRATION_BRANCH` is
+pinned to avoid splitting a run across branches; and `UPSTREAM_REMOTE` and
+`UPSTREAM_BRANCH` are pinned to keep a run on the core source it started from. All other
+settings update at their next use.
+
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |

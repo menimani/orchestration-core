@@ -65,8 +65,35 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 ### Retained runtime configuration
 
-`loadConfig` keeps the environment-variable surface from the pre-rewrite launcher.
-Missing and empty values use the defaults below. Boolean values accept only the exact
+`loadConfig` keeps the environment-variable surface from the pre-rewrite launcher. The
+operator file is `orchestration/config.json`; its keys are the existing uppercase setting
+names. Resolution order is file, then environment, then the defaults below. A missing file
+therefore preserves the previous behavior and existing launch commands remain valid. Use
+`npm run config -- list`, `get <SETTING>`, `set <SETTING> <value>`, or `unset <SETTING>`
+(with the installed package's command prefix) to read and update it atomically.
+
+The loop caches a successful JSON parse against the file modification time and resolves a
+setting when it is referenced. A malformed file is reported and leaves the last successful
+parse active, or falls back to environment and defaults before the first successful parse.
+File values pass through the same validation as environment values. Rejected live values
+are reported and retain the previous valid value. Changes to live values are recorded in
+the loop event log with the setting name and old and new values.
+
+Seven settings are pinned at loop startup. A file change to one is reported as ignored and
+the startup value remains active for the run:
+
+| Setting | Why it is pinned |
+|---------|------------------|
+| `FORGE` | Switching forge leaves in-flight work owned by a component no longer in use. |
+| `RUNNER` | Switching runner leaves in-flight work owned by a component no longer in use. |
+| `ISSUE_QUEUE_ENABLED` | Changing queue mode strands issues claimed under the old mode. |
+| `WORKER_MODE` | Changing worker mode strands issues claimed under the old mode. |
+| `INTEGRATION_BRANCH` | Changing it splits one run across branches. |
+| `UPSTREAM_REMOTE` | Changing it pulls a different core into a run already based on the original source. |
+| `UPSTREAM_BRANCH` | Changing it pulls a different core into a run already based on the original source. |
+
+Every other setting is live. Missing and empty environment values use the defaults below.
+Boolean values accept only the exact
 lowercase values `true` and `false`; every other non-empty value is rejected. Numeric
 values must be non-negative integers, with the narrower bounds stated below.
 
