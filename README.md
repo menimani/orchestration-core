@@ -94,8 +94,8 @@ carry the consumer-selected parts of that:
 
 | Adapter | Selector | Valid selector value | Bundled implementation | Replace it to… |
 |---------|----------|----------------------|------------------------|----------------|
-| forge   | `FORGE`  | `github`             | `forge-github` (`gh`)  | move to Gitea, GitLab, … |
-| runner  | `RUNNER` | `codex`, `claude`    | `runner-codex`, `runner-claude` | drive a different agent CLI |
+| forge   | `FORGE`  | `github` or an external module selector | `forge-github` (`gh`)  | move to Gitea, GitLab, … |
+| runner  | `RUNNER` | `codex`, `claude`, or an external module selector | `runner-codex`, `runner-claude` | drive a different agent CLI |
 | project | discovery or `PROJECT` | project name | none — you write it | describe *your* repository |
 
 The project adapter is the one you must supply. It lives **outside** this package so a
@@ -113,6 +113,12 @@ With neither variable set, the core uses the single `project-*.ts` file in
 `orchestration/project/`. If that directory has multiple adapters, set `PROJECT=<name>`
 to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explicit path;
 it overrides the conventional path selected by `PROJECT`.
+
+An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, absolute
+path, or path relative to the consumer repository root. A forge module exports a `Forge`
+as its default or `forge` export, or exports `createForge(repoRoot, report)`. A runner
+module likewise exports a `Runner` as its default or `runner` export, or exports
+`createRunner(options)`. Factories may be asynchronous.
 
 A project adapter answers a few questions: which interactive agents receive shared skills,
 which staged-path checks run before a commit,
@@ -274,7 +280,7 @@ settings update at their next use.
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `MAX_ISSUE_RETRIES` | 3 | Consecutive failed tasks allowed per issue before it is parked as `loop:retry-exhausted` |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | medium / medium / medium | Reasoning effort per kind of work; `TASK_EFFORT` applies to queued tasks without a per-task override, while review-spawned fixes always use high effort |
-| `RUNNER` | codex | Agent CLI adapter; accepts `codex` or `claude` |
+| `RUNNER` | codex | Agent CLI adapter; accepts `codex`, `claude`, or an external module selector |
 | `RUNNER_CLAUDE_MODEL` | claude-opus-5 | Base Claude model used when `RUNNER=claude` and no task-specific model is set |
 | `RUNNER_CLAUDE_MODEL_MINIMAL` / `LOW` / `MEDIUM` / `HIGH` | `RUNNER_CLAUDE_MODEL` | Optional model selected for the matching reasoning effort when `RUNNER=claude` |
 | `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |

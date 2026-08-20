@@ -112,7 +112,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
 | `REVIEW_EFFORT` | `medium` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
-| `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter. |
+| `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter, or an external adapter module. |
 | `RUNNER_CLAUDE_MODEL` | `claude-opus-5` | Base model for the Claude runner when no task-specific model override applies. |
 | `RUNNER_CLAUDE_MODEL_MINIMAL`, `RUNNER_CLAUDE_MODEL_LOW`, `RUNNER_CLAUDE_MODEL_MEDIUM`, `RUNNER_CLAUDE_MODEL_HIGH` | `RUNNER_CLAUDE_MODEL` | Optional Claude model mapping for each runner-neutral reasoning effort. |
 | `MAX_PARALLEL` | `3` | Limit concurrently running queued-task processes and shared-issue claim capacity. It must be at least 1; scan fan-out is controlled separately by `SCAN_PARALLEL`. |
@@ -470,8 +470,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
 ## Adapter seams (new in the rewrite)
 
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
-    `forge-github.ts`; gitea/gitlab implementations can be added without touching the
-    core). The interface returns normalized values only: PR state plus check records with
+    `forge-github.ts`; any other selector loads an external package, file URL, absolute
+    path, or consumer-repository-relative module). External modules export a `Forge`
+    as default or `forge`, or a `createForge(repoRoot, report)` factory, so gitea/gitlab
+    implementations can be added without touching the core. The interface returns
+    normalized values only: PR state plus check records with
     `name`, `conclusion`, and `startedAt`, which is an ISO timestamp when the forge reports
     one and otherwise an empty string. For each check name, CI waiting discards only
     timestamped records older than the newest `startedAt`: it retains every record tied
@@ -486,7 +489,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     message decoration for forge-driven closure. Fingerprint deduplication, claim
     arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
-    `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`). The runner contract is
+    `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`; any other selector
+    resolves like an external forge module). External modules export a `Runner` as default
+    or `runner`, or a `createRunner(options)` factory. The runner contract is
     the output markers — `TASK_COMPLETE`,
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
