@@ -65,10 +65,11 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 ### Retained runtime configuration
 
-`loadConfig` keeps the environment-variable surface from the pre-rewrite launcher. The
-operator file is `orchestration/config.json`; its keys are the existing uppercase setting
-names. Resolution order is file, then environment, then the defaults below. A missing file
-therefore preserves the previous behavior and existing launch commands remain valid. Use
+`loadConfig` keeps the runner-neutral environment-variable surface from the pre-rewrite
+launcher. The operator file is `orchestration/config.json`; its keys are the existing
+uppercase setting names. Resolution order is file, then environment, then the defaults
+below. A missing file therefore preserves the previous behavior and existing launch
+commands remain valid. Use
 `npm run config -- list`, `get <SETTING>`, `set <SETTING> <value>`, or `unset <SETTING>`
 (with the installed package's command prefix) to read and update it. The command writes a
 temporary file in the same directory and renames it into place atomically, so the loop
@@ -99,6 +100,10 @@ Every other setting is live. Missing and empty environment values use the defaul
 Boolean values accept only the exact
 lowercase values `true` and `false`; every other non-empty value is rejected. Numeric
 values must be non-negative integers, with the narrower bounds stated below.
+
+The Claude adapter reads `RUNNER_CLAUDE_MODEL` and its four per-effort variants directly
+from the process environment when the runner is loaded. These runner-specific variables
+are not parsed by `loadConfig` and are not operator-file settings.
 
 | Variable | Default | Contract |
 |----------|---------|----------|

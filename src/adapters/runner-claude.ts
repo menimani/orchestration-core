@@ -18,12 +18,12 @@ function configuredModel(value: string | undefined, fallback: string): string {
 }
 
 function effortModels(options: RunnerLoadOptions): Record<ReasoningEffort, string> {
-  const base = configuredModel(options.runnerClaudeModel, DEFAULT_MODEL)
+  const base = configuredModel(options.env.RUNNER_CLAUDE_MODEL, DEFAULT_MODEL)
   return {
-    minimal: configuredModel(options.runnerClaudeModelMinimal, base),
-    low: configuredModel(options.runnerClaudeModelLow, base),
-    medium: configuredModel(options.runnerClaudeModelMedium, base),
-    high: configuredModel(options.runnerClaudeModelHigh, base),
+    minimal: configuredModel(options.env.RUNNER_CLAUDE_MODEL_MINIMAL, base),
+    low: configuredModel(options.env.RUNNER_CLAUDE_MODEL_LOW, base),
+    medium: configuredModel(options.env.RUNNER_CLAUDE_MODEL_MEDIUM, base),
+    high: configuredModel(options.env.RUNNER_CLAUDE_MODEL_HIGH, base),
   }
 }
 
@@ -89,7 +89,9 @@ export function runClaudeProcess(
   })
 }
 
-export function createClaudeRunner(options: RunnerLoadOptions = {}): Runner {
+export function createClaudeRunner(
+  options: RunnerLoadOptions = { env: process.env },
+): Runner {
   const models = effortModels(options)
   return {
     sharedSkills: createClaudeSharedSkills(),

@@ -115,18 +115,10 @@ function displayConfigValue(value: LoopConfig[keyof LoopConfig]): string {
 }
 
 function resolvedRunnerModel(
-  config: LoopConfig,
   configured: string,
-  effort: ReasoningEffort,
 ): string {
   if (configured !== '') return configured
-  if (config.runner !== 'claude') return '(runner default)'
-  return {
-    minimal: config.runnerClaudeModelMinimal,
-    low: config.runnerClaudeModelLow,
-    medium: config.runnerClaudeModelMedium,
-    high: config.runnerClaudeModelHigh,
-  }[effort]
+  return '(runner default)'
 }
 
 function reportResolvedLoopConfig(
@@ -146,9 +138,9 @@ function reportResolvedLoopConfig(
   report(`  queue mode: ${queueMode(config)}`)
   report(`  run branch: ${runBranch}`)
   report(`  runner: ${config.runner}`)
-  report(`  scan: model=${resolvedRunnerModel(config, config.scanModel, config.scanEffort)} effort=${config.scanEffort}`)
-  report(`  task: model=${resolvedRunnerModel(config, config.taskModel, config.taskEffort)} effort=${config.taskEffort}`)
-  report(`  review: model=${resolvedRunnerModel(config, config.taskModel, config.reviewEffort)} effort=${config.reviewEffort}`)
+  report(`  scan: model=${resolvedRunnerModel(config.scanModel)} effort=${config.scanEffort}`)
+  report(`  task: model=${resolvedRunnerModel(config.taskModel)} effort=${config.taskEffort}`)
+  report(`  review: model=${resolvedRunnerModel(config.taskModel)} effort=${config.reviewEffort}`)
   report('  changed from defaults:')
   let changed = false
   for (const key of Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[]) {
@@ -569,7 +561,7 @@ const cmdStart: Command = async (paths, args) => {
       return 1
     }
   }
-  const runner = await loadRunner(config.runner, config)
+  const runner = await loadRunner(config.runner, { env: process.env })
   const project = await loadProject(paths.root)
   const result = await startTask(paths, runner, taskId, {
     effort,
@@ -1237,7 +1229,7 @@ async function runLoopDaemon(
       loopPaths.repoRoot,
       (message) => log(formatEventLine('WARN', 'forge', message)),
     )
-    const runner = await loadRunner(config.runner, config)
+    const runner = await loadRunner(config.runner, { env: process.env })
     const projectModule = await import('./adapters/project.ts')
     const projectRoot = topology.integrationBranch === undefined
       ? paths.root
