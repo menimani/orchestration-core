@@ -528,6 +528,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
     through `adapters/os.ts`. Callers receive intent-level process-tree, directory, and
     worktree-path operations from either `os-windows.ts` or `os-posix.ts`; there is no
     OS selector or platform field in the contract.
+32a. `deploy` accepts no arguments and uses the current branch, the project adapter's
+    deployment workflow and revision URL, and a request-unique dispatch token. It
+    dispatches that workflow and identifies only the run returned for the same workflow,
+    ref, and token. Run discovery is polled for at most five minutes; after discovery,
+    only that run id is polled for at most thirty minutes. Both use five-second polling
+    capped to the remaining deadline. The run must complete with conclusion `success`,
+    and the revision endpoint must return a successful response. Its trimmed body is
+    compared exactly with the run's `headSha`. The command reports the workflow success
+    and revision `PASS` or `FAIL`, and exits zero only for an exact revision match;
+    invalid usage, a missing deployment declaration, either timeout, an unsuccessful
+    workflow or revision response, and a revision mismatch exit non-zero.
 
 ## The issue queue (new in the rewrite, opt-in)
 
