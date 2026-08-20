@@ -290,7 +290,7 @@ describe('mergeTask', () => {
     })).resolves.toMatchObject({ outcome: 'merged' })
 
     expect(readStatus(paths, taskId)?.status).toBe('merged')
-    expect(existsSync(join(guard, 'succeeded'))).toBe(true)
+    expect(existsSync(guard)).toBe(false)
   })
 
   it('reclaims an old merge guard with an unparseable owner file', async () => {
@@ -308,7 +308,7 @@ describe('mergeTask', () => {
     })).resolves.toMatchObject({ outcome: 'merged' })
 
     expect(readStatus(paths, taskId)?.status).toBe('merged')
-    expect(existsSync(join(guard, 'succeeded'))).toBe(true)
+    expect(existsSync(guard)).toBe(false)
   })
 
   it('merges a committed task, removes its worktree and branch, and records merged', async () => {
