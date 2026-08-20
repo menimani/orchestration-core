@@ -13,6 +13,7 @@ const LOCK_RETRY_MS = 10
 const OWNER_GRACE_MS = 30_000
 const MAX_LOCK_RETRIES = Math.ceil(OWNER_GRACE_MS / LOCK_RETRY_MS)
 const sleepBuffer = new SharedArrayBuffer(4)
+const releasedOwnedLockTokens = new Set<string>()
 
 function ownerText(lockDir: string): string {
   try {
@@ -35,6 +36,7 @@ function lockOwnerIsStale(lockDir: string): boolean {
   const [pidRaw, createdRaw, token, ...extra] = ownerText(lockDir).split(/\s+/)
   const pid = Number(pidRaw)
   const created = Number(createdRaw)
+  if (token !== undefined && releasedOwnedLockTokens.has(token)) return true
   if (
     !/^[1-9]\d*$/.test(pidRaw ?? '')
     || !/^\d+$/.test(createdRaw ?? '')
@@ -73,8 +75,12 @@ function releaseOwnedLock(lockDir: string, token: string): void {
     renameSync(lockDir, displaced)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
-    throw error
+    // The mutation has already committed. Keep its result observable and let the next
+    // acquisition reclaim this exact token even while this process remains alive.
+    releasedOwnedLockTokens.add(token)
+    return
   }
+  releasedOwnedLockTokens.delete(token)
 
   // Revalidate after the atomic displacement so a racing replacement is never erased.
   if (ownerText(displaced).split(/\s+/)[2] !== token) {
