@@ -9,6 +9,7 @@ export interface WorktreeRemovalResult {
   fallback: string | undefined
   gitFailure: string | undefined
   fallbackFailure: string | undefined
+  pruneFailure: string | undefined
 }
 
 export function removalFailureDetail(error: unknown): string {
@@ -26,7 +27,10 @@ export function removeWorktreeWithFallback(
 ): WorktreeRemovalResult {
   try {
     runtime.git(repoRoot, ['worktree', 'remove', worktree, '--force'])
-    return { fallback: undefined, gitFailure: undefined, fallbackFailure: undefined }
+    return {
+      fallback: undefined, gitFailure: undefined, fallbackFailure: undefined,
+      pruneFailure: undefined,
+    }
   } catch (error) {
     const gitFailure = removalFailureDetail(error)
     const worktreePath = runtime.os.worktreePathFor(worktree)
@@ -37,11 +41,12 @@ export function removeWorktreeWithFallback(
       fallbackFailure = removalFailureDetail(fallbackError)
     }
 
+    let pruneFailure: string | undefined
     try {
       runtime.git(repoRoot, ['worktree', 'prune'])
-    } catch {
-      // Callers decide whether a failed metadata cleanup is fatal.
+    } catch (pruneError) {
+      pruneFailure = removalFailureDetail(pruneError)
     }
-    return { fallback: worktreePath.removalFallback, gitFailure, fallbackFailure }
+    return { fallback: worktreePath.removalFallback, gitFailure, fallbackFailure, pruneFailure }
   }
 }

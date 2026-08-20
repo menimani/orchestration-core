@@ -20,7 +20,9 @@ import {
 import { taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
-import type { WorktreeRemovalRuntime } from '../src/worktree.ts'
+import {
+  removeWorktreeWithFallback, type WorktreeRemovalRuntime,
+} from '../src/worktree.ts'
 import { stubProject } from './stubProject.ts'
 import { TestProcessRegistry } from './testProcess.ts'
 
@@ -101,6 +103,21 @@ function failedWorktreeRemovalRuntime(): WorktreeRemovalRuntime {
   }
 }
 
+function staleMetadataRemovalRuntime(): WorktreeRemovalRuntime {
+  return {
+    os: posixOperatingSystem((path, options) => { rmSync(path, options) }),
+    git: (cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') {
+        throw new Error('Git removal failed')
+      }
+      if (args[0] === 'worktree' && args[1] === 'prune') {
+        throw new Error('metadata is locked')
+      }
+      return git(cwd, args)
+    },
+  }
+}
+
 async function makeCompletedTask(taskId: string, options: { commit?: boolean; dirty?: boolean } = {}): Promise<string> {
   writeFileSync(specFile(paths, taskId), '# spec\n')
   const worktree = worktreeDir(paths, taskId)
@@ -135,6 +152,46 @@ afterEach(async () => {
 })
 
 describe('removeMergedWorktree', () => {
+  it('returns a metadata prune failure after fallback removal', () => {
+    const worktree = worktreeDir(paths, '20260820_205524_042_auto-prune-failure')
+    const result = removeWorktreeWithFallback(paths.repoRoot, worktree, {
+      os: posixOperatingSystem(vi.fn()),
+      git: (_cwd, args) => {
+        if (args[1] === 'remove') throw new Error('Git removal failed')
+        if (args[1] === 'prune') throw new Error('metadata is locked')
+        return ''
+      },
+    })
+
+    expect(result).toMatchObject({
+      gitFailure: 'Git removal failed',
+      fallbackFailure: undefined,
+      pruneFailure: 'metadata is locked',
+    })
+  })
+
+  it('does not report removal when worktree metadata is still registered', () => {
+    const worktree = worktreeDir(paths, '20260820_205524_043_auto-stale-registration')
+    const log = vi.fn()
+    const removed = removeMergedWorktree(paths, worktree, log, {
+      os: posixOperatingSystem(vi.fn()),
+      git: (_cwd, args) => {
+        if (args[1] === 'remove') throw new Error('Git removal failed')
+        if (args[1] === 'prune') throw new Error('metadata is locked')
+        if (args[1] === 'list') return `worktree ${worktree}\0HEAD deadbeef\0`
+        return ''
+      },
+    })
+
+    expect(removed).toBe(false)
+    expect(log).toHaveBeenCalledWith(
+      `WARN: worktree metadata pruning failed for ${worktree}: metadata is locked`,
+    )
+    expect(log).toHaveBeenCalledWith(
+      `WARN: the removed worktree is still registered and has to be pruned by hand: ${worktree}`,
+    )
+  })
+
   it('uses the Windows UNC namespace for a UNC worktree fallback', () => {
     const worktree = '\\\\server\\share\\orchestration\\worktrees\\task'
     const remove = vi.fn()
@@ -372,6 +429,26 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
+  it('does not report merged cleanup while metadata and the task branch remain', async () => {
+    const taskId = '20260820_205524_044_auto-retained-merged-metadata'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const branch = branchName(taskId)
+    const outputFile = join(repoRoot, 'stale-merge-output.log')
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+      worktreeRemovalRuntime: staleMetadataRemovalRuntime(),
+    })
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain(`WARN: worktree metadata pruning failed for ${worktree}`)
+    expect(output).toContain(`task branch remains: ${branch}`)
+    expect(output).not.toContain(`Merged ${taskId} and removed the worktree.`)
+    expect(git(repoRoot, ['worktree', 'list', '--porcelain']))
+      .toContain(`branch refs/heads/${branch}`)
+    expect(git(repoRoot, ['branch', '--list', branch]).trim()).not.toBe('')
+  })
+
   it('stops and verifies a completed runner with a live PID before merging', async () => {
     const taskId = '20260808_000000_017_user-runner-finishes-output-first'
     const worktree = await makeCompletedTask(taskId, { commit: true })
@@ -552,6 +629,28 @@ describe('mergeTask', () => {
     expect(output).not.toContain(`Completed ${taskId} without changes and removed the worktree.`)
     expect(existsSync(worktree)).toBe(true)
     expect(readStatus(paths, taskId)?.status).toBe('no-change')
+  })
+
+  it('does not report no-change cleanup while metadata and the task branch remain', async () => {
+    const taskId = '20260820_205524_045_auto-retained-no-change-metadata'
+    const worktree = await makeCompletedTask(taskId)
+    const branch = branchName(taskId)
+    const outputFile = join(repoRoot, 'stale-no-change-output.log')
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The reported problem is already fixed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+      worktreeRemovalRuntime: staleMetadataRemovalRuntime(),
+    })
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain(`WARN: worktree metadata pruning failed for ${worktree}`)
+    expect(output).toContain(`task branch remains: ${branch}`)
+    expect(output).not.toContain(`Completed ${taskId} without changes and removed the worktree.`)
+    expect(git(repoRoot, ['worktree', 'list', '--porcelain']))
+      .toContain(`branch refs/heads/${branch}`)
+    expect(git(repoRoot, ['branch', '--list', branch]).trim()).not.toBe('')
   })
 
   it('keeps a no-change task retryable when its linked work cannot be reconciled', async () => {
