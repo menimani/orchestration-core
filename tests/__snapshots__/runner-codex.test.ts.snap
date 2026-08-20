@@ -292,6 +292,16 @@ Edit the generated \`orchestration/project/project-<name>.ts\` from the decision
 only when init created it in this run. If an adapter already existed, report it and ask
 before changing it; deliberate divergence is not a repair target.
 
+Shared skills rendered into \`.agents/skills/\` or \`.claude/skills/\` and recorded in that
+directory's \`.orchestration-core-sync.json\` are core-owned. Do not edit their rendered
+trees: clean syncs overwrite edits, deletions, and added support files. To add
+repository-specific guidance to shared skill \`<name>\`, write the fragment at
+\`orchestration/project/skills/<name>.md\`. The renderer places it at the automatic
+\`{{ORCHESTRATION_PROJECT_GUIDANCE}}\` injection point at the end of \`SKILL.md\`; when no
+fragment exists, the point renders to nothing. Skills absent from the managed index are
+repository-owned and remain untouched, so a repository may still supply a complete local
+skill beside the rendered ones.
+
 Keep \`preCommitChecks\` fast. The core-owned hook supplies the default-branch guard and
 selects these checks from staged paths. Do not create repository-owned hook scripts.
 

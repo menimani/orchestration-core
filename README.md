@@ -80,9 +80,18 @@ task dispatch, leaving any staged output available for diagnosis. Loop commands 
 rendered for
 the installed package location (`npm run` here, `npm run -C orchestration/ts` in the
 layout below).
-The sync tracks the exact content it generated: a consumer edit, deletion, or added
-support file is reported and retained, while repository skills absent from the manifest
-are never touched. Canonical skills live outside a nested runner skill directory,
+Every shared `SKILL.md` has one renderer-supplied injection point named
+`{{ORCHESTRATION_PROJECT_GUIDANCE}}` at its end. A consumer can supply the fragment for
+skill `<name>` at `orchestration/project/skills/<name>.md`, outside the vendored
+`orchestration/ts` subtree. The renderer adds Markdown separation before a non-empty
+fragment and emits nothing at the injection point when the file is absent, so consumers
+without fragments receive the same output as before.
+The sync tracks the exact content it generated. A rendered skill recorded in
+`.orchestration-core-sync.json` is core-owned; direct edits, deletions, and added support
+files are overwritten by a clean sync. Put repository-specific additions in the project
+fragment instead. A repository skill absent from the managed index is repository-owned
+and is never touched. Canonical
+skills live outside a nested runner skill directory,
 so importing the package does not expose a second qualified copy of each shared skill.
 
 Nothing here decides that shipping is safe. Deployment stays a human action.
