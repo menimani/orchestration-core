@@ -236,6 +236,32 @@ describe('live loop configuration', () => {
     expect(logText()).toContain('in-flight work owned by a component no longer in use')
   })
 
+  it('stops polling when a live configuration update is invalid', async () => {
+    initializeGitRepo()
+    const filePath = join(paths.root, 'config.json')
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 1, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    const loop = loopWithConfig(config)
+    loop.initializeSessionStateForBranch()
+    const taskId = '20260820_000003_003_auto-invalid-live-configuration'
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# task\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:0\n`)
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 0, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+
+    await expect(loop.poll()).rejects.toThrow(
+      `Invalid configuration file ${filePath} (setting: MAX_PARALLEL)`,
+    )
+    expect(runnerStarts).toHaveLength(0)
+    expect(logText()).toMatch(/setting: MAX_PARALLEL.*must be at least 1/)
+  })
+
   it('retains the existing loop behavior when the configuration file is absent', async () => {
     const config = loadConfig({
       SCAN_ENABLED: 'false', AUTO_PR: 'false', REVIEW_ENABLED: 'false',

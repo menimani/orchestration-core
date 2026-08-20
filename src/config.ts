@@ -299,7 +299,8 @@ function changedNames(previous: ConfigFileValues, next: ConfigFileValues): Set<s
 function settingFromError(error: unknown, changed: Set<string>): string | undefined {
   const message = error instanceof Error ? error.message : String(error)
   const mentioned = [...KEY_BY_NAME.keys()].filter((name) => message.includes(name))
-  return mentioned.find((name) => changed.has(name)) ?? mentioned[0]
+  const unknown = message.match(/Unknown configuration setting '([^']+)'/)
+  return mentioned.find((name) => changed.has(name)) ?? mentioned[0] ?? unknown?.[1]
 }
 
 /**
@@ -319,6 +320,7 @@ export function loadConfig(
   let activeValues: ConfigFileValues = {}
   let activeConfig = environmentConfig
   let observedStamp: string | undefined
+  let refreshError: Error | undefined
 
   const emitError = (message: string, setting?: string): void => report({
     type: 'error',
@@ -327,26 +329,8 @@ export function loadConfig(
   })
 
   const acceptValues = (parsed: ConfigFileValues): void => {
-    const candidate = { ...parsed }
-    const changed = changedNames(activeValues, candidate)
-    const rejected = new Set<string>()
-    for (;;) {
-      try {
-        activeConfig = validateConfigFileValues(candidate, env)
-        activeValues = candidate
-        return
-      } catch (error) {
-        const setting = settingFromError(error, changed)
-        if (setting === undefined || rejected.has(setting)) {
-          emitError(`Rejected configuration file: ${(error as Error).message}`)
-          return
-        }
-        rejected.add(setting)
-        emitError(`Rejected ${setting}: ${(error as Error).message}; using its previous value`, setting)
-        if (Object.hasOwn(activeValues, setting)) candidate[setting] = activeValues[setting]
-        else delete candidate[setting]
-      }
-    }
+    activeConfig = validateConfigFileValues(parsed, env)
+    activeValues = { ...parsed }
   }
 
   const refresh = (): void => {
@@ -371,17 +355,38 @@ export function loadConfig(
         return
       }
     }
-    if (stamp === observedStamp) return
+    if (stamp === observedStamp) {
+      if (refreshError !== undefined) throw refreshError
+      return
+    }
     observedStamp = stamp
     if (stamp === 'missing') {
       acceptValues({})
+      refreshError = undefined
       return
     }
+    let parsed: ConfigFileValues
     try {
-      acceptValues(parseConfigFile(readFileSync(filePath, 'utf8')))
+      parsed = parseConfigFile(readFileSync(filePath, 'utf8'))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      emitError(`Could not parse ${filePath}: ${message}; using the last good configuration`)
+      refreshError = new Error(
+        `Invalid configuration file ${filePath} (setting: file contents): ${message}`,
+      )
+      emitError(refreshError.message)
+      throw refreshError
+    }
+    try {
+      acceptValues(parsed)
+      refreshError = undefined
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const setting = settingFromError(error, changedNames(activeValues, parsed))
+      refreshError = new Error(
+        `Invalid configuration file ${filePath} (setting: ${setting ?? 'unknown'}): ${message}`,
+      )
+      emitError(refreshError.message, setting)
+      throw refreshError
     }
   }
 

@@ -169,19 +169,27 @@ describe('loadConfig', () => {
     expect(config.pollIntervalSeconds).toBe(30)
   })
 
-  it('validates a file value with the environment setting validation', () => {
+  it('stops when a file value fails startup validation', () => {
     const events: string[] = []
     const filePath = configFile(JSON.stringify({ TASK_GATE: 'fast' }))
-    const config = loadConfig({ TASK_GATE: 'light' }, {
+
+    expect(() => loadConfig({ TASK_GATE: 'light' }, {
       filePath,
       onEvent: (event) => events.push(event.message),
-    })
-
-    expect(config.taskGate).toBe('light')
-    expect(events.join('\n')).toMatch(/Rejected TASK_GATE.*must be 'full' or 'light'/)
+    })).toThrow(`Invalid configuration file ${filePath} (setting: TASK_GATE):`)
+    expect(events.join('\n')).toContain(filePath)
+    expect(events.join('\n')).toMatch(/setting: TASK_GATE.*must be 'full' or 'light'/)
   })
 
-  it('keeps the last good parse when the file becomes malformed', () => {
+  it('reports an unknown file setting before stopping', () => {
+    const filePath = configFile(JSON.stringify({ UNRECOGNIZED_SETTING: true }))
+
+    expect(() => loadConfig({}, { filePath })).toThrow(
+      `Invalid configuration file ${filePath} (setting: UNRECOGNIZED_SETTING):`,
+    )
+  })
+
+  it('stops instead of retaining the last good parse when the file becomes malformed', () => {
     const events: string[] = []
     const filePath = configFile(JSON.stringify({ MAX_PARALLEL: 6 }))
     const config = loadConfig({}, {
@@ -192,8 +200,11 @@ describe('loadConfig', () => {
 
     writeFileSync(filePath, '{ malformed json that changes size')
 
-    expect(() => config.maxParallel).not.toThrow()
-    expect(config.maxParallel).toBe(6)
-    expect(events.join('\n')).toContain('using the last good configuration')
+    expect(() => config.maxParallel).toThrow(
+      `Invalid configuration file ${filePath} (setting: file contents)`,
+    )
+    expect(() => config.maxParallel).toThrow()
+    expect(events.join('\n')).toContain(filePath)
+    expect(events.join('\n')).toMatch(/setting: file contents.*JSON/)
   })
 })
