@@ -1,8 +1,8 @@
 import { execFileSync, execSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, rmdirSync,
-  writeFileSync,
+  renameSync, statSync, writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
@@ -612,6 +612,8 @@ interface MergeGuardOwner {
   startIdentity: string | null
 }
 
+const MALFORMED_MERGE_GUARD_MAX_AGE_MS = 30_000
+
 function mergeGuardDir(paths: OrchPaths, taskId: string): string {
   return join(paths.queueDir, 'merge-guards', taskId)
 }
@@ -632,6 +634,51 @@ function activeMergeGuardOwner(dir: string): MergeGuardOwner | undefined {
   }
 }
 
+function malformedMergeGuardIsStale(dir: string): boolean {
+  try {
+    const ownerFile = join(dir, 'owner.json')
+    const modifiedAt = statSync(existsSync(ownerFile) ? ownerFile : dir).mtimeMs
+    return Date.now() - modifiedAt >= MALFORMED_MERGE_GUARD_MAX_AGE_MS
+  } catch {
+    return false
+  }
+}
+
+function publishMergeGuard(dir: string, owner: MergeGuardOwner): boolean {
+  const pendingOwner = `${dir}.owner-${process.pid}-${randomUUID()}.json`
+  try {
+    mkdirSync(dir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw error
+  }
+  try {
+    writeFileSync(pendingOwner, `${JSON.stringify(owner)}\n`, { flag: 'wx' })
+    renameSync(pendingOwner, join(dir, 'owner.json'))
+    return true
+  } catch (error) {
+    // We created this directory and no observer can acquire it while it exists. Remove
+    // both pieces so an ordinary I/O failure does not become a permanent active guard.
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+    throw error
+  } finally {
+    rmSync(pendingOwner, { force: true, maxRetries: 3, retryDelay: 50 })
+  }
+}
+
+function reclaimMalformedMergeGuard(dir: string): void {
+  try {
+    rmSync(join(dir, 'owner.json'))
+  } catch {
+    // The owner may be missing rather than malformed.
+  }
+  try {
+    rmdirSync(dir)
+  } catch {
+    // A concurrent waiter reclaimed it, or a marker now makes the directory non-empty.
+  }
+}
+
 function acquireMergeGuard(
   paths: OrchPaths,
   taskId: string,
@@ -645,27 +692,28 @@ function acquireMergeGuard(
     state: 'active', pid: process.pid, startIdentity: currentProcessStartIdentity(),
   }
   for (;;) {
-    try {
-      mkdirSync(dir)
-      writeFileSync(join(dir, 'owner.json'), `${JSON.stringify(owner)}\n`, { flag: 'wx' })
+    if (publishMergeGuard(dir, owner)) {
       return { acquired: true, file: dir, owner }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
-      const recorded = activeMergeGuardOwner(dir)
-      // An ownerless directory is the narrow acquisition window of another process.
-      if (recorded === undefined) return { acquired: false, reason: 'active' }
-      if (lockOwnerIsCurrent(recorded.pid, recorded.startIdentity)) {
-        return { acquired: false, reason: 'active' }
-      }
-      // Removing the owner before the directory makes stale reclamation safe between
-      // multiple waiters: rmdir can never remove a replacement's non-empty guard.
-      try {
-        rmSync(join(dir, 'owner.json'))
-        rmdirSync(dir)
-      } catch {
-        // A concurrent owner changed the marker; retry against its current state.
-      }
+    }
+    if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
+    const recorded = activeMergeGuardOwner(dir)
+    if (recorded === undefined) {
+      // Atomic publication means a fresh ownerless or malformed directory may belong to
+      // an older binary still acquiring its guard. Recover it only after that window ends.
+      if (!malformedMergeGuardIsStale(dir)) return { acquired: false, reason: 'active' }
+      reclaimMalformedMergeGuard(dir)
+      continue
+    }
+    if (lockOwnerIsCurrent(recorded.pid, recorded.startIdentity)) {
+      return { acquired: false, reason: 'active' }
+    }
+    // Removing the owner before the directory makes stale reclamation safe between
+    // multiple waiters: rmdir can never remove a replacement's non-empty guard.
+    try {
+      rmSync(join(dir, 'owner.json'))
+      rmdirSync(dir)
+    } catch {
+      // A concurrent owner changed the marker; retry against its current state.
     }
   }
 }

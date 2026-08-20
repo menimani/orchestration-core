@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync,
+  writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -276,6 +277,40 @@ describe('removeTemporaryWorktree', () => {
 })
 
 describe('mergeTask', () => {
+  it('reclaims an old ownerless merge guard left by a failed acquisition', async () => {
+    const taskId = '20260820_135042_001_user-ownerless-guard'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mkdirSync(guard, { recursive: true })
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(guard, old, old)
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    })).resolves.toMatchObject({ outcome: 'merged' })
+
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(existsSync(join(guard, 'succeeded'))).toBe(true)
+  })
+
+  it('reclaims an old merge guard with an unparseable owner file', async () => {
+    const taskId = '20260820_135042_002_user-malformed-guard'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mkdirSync(guard, { recursive: true })
+    const ownerFile = join(guard, 'owner.json')
+    writeFileSync(ownerFile, '{not json\n')
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(ownerFile, old, old)
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    })).resolves.toMatchObject({ outcome: 'merged' })
+
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(existsSync(join(guard, 'succeeded'))).toBe(true)
+  })
+
   it('merges a committed task, removes its worktree and branch, and records merged', async () => {
     const taskId = '20260808_000000_001_user-adds-a-file'
     const worktree = await makeCompletedTask(taskId, { commit: true })
