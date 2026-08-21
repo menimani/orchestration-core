@@ -116,7 +116,10 @@ export interface ProjectAdapter {
   deployment?: { workflow: string; revisionUrl: string }
   /** Whether pull requests are expected to receive CI checks. Omit when unknown. */
   ciChecksExpected?: boolean
-  /** Verify that passing merge checks did not borrow Node modules from a parent checkout. */
+  /**
+   * Opt in to verifying that passing merge checks did not borrow Node modules from a
+   * parent checkout. Omitted or false skips this Node/npm-specific verification.
+   */
   verifyDependencyIsolation?: boolean
   /** Per-merge verification, selected from the paths the worktree touched. */
   mergeChecks(taskGate: 'full' | 'light'): MergeCheck[]

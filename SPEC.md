@@ -233,15 +233,18 @@ are not parsed by `loadConfig` and are not operator-file settings.
    documented; the gate stops the loop rather than promote a failing tip.
    A missing-toolchain repair that fails also stops the gate and reports the adapter's
    remediation message without running the subsequent suite step.
-9a. A merge check that passes counts only where its directory satisfies its own declared
-    dependencies. A worktree sits inside the checkout it was cut from, so Node resolves
-    anything the worktree lacks from the parent's `node_modules`: an install that stopped
-    partway produces a pass against a dependency tree nobody assembled, and that verdict
-    describes neither tree. Declared dependencies with no `node_modules`, an npm-owned
-    directory with no completed-install record, or any declared dependency absent from
-    `node_modules` turns the pass into a failure that names what was borrowed. The
-    verification follows the check rather than preceding it, because a check may install
-    as its own first step.
+9a. Dependency-isolation verification is opt-in per project adapter. When
+    `verifyDependencyIsolation` is `true`, a merge check that passes counts only where its
+    directory satisfies its own declared Node dependencies. A worktree sits inside the
+    checkout it was cut from, so Node resolves anything the worktree lacks from the
+    parent's `node_modules`: an install that stopped partway produces a pass against a
+    dependency tree nobody assembled, and that verdict describes neither tree. Declared
+    dependencies with no `node_modules`, an npm-owned directory with no completed-install
+    record, or any declared dependency absent from `node_modules` turns the pass into a
+    failure that names what was borrowed. The verification follows the check rather than
+    preceding it, because a check may install as its own first step. When the option is
+    omitted or false, merge-check results are not subjected to this Node/npm-specific
+    verification, allowing adapters with other dependency models to opt out.
 9b. The core project's merge and cycle gates build `node_modules` with `npm ci` in a
     staging directory, then activate the complete tree. The working dependency tree is
     never npm's cleanup target: a failed install leaves it untouched, a failed activation
