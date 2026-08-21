@@ -337,9 +337,10 @@ export function loadConfig(
         const message = error instanceof Error ? error.message : String(error)
         if (observedStamp !== `error:${message}`) {
           observedStamp = `error:${message}`
-          emitError(`Could not inspect ${filePath}: ${message}`)
+          refreshError = new Error(`Could not inspect ${filePath}: ${message}`)
+          emitError(refreshError.message)
         }
-        return
+        throw refreshError
       }
     }
     if (stamp === observedStamp) {
