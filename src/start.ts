@@ -35,6 +35,14 @@ export class StartupProcessRetainedError extends AggregateError {
   }
 }
 
+/** The runner started, but did not identify the process that now owns the worktree. */
+export class StartupOwnershipUnknownError extends Error {
+  constructor(pid: number) {
+    super(`Runner returned invalid PID ${String(pid)}; process ownership could not be established.`)
+    this.name = 'StartupOwnershipUnknownError'
+  }
+}
+
 export function worktreeAddArgs(worktree: string, branch: string): string[] {
   return ['worktree', 'add', '--quiet', worktree, '-b', branch]
 }
@@ -119,6 +127,9 @@ export async function startTask(
       effort: options.effort,
       model: options.model,
     })
+    if (!Number.isSafeInteger(pid) || pid <= 0) {
+      throw new StartupOwnershipUnknownError(pid)
+    }
     launchedPid = pid
     // Ownership must survive a failure to acquire or publish the status record. The
     // loop consults this registry before deciding whether failed startup work is safe
@@ -129,6 +140,10 @@ export async function startTask(
     return { outcome: 'started', pid }
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error)
+    if (error instanceof StartupOwnershipUnknownError) {
+      appendFileSync(log, `Task startup ownership is unknown:\n${detail}\n`)
+      throw error
+    }
     if (launchedPid !== undefined) {
       try {
         operatingSystem.terminateProcessTree(launchedPid)

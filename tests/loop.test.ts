@@ -2719,6 +2719,49 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(retainedStarts).toEqual([taskId])
   })
 
+  it('stops without releasing a claim when the runner returns an invalid PID', async () => {
+    initializeGitRepo()
+    const description = '[BUG] retain a claimed task with unknown runner ownership'
+    const attemptedTaskIds: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
+        return 0
+      },
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, maxParallel: 1 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'unknown runner ownership',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    const taskId = attemptedTaskIds[0]!
+    const retained = await fakeForge.getIssue(issueNumber)
+    expect(retained.labels).toContain(LABEL_IN_PROGRESS)
+    expect(retained.labels).not.toContain(LABEL_READY)
+    expect(retained.assignees).toEqual(['worker-a'])
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+    )
+
+    expect(await loop.poll()).toBe('stopped')
+    expect(attemptedTaskIds).toEqual([taskId])
+  })
+
   it('persists a startup-failure release and stops after three failed reconciliations', async () => {
     initializeGitRepo()
     const description = '[BUG] retain a claimed task until its issue can be released'
