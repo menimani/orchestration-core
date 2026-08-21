@@ -3,6 +3,7 @@ import {
   mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { z } from 'zod'
 import { operatingSystem } from './adapters/os.ts'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
@@ -19,7 +20,9 @@ import {
 // lock and compare-and-swap transitions refuse to overwrite a state another writer
 // already changed.
 
-export type TaskState = 'running' | 'completed' | 'failed' | 'merged' | 'no-change' | string
+const taskStateSchema = z.enum(['running', 'completed', 'failed', 'merged', 'no-change'])
+
+export type TaskState = z.infer<typeof taskStateSchema>
 
 export interface TaskStatus {
   task_id: string
@@ -41,19 +44,48 @@ interface StatusMetadata {
 
 type DurableTaskStatus = Omit<TaskStatus, 'pid'>
 
+const durableTaskStatusSchema = z.object({
+  task_id: z.string(),
+  status: taskStateSchema,
+  started_at: z.string(),
+  updated_at: z.string(),
+  worktree: z.string(),
+  branch: z.string(),
+  merge_commit: z.string().optional(),
+  run_branch: z.string().optional(),
+}).passthrough()
+
+function schemaPath(path: PropertyKey[]): string {
+  if (path.length === 0) return '(root)'
+  return path.map((segment, index) => {
+    if (typeof segment === 'number') return `[${segment}]`
+    return `${index === 0 ? '' : '.'}${String(segment)}`
+  }).join('')
+}
+
 export function readStatus(
   paths: OrchPaths,
   taskId: string,
   processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
   processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
 ): TaskStatus | undefined {
-  let record: DurableTaskStatus
+  let parsed: unknown
   try {
-    record = JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as DurableTaskStatus
+    parsed = JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as unknown
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
+  const result = durableTaskStatusSchema.safeParse(parsed)
+  if (!result.success) {
+    const mismatches = result.error.issues
+      .map((issue) => `${schemaPath(issue.path)}: ${issue.message}`)
+      .join('; ')
+    throw new Error(`Status file for ${taskId} failed schema validation at ${mismatches}`, {
+      cause: result.error,
+    })
+  }
+  const record: DurableTaskStatus = result.data
   // The record is durable; the process it named is not. The registry answers for the
   // process, so a number left in an old record is not read back as a live task.
   return {

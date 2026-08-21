@@ -1077,6 +1077,10 @@ describe('loop daemon ownership', () => {
     writeFileSync(statusFile(paths, taskId), JSON.stringify({
       task_id: taskId,
       status: 'running',
+      started_at: '2026-08-12T01:02:03Z',
+      updated_at: '2026-08-12T01:02:03Z',
+      worktree: worktreeDir(paths, taskId),
+      branch: branchName(taskId),
       pid: process.pid,
     }))
     // A task's process lives in the registry, not in the record.

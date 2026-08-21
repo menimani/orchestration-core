@@ -117,7 +117,15 @@ function writeFinal(taskId: string, content: string): void {
 
 function writeRawStatus(taskId: string, status: string, pid: number | null = null): void {
   writeFileSync(statusFile(paths, taskId),
-    JSON.stringify({ task_id: taskId, status, pid }))
+    JSON.stringify({
+      task_id: taskId,
+      status,
+      pid,
+      started_at: '2026-08-08T03:00:00Z',
+      updated_at: '2026-08-08T03:00:00Z',
+      worktree: worktreeDir(paths, taskId),
+      branch: branchName(taskId),
+    }))
   // A running task's process lives in the registry, not in the record.
   if (pid === null) forgetTaskProcess(paths, taskId)
   else recordTaskProcess(paths, taskId, pid)
@@ -430,6 +438,17 @@ describe('status file safety', () => {
 
     const loop = makeLoop({ scanEnabled: false, autoMerge: false })
     await expect(loop.poll()).rejects.toThrow(SyntaxError)
+  })
+
+  it('stops the poll when an existing task status is structurally invalid', async () => {
+    const taskId = '20260811_000000_001_user-existing'
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# Existing task\n')
+    writeFileSync(statusFile(paths, taskId), '{}')
+
+    const loop = makeLoop({ scanEnabled: false, autoMerge: false })
+    await expect(loop.poll()).rejects.toThrow(
+      `Status file for ${taskId} failed schema validation`,
+    )
   })
 })
 

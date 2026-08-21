@@ -25,7 +25,7 @@ import {
   type ClaimedRequirement,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc } from '../src/ids.ts'
-import { orchPaths, type OrchPaths } from '../src/paths.ts'
+import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { specFile } from '../src/tasks.ts'
 import { frameVerifiedRequirement } from '../src/templates.ts'
@@ -36,6 +36,18 @@ import { stubProject } from './stubProject.ts'
 let repoRoot: string
 let paths: OrchPaths
 let forge: FakeForge
+
+function durableStatus(taskId: string, status: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    task_id: taskId,
+    status,
+    started_at: '2026-08-08T03:00:00Z',
+    updated_at: '2026-08-08T03:00:00Z',
+    worktree: worktreeDir(paths, taskId),
+    branch: branchName(taskId),
+    ...extra,
+  })
+}
 
 beforeEach(() => {
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-issues-'))
@@ -1014,7 +1026,7 @@ describe('claimIssueGroup', () => {
     )
     if (first.outcome !== 'claimed') throw new Error(`expected a claim, got ${first.outcome}`)
     writeFileSync(join(paths.statusDir, `${first.taskId}.json`),
-      JSON.stringify({ task_id: first.taskId, status: 'merged' }))
+      durableStatus(first.taskId, 'merged'))
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     recordIssuePromotions(paths, first.taskId, 'a'.repeat(40), 'chore/run-branch')
 
@@ -1040,7 +1052,7 @@ describe('claimIssueGroup', () => {
       )
       if (first.outcome !== 'claimed') throw new Error(`expected a claim, got ${first.outcome}`)
       writeFileSync(join(paths.statusDir, `${first.taskId}.json`),
-        JSON.stringify({ task_id: first.taskId, status }))
+        durableStatus(first.taskId, status))
       writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
 
       const duplicate = await forge.createIssue({
@@ -2062,7 +2074,7 @@ describe('reapStaleLeases', () => {
     })
     recordIssuesForTask(paths, 'task-completed', [issueNumber])
     writeFileSync(join(paths.statusDir, 'task-completed.json'),
-      JSON.stringify({ task_id: 'task-completed', status: 'completed' }))
+      durableStatus('task-completed', 'completed'))
 
     const reaped = await reapStaleLeases(
       forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
@@ -2211,7 +2223,7 @@ describe('loop integration in issue mode', () => {
     writeFileSync(finalMessageFile(paths, '20260808_000000_001_scan'),
       'NEXT_TASK: [BUG] `src/a/b.ts` breaks on empty input\nTASK_COMPLETE\n')
     writeFileSync(join(paths.statusDir, '20260808_000000_001_scan.json'),
-      JSON.stringify({ task_id: '20260808_000000_001_scan', status: 'completed', pid: null }))
+      durableStatus('20260808_000000_001_scan', 'completed'))
 
     // One poll carries the finding all the way: published as an issue by the
     // completion scan, then claimed and started by the same poll's fill step.
@@ -2251,7 +2263,7 @@ describe('loop integration in issue mode', () => {
     await forge.assignIssue(unlinked, 'worker-gone')
     recordIssuesForTask(paths, 'task-running', [linked])
     writeFileSync(join(paths.statusDir, 'task-running.json'),
-      JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+      durableStatus('task-running', 'running', { pid: process.pid }))
     recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
 
@@ -2289,7 +2301,7 @@ describe('loop integration in issue mode', () => {
     })
     recordIssuesForTask(paths, 'task-running', [issueNumber])
     writeFileSync(join(paths.statusDir, 'task-running.json'),
-      JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+      durableStatus('task-running', 'running', { pid: process.pid }))
     recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
     forge.commentIssue = async () => { throw new Error('forge unavailable') }
