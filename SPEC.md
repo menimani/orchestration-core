@@ -271,7 +271,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 
 ## Scans and cycles
 
-12. Scans start on idle (nothing queued or running), `SCAN_PARALLEL` (1-4) at a time
+12. Scans start on idle (nothing queued or running), with `SCAN_PARALLEL` scans at a
+    time; the value must be at least 1, and values above 4 are clamped to 4. Scans run
     over disjoint groups of the checklist's sections. A cycle counts as empty only when
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
