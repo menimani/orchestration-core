@@ -14,7 +14,7 @@ import {
   absolutePackageScriptCommand, orchPaths, statusFile, type OrchPaths,
 } from '../src/paths.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
-import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
+import { readStatus, transitionStatus, writeMergedStatus, writeStatus } from '../src/status.ts'
 import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
@@ -89,7 +89,8 @@ describe('status files', () => {
     writeFileSync(join(lockDir, 'pid'), `${process.pid}\n`)
 
     let finished = false
-    const writer = writeStatus(paths, 'task-locked', 'merged').then(() => { finished = true })
+    const writer = writeMergedStatus(paths, 'task-locked', 'merge-commit', 'main')
+      .then(() => { finished = true })
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(finished).toBe(false)
     expect(readStatus(paths, 'task-locked')?.status).toBe('running')
@@ -169,7 +170,7 @@ describe('status files', () => {
   })
 
   it('refuses a transition whose expected state is stale', async () => {
-    await writeStatus(paths, 'task-cas', 'merged')
+    await writeMergedStatus(paths, 'task-cas', 'merge-commit', 'main')
     expect(await transitionStatus(paths, 'task-cas', 'running', 'completed')).toBe(false)
     expect(readStatus(paths, 'task-cas')?.status).toBe('merged')
   })

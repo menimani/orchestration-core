@@ -45,6 +45,7 @@ function durableStatus(taskId: string, status: string, extra: Record<string, unk
     updated_at: '2026-08-08T03:00:00Z',
     worktree: worktreeDir(paths, taskId),
     branch: branchName(taskId),
+    ...(status === 'merged' ? { merge_commit: 'merge-commit', run_branch: 'main' } : {}),
     ...extra,
   })
 }

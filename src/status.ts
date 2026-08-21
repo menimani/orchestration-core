@@ -53,7 +53,23 @@ const durableTaskStatusSchema = z.object({
   branch: z.string(),
   merge_commit: z.string().optional(),
   run_branch: z.string().optional(),
-}).passthrough()
+}).passthrough().superRefine((record, context) => {
+  if (record.status !== 'merged') return
+  if (record.merge_commit === undefined) {
+    context.addIssue({
+      code: 'custom',
+      path: ['merge_commit'],
+      message: 'Required for merged status',
+    })
+  }
+  if (record.run_branch === undefined) {
+    context.addIssue({
+      code: 'custom',
+      path: ['run_branch'],
+      message: 'Required for merged status',
+    })
+  }
+})
 
 function schemaPath(path: PropertyKey[]): string {
   if (path.length === 0) return '(root)'
@@ -271,7 +287,12 @@ function writeStatusUnlocked(
   if (pid === undefined || !Number.isInteger(pid)) forgetTaskProcess(paths, taskId)
 }
 
-export async function writeStatus(paths: OrchPaths, taskId: string, status: TaskState, pid?: number): Promise<void> {
+export async function writeStatus(
+  paths: OrchPaths,
+  taskId: string,
+  status: Exclude<TaskState, 'merged'>,
+  pid?: number,
+): Promise<void> {
   const owner = await acquireStatusLock(paths, taskId)
   try {
     writeStatusUnlocked(paths, taskId, status, pid)
@@ -303,7 +324,7 @@ export async function transitionStatus(
   paths: OrchPaths,
   taskId: string,
   expected: TaskState,
-  next: TaskState,
+  next: Exclude<TaskState, 'merged'>,
   pid?: number,
 ): Promise<boolean> {
   const owner = await acquireStatusLock(paths, taskId)
