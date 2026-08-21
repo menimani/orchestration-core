@@ -1555,6 +1555,15 @@ export function createLoop(deps: LoopDeps) {
       return true
     }
 
+    // The PR can be completed or closed by a person between the final gate and
+    // promotion. Let postLoopPr interpret that terminal state instead of trying to
+    // create another PR for the same branch on every poll.
+    if (mode === 'final' && (status.state === 'merged' || status.state === 'closed')) {
+      if (status.url !== '') writeFileSync(prUrlFile, `${status.url}\n`)
+      previousGateFailures.delete('draft-pr')
+      return true
+    }
+
     try {
       const ahead = gitIn(paths.repoRoot, ['rev-list', '--count', `${baseRef}..HEAD`]).trim()
       if (ahead === '0') {
@@ -1659,7 +1668,17 @@ export function createLoop(deps: LoopDeps) {
       }
       return false
     }
-    if (status.isDraft) {
+    if (status.state === 'merged') {
+      previousGateFailures.delete('pr-promotion-state')
+    } else if (status.state === 'closed') {
+      reportGateFailure(
+        'could not promote PR because it is closed',
+        true,
+        'pr-promotion-state',
+      )
+      return false
+    }
+    if (status.state === 'open' && status.isDraft) {
       try {
         await forge.markPrReady(branch)
         previousGateFailures.delete('pr-promotion')
@@ -1687,7 +1706,24 @@ export function createLoop(deps: LoopDeps) {
         return false
       }
     }
-    if (status.state !== 'open' || status.isDraft) return false
+    if (status.state === 'closed') {
+      reportGateFailure(
+        'could not promote PR because it is closed',
+        true,
+        'pr-promotion-state',
+      )
+      return false
+    }
+    if (status.state === 'open' && status.isDraft) {
+      reportGateFailure(
+        'could not confirm PR promotion; PR is still draft',
+        true,
+        'pr-promotion-state',
+      )
+      return false
+    }
+    if (status.state !== 'open' && status.state !== 'merged') return false
+    previousGateFailures.delete('pr-promotion-state')
     const gateEnvironment = os.verificationEnvironmentLabel()
     event(
       'Status', 'Environments',
@@ -1710,6 +1746,7 @@ export function createLoop(deps: LoopDeps) {
     previousGateFailures.delete('pr-status-before-promotion')
     previousGateFailures.delete('pr-promotion')
     previousGateFailures.delete('pr-status-after-promotion')
+    previousGateFailures.delete('pr-promotion-state')
     return true
   }
 
