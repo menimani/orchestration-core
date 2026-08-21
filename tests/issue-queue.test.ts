@@ -11,11 +11,13 @@ import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels,
   commentOnIssueMerge, fingerprintOf, groupReadyFindings, heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
-  issueFailureCount, IssueReleaseReconciliationError,
+  issueFailureCount, issueReleaseIntentForTask, issueReleasePreparationForTask,
+  IssueReleaseReconciliationError,
   missingRequirementCompletionMarkers, parseIssueBody,
   publishDelegatedTask, publishFinding, reapStaleLeases,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
-  clearIssueFailureCounts, reconcileIssueReleaseIntent, recordIssueCompletions,
+  clearIssueFailureCounts, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
+  recordIssueCompletions,
   recordIssueFailure, recordIssueReleaseIntent, recordIssuesForTask,
   recordIssuePromotions,
   releaseIssueClaim,
@@ -1504,6 +1506,74 @@ describe('claimIssueGroup', () => {
 })
 
 describe('issue claim release', () => {
+  it('rejects malformed failure counts without overwriting any issue streak', () => {
+    recordIssuesForTask(paths, 'failed-task', [41, 42])
+    const countDirectory = join(paths.queueDir, 'issue-failure-count')
+    mkdirSync(countDirectory, { recursive: true })
+    writeFileSync(join(countDirectory, '41'), '2\n')
+    writeFileSync(join(countDirectory, '42'), 'malformed\n')
+
+    expect(() => recordIssueFailure(paths, 'failed-task')).toThrow(
+      /expected a positive safe integer/,
+    )
+    expect(readFileSync(join(countDirectory, '41'), 'utf8')).toBe('2\n')
+    expect(readFileSync(join(countDirectory, '42'), 'utf8')).toBe('malformed\n')
+  })
+
+  it('rejects a failure count whose next increment would be unsafe', () => {
+    recordIssuesForTask(paths, 'failed-task', [41])
+    const countDirectory = join(paths.queueDir, 'issue-failure-count')
+    mkdirSync(countDirectory, { recursive: true })
+    writeFileSync(join(countDirectory, '41'), `${Number.MAX_SAFE_INTEGER}\n`)
+
+    expect(() => recordIssueFailure(paths, 'failed-task')).toThrow(/cannot be safely incremented/)
+    expect(issueFailureCount(paths, 41)).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  it('rejects every malformed persisted issue-list entry', () => {
+    const taskId = 'malformed-lists'
+    recordIssuesForTask(paths, taskId, [41, 42])
+    recordIssueReleaseIntent(paths, taskId, [41, 42])
+    prepareIssueReleaseIntent(paths, taskId, [41, 42])
+    const files = [
+      join(paths.queueDir, 'issue-map', taskId),
+      join(paths.queueDir, 'issue-release-intent', taskId),
+      join(paths.queueDir, 'issue-release-preparation', taskId),
+    ]
+    for (const file of files) writeFileSync(file, '41\nmalformed\n42\n')
+
+    expect(() => issueNumbersForTask(paths, taskId)).toThrow(/one positive safe integer per line/)
+    expect(() => issueReleaseIntentForTask(paths, taskId)).toThrow(
+      /one positive safe integer per line/,
+    )
+    expect(() => issueReleasePreparationForTask(paths, taskId)).toThrow(
+      /one positive safe integer per line/,
+    )
+  })
+
+  it('accepts empty persisted issue lists produced by the writers', () => {
+    const taskId = 'empty-lists'
+    recordIssuesForTask(paths, taskId, [])
+    recordIssueReleaseIntent(paths, taskId, [])
+    prepareIssueReleaseIntent(paths, taskId, [])
+
+    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+  })
+
+  it('keeps malformed release reconciliation state for operator repair', async () => {
+    const taskId = 'malformed-release'
+    const intent = join(paths.queueDir, 'issue-release-intent', taskId)
+    recordIssueReleaseIntent(paths, taskId, [41, 42])
+    writeFileSync(intent, '41\n9007199254740992\n')
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, taskId)).rejects.toThrow(
+      /one positive safe integer per line/,
+    )
+    expect(readFileSync(intent, 'utf8')).toBe('41\n9007199254740992\n')
+  })
+
   it('parks an issue when consecutive failed-task releases reach the retry bound', async () => {
     const issueNumber = await forge.createIssue({
       title: 'persistently failing issue', body: '',
