@@ -92,8 +92,8 @@ describe('test suite wrapper', () => {
       writeFileSync(join(vitest, 'vitest.mjs'), [
         "import { writeFileSync } from 'node:fs'",
         'if (process.env.ORCHESTRATION_TEST_STARTED_FILE) {',
-        "  writeFileSync(process.env.ORCHESTRATION_TEST_STARTED_FILE, '')",
         '  writeFileSync(process.env.ORCHESTRATION_TEST_PID_FILE, String(process.pid))',
+        "  writeFileSync(process.env.ORCHESTRATION_TEST_STARTED_FILE, '')",
         '}',
         'await new Promise((resolve) => setTimeout(resolve, Number(process.env.ORCHESTRATION_TEST_DELAY_MS ?? 0)))',
         'if (process.env.ORCHESTRATION_TEST_COMPLETED_FILE) {',
