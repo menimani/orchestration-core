@@ -1096,6 +1096,34 @@ describe('claimIssueGroup', () => {
     expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
+  it('reports both claim verification and assignment release failures', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks during claim verification')
+    const issue = await forge.getIssue(issueNumber)
+    const getIssue = forge.getIssue.bind(forge)
+    const verificationFailure = new Error('getIssue failed after assignment')
+    const releaseFailure = new Error('unassignIssue failed during compensation')
+    let reads = 0
+    forge.getIssue = async (number) => {
+      if (number === issueNumber && ++reads === 2) throw verificationFailure
+      return getIssue(number)
+    }
+    forge.unassignIssue = async () => { throw releaseFailure }
+
+    const failure = await claimIssueGroup(
+      forge, paths, [issue], 'worker-a', appendRequirements,
+    ).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(failure).toMatchObject({
+      message: `Claim verification and compensation both failed for issue #${issueNumber}`,
+      errors: [verificationFailure, releaseFailure],
+    })
+    const retained = await getIssue(issueNumber)
+    expect(retained.assignees).toEqual(['worker-a'])
+    expect(retained.labels).toContain(LABEL_READY)
+    expect(retained.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
   it.each([
     ['adding in-progress', 'addLabel'],
     ['removing ready', 'removeLabel'],
@@ -1121,6 +1149,33 @@ describe('claimIssueGroup', () => {
     expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
     expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
     expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
+  it('reports both claim mutation and assignment release failures', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks during label mutation')
+    const issue = await forge.getIssue(issueNumber)
+    const removeLabel = forge.removeLabel.bind(forge)
+    const mutationFailure = new Error('removeLabel failed after applying')
+    const releaseFailure = new Error('unassignIssue failed during compensation')
+    forge.removeLabel = async (number, label) => {
+      await removeLabel(number, label)
+      if (number === issueNumber && label === LABEL_READY) throw mutationFailure
+    }
+    forge.unassignIssue = async () => { throw releaseFailure }
+
+    const failure = await claimIssueGroup(
+      forge, paths, [issue], 'worker-a', appendRequirements,
+    ).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(failure).toMatchObject({
+      message: `Claim mutation and compensation both failed for issue #${issueNumber}`,
+      errors: [mutationFailure, releaseFailure],
+    })
+    const retained = forge.issues.get(issueNumber)
+    expect(retained?.assignees).toEqual(['worker-a'])
+    expect(retained?.labels).toContain(LABEL_IN_PROGRESS)
+    expect(retained?.labels).not.toContain(LABEL_READY)
   })
 
   it.each([
@@ -1180,6 +1235,34 @@ describe('claimIssueGroup', () => {
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(retry.taskId)
   })
 
+  it('reports both task materialization and claim release failures', async () => {
+    const description = '[BUG] `src/a/b.ts` fails while materializing a task'
+    const issueNumber = await readyIssue(description)
+    const issue = await forge.getIssue(issueNumber)
+    const materializationFailure = new Error('append failed')
+    const releaseFailure = new Error('unassignIssue failed during compensation')
+    let failedTaskId: string | undefined
+    forge.unassignIssue = async () => { throw releaseFailure }
+
+    const failure = await claimIssueGroup(forge, paths, [issue], 'worker-a', (taskId) => {
+      failedTaskId = taskId
+      throw materializationFailure
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(failure).toMatchObject({
+      message: `Claim group materialization and compensation both failed for issues #${issueNumber}`,
+      errors: [materializationFailure, releaseFailure],
+    })
+    if (failedTaskId === undefined) throw new Error('expected append to be attempted')
+    expect(existsSync(specFile(paths, failedTaskId))).toBe(false)
+    expect(existingTaskIdForDesc(paths, 'auto', description)).toBeUndefined()
+    const retained = forge.issues.get(issueNumber)
+    expect(retained?.assignees).toEqual(['worker-a'])
+    expect(retained?.labels).toContain(LABEL_IN_PROGRESS)
+    expect(retained?.labels).not.toContain(LABEL_READY)
+  })
+
   it('quarantines an unparseable issue with an actionable reason', async () => {
     const issueNumber = await forge.createIssue({
       title: 'hand-written', body: 'no structure here', labels: [LABEL_FINDING, LABEL_READY],
@@ -1220,6 +1303,35 @@ describe('claimIssueGroup', () => {
     expect(after.labels).toContain(LABEL_READY)
     expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
     expect(after.labels).not.toContain(LABEL_MERGE_FAILED)
+  })
+
+  it('reports both issue quarantine and assignment release failures', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'hand-written', body: 'no structure here', labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const commentIssue = forge.commentIssue.bind(forge)
+    const quarantineFailure = new Error('commentIssue failed after applying')
+    const releaseFailure = new Error('unassignIssue failed during compensation')
+    forge.commentIssue = async (number, comment) => {
+      await commentIssue(number, comment)
+      throw quarantineFailure
+    }
+    forge.unassignIssue = async () => { throw releaseFailure }
+
+    const failure = await claimIssueGroup(
+      forge, paths, [await forge.getIssue(issueNumber)], 'worker-a', appendRequirements,
+    ).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(failure).toMatchObject({
+      message: `Issue quarantine and compensation both failed for issue #${issueNumber}`,
+      errors: [quarantineFailure, releaseFailure],
+    })
+    const retained = forge.issues.get(issueNumber)
+    expect(retained?.assignees).toEqual(['worker-a'])
+    expect(retained?.labels).toContain(LABEL_IN_PROGRESS)
+    expect(retained?.labels).not.toContain(LABEL_READY)
+    expect(retained?.labels).not.toContain(LABEL_MERGE_FAILED)
   })
 
   it('names an empty requirement when quarantining an issue', async () => {
