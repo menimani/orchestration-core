@@ -8,12 +8,30 @@ import { performance } from 'node:perf_hooks'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const fixtures: string[] = []
+const processRoots: number[] = []
 
 async function waitForPath(path: string): Promise<void> {
   const deadline = Date.now() + 5_000
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`)
     await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -39,10 +57,93 @@ function run(command: string, args: readonly string[], cwd: string, env: NodeJS.
 }
 
 afterEach(() => {
+  for (const pid of processRoots.splice(0)) {
+    if (!processIsAlive(pid)) continue
+    try {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+    } catch {
+      if (processIsAlive(pid)) throw new Error(`Could not stop test process tree ${pid}`)
+    }
+  }
   for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true })
 })
 
 describe('test suite wrapper', () => {
+  it.runIf(process.platform === 'win32')(
+    'terminates Vitest and releases its lock when the invoking PowerShell exits',
+    async () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-cancel-'))
+      fixtures.push(fixture)
+      const scripts = join(fixture, 'scripts')
+      const vitest = join(fixture, 'node_modules', 'vitest')
+      const startedFile = join(fixture, 'started')
+      const completedFile = join(fixture, 'completed')
+      const pidFile = join(fixture, 'vitest-pid')
+      mkdirSync(scripts, { recursive: true })
+      mkdirSync(vitest, { recursive: true })
+      writeFileSync(
+        join(scripts, 'run-tests.mjs'),
+        readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')),
+      )
+      writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+      writeFileSync(join(vitest, 'vitest.mjs'), [
+        "import { writeFileSync } from 'node:fs'",
+        'if (process.env.ORCHESTRATION_TEST_STARTED_FILE) {',
+        "  writeFileSync(process.env.ORCHESTRATION_TEST_STARTED_FILE, '')",
+        '  writeFileSync(process.env.ORCHESTRATION_TEST_PID_FILE, String(process.pid))',
+        '}',
+        'await new Promise((resolve) => setTimeout(resolve, Number(process.env.ORCHESTRATION_TEST_DELAY_MS ?? 0)))',
+        'if (process.env.ORCHESTRATION_TEST_COMPLETED_FILE) {',
+        "  writeFileSync(process.env.ORCHESTRATION_TEST_COMPLETED_FILE, '')",
+        '}',
+        '',
+      ].join('\n'))
+
+      const invoker = spawn('powershell.exe', [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+        '& $env:ORCHESTRATION_TEST_NODE $env:ORCHESTRATION_TEST_WRAPPER',
+      ], {
+        cwd: fixture,
+        env: {
+          ...process.env,
+          ORCHESTRATION_TEST_COMPLETED_FILE: completedFile,
+          ORCHESTRATION_TEST_DELAY_MS: '2000',
+          ORCHESTRATION_TEST_NODE: process.execPath,
+          ORCHESTRATION_TEST_PID_FILE: pidFile,
+          ORCHESTRATION_TEST_STARTED_FILE: startedFile,
+          ORCHESTRATION_TEST_WRAPPER: join(scripts, 'run-tests.mjs'),
+        },
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+      if (invoker.pid !== undefined) processRoots.push(invoker.pid)
+      await waitForPath(startedFile)
+      const vitestPid = Number(readFileSync(pidFile, 'utf8'))
+      processRoots.push(vitestPid)
+      expect(processIsAlive(vitestPid)).toBe(true)
+
+      invoker.kill('SIGKILL')
+      await waitUntil(
+        () => !processIsAlive(vitestPid),
+        `Vitest process ${vitestPid} survived its invoking PowerShell process`,
+      )
+      await new Promise((resolve) => setTimeout(resolve, 2_100))
+      expect(existsSync(completedFile)).toBe(false)
+
+      const contender = await run(
+        process.execPath,
+        [join(scripts, 'run-tests.mjs')],
+        fixture,
+        process.env,
+      )
+      expect(contender.status).toBe(0)
+      expect(contender.stderr).toBe('')
+    },
+  )
+
   it('serializes linked-worktree invocations and forwards each gate flag once', async () => {
     const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-'))
     fixtures.push(fixture)
