@@ -14,11 +14,13 @@ specific failure; the comments in the source name the incident rather than the p
 
 - Node 23.6 or later — the TypeScript sources are executed natively, with no build step
 - git
-- Bash on Windows (for example, Git Bash), with `bash` available on `PATH` — the bundled
-  runners use it to launch npm command shims safely
-- An agent CLI (the bundled runner adapters drive
-  [Codex](https://openai.com/codex/) or [Claude Code](https://docs.anthropic.com/en/docs/claude-code))
-- A forge CLI (the bundled forge adapter drives GitHub through `gh`)
+- The bundled adapters additionally require:
+  - Bash on Windows (for example, Git Bash), with `bash` available on `PATH` — the
+    bundled runners use it to launch npm command shims safely
+  - The agent CLI selected by the bundled runner adapter:
+    [Codex](https://openai.com/codex/) or
+    [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+  - The GitHub CLI, `gh`, when using the bundled `forge-github` adapter
 
 ## How a run works
 
