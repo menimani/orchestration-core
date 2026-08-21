@@ -155,6 +155,10 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
   // startup dependency install reinstalls the package it is running from.
   expect(resolve(daemonSpawn?.cwd ?? '').toLowerCase())
     .toBe(realpathSync.native(root).toLowerCase())
+  const repoOption = daemonSpawn?.args.indexOf('--repo') ?? -1
+  expect(repoOption).toBeGreaterThan(-1)
+  expect(resolve(daemonSpawn?.args[repoOption + 1] ?? '').toLowerCase())
+    .toBe(realpathSync.native(root).toLowerCase())
 
   mkdirSync(dirname(stopFile), { recursive: true })
   writeFileSync(stopFile, '')
