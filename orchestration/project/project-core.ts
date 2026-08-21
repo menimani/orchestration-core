@@ -18,6 +18,10 @@ export const coreProject: ProjectAdapter = {
   name: 'core',
   sharedSkills: [createClaudeSharedSkills()],
   verifyDependencyIsolation: true,
+  manualEnvironmentChecks: [{
+    environment: 'Linux',
+    command: 'npm run test:linux',
+  }],
   integrationWorktreeSetup: [{
     label: 'Core dependencies',
     cwd: '',

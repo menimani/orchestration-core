@@ -98,6 +98,13 @@ interface FindingDispatch {
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
 const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
 
+function platformName(platform: NodeJS.Platform): string {
+  if (platform === 'win32') return 'Windows'
+  if (platform === 'darwin') return 'macOS'
+  if (platform === 'linux') return 'Linux'
+  return platform
+}
+
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -1637,6 +1644,17 @@ export function createLoop(deps: LoopDeps) {
         )
       }
       return false
+    }
+    const gateEnvironment = platformName(process.platform)
+    event(
+      'Status', 'Environments',
+      `run verification exercised ${gateEnvironment}; promoted branch was not run in any other environment`,
+    )
+    for (const check of project.manualEnvironmentChecks ?? []) {
+      event(
+        'Status', `${check.environment} check`,
+        `not run for this branch; run ${check.command}`,
+      )
     }
     if (status.isDraft) {
       try {

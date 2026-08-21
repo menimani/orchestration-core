@@ -1699,6 +1699,53 @@ describe('cycle gate', () => {
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('reports the environment exercised by the final gate before promotion', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ scanEnabled: false, autoPr: true, reviewEnabled: false })
+    loop.initializeSessionStateForBranch()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+
+    expect(await loop.poll()).toBe('done')
+
+    const environment = process.platform === 'win32'
+      ? 'Windows'
+      : process.platform === 'darwin' ? 'macOS' : process.platform === 'linux' ? 'Linux' : process.platform
+    expect(logged).toContain(
+      `Status Environments  run verification exercised ${environment}; `
+      + 'promoted branch was not run in any other environment',
+    )
+  })
+
+  it('names an available cross-platform check that was not run for the branch', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const project: ProjectAdapter = {
+      ...stubProject,
+      manualEnvironmentChecks: [{ environment: 'Linux', command: 'npm run test:linux' }],
+    }
+    const loop = makeLoop(
+      { scanEnabled: false, autoPr: true, reviewEnabled: false },
+      project,
+    )
+    loop.initializeSessionStateForBranch()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(logged).toContain(
+      formatEventLine(
+        'Status', 'Linux check', 'not run for this branch; run npm run test:linux',
+      ),
+    )
+  })
+
   it('concludes an empty run without retrying pull request creation', async () => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
