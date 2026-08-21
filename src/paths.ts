@@ -46,14 +46,6 @@ export function packagePathPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT):
   return packageDirectory === '' ? '' : `${packageDirectory}/`
 }
 
-export function packageScriptCommand(
-  repoRoot: string,
-  script: string,
-  packageRoot = PACKAGE_ROOT,
-): string {
-  return `${packageCommandPrefix(repoRoot, packageRoot)} ${script}`
-}
-
 function shellPathArgument(path: string): string {
   return `'${path.replaceAll('\\', '/').replaceAll("'", "'\\''")}'`
 }
