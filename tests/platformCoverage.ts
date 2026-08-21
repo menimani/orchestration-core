@@ -19,6 +19,11 @@ export const PLATFORM_SUITES: PlatformSuite[] = [
     reason: 'launches a Windows process tree and observes the consoles it attaches',
   },
   {
+    file: 'tests/windows-run-tests-cancellation.test.ts',
+    platform: 'win32',
+    reason: 'launches PowerShell and verifies Windows process-tree cancellation',
+  },
+  {
     file: 'tests/posix-process-group.test.ts',
     platform: 'linux',
     reason: 'signals a real detached process group and reads /proc to see who survived',
