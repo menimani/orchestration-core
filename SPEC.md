@@ -224,11 +224,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
    task worktree and run branch clean. The task is abandoned after that first counted
    merge failure: its worktree and branch are removed, and linked issues return to ready
    before another poll can select it again. Pre-merge tests are chosen from the paths the
-   rebased worktree touched. `TASK_GATE=full`
-   asks the project adapter for its full merge checks; `TASK_GATE=light` asks it for
-   reduced merge checks, then runs the adapter's cycle suite once at each cycle-gate
-   entry. Light-gate attribution cost (a suite break at the gate names no task) is
-   accepted and documented; the gate stops the loop rather than promote a failing tip.
+   rebased worktree touched. `TASK_GATE=full` asks the project adapter for its full merge
+   checks; `TASK_GATE=light` asks it for reduced merge checks. At each cycle-gate entry,
+   light mode runs every step in the adapter's cycle suite, while full mode runs only
+   cycle-suite steps that opt in with `SuiteStep.runAtEveryTaskGate`. A successful suite
+   verdict is retained across gate retries only while the branch tip is unchanged.
+   Light-gate attribution cost (a suite break at the gate names no task) is accepted and
+   documented; the gate stops the loop rather than promote a failing tip.
    A missing-toolchain repair that fails also stops the gate and reports the adapter's
    remediation message without running the subsequent suite step.
 9a. A merge check that passes counts only where its directory satisfies its own declared
