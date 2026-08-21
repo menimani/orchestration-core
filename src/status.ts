@@ -44,7 +44,10 @@ interface StatusMetadata {
 
 type DurableTaskStatus = Omit<TaskStatus, 'pid'>
 
-const durableTaskStatusSchema = z.object({
+// Older cores wrote merged records before durable merge metadata was introduced.
+// Reads accept that historical shape, while every record written by this core is
+// checked against the current schema below.
+const readableDurableTaskStatusSchema = z.object({
   task_id: z.string(),
   status: taskStateSchema,
   started_at: z.string(),
@@ -53,23 +56,27 @@ const durableTaskStatusSchema = z.object({
   branch: z.string(),
   merge_commit: z.string().optional(),
   run_branch: z.string().optional(),
-}).passthrough().superRefine((record, context) => {
-  if (record.status !== 'merged') return
-  if (record.merge_commit === undefined) {
-    context.addIssue({
-      code: 'custom',
-      path: ['merge_commit'],
-      message: 'Required for merged status',
-    })
-  }
-  if (record.run_branch === undefined) {
-    context.addIssue({
-      code: 'custom',
-      path: ['run_branch'],
-      message: 'Required for merged status',
-    })
-  }
-})
+}).passthrough()
+
+const writableDurableTaskStatusSchema = readableDurableTaskStatusSchema.superRefine(
+  (record, context) => {
+    if (record.status !== 'merged') return
+    if (record.merge_commit === undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['merge_commit'],
+        message: 'Required for merged status',
+      })
+    }
+    if (record.run_branch === undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['run_branch'],
+        message: 'Required for merged status',
+      })
+    }
+  },
+)
 
 function schemaPath(path: PropertyKey[]): string {
   if (path.length === 0) return '(root)'
@@ -92,7 +99,7 @@ export function readStatus(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
-  const result = durableTaskStatusSchema.safeParse(parsed)
+  const result = readableDurableTaskStatusSchema.safeParse(parsed)
   if (!result.success) {
     const mismatches = result.error.issues
       .map((issue) => `${schemaPath(issue.path)}: ${issue.message}`)
@@ -276,6 +283,7 @@ function writeStatusUnlocked(
       run_branch: metadata.runBranch,
     }),
   }
+  writableDurableTaskStatusSchema.parse(record)
   try {
     // Publishing with a same-directory rename prevents readers from observing a
     // truncated JSON document if this process exits while writing the new record.

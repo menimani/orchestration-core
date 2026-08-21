@@ -452,30 +452,6 @@ describe('status file safety', () => {
     )
   })
 
-  it.each(['merge_commit', 'run_branch'])(
-    'stops the poll when a merged task status is missing %s',
-    async (missingField) => {
-      const taskId = `20260811_000000_001_merged-missing-${missingField}`
-      writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# Existing task\n')
-      const record: Record<string, string> = {
-        task_id: taskId,
-        status: 'merged',
-        started_at: '2026-08-21T12:00:00Z',
-        updated_at: '2026-08-21T12:00:00Z',
-        worktree: join(paths.worktreesDir, taskId),
-        branch: `task/${taskId}`,
-        merge_commit: 'merge-commit',
-        run_branch: 'main',
-      }
-      delete record[missingField]
-      writeFileSync(statusFile(paths, taskId), JSON.stringify(record))
-
-      const loop = makeLoop({ scanEnabled: false, autoMerge: false })
-      await expect(loop.poll()).rejects.toThrow(
-        `Status file for ${taskId} failed schema validation at ${missingField}`,
-      )
-    },
-  )
 })
 
 describe('persisted counter safety', () => {
