@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, statSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, rmSync, statSync, readFileSync, writeFileSync } from 'node:fs'
 import { uptime } from 'node:os'
 import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
@@ -41,6 +41,19 @@ function registryDir(paths: OrchPaths): string {
 
 function registryFile(paths: OrchPaths, taskId: string): string {
   return join(registryDir(paths), taskId)
+}
+
+/** Task ids with a process-registry entry, including entries not backed by status. */
+export function registeredTaskIds(paths: OrchPaths): string[] {
+  try {
+    return readdirSync(registryDir(paths), { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .sort()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
 }
 
 /** When the running system started, in epoch milliseconds. */

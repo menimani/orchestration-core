@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { type OrchPaths } from './paths.ts'
 import {
-  bootedAt, forgetTaskProcess, taskProcessPid, terminableTaskProcessPid,
+  bootedAt, forgetTaskProcess, registeredTaskIds, taskProcessPid, terminableTaskProcessPid,
 } from './processRegistry.ts'
 import { listTaskIds } from './refresh.ts'
 
@@ -22,7 +22,11 @@ export function liveTaskProcesses(
   os: OperatingSystem = operatingSystem,
 ): TaskProcess[] {
   const live: TaskProcess[] = []
-  for (const taskId of listTaskIds(paths)) {
+  // A runner is registered before its status is persisted. If status persistence and
+  // startup termination both fail, the registry is the only surviving ownership
+  // record and must still make the task visible to stop and daemon-start checks.
+  const taskIds = new Set([...listTaskIds(paths), ...registeredTaskIds(paths)])
+  for (const taskId of [...taskIds].sort()) {
     const pid = taskProcessPid(
       paths, taskId, bootedAt, os.processStartIdentity, os.processIsAlive,
     )

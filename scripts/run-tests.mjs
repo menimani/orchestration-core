@@ -1,8 +1,6 @@
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import {
-  mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
-} from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, toNamespacedPath } from 'node:path'
 import { performance } from 'node:perf_hooks'
 
@@ -12,6 +10,7 @@ const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2
 const retryMilliseconds = 250
 const unpublishedOwnerGraceMilliseconds = 30_000
 const maximumWaitMilliseconds = 10 * 60_000
+const windowsParentPollMilliseconds = 50
 
 function commonGitDirectory() {
   try {
@@ -66,6 +65,31 @@ function processIdentity(pid) {
     return started === '' ? null : `${process.platform}:${started}`
   } catch {
     return null
+  }
+}
+
+function invokingWindowsShellPid() {
+  const command = [
+    '& { param([int]$TargetPid)',
+    '$fallback = $TargetPid',
+    'while ($TargetPid -gt 0) {',
+    '  $candidate = Get-CimInstance Win32_Process -Filter "ProcessId = $TargetPid" -ErrorAction SilentlyContinue',
+    '  if ($null -eq $candidate) { break }',
+    '  if ($candidate.Name -in @("powershell.exe", "pwsh.exe")) { $TargetPid; return }',
+    '  $TargetPid = [int]$candidate.ParentProcessId',
+    '}',
+    '$fallback',
+    '}',
+  ].join(' ')
+  try {
+    const value = execFileSync(
+      'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command, String(process.ppid)],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim()
+    const pid = Number(value)
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : process.ppid
+  } catch {
+    return process.ppid
   }
 }
 
@@ -194,31 +218,92 @@ function vitestEntryPoint() {
   return join(dirname(require.resolve('vitest/package.json')), 'vitest.mjs')
 }
 
-await acquireLock()
-let child
-const forwardSignal = (signal) => child?.kill(signal)
-process.once('SIGINT', forwardSignal)
-process.once('SIGTERM', forwardSignal)
-try {
-  // The package script deliberately supplies no Vitest flags. npm appends gate flags to
-  // this argument list once, so the merge gate remains `npm test -- ...` compatible.
-  child = spawn(process.execPath, [vitestEntryPoint(), 'run', ...process.argv.slice(2)], {
+function terminateWindowsProcessTree(pid) {
+  spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+}
+
+async function runVitest(args, invokingPid) {
+  const child = spawn(process.execPath, [vitestEntryPoint(), 'run', ...args], {
     cwd: packageRoot,
     stdio: 'inherit',
     windowsHide: true,
   })
-  const status = await new Promise((resolveStatus, reject) => {
-    child.once('error', reject)
-    child.once('exit', (code, signal) => resolveStatus({ code, signal }))
-  })
-  if (status.signal !== null) {
+  let cancelled = false
+  const parentMonitor = invokingPid === undefined ? undefined : setInterval(() => {
+    if (processIsAlive(invokingPid)) return
+    cancelled = true
+    clearInterval(parentMonitor)
+    if (child.pid !== undefined) terminateWindowsProcessTree(child.pid)
+  }, windowsParentPollMilliseconds)
+  let status
+  try {
+    status = await new Promise((resolveStatus, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code, signal) => resolveStatus({ code, signal }))
+    })
+  } finally {
+    if (parentMonitor !== undefined) clearInterval(parentMonitor)
+  }
+  if (cancelled) {
+    console.error('Vitest stopped because its invoking process exited.')
+    process.exitCode = 1
+  } else if (status.signal !== null) {
     console.error(`Vitest stopped on signal ${status.signal}.`)
     process.exitCode = 1
   } else {
     process.exitCode = status.code ?? 1
   }
-} finally {
-  process.removeListener('SIGINT', forwardSignal)
-  process.removeListener('SIGTERM', forwardSignal)
-  releaseLock()
+}
+
+if (process.argv[2] === '--windows-vitest-supervisor') {
+  const invokingPid = Number(process.argv[3])
+  if (!Number.isSafeInteger(invokingPid) || invokingPid <= 0) {
+    throw new Error('The Windows test supervisor requires an invoking process PID.')
+  }
+  await runVitest(process.argv.slice(4), invokingPid)
+} else {
+  await acquireLock()
+  let child
+  const forwardSignal = (signal) => {
+    if (child?.pid === undefined) return
+    if (process.platform === 'win32') terminateWindowsProcessTree(child.pid)
+    else child.kill(signal)
+  }
+  process.once('SIGINT', forwardSignal)
+  process.once('SIGTERM', forwardSignal)
+  try {
+    // The package script deliberately supplies no Vitest flags. npm appends gate flags to
+    // this argument list once, so the merge gate remains `npm test -- ...` compatible.
+    const args = process.argv.slice(2)
+    child = process.platform === 'win32'
+      ? spawn(process.execPath, [
+        import.meta.filename, '--windows-vitest-supervisor',
+        String(invokingWindowsShellPid()), ...args,
+      ], {
+        cwd: packageRoot,
+        stdio: 'inherit',
+        windowsHide: true,
+      })
+      : spawn(process.execPath, [vitestEntryPoint(), 'run', ...args], {
+        cwd: packageRoot,
+        stdio: 'inherit',
+      })
+    const status = await new Promise((resolveStatus, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code, signal) => resolveStatus({ code, signal }))
+    })
+    if (status.signal !== null) {
+      console.error(`Vitest stopped on signal ${status.signal}.`)
+      process.exitCode = 1
+    } else {
+      process.exitCode = status.code ?? 1
+    }
+  } finally {
+    process.removeListener('SIGINT', forwardSignal)
+    process.removeListener('SIGTERM', forwardSignal)
+    releaseLock()
+  }
 }

@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
-import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import {
+  branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
+} from '../src/paths.ts'
 import { recordTaskProcess, terminableTaskProcessPid } from '../src/processRegistry.ts'
 import {
   completionMarkerPresent, noChangeMarkerPresent, refreshAll, refreshTask,
@@ -24,7 +26,16 @@ afterEach(() => {
 
 function writeRawStatus(taskId: string, content: string): string {
   const file = statusFile(paths, taskId)
-  writeFileSync(file, content)
+  const partial = JSON.parse(content) as Record<string, unknown>
+  const record = {
+    task_id: taskId,
+    started_at: '2026-08-08T03:00:00Z',
+    updated_at: '2026-08-08T03:00:00Z',
+    worktree: worktreeDir(paths, taskId),
+    branch: branchName(taskId),
+    ...partial,
+  }
+  writeFileSync(file, `${JSON.stringify(record)}\n`)
   // A running task's process lives in the registry, not in the record. A fixture that
   // names one has to put it where the reader looks.
   const pid = (JSON.parse(content) as { pid?: number | null }).pid
@@ -38,10 +49,12 @@ function ageFile(file: string): void {
 }
 
 describe('refreshAll', () => {
-  // Terminal files deliberately contain only enough JSON to classify them. A refresh
-  // must not inspect other fields, and must leave their content exactly as found.
+  // Terminal files carry sentinel fields not owned by refresh. A refresh must leave
+  // their content exactly as found.
   it('leaves terminal files byte-for-byte untouched', async () => {
-    const merged = writeRawStatus('merged-task', '{"status":"merged","sentinel":"keep merged"}\n')
+    const merged = writeRawStatus('merged-task',
+      '{"status":"merged","merge_commit":"merge-commit","run_branch":"main",'
+      + '"sentinel":"keep merged"}\n')
     const noChange = writeRawStatus('no-change-task',
       '{"status":"no-change","sentinel":"keep no change"}\n')
     const failed = writeRawStatus('failed-task', '{"status":"failed","sentinel":"keep failed"}\n')

@@ -11,11 +11,13 @@ import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels,
   commentOnIssueMerge, fingerprintOf, groupReadyFindings, heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
-  issueFailureCount, IssueReleaseReconciliationError,
+  issueFailureCount, issueReleaseIntentForTask, issueReleasePreparationForTask,
+  IssueReleaseReconciliationError,
   missingRequirementCompletionMarkers, parseIssueBody,
   publishDelegatedTask, publishFinding, reapStaleLeases,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
-  clearIssueFailureCounts, reconcileIssueReleaseIntent, recordIssueCompletions,
+  clearIssueFailureCounts, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
+  recordIssueCompletions,
   recordIssueFailure, recordIssueReleaseIntent, recordIssuesForTask,
   recordIssuePromotions,
   releaseIssueClaim,
@@ -25,7 +27,7 @@ import {
   type ClaimedRequirement,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc } from '../src/ids.ts'
-import { orchPaths, type OrchPaths } from '../src/paths.ts'
+import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { specFile } from '../src/tasks.ts'
 import { frameVerifiedRequirement } from '../src/templates.ts'
@@ -36,6 +38,19 @@ import { stubProject } from './stubProject.ts'
 let repoRoot: string
 let paths: OrchPaths
 let forge: FakeForge
+
+function durableStatus(taskId: string, status: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    task_id: taskId,
+    status,
+    started_at: '2026-08-08T03:00:00Z',
+    updated_at: '2026-08-08T03:00:00Z',
+    worktree: worktreeDir(paths, taskId),
+    branch: branchName(taskId),
+    ...(status === 'merged' ? { merge_commit: 'merge-commit', run_branch: 'main' } : {}),
+    ...extra,
+  })
+}
 
 beforeEach(() => {
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-issues-'))
@@ -1014,7 +1029,7 @@ describe('claimIssueGroup', () => {
     )
     if (first.outcome !== 'claimed') throw new Error(`expected a claim, got ${first.outcome}`)
     writeFileSync(join(paths.statusDir, `${first.taskId}.json`),
-      JSON.stringify({ task_id: first.taskId, status: 'merged' }))
+      durableStatus(first.taskId, 'merged'))
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     recordIssuePromotions(paths, first.taskId, 'a'.repeat(40), 'chore/run-branch')
 
@@ -1040,7 +1055,7 @@ describe('claimIssueGroup', () => {
       )
       if (first.outcome !== 'claimed') throw new Error(`expected a claim, got ${first.outcome}`)
       writeFileSync(join(paths.statusDir, `${first.taskId}.json`),
-        JSON.stringify({ task_id: first.taskId, status }))
+        durableStatus(first.taskId, status))
       writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
 
       const duplicate = await forge.createIssue({
@@ -1491,6 +1506,74 @@ describe('claimIssueGroup', () => {
 })
 
 describe('issue claim release', () => {
+  it('rejects malformed failure counts without overwriting any issue streak', () => {
+    recordIssuesForTask(paths, 'failed-task', [41, 42])
+    const countDirectory = join(paths.queueDir, 'issue-failure-count')
+    mkdirSync(countDirectory, { recursive: true })
+    writeFileSync(join(countDirectory, '41'), '2\n')
+    writeFileSync(join(countDirectory, '42'), 'malformed\n')
+
+    expect(() => recordIssueFailure(paths, 'failed-task')).toThrow(
+      /expected a positive safe integer/,
+    )
+    expect(readFileSync(join(countDirectory, '41'), 'utf8')).toBe('2\n')
+    expect(readFileSync(join(countDirectory, '42'), 'utf8')).toBe('malformed\n')
+  })
+
+  it('rejects a failure count whose next increment would be unsafe', () => {
+    recordIssuesForTask(paths, 'failed-task', [41])
+    const countDirectory = join(paths.queueDir, 'issue-failure-count')
+    mkdirSync(countDirectory, { recursive: true })
+    writeFileSync(join(countDirectory, '41'), `${Number.MAX_SAFE_INTEGER}\n`)
+
+    expect(() => recordIssueFailure(paths, 'failed-task')).toThrow(/cannot be safely incremented/)
+    expect(issueFailureCount(paths, 41)).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  it('rejects every malformed persisted issue-list entry', () => {
+    const taskId = 'malformed-lists'
+    recordIssuesForTask(paths, taskId, [41, 42])
+    recordIssueReleaseIntent(paths, taskId, [41, 42])
+    prepareIssueReleaseIntent(paths, taskId, [41, 42])
+    const files = [
+      join(paths.queueDir, 'issue-map', taskId),
+      join(paths.queueDir, 'issue-release-intent', taskId),
+      join(paths.queueDir, 'issue-release-preparation', taskId),
+    ]
+    for (const file of files) writeFileSync(file, '41\nmalformed\n42\n')
+
+    expect(() => issueNumbersForTask(paths, taskId)).toThrow(/one positive safe integer per line/)
+    expect(() => issueReleaseIntentForTask(paths, taskId)).toThrow(
+      /one positive safe integer per line/,
+    )
+    expect(() => issueReleasePreparationForTask(paths, taskId)).toThrow(
+      /one positive safe integer per line/,
+    )
+  })
+
+  it('accepts empty persisted issue lists produced by the writers', () => {
+    const taskId = 'empty-lists'
+    recordIssuesForTask(paths, taskId, [])
+    recordIssueReleaseIntent(paths, taskId, [])
+    prepareIssueReleaseIntent(paths, taskId, [])
+
+    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+  })
+
+  it('keeps malformed release reconciliation state for operator repair', async () => {
+    const taskId = 'malformed-release'
+    const intent = join(paths.queueDir, 'issue-release-intent', taskId)
+    recordIssueReleaseIntent(paths, taskId, [41, 42])
+    writeFileSync(intent, '41\n9007199254740992\n')
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, taskId)).rejects.toThrow(
+      /one positive safe integer per line/,
+    )
+    expect(readFileSync(intent, 'utf8')).toBe('41\n9007199254740992\n')
+  })
+
   it('parks an issue when consecutive failed-task releases reach the retry bound', async () => {
     const issueNumber = await forge.createIssue({
       title: 'persistently failing issue', body: '',
@@ -2062,7 +2145,7 @@ describe('reapStaleLeases', () => {
     })
     recordIssuesForTask(paths, 'task-completed', [issueNumber])
     writeFileSync(join(paths.statusDir, 'task-completed.json'),
-      JSON.stringify({ task_id: 'task-completed', status: 'completed' }))
+      durableStatus('task-completed', 'completed'))
 
     const reaped = await reapStaleLeases(
       forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
@@ -2211,7 +2294,7 @@ describe('loop integration in issue mode', () => {
     writeFileSync(finalMessageFile(paths, '20260808_000000_001_scan'),
       'NEXT_TASK: [BUG] `src/a/b.ts` breaks on empty input\nTASK_COMPLETE\n')
     writeFileSync(join(paths.statusDir, '20260808_000000_001_scan.json'),
-      JSON.stringify({ task_id: '20260808_000000_001_scan', status: 'completed', pid: null }))
+      durableStatus('20260808_000000_001_scan', 'completed'))
 
     // One poll carries the finding all the way: published as an issue by the
     // completion scan, then claimed and started by the same poll's fill step.
@@ -2251,7 +2334,7 @@ describe('loop integration in issue mode', () => {
     await forge.assignIssue(unlinked, 'worker-gone')
     recordIssuesForTask(paths, 'task-running', [linked])
     writeFileSync(join(paths.statusDir, 'task-running.json'),
-      JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+      durableStatus('task-running', 'running', { pid: process.pid }))
     recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
 
@@ -2289,7 +2372,7 @@ describe('loop integration in issue mode', () => {
     })
     recordIssuesForTask(paths, 'task-running', [issueNumber])
     writeFileSync(join(paths.statusDir, 'task-running.json'),
-      JSON.stringify({ task_id: 'task-running', status: 'running', pid: process.pid }))
+      durableStatus('task-running', 'running', { pid: process.pid }))
     recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
     forge.commentIssue = async () => { throw new Error('forge unavailable') }

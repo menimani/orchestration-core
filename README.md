@@ -14,11 +14,13 @@ specific failure; the comments in the source name the incident rather than the p
 
 - Node 23.6 or later — the TypeScript sources are executed natively, with no build step
 - git
-- Bash on Windows (for example, Git Bash), with `bash` available on `PATH` — the bundled
-  runners use it to launch npm command shims safely
-- An agent CLI (the bundled runner adapters drive
-  [Codex](https://openai.com/codex/) or [Claude Code](https://docs.anthropic.com/en/docs/claude-code))
-- A forge CLI (the bundled forge adapter drives GitHub through `gh`)
+- The bundled adapters additionally require:
+  - Bash on Windows (for example, Git Bash), with `bash` available on `PATH` — the
+    bundled runners use it to launch npm command shims safely
+  - The agent CLI selected by the bundled runner adapter:
+    [Codex](https://openai.com/codex/) or
+    [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+  - The GitHub CLI, `gh`, when using the bundled `forge-github` adapter
 
 ## How a run works
 
@@ -314,7 +316,7 @@ settings update at their next use.
 |----------|---------|--------|
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |
 | `MAX_PARALLEL` | 3 | Ordinary task agent processes at once; scan agents use `SCAN_PARALLEL` independently |
-| `SCAN_PARALLEL` | 2 | Scan agent processes started together per scan cycle (1-4), independent of `MAX_PARALLEL` |
+| `SCAN_PARALLEL` | 2 | Scan agent processes started together per scan cycle; values must be at least 1 and values above 4 are clamped to 4, independently of `MAX_PARALLEL` |
 | `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
 | `AUTO_REVIEW` | false | Enable agent review of cycle diffs and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |

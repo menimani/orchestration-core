@@ -186,6 +186,28 @@ describe('project adapter loading', () => {
     expect(monitored.sourceChanged()).toBe(true)
   })
 
+  it('does not monitor dependencies imported only for adapter types', async () => {
+    const repository = createFixtureRepository()
+    const orchestrationRoot = join(repository, 'orchestration')
+    const projectDirectory = join(orchestrationRoot, 'project')
+    const adapterPath = join(projectDirectory, 'project-fixture.ts')
+    const typesPath = join(orchestrationRoot, 'ts', 'src', 'adapters', 'project.ts')
+    mkdirSync(dirname(typesPath), { recursive: true })
+    writeFileSync(typesPath, 'export interface ProjectAdapter { name: string }\n')
+    writeFixtureAdapter(adapterPath, 'fixture.yml')
+    const adapterSource = readFileSync(adapterPath, 'utf8')
+    writeFileSync(adapterPath, [
+      "import type { ProjectAdapter } from '../ts/src/adapters/project.ts'",
+      adapterSource.replace('export const fixtureProject = {',
+        'export const fixtureProject: ProjectAdapter & Record<string, unknown> = {'),
+    ].join('\n'))
+    const monitored = await loadMonitoredProject(orchestrationRoot, {})
+
+    writeFileSync(typesPath, 'export interface ProjectAdapter { name: string; updated: true }\n')
+
+    expect(monitored.sourceChanged()).toBe(false)
+  })
+
   it('names the resolved path when the adapter is absent', async () => {
     const missingPath = resolve(import.meta.dirname, 'fixtures', 'project-missing.ts')
 

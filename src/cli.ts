@@ -203,7 +203,7 @@ async function approveLoopStart(
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
     const answer = await rl.question('Start the loop with this configuration? [y/N] ')
-    const approved = /^(?:y|yes)$/i.test(answer.trim())
+    const approved = answer === 'y' || answer === 'yes'
     if (!approved) console.error('Refusing start: configuration was not approved.')
     return approved
   } finally {

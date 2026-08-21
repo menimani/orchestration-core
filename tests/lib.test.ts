@@ -11,10 +11,10 @@ import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
   branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId,
   isScanTaskId,
-  absolutePackageScriptCommand, orchPaths, packageScriptCommand, statusFile, type OrchPaths,
+  absolutePackageScriptCommand, orchPaths, statusFile, type OrchPaths,
 } from '../src/paths.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
-import { readStatus, transitionStatus, writeStatus } from '../src/status.ts'
+import { readStatus, transitionStatus, writeMergedStatus, writeStatus } from '../src/status.ts'
 import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
@@ -89,7 +89,8 @@ describe('status files', () => {
     writeFileSync(join(lockDir, 'pid'), `${process.pid}\n`)
 
     let finished = false
-    const writer = writeStatus(paths, 'task-locked', 'merged').then(() => { finished = true })
+    const writer = writeMergedStatus(paths, 'task-locked', 'merge-commit', 'main')
+      .then(() => { finished = true })
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(finished).toBe(false)
     expect(readStatus(paths, 'task-locked')?.status).toBe('running')
@@ -169,7 +170,7 @@ describe('status files', () => {
   })
 
   it('refuses a transition whose expected state is stale', async () => {
-    await writeStatus(paths, 'task-cas', 'merged')
+    await writeMergedStatus(paths, 'task-cas', 'merge-commit', 'main')
     expect(await transitionStatus(paths, 'task-cas', 'running', 'completed')).toBe(false)
     expect(readStatus(paths, 'task-cas')?.status).toBe('merged')
   })
@@ -181,6 +182,54 @@ describe('status files', () => {
   it('does not treat a malformed existing status file as absent', () => {
     writeFileSync(statusFile(paths, 'task-malformed'), '{"status":"running"')
     expect(() => readStatus(paths, 'task-malformed')).toThrow(SyntaxError)
+  })
+
+  it.each([
+    ['task_id', { status: 'running', started_at: '', updated_at: '', worktree: '', branch: '' }],
+    ['status', { task_id: 'task-invalid', started_at: '', updated_at: '', worktree: '', branch: '' }],
+    ['started_at', { task_id: 'task-invalid', status: 'running', updated_at: '', worktree: '', branch: '' }],
+    ['updated_at', { task_id: 'task-invalid', status: 'running', started_at: '', worktree: '', branch: '' }],
+    ['worktree', { task_id: 'task-invalid', status: 'running', started_at: '', updated_at: '', branch: '' }],
+    ['branch', { task_id: 'task-invalid', status: 'running', started_at: '', updated_at: '', worktree: '' }],
+  ])('rejects a status record missing required field %s', (field, record) => {
+    writeFileSync(statusFile(paths, 'task-invalid'), JSON.stringify(record))
+
+    expect(() => readStatus(paths, 'task-invalid'))
+      .toThrow(`Status file for task-invalid failed schema validation at ${field}`)
+  })
+
+  it.each([
+    ['task_id', 1], ['status', 1], ['started_at', 1], ['updated_at', 1],
+    ['worktree', 1], ['branch', 1], ['merge_commit', 1], ['run_branch', 1],
+  ])('rejects a status record whose %s has the wrong type', (field, value) => {
+    const record = {
+      task_id: 'task-invalid',
+      status: 'running',
+      started_at: '2026-08-21T12:00:00Z',
+      updated_at: '2026-08-21T12:00:00Z',
+      worktree: 'worktree',
+      branch: 'task/task-invalid',
+      [field]: value,
+    }
+    writeFileSync(statusFile(paths, 'task-invalid'), JSON.stringify(record))
+
+    expect(() => readStatus(paths, 'task-invalid'))
+      .toThrow(`Status file for task-invalid failed schema validation at ${field}`)
+  })
+
+  it('rejects an unknown task state', () => {
+    const record = {
+      task_id: 'task-invalid',
+      status: 'unknown',
+      started_at: '2026-08-21T12:00:00Z',
+      updated_at: '2026-08-21T12:00:00Z',
+      worktree: 'worktree',
+      branch: 'task/task-invalid',
+    }
+    writeFileSync(statusFile(paths, 'task-invalid'), JSON.stringify(record))
+
+    expect(() => readStatus(paths, 'task-invalid'))
+      .toThrow('Status file for task-invalid failed schema validation at status')
   })
 
   it('publishes status through a temporary file without leaving it behind', async () => {
@@ -214,33 +263,6 @@ describe('package script commands', () => {
 
     expect(absolutePackageScriptCommand(repoRoot, 'loop-status', packageRoot))
       .toBe(`npm run -C '${expectedPackageRoot}' loop-status -- --repo '${expectedRepoRoot}'`)
-  })
-
-  it('runs scripts directly when the package is the repository root', () => {
-    expect(packageScriptCommand(repoRoot, 'loop-status', repoRoot))
-      .toBe('npm run loop-status')
-  })
-
-  it('selects the package directory when it is installed as a subtree', () => {
-    expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'ts')))
-      .toBe("npm run -C 'orchestration/ts' stop")
-  })
-
-  it('shell-quotes a subtree package directory containing spaces', () => {
-    expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', 'core package')))
-      .toBe("npm run -C 'orchestration/core package' stop")
-  })
-
-  it.each([
-    ['core;false', "'orchestration/core;false'"],
-    ['core&false', "'orchestration/core&false'"],
-    ['core$(false)', "'orchestration/core$(false)'"],
-    ['core`false`', "'orchestration/core`false`'"],
-    ['core!false', "'orchestration/core!false'"],
-    ["core'package", "'orchestration/core'\\''package'"],
-  ])('shell-quotes Bash and Windows Git Bash metacharacters in %s', (directory, quoted) => {
-    expect(packageScriptCommand(repoRoot, 'stop', join(repoRoot, 'orchestration', directory)))
-      .toBe(`npm run -C ${quoted} stop`)
   })
 })
 

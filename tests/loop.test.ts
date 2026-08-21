@@ -117,7 +117,16 @@ function writeFinal(taskId: string, content: string): void {
 
 function writeRawStatus(taskId: string, status: string, pid: number | null = null): void {
   writeFileSync(statusFile(paths, taskId),
-    JSON.stringify({ task_id: taskId, status, pid }))
+    JSON.stringify({
+      task_id: taskId,
+      status,
+      pid,
+      started_at: '2026-08-08T03:00:00Z',
+      updated_at: '2026-08-08T03:00:00Z',
+      worktree: worktreeDir(paths, taskId),
+      branch: branchName(taskId),
+      ...(status === 'merged' ? { merge_commit: 'merge-commit', run_branch: 'main' } : {}),
+    }))
   // A running task's process lives in the registry, not in the record.
   if (pid === null) forgetTaskProcess(paths, taskId)
   else recordTaskProcess(paths, taskId, pid)
@@ -430,6 +439,60 @@ describe('status file safety', () => {
 
     const loop = makeLoop({ scanEnabled: false, autoMerge: false })
     await expect(loop.poll()).rejects.toThrow(SyntaxError)
+  })
+
+  it('stops the poll when an existing task status is structurally invalid', async () => {
+    const taskId = '20260811_000000_001_user-existing'
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# Existing task\n')
+    writeFileSync(statusFile(paths, taskId), '{}')
+
+    const loop = makeLoop({ scanEnabled: false, autoMerge: false })
+    await expect(loop.poll()).rejects.toThrow(
+      `Status file for ${taskId} failed schema validation`,
+    )
+  })
+
+})
+
+describe('persisted counter safety', () => {
+  it.each(['', 'not-a-count', '1 2', '-1', '9007199254740992'])(
+    'stops with a diagnostic instead of resetting a malformed scan count %j',
+    async (value) => {
+      initializeGitRepo()
+      const loop = makeLoop({ scanEnabled: false, autoMerge: false })
+      loop.initializeSessionStateForBranch()
+      writeFileSync(join(paths.queueDir, 'scan-count.txt'), value)
+
+      expect(await loop.poll()).toBe('stopped')
+
+      expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+      expect(logged).toContain(
+        'ERROR persisted counter queue/scan-count.txt is invalid; expected a non-negative integer; stopping the loop',
+      )
+    },
+  )
+
+  it('rejects a malformed task-growth count without overwriting it', () => {
+    const countFile = join(paths.queueDir, 'total-task-count.txt')
+    writeFileSync(countFile, 'unknown\n')
+    const loop = makeLoop()
+
+    expect(() => loop.countAllTasks()).toThrow('persisted counter queue/total-task-count.txt is invalid')
+
+    expect(readFileSync(countFile, 'utf8')).toBe('unknown\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('rejects a malformed merge-failure count without incrementing it', () => {
+    const countFile = join(paths.queueDir, 'merge-failure-count.txt')
+    writeFileSync(countFile, 'NaN\n')
+    const loop = makeLoop()
+
+    expect(() => loop.noteMergeFailure(join(paths.logsDir, 'missing.merge.log')))
+      .toThrow('persisted counter queue/merge-failure-count.txt is invalid')
+
+    expect(readFileSync(countFile, 'utf8')).toBe('NaN\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 })
 
@@ -1979,6 +2042,25 @@ describe('cycle gate', () => {
     expect(existsSync(completeFlag)).toBe(true)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logText()).toContain('WARN could not enqueue CI fix: queue unavailable')
+  })
+
+  it('stops instead of resetting a malformed CI fix attempt count', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>()
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 2,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile } = prepareFailedCiGate()
+    writeFileSync(attemptFile, 'corrupt\n')
+
+    await expect(loop.triggerScanIfIdle())
+      .rejects.toThrow('persisted counter queue/ci-fix-emitted-1 is invalid')
+
+    expect(enqueue).not.toHaveBeenCalled()
+    expect(readFileSync(attemptFile, 'utf8')).toBe('corrupt\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
   it('stops only after successfully enqueued CI fix attempts reach the cap', async () => {
