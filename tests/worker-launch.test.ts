@@ -1,7 +1,8 @@
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { orchPaths } from '../src/paths.ts'
 import {
@@ -33,6 +34,95 @@ function dependencies(launchDaemon = vi.fn(() => 0)): WorkerCommandDependencies 
 
 const unsupportedConfig = 'export function loadConfig() { return {} }\n'
 const supportedConfig = 'export function loadConfig() { return { workerMode: true } }\n'
+const WORKER_MODULE = pathToFileURL(join(import.meta.dirname, '..', 'src', 'worker.ts')).href
+const PATHS_MODULE = pathToFileURL(join(import.meta.dirname, '..', 'src', 'paths.ts')).href
+
+interface LaunchProbe {
+  command: string
+  args: string[]
+  cwd: string
+  issueQueueEnabled: string | undefined
+  workerMode: string | undefined
+  parentSentinel: string | undefined
+}
+
+interface LaunchOutcome {
+  status?: number
+  error?: { name: string, message: string, code?: string }
+}
+
+function runProductionLaunchProbe(
+  daemonStatus: number,
+  spawnError = false,
+): { probe: LaunchProbe, outcome: LaunchOutcome } {
+  const preload = join(tempRoot, `worker-spawn-probe-${daemonStatus}-${spawnError}.cjs`)
+  const harness = join(tempRoot, `worker-launch-harness-${daemonStatus}-${spawnError}.ts`)
+  const probeFile = join(tempRoot, `worker-spawn-probe-${daemonStatus}-${spawnError}.json`)
+  const outcomeFile = join(tempRoot, `worker-launch-outcome-${daemonStatus}-${spawnError}.json`)
+  writeFileSync(preload, [
+    "const childProcess = require('node:child_process')",
+    "const { writeFileSync } = require('node:fs')",
+    "const { syncBuiltinESMExports } = require('node:module')",
+    'const originalSpawnSync = childProcess.spawnSync',
+    'childProcess.spawnSync = function (command, args, options) {',
+    "  if (args?.[0] === '--input-type=module') {",
+    "    return { status: 0, signal: null, stdout: '', stderr: '' }",
+    '  }',
+    "  if (args?.[1] === 'loop' && args?.includes('--daemon')) {",
+    '    writeFileSync(process.env.ORCH_WORKER_LAUNCH_PROBE, JSON.stringify({',
+    '      command, args, cwd: options?.cwd,',
+    '      issueQueueEnabled: options?.env?.ISSUE_QUEUE_ENABLED,',
+    '      workerMode: options?.env?.WORKER_MODE,',
+    '      parentSentinel: options?.env?.ORCH_WORKER_PARENT_SENTINEL,',
+    '    }))',
+    "    if (process.env.ORCH_WORKER_SPAWN_ERROR === 'true') {",
+    "      const error = Object.assign(new Error('synthetic daemon spawn failure'), { code: 'ENOENT' })",
+    "      return { error, status: null, signal: null, stdout: '', stderr: '' }",
+    '    }',
+    '    return { status: Number(process.env.ORCH_WORKER_DAEMON_STATUS), signal: null,',
+    "      stdout: '', stderr: '' }",
+    '  }',
+    '  return originalSpawnSync.apply(this, arguments)',
+    '}',
+    'syncBuiltinESMExports()',
+    '',
+  ].join('\n'))
+  writeFileSync(harness, [
+    `import { runWorkerCommand } from ${JSON.stringify(WORKER_MODULE)}`,
+    `import { orchPaths } from ${JSON.stringify(PATHS_MODULE)}`,
+    "import { writeFileSync } from 'node:fs'",
+    `const paths = orchPaths(${JSON.stringify(worker)})`,
+    'try {',
+    "  const status = await runWorkerCommand(paths, 'origin/main')",
+    '  writeFileSync(process.env.ORCH_WORKER_OUTCOME, JSON.stringify({ status }))',
+    '} catch (error) {',
+    '  writeFileSync(process.env.ORCH_WORKER_OUTCOME, JSON.stringify({ error: {',
+    '    name: error?.name, message: error?.message, code: error?.code,',
+    '  } }))',
+    '}',
+    '',
+  ].join('\n'))
+
+  const result = spawnSync(process.execPath, [harness], {
+    cwd: tempRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require="${preload.replaceAll('\\', '\\\\')}"`.trim(),
+      ORCH_WORKER_DAEMON_STATUS: String(daemonStatus),
+      ORCH_WORKER_LAUNCH_PROBE: probeFile,
+      ORCH_WORKER_OUTCOME: outcomeFile,
+      ORCH_WORKER_PARENT_SENTINEL: 'preserved',
+      ORCH_WORKER_SPAWN_ERROR: String(spawnError),
+    },
+    windowsHide: true,
+  })
+  expect(result.status, result.stderr).toBe(0)
+  return {
+    probe: JSON.parse(readFileSync(probeFile, 'utf8')) as LaunchProbe,
+    outcome: JSON.parse(readFileSync(outcomeFile, 'utf8')) as LaunchOutcome,
+  }
+}
 
 beforeEach(() => {
   tempRoot = mkdtempSync(join(tmpdir(), 'orch-worker-launch-'))
@@ -134,5 +224,42 @@ describe('worker mode self-check', () => {
       .rejects.toThrow(/updated checkout does not support worker mode.*config\.workerMode is missing/)
     expect(readFileSync(join(worker, 'new.txt'), 'utf8').trim()).toBe('new code')
     expect(launch).not.toHaveBeenCalled()
+  })
+})
+
+describe('worker daemon subprocess boundary', () => {
+  beforeEach(() => {
+    commit(merger, 'orchestration/ts/src/config.ts', supportedConfig, 'feat: add worker support')
+    commit(merger, 'orchestration/ts/src/cli.ts', '// updated worker CLI\n', 'feat: add updated CLI')
+    git(merger, ['push', '-q', 'origin', 'HEAD:main'])
+  })
+
+  it('launches the updated issue-mode CLI from the repository with the worker environment', () => {
+    const { probe, outcome } = runProductionLaunchProbe(23)
+
+    expect(outcome).toEqual({ status: 23 })
+    expect(resolve(probe.command).toLowerCase()).toBe(resolve(process.execPath).toLowerCase())
+    expect(probe.args).toEqual([
+      join(worker, 'orchestration', 'ts', 'src', 'cli.ts'),
+      'loop', '--approve-mode', 'issue', '--daemon',
+    ])
+    expect(resolve(probe.cwd).toLowerCase()).toBe(realpathSync.native(worker).toLowerCase())
+    expect(probe).toMatchObject({
+      issueQueueEnabled: 'true',
+      workerMode: 'true',
+      parentSentinel: 'preserved',
+    })
+  })
+
+  it('surfaces a daemon spawn error from the production handoff', () => {
+    const { outcome } = runProductionLaunchProbe(0, true)
+
+    expect(outcome).toEqual({
+      error: {
+        name: 'Error',
+        message: 'synthetic daemon spawn failure',
+        code: 'ENOENT',
+      },
+    })
   })
 })
