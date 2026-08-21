@@ -7,6 +7,7 @@ import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
@@ -1729,25 +1730,29 @@ describe('cycle gate', () => {
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
   })
 
-  it('reports the environment exercised by the final gate before promotion', async () => {
+  it('reports the OS-adapter environment only after promotion is confirmed', async () => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const environmentLabel = vi.spyOn(operatingSystem, 'verificationEnvironmentLabel')
+      .mockReturnValue('adapter-provided environment')
     const loop = makeLoop({ scanEnabled: false, autoPr: true, reviewEnabled: false })
     loop.initializeSessionStateForBranch()
     fakeForge.markPrReady = async () => {
+      expect(logged.some((line) => line.startsWith('Status Environments'))).toBe(false)
       forgeStatus = { ...forgeStatus, isDraft: false }
     }
 
-    expect(await loop.poll()).toBe('done')
-
-    const environment = process.platform === 'win32'
-      ? 'Windows'
-      : process.platform === 'darwin' ? 'macOS' : process.platform === 'linux' ? 'Linux' : process.platform
-    expect(logged).toContain(
-      `Status Environments  run verification exercised ${environment}; `
-      + 'promoted branch was not run in any other environment',
-    )
+    try {
+      expect(await loop.poll()).toBe('done')
+      expect(environmentLabel).toHaveBeenCalledOnce()
+      expect(logged).toContain(
+        'Status Environments  run verification exercised adapter-provided environment; '
+        + 'promoted branch was not run in any other environment',
+      )
+    } finally {
+      environmentLabel.mockRestore()
+    }
   })
 
   it('names an available cross-platform check that was not run for the branch', async () => {
@@ -3171,7 +3176,10 @@ describe('completion marker output', () => {
     git(['remote', 'add', 'origin', remote])
     git(['push', '-u', 'origin', 'main'])
     git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
-    const loop = makeLoop()
+    const loop = makeLoop({}, {
+      ...stubProject,
+      manualEnvironmentChecks: [{ environment: 'Linux', command: 'npm run test:linux' }],
+    })
     fakeForge.markPrReady = async () => {
       throw new Error('promotion failed')
     }
@@ -3187,6 +3195,8 @@ describe('completion marker output', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
     expect(logged).not.toContain('Completed Loop        PR https://example.test/pull/1')
+    expect(logged.some((line) => line.startsWith('Status Environments'))).toBe(false)
+    expect(logged.some((line) => line.startsWith('Status Linux check'))).toBe(false)
   })
 
   it('reports repeated pre-promotion status errors and stops the loop', async () => {
@@ -3215,6 +3225,7 @@ describe('completion marker output', () => {
       'ERROR could not check PR status before promotion: status unavailable (repeated 2 times)',
     )
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logged.some((line) => line.startsWith('Status Environments'))).toBe(false)
   })
 
   it('reports repeated post-promotion status errors and stops the loop', async () => {
@@ -3243,6 +3254,7 @@ describe('completion marker output', () => {
       'ERROR could not confirm PR status after promotion: confirmation unavailable (repeated 2 times)',
     )
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logged.some((line) => line.startsWith('Status Environments'))).toBe(false)
   })
 
   it('does not emit LOOP_DONE until the forge confirms the PR is ready', async () => {
@@ -3259,6 +3271,7 @@ describe('completion marker output', () => {
     expect(prStatusCalls).toBe(3)
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
     expect(logged).not.toContain('Completed Loop        PR https://example.test/pull/1')
+    expect(logged.some((line) => line.startsWith('Status Environments'))).toBe(false)
   })
 
   it('keeps the final gate state until draft promotion is confirmed', async () => {
