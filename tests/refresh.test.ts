@@ -52,7 +52,9 @@ describe('refreshAll', () => {
   // Terminal files carry sentinel fields not owned by refresh. A refresh must leave
   // their content exactly as found.
   it('leaves terminal files byte-for-byte untouched', async () => {
-    const merged = writeRawStatus('merged-task', '{"status":"merged","sentinel":"keep merged"}\n')
+    const merged = writeRawStatus('merged-task',
+      '{"status":"merged","merge_commit":"merge-commit","run_branch":"main",'
+      + '"sentinel":"keep merged"}\n')
     const noChange = writeRawStatus('no-change-task',
       '{"status":"no-change","sentinel":"keep no change"}\n')
     const failed = writeRawStatus('failed-task', '{"status":"failed","sentinel":"keep failed"}\n')
