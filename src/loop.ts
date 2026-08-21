@@ -44,6 +44,7 @@ import { currentBranchPushRemote, currentBranchTrackingRemote } from './gitRemot
 import { LoopWarningLog } from './loopLog.ts'
 import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
+import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
@@ -84,6 +85,7 @@ export interface LoopDeps {
   projectAdapterChanged?: () => boolean
   branchGuard?: (() => string | undefined) | undefined
   prepareIntegrationWorktree?: (() => void) | undefined
+  os?: OperatingSystem | undefined
 }
 
 interface QueueEntry {
@@ -99,13 +101,6 @@ interface FindingDispatch {
 
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
 const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
-
-function platformName(platform: NodeJS.Platform): string {
-  if (platform === 'win32') return 'Windows'
-  if (platform === 'darwin') return 'macOS'
-  if (platform === 'linux') return 'Linux'
-  return platform
-}
 
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
@@ -143,6 +138,7 @@ export function createLoop(deps: LoopDeps) {
     terminateTaskProcesses = () => terminateLiveTaskProcesses(paths),
     enqueueTask: enqueueTaskImpl = enqueueTask,
     startTask: startTaskImpl = startTask,
+    os = operatingSystem,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
@@ -1647,17 +1643,6 @@ export function createLoop(deps: LoopDeps) {
       }
       return false
     }
-    const gateEnvironment = platformName(process.platform)
-    event(
-      'Status', 'Environments',
-      `run verification exercised ${gateEnvironment}; promoted branch was not run in any other environment`,
-    )
-    for (const check of project.manualEnvironmentChecks ?? []) {
-      event(
-        'Status', `${check.environment} check`,
-        `not run for this branch; run ${check.command}`,
-      )
-    }
     if (status.isDraft) {
       try {
         await forge.markPrReady(branch)
@@ -1687,6 +1672,17 @@ export function createLoop(deps: LoopDeps) {
       }
     }
     if (status.state !== 'open' || status.isDraft) return false
+    const gateEnvironment = os.verificationEnvironmentLabel()
+    event(
+      'Status', 'Environments',
+      `run verification exercised ${gateEnvironment}; promoted branch was not run in any other environment`,
+    )
+    for (const check of project.manualEnvironmentChecks ?? []) {
+      event(
+        'Status', `${check.environment} check`,
+        `not run for this branch; run ${check.command}`,
+      )
+    }
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
     marker(`LOOP_DONE: ${prUrl}`)

@@ -182,6 +182,7 @@ export function createOperatingSystem(
   }
 
   return {
+    verificationEnvironmentLabel: () => 'Windows',
     async launchDaemon(options) {
       const pid = await (runtime.startDaemon ?? startWindowsProcess)(options)
       return {
