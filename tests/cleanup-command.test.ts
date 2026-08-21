@@ -13,13 +13,26 @@ import {
   LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY, prepareIssueReleaseIntent,
   reapStaleLeases, reconcileIssueReleaseIntents, recordIssueReleaseIntent, recordIssuesForTask,
 } from '../src/issueQueue.ts'
-import { finalMessageFile, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import {
+  branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
+} from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
 let repoRoot: string
 let paths: OrchPaths
 const taskId = '20260813_184040_037_auto-cleanup-claim'
+
+function writeTaskStatus(): void {
+  writeFileSync(statusFile(paths, taskId), JSON.stringify({
+    task_id: taskId,
+    status: 'completed',
+    started_at: '2026-08-13T09:40:40Z',
+    updated_at: '2026-08-13T09:40:40Z',
+    worktree: worktreeDir(paths, taskId),
+    branch: branchName(taskId),
+  }))
+}
 
 function runtime(
   overrides: Partial<CleanupCommandRuntime> = {},
@@ -89,7 +102,7 @@ describe('cleanup command', () => {
       assignees: [forge.user],
     })
     recordIssuesForTask(paths, taskId, [issueNumber])
-    writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, pid: null }))
+    writeTaskStatus()
     prepareIssueReleaseIntent(paths, taskId, [issueNumber])
 
     await expect(reconcileIssueReleaseIntents(forge, paths)).resolves.toEqual([])
@@ -185,7 +198,7 @@ describe('cleanup command', () => {
 
   it('keeps successful local cleanup when the forge cannot release the issue', async () => {
     execFileSync('git', ['init'], { cwd: repoRoot, windowsHide: true })
-    writeFileSync(statusFile(paths, taskId), JSON.stringify({ task_id: taskId, pid: null }))
+    writeTaskStatus()
     writeFileSync(finalMessageFile(paths, taskId), 'TASK_COMPLETE\n')
     writeFileSync(specFile(paths, taskId), '# claimed task\n')
     recordIssuesForTask(paths, taskId, [51, 52])

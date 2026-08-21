@@ -30,6 +30,18 @@ vi.mock('../src/status.ts', async (importOriginal) => {
 let repoRoot: string
 let paths: OrchPaths
 
+function runningStatus(taskId: string, pid: number | null): string {
+  return JSON.stringify({
+    task_id: taskId,
+    status: 'running',
+    started_at: '2026-08-09T00:00:00Z',
+    updated_at: '2026-08-09T00:00:00Z',
+    worktree: worktreeDir(paths, taskId),
+    branch: branchName(taskId),
+    pid,
+  })
+}
+
 function git(args: string[]): string {
   return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', windowsHide: true })
 }
@@ -71,9 +83,7 @@ describe('startTask', () => {
       cwd: worktree, windowsHide: true,
     })
     const recoveredHead = git(['rev-parse', branchName(taskId)]).trim()
-    writeFileSync(statusFile(paths, taskId), JSON.stringify({
-      task_id: taskId, status: 'running', pid: null,
-    }))
+    writeFileSync(statusFile(paths, taskId), runningStatus(taskId, null))
     const start = vi.fn(async () => process.pid)
 
     await expect(startTask(
@@ -93,9 +103,7 @@ describe('startTask', () => {
     writeFileSync(specFile(paths, taskId), '# live worktree task\n')
     mkdirSync(worktree, { recursive: true })
     writeFileSync(join(worktree, 'owned.txt'), 'still running\n')
-    writeFileSync(statusFile(paths, taskId), JSON.stringify({
-      task_id: taskId, status: 'running', pid: process.pid,
-    }))
+    writeFileSync(statusFile(paths, taskId), runningStatus(taskId, process.pid))
     // A task's process lives in the registry, not in the record.
     recordTaskProcess(paths, taskId, process.pid)
     const start = vi.fn(async () => process.pid)
@@ -115,9 +123,7 @@ describe('startTask', () => {
     const worktree = worktreeDir(paths, taskId)
     writeFileSync(specFile(paths, taskId), '# adapter verdict task\n')
     mkdirSync(worktree, { recursive: true })
-    writeFileSync(statusFile(paths, taskId), JSON.stringify({
-      task_id: taskId, status: 'running', pid: process.pid,
-    }))
+    writeFileSync(statusFile(paths, taskId), runningStatus(taskId, process.pid))
     recordTaskProcess(paths, taskId, process.pid)
     const start = vi.fn(async () => process.pid)
 

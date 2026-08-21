@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
-import { orchPaths, type OrchPaths } from '../src/paths.ts'
+import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import {
   buildIssueBody, issueNumberForTask, parseIssueBody,
@@ -29,7 +29,14 @@ function createSpec(taskId: string): void {
 }
 
 function writeTestStatus(taskId: string, status: string): void {
-  writeFileSync(join(paths.statusDir, `${taskId}.json`), JSON.stringify({ task_id: taskId, status }))
+  writeFileSync(join(paths.statusDir, `${taskId}.json`), JSON.stringify({
+    task_id: taskId,
+    status,
+    started_at: '2026-08-08T03:00:00Z',
+    updated_at: '2026-08-08T03:00:00Z',
+    worktree: worktreeDir(paths, taskId),
+    branch: branchName(taskId),
+  }))
 }
 
 beforeEach(() => {

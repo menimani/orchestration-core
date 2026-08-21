@@ -183,6 +183,54 @@ describe('status files', () => {
     expect(() => readStatus(paths, 'task-malformed')).toThrow(SyntaxError)
   })
 
+  it.each([
+    ['task_id', { status: 'running', started_at: '', updated_at: '', worktree: '', branch: '' }],
+    ['status', { task_id: 'task-invalid', started_at: '', updated_at: '', worktree: '', branch: '' }],
+    ['started_at', { task_id: 'task-invalid', status: 'running', updated_at: '', worktree: '', branch: '' }],
+    ['updated_at', { task_id: 'task-invalid', status: 'running', started_at: '', worktree: '', branch: '' }],
+    ['worktree', { task_id: 'task-invalid', status: 'running', started_at: '', updated_at: '', branch: '' }],
+    ['branch', { task_id: 'task-invalid', status: 'running', started_at: '', updated_at: '', worktree: '' }],
+  ])('rejects a status record missing required field %s', (field, record) => {
+    writeFileSync(statusFile(paths, 'task-invalid'), JSON.stringify(record))
+
+    expect(() => readStatus(paths, 'task-invalid'))
+      .toThrow(`Status file for task-invalid failed schema validation at ${field}`)
+  })
+
+  it.each([
+    ['task_id', 1], ['status', 1], ['started_at', 1], ['updated_at', 1],
+    ['worktree', 1], ['branch', 1], ['merge_commit', 1], ['run_branch', 1],
+  ])('rejects a status record whose %s has the wrong type', (field, value) => {
+    const record = {
+      task_id: 'task-invalid',
+      status: 'running',
+      started_at: '2026-08-21T12:00:00Z',
+      updated_at: '2026-08-21T12:00:00Z',
+      worktree: 'worktree',
+      branch: 'task/task-invalid',
+      [field]: value,
+    }
+    writeFileSync(statusFile(paths, 'task-invalid'), JSON.stringify(record))
+
+    expect(() => readStatus(paths, 'task-invalid'))
+      .toThrow(`Status file for task-invalid failed schema validation at ${field}`)
+  })
+
+  it('rejects an unknown task state', () => {
+    const record = {
+      task_id: 'task-invalid',
+      status: 'unknown',
+      started_at: '2026-08-21T12:00:00Z',
+      updated_at: '2026-08-21T12:00:00Z',
+      worktree: 'worktree',
+      branch: 'task/task-invalid',
+    }
+    writeFileSync(statusFile(paths, 'task-invalid'), JSON.stringify(record))
+
+    expect(() => readStatus(paths, 'task-invalid'))
+      .toThrow('Status file for task-invalid failed schema validation at status')
+  })
+
   it('publishes status through a temporary file without leaving it behind', async () => {
     await writeStatus(paths, 'task-atomic', 'running', 12345)
     expect(existsSync(join(paths.statusDir, `.task-atomic.${process.pid}.tmp`))).toBe(false)
