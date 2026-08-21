@@ -18,6 +18,11 @@ export const PLATFORM_SUITES: PlatformSuite[] = [
     platform: 'win32',
     reason: 'launches a Windows process tree and observes the consoles it attaches',
   },
+  {
+    file: 'tests/posix-process-group.test.ts',
+    platform: 'linux',
+    reason: 'signals a real detached process group and reads /proc to see who survived',
+  },
 ]
 
 /** The suites this platform cannot attempt, so the config can leave them uncollected. */
