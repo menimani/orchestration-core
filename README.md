@@ -184,6 +184,7 @@ project files, and a deliberately different hooks setting are reported and never
 For `SCAN_PARALLEL` greater than one, keep the scan checklist as uniquely numbered
 Markdown headings outside fenced code blocks; without numbered headings the loop warns
 and runs one full scan, while ambiguous numbering stops the loop before the cycle starts.
+Requests above the number of numbered sections are reduced to that count and reported.
 
 Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
 the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,
@@ -316,7 +317,7 @@ settings update at their next use.
 |----------|---------|--------|
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |
 | `MAX_PARALLEL` | 3 | Ordinary task agent processes at once; scan agents use `SCAN_PARALLEL` independently |
-| `SCAN_PARALLEL` | 2 | Scan agent processes started together per scan cycle; values must be at least 1 and values above 4 are clamped to 4, independently of `MAX_PARALLEL` |
+| `SCAN_PARALLEL` | 2 | Requested scan agent processes per cycle; values must be at least 1 and are reduced to the template's numbered section count at launch, independently of `MAX_PARALLEL` |
 | `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
 | `AUTO_REVIEW` | false | Enable agent review of cycle diffs and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |

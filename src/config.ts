@@ -179,8 +179,7 @@ function resolveConfig(env: NodeJS.ProcessEnv): LoopConfig {
   if (taskGate !== 'full' && taskGate !== 'light') {
     throw new Error(`TASK_GATE must be 'full' or 'light', got '${taskGate}'`)
   }
-  // SCAN_PARALLEL: the loop supports up to four concurrent scans, so higher values clamp.
-  const scanParallel = Math.min(num(env, 'SCAN_PARALLEL', 2), 4)
+  const scanParallel = num(env, 'SCAN_PARALLEL', 2)
   if (scanParallel < 1) {
     throw new Error('SCAN_PARALLEL must be at least 1')
   }
