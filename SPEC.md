@@ -407,6 +407,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     for a person instead of promoting a branch its own review keeps rejecting.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
+    the event log names the host environment where the run verification executed and
+    states that the branch was not run elsewhere. Repository adapters may also declare
+    manual cross-environment checks; the log names each check and its command while
+    explicitly recording that the loop did not run it for the branch.
     `LOOP_DONE: <PR URL>` is emitted to the machine-marker sink and as a formatted
     `loop.log` copy, session state is cleaned up, and the loop exits. When the run branch
     has no commits beyond the fetched default branch, the PR, CI, and review

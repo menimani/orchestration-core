@@ -35,6 +35,13 @@ describe('core project verification', () => {
       .toContain('node orchestration/project/safe-npm-ci.ts')
   })
 
+  it('declares the opt-in Linux verification command', () => {
+    expect(coreProject.manualEnvironmentChecks).toContainEqual({
+      environment: 'Linux',
+      command: 'npm run test:linux',
+    })
+  })
+
   it('leaves the merge gate as the sole source of Vitest worker flags', () => {
     expect(packageJson.scripts.test).toBe('node scripts/run-tests.mjs')
     const command = coreProject.mergeChecks('full')[0]?.command ?? ''
