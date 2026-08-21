@@ -9,7 +9,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
-import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
+import {
+  absolutePackageScriptCommand, branchName, finalMessageFile, orchPaths, statusFile, worktreeDir,
+} from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import { writeStatus } from '../src/status.ts'
@@ -681,6 +683,54 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('keeps a cross-repository daemon and its reported commands bound to the target', async () => {
+    const callerRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'orch-cli-caller-')))
+    extraRoots.push(callerRoot)
+    mkdirSync(join(repoRoot, 'orchestration'))
+    writeFileSync(join(repoRoot, 'relative-runner.mjs'), [
+      "import { join } from 'node:path'",
+      'export default {',
+      '  sharedSkills: {',
+      "    destinationRoot: (root) => join(root, '.test-runner', 'skills'),",
+      '    renderFile: (contents) => contents,',
+      '  },',
+      '  start: async () => process.pid,',
+      '}',
+      '',
+    ].join('\n'))
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop', '--approve-mode', 'local', '--daemon', '--repo', repoRoot],
+      {
+        cwd: callerRoot,
+        env: {
+          ...CORE_ENV,
+          AUTO_PR: 'false',
+          ISSUE_QUEUE_ENABLED: 'false',
+          MAX_SCAN_CYCLES: '0',
+          RUNNER: './relative-runner.mjs',
+          SCAN_ENABLED: 'true',
+        },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Started the loop in the background')
+    expect(result.stdout).toContain(
+      `Check: ${absolutePackageScriptCommand(repoRoot, 'loop-status')}`,
+    )
+    expect(result.stdout).toContain(`Stop: ${absolutePackageScriptCommand(repoRoot, 'stop')}`)
+    const match = /Started the loop in the background \(PID=(\d+)\)/.exec(result.stdout)
+    expect(match).not.toBeNull()
+    const daemonPid = Number(match?.[1])
+    testProcesses.trackPid(daemonPid, { tree: true })
+    await waitUntil(() => !pidIsAlive(daemonPid), 'cross-repository daemon did not stop')
+  })
+
   it('refuses a non-interactive start without an approved mode before side effects', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,

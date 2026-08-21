@@ -34,7 +34,8 @@ import {
 } from './merge.ts'
 import { deploy } from './deploy.ts'
 import {
-  isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
+  absolutePackageScriptCommand, isScanTaskId, logFile, orchPaths, packageFile,
+  type OrchPaths,
 } from './paths.ts'
 import { pruneTasks } from './prune.ts'
 import { branchAcceptsCommits, runPreCommitChecks } from './preCommit.ts'
@@ -1003,7 +1004,7 @@ const cmdLoop: Command = async (paths, args) => {
     // A daemon child inherits the launcher's approved mode. The launcher already
     // reported it, and raw child output would bypass the aligned daemon log helper.
     if (markerOutput === undefined) {
-      const runner = await loadRunner(config.runner, { env: process.env })
+      const runner = await loadRunner(config.runner, { env: process.env, repoRoot: paths.repoRoot })
       reportResolvedLoopConfig(paths, config, runner, console.log)
     }
     if (!await approveLoopStart(config, approvedMode)) return 1
@@ -1034,7 +1035,7 @@ const cmdLoop: Command = async (paths, args) => {
     )
     const daemonArgs = [
       packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
-      '--approve-mode', queueMode(config),
+      '--approve-mode', queueMode(config), '--repo', paths.repoRoot,
     ]
     // The daemon must work on the repository this launcher was pointed at. Starting it
     // in the package directory instead made it resolve its own checkout as the
@@ -1059,8 +1060,8 @@ const cmdLoop: Command = async (paths, args) => {
     daemon.release()
     console.log(`Started the loop in the background (PID=${daemonPid})`)
     console.log(`Log: ${loopLog}`)
-    console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
-    console.log(`Stop: ${packageScriptCommand(paths.repoRoot, 'stop')}`)
+    console.log(`Check: ${absolutePackageScriptCommand(paths.repoRoot, 'loop-status')}`)
+    console.log(`Stop: ${absolutePackageScriptCommand(paths.repoRoot, 'stop')}`)
     return 0
   }
   const startupResultFile = process.env[LOOP_STARTUP_RESULT_FILE_ENV]
