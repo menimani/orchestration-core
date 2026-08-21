@@ -9,7 +9,9 @@ import {
   branchName, logFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
 import { recordTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
-import { startTask, StartupProcessRetainedError, worktreeAddArgs } from '../src/start.ts'
+import {
+  startTask, StartupOwnershipUnknownError, StartupProcessRetainedError, worktreeAddArgs,
+} from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -154,6 +156,33 @@ describe('startTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('failed')
     expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('setup exploded')
   })
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'retains the task without publishing status when the runner returns invalid PID %s',
+    async (pid) => {
+      const taskId = `20260821_000000_001_invalid-pid-${String(pid).replace(/\W/g, '-')}`
+      writeFileSync(specFile(paths, taskId), '# invalid runner PID\n')
+      const terminateProcessTree = vi.spyOn(operatingSystem, 'terminateProcessTree')
+      const report = vi.fn()
+
+      await expect(startTask(paths, {
+        sharedSkills: fakeRunnerSharedSkills,
+        start: vi.fn(async () => pid),
+      }, taskId, { effort: 'medium', report })).rejects.toMatchObject({
+        name: 'StartupOwnershipUnknownError',
+        message: `Runner returned invalid PID ${String(pid)}; process ownership could not be established.`,
+      } satisfies Partial<StartupOwnershipUnknownError>)
+
+      expect(terminateProcessTree).not.toHaveBeenCalled()
+      expect(statusMocks.writeStatus).not.toHaveBeenCalled()
+      expect(readStatus(paths, taskId)).toBeUndefined()
+      expect(taskProcessPid(paths, taskId)).toBeUndefined()
+      expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+      expect(report).not.toHaveBeenCalledWith(expect.stringContaining('Started.'))
+      expect(readFileSync(logFile(paths, taskId), 'utf8'))
+        .toContain('Task startup ownership is unknown:')
+    },
+  )
 
   it('stops and verifies a launched process tree before recording status persistence failure', async () => {
     const taskId = '20260814_000000_001_status-failure'

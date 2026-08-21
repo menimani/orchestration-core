@@ -28,7 +28,9 @@ import {
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, transitionStatus } from './status.ts'
-import { startTask, StartupProcessRetainedError } from './start.ts'
+import {
+  startTask, StartupOwnershipUnknownError, StartupProcessRetainedError,
+} from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
   terminateLiveTaskProcesses, type TaskProcessTermination,
@@ -2539,6 +2541,14 @@ export function createLoop(deps: LoopDeps) {
           previousGateFailures.delete(`task-startup-${entry.taskId}`)
           running += 1
         } catch (error) {
+          if (error instanceof StartupOwnershipUnknownError) {
+            event(
+              'ERROR', shortTaskId(entry.taskId),
+              'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+            )
+            writeFileSync(stopFile, '')
+            break
+          }
           if (error instanceof StartupProcessRetainedError) {
             event(
               'ERROR', shortTaskId(entry.taskId),
