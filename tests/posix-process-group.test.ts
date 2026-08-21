@@ -81,9 +81,19 @@ setInterval(() => {}, 1000)
 
   expect(operatingSystem.terminateProcessTree(daemon.pid)).toBe(true)
 
-  // The leader and the child it forked are both gone, and the group reports empty. A
-  // signal delivered to the leader alone would leave the child here.
-  expect(operatingSystem.processIsAlive(leaderPid)).toBe(false)
-  expect(operatingSystem.processIsAlive(childPid)).toBe(false)
+  // The forked child is what proves group-wide delivery: it was never signalled
+  // directly, so a signal that reached only the leader leaves it running here. It is a
+  // grandchild of this process, reparented to init and reaped there, so wait for the
+  // PID to disappear rather than assuming reaping already happened.
+  await waitUntil(
+    () => !operatingSystem.processIsAlive(childPid),
+    'the forked child outlived a signal sent to its process group',
+  )
+
+  // The group reports empty, which is the contract terminateProcessTree returned true
+  // for. `processIsAlive(leaderPid)` is deliberately not asserted: the leader is a child
+  // of this test process, so between its death and this process reaping it the PID still
+  // answers `kill(pid, 0)` as a zombie. `groupHasRunningMember` excludes state Z for that
+  // reason, and it is the check the adapter itself trusts.
   expect(operatingSystem.processTreeIsAlive(daemon.pid)).toBe(false)
 })
