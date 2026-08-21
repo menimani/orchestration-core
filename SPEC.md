@@ -604,7 +604,7 @@ it; scan and review prompts apply that rule to the text they inspect or quote. A
 author has write access; idle detection additionally retains the merge-SHA ancestry check,
 so authorship and verified ancestry must both hold.
 
-32. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
+33. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
     same growth bounds. A finding is filed in the repository the loop is running
     against, never anywhere else. An issue is filed once per fingerprint: the advisory
@@ -621,7 +621,7 @@ so authorship and verified ancestry must both hold.
     merges because the same advisory recurs with different prose. Pre-granularity open
     issue bodies are interpreted from their requirement text, and their coarse local
     ledger entry is replaced when encountered, avoiding a one-time duplicate round.
-33. Before claiming, worker daemons group ready findings whose titles name the same first
+34. Before claiming, worker daemons group ready findings whose titles name the same first
     path, using the same primary-path convention as fingerprinting. A group contains at
     most four issues; another batch remains ready for the next claim. Titles without a
     path stay singleton tasks. Every grouped requirement appears separately in the task
@@ -650,7 +650,7 @@ so authorship and verified ancestry must both hold.
     issue without heartbeats for `ISSUE_LEASE_HOURS` (default 3) is reaped back to
     ready, unassigned, so lease expiry identifies a worker that is no longer polling
     rather than a long-running task.
-34. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
+35. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
     the forge closes all of them when the promotion PR lands the commit on the default
     branch. Immediately after merging, the worker comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
@@ -678,7 +678,7 @@ so authorship and verified ancestry must both hold.
     once creation may have happened, the issue is reconciled or the command aborts.
     The marker includes the daemon PID, is removed with the PID lock on every graceful
     exit, and is ignored when its owning process is no longer alive.
-35. `WORKER_MODE=true` defaults off and requires `ISSUE_QUEUE_ENABLED=true`. A worker-mode
+36. `WORKER_MODE=true` defaults off and requires `ISSUE_QUEUE_ENABLED=true`. A worker-mode
     daemon is execution-only: it never scans, enters a cycle gate, creates or updates a
     pull request, runs a review, or merges. It claims and heartbeats ready issues through
     the standard path and starts their local tasks. A completed task with commits pushes
@@ -690,7 +690,7 @@ so authorship and verified ancestry must both hold.
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.
-36. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
+37. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts `loop:merge-ready`
     issues from that poll's shared finding snapshot: it reads the reported branch and head, fetches that branch
     from the configured push remote, verifies the head and that it adds commits to the
