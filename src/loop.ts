@@ -28,7 +28,7 @@ import {
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, transitionStatus } from './status.ts'
-import { startTask } from './start.ts'
+import { startTask, StartupProcessRetainedError } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
   terminateLiveTaskProcesses, type TaskProcessTermination,
@@ -77,6 +77,7 @@ export interface LoopDeps {
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   terminateTaskProcesses?: (() => TaskProcessTermination) | undefined
   enqueueTask?: typeof enqueueTask
+  startTask?: typeof startTask
   updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
   projectAdapterChanged?: () => boolean
   branchGuard?: (() => string | undefined) | undefined
@@ -132,6 +133,7 @@ export function createLoop(deps: LoopDeps) {
     orchestrationDepsRuntime,
     terminateTaskProcesses = () => terminateLiveTaskProcesses(paths),
     enqueueTask: enqueueTaskImpl = enqueueTask,
+    startTask: startTaskImpl = startTask,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
@@ -2031,7 +2033,7 @@ export function createLoop(deps: LoopDeps) {
         : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
       writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
       try {
-        await startTask(paths, runner, scanId, {
+        await startTaskImpl(paths, runner, scanId, {
           effort: config.scanEffort as 'high',
           model: config.scanModel === '' ? undefined : config.scanModel,
           setup: project.scanWorktreeSetup,
@@ -2503,7 +2505,7 @@ export function createLoop(deps: LoopDeps) {
           ? readFileSync(effortFile, 'utf8').replace(/[\s\r\n]/g, '')
           : config.taskEffort
         try {
-          await startTask(paths, runner, entry.taskId, {
+          await startTaskImpl(paths, runner, entry.taskId, {
             effort: effort as 'medium',
             model: config.taskModel === '' ? undefined : config.taskModel,
           })
@@ -2519,6 +2521,14 @@ export function createLoop(deps: LoopDeps) {
           previousGateFailures.delete(`task-startup-${entry.taskId}`)
           running += 1
         } catch (error) {
+          if (error instanceof StartupProcessRetainedError) {
+            event(
+              'ERROR', shortTaskId(entry.taskId),
+              `startup process tree PID ${error.pid} survived; task retained and loop stopped`,
+            )
+            writeFileSync(stopFile, '')
+            break
+          }
           const issueNumbers = issueNumbersForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumbers.length > 0) {
             recordIssueFailure(paths, entry.taskId)
