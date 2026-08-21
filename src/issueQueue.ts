@@ -1369,6 +1369,30 @@ async function releasePartialClaim(
   }
 }
 
+async function restoreReadyAfterClaimDrift(
+  forge: Forge,
+  issueNumber: number,
+  me: string,
+): Promise<void> {
+  await forge.unassignIssue(issueNumber, me)
+  const current = await forge.getIssue(issueNumber)
+  if (current.state !== 'open') return
+  if (!current.labels.includes(LABEL_READY)) {
+    await forge.addLabel(issueNumber, LABEL_READY)
+  }
+  for (const label of LIFECYCLE_LABELS) {
+    if (label !== LABEL_READY && current.labels.includes(label)) {
+      await forge.removeLabel(issueNumber, label)
+    }
+  }
+  const restored = await forge.getIssue(issueNumber)
+  if (restored.state === 'open'
+    && (restored.assignees.length !== 0
+      || !issueHasExactlyLifecycleLabel(restored, LABEL_READY))) {
+    throw new Error(`Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`)
+  }
+}
+
 async function releasePartialQuarantine(
   forge: Forge,
   issueNumber: number,
@@ -1435,10 +1459,12 @@ async function claimRemoteIssue(
     throw error
   }
   const winner = [...afterAssignment.assignees].sort()[0]
-  if (afterAssignment.state !== 'open'
-    || !issueHasExactlyLifecycleLabel(afterAssignment, LABEL_READY)
-    || winner !== me) {
+  if (afterAssignment.state !== 'open' || winner !== me) {
     await forge.unassignIssue(issue.number, me)
+    return { outcome: 'lost-race', issueNumber: issue.number }
+  }
+  if (!issueHasExactlyLifecycleLabel(afterAssignment, LABEL_READY)) {
+    await restoreReadyAfterClaimDrift(forge, issue.number, me)
     return { outcome: 'lost-race', issueNumber: issue.number }
   }
   try {
@@ -1457,10 +1483,12 @@ async function claimRemoteIssue(
   }
 
   const claimed = await forge.getIssue(issue.number)
-  if (claimed.state !== 'open'
-    || !issueHasExactlyLifecycleLabel(claimed, LABEL_IN_PROGRESS)
-    || [...claimed.assignees].sort()[0] !== me) {
+  if (claimed.state !== 'open' || [...claimed.assignees].sort()[0] !== me) {
     await forge.unassignIssue(issue.number, me)
+    return { outcome: 'lost-race', issueNumber: issue.number }
+  }
+  if (!issueHasExactlyLifecycleLabel(claimed, LABEL_IN_PROGRESS)) {
+    await restoreReadyAfterClaimDrift(forge, issue.number, me)
     return { outcome: 'lost-race', issueNumber: issue.number }
   }
 
