@@ -464,6 +464,36 @@ describe('forge poll budget', () => {
     }
   })
 
+  it('does not claim from a poll whose duplicate re-read cannot be verified', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const description = '[BUG] `src/shared.ts` duplicate finding'
+    await fakeForge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const duplicate = await fakeForge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-2'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    fakeForge.getIssue = async (issueNumber) => {
+      if (issueNumber === duplicate) throw new Error('duplicate re-read unavailable')
+      return getIssue(issueNumber)
+    }
+
+    await expect(loop.poll()).resolves.toBe('continue')
+
+    expect(runnerStarts).toEqual([])
+    expect(logText()).toContain(
+      'WARN issue queue unreachable: duplicate re-read unavailable',
+    )
+  })
+
   it('shows two review-origin fixes in the task log', async () => {
     initializeGitRepo()
     const loop = makeLoop({
