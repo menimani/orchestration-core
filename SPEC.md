@@ -138,7 +138,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
    process is alive and becomes `failed` when the process is gone. Markers in the
    transcript log are ignored — only the final-message file is authoritative. An ordinary
    completed task may additionally report `NO_CHANGE_WARRANTED` on its own line when its
-   investigation proves the requested change is already unnecessary.
+   investigation proves the requested change is already unnecessary. A missing task
+   status file means no status, but an existing file must be valid JSON with string
+   `task_id`, `started_at`, `updated_at`, `worktree`, and `branch` fields and a recognized
+   task state; `merged` additionally requires string `merge_commit` and `run_branch`
+   fields. Malformed JSON or a schema mismatch is not treated as absent: the read fails,
+   stopping the poll that encountered it, and the file is retained for operator repair.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
    `scan` for scans, are `review-c<n>` for automatic reviews of cycle `<n>`, and start
    with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes, scan findings, review-origin
@@ -187,7 +192,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    cleanup leaves a durable release intent and retains the task mapping until the daemon
    retries the release successfully. Reconciliation runs on each poll before stale-lease
    reaping; three consecutive failed polls stop the loop, while a successful poll clears
-   the failure streak.
+   the failure streak. Persisted issue mappings, release preparations, and release intents
+   are either empty or contain one positive safe integer per line. Any malformed entry
+   rejects the whole list instead of being skipped; reconciliation does not perform a
+   partial release or discard the file, so the complete state remains available for
+   operator repair.
 
 ## Growth and decisions
 
@@ -295,7 +304,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the cycle's scans all came back empty and one more empty cycle reaches
     `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
     re-read every poll (this is also the documented lever for forcing an early final
-    cycle on a running loop).
+    cycle on a running loop). A missing persisted counter reads as zero; an existing
+    counter must contain base-10 digits representing a non-negative safe integer.
+    Invalid contents, including an empty file, log the affected repository-relative
+    state path, write the stop file, and stop the loop without resetting or overwriting
+    the counter, retaining it for operator repair.
 14. Effort defaults: scans, queued tasks, and automatic reviews all run the runner at
     medium reasoning effort. Fixes spawned by an automatic review are the exception: they
     always run at high effort because they repair findings that escaped the original
