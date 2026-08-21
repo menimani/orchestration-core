@@ -2036,7 +2036,7 @@ export function createLoop(deps: LoopDeps) {
       }
       prepareIntegration()
     }
-    const requestedScans = [1, 2, 3, 4].includes(config.scanParallel) ? config.scanParallel : 2
+    const requestedScans = config.scanParallel
     let nScans = requestedScans
     let sectionGroups: number[][] = []
     if (nScans > 1) {
@@ -2052,6 +2052,10 @@ export function createLoop(deps: LoopDeps) {
         event('WARN', `scan-template.md has no numbered sections; requested ${requestedScans} parallel scans, running one full scan`)
         nScans = 1
       } else {
+        if (requestedScans > sections.length) {
+          nScans = sections.length
+          event('WARN', `requested ${requestedScans} parallel scans but scan-template.md has ${sections.length} numbered sections; running ${nScans} scans`)
+        }
         sectionGroups = partitionScanSections(sections, nScans)
       }
     }

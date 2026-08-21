@@ -1601,6 +1601,23 @@ describe('cycle gate', () => {
     expect(Math.max(...assignmentSizes) - Math.min(...assignmentSizes)).toBeLessThanOrEqual(1)
   })
 
+  it('clamps parallel scans to the numbered section count and reports the request', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n\n### 1. First check\n\n### 2. Second check\n',
+    )
+    const loop = makeLoop({ scanParallel: 5, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(2)
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-1'), 'utf8')).toBe('2\n')
+    expect(logText()).toContain(
+      'WARN requested 5 parallel scans but scan-template.md has 2 numbered sections; running 2 scans',
+    )
+  })
+
   it('falls back to one full scan with a warning when the template has no numbered sections', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })

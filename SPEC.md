@@ -119,6 +119,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `AUTO_MERGE` | `true` | Merge completed local task worktrees automatically. `false` leaves them completed and eligible for an explicit or later merge. |
 | `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
+| `SCAN_PARALLEL` | `2` | Requested scan processes per cycle. It must be at least 1 and is reduced at launch when the scan template has fewer numbered sections. |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
 | `REVIEW_EFFORT` | `medium` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
 | `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter, or an external adapter module. |
@@ -286,7 +287,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 ## Scans and cycles
 
 12. Scans start on idle (nothing queued or running), with `SCAN_PARALLEL` scans at a
-    time; the value must be at least 1, and values above 4 are clamped to 4. Scans run
+    time; the value must be at least 1. A request above the number of numbered scan
+    sections is reduced to that section count and reported in the event log. Scans run
     over disjoint groups of the checklist's sections. A cycle counts as empty only when
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
