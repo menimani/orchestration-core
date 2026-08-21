@@ -41,6 +41,29 @@ afterEach(() => {
 })
 
 describe('terminateLiveTaskProcesses', () => {
+  it('finds and terminates a registry-only process retained after startup failure', () => {
+    recordTaskProcess(paths, 'retained-startup', 101, () => 'started:101')
+    const alive = new Set([101])
+    const terminateProcessTree = vi.fn((pid: number) => {
+      alive.delete(pid)
+      return true
+    })
+    const os = {
+      processStartIdentity: (pid: number) => alive.has(pid) ? `started:${pid}` : undefined,
+      processIsAlive: (pid: number) => alive.has(pid),
+      terminateProcessTree,
+    } as unknown as OperatingSystem
+
+    const result = terminateLiveTaskProcesses(paths, os)
+
+    expect(terminateProcessTree).toHaveBeenCalledWith(101)
+    expect(result).toEqual({
+      terminated: [{ taskId: 'retained-startup', pid: 101 }],
+      failures: [],
+    })
+    expect(taskProcessPid(paths, 'retained-startup')).toBeUndefined()
+  })
+
   it('attempts every live task tree even when one cannot be terminated', () => {
     writeRunningTask('first-task', 101)
     writeRunningTask('second-task', 102)
