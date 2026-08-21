@@ -1088,14 +1088,45 @@ describe('claimIssueGroup', () => {
     expect(after.labels).toContain(LABEL_READY)
   })
 
-  it('releases its assignment when the lifecycle changes immediately after assignment', async () => {
-    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` changes during assignment')
+  it.each([
+    ['loses its lifecycle label', async (number: number) => {
+      await forge.removeLabel(number, LABEL_READY)
+    }],
+    ['gains a conflicting lifecycle label', async (number: number) => {
+      await forge.addLabel(number, LABEL_MERGE_FAILED)
+    }],
+  ] as const)(
+    'restores a claimable ready state when an issue %s immediately after assignment',
+    async (_description, driftLifecycle) => {
+      const issueNumber = await readyIssue('[BUG] `src/a/b.ts` changes during assignment')
+      const issue = await forge.getIssue(issueNumber)
+      const assignIssue = forge.assignIssue.bind(forge)
+      forge.assignIssue = async (number, assignee) => {
+        await assignIssue(number, assignee)
+        if (number === issueNumber) await driftLifecycle(number)
+      }
+
+      const result = await claimIssueGroup(forge, paths, [issue], 'worker-a', appendRequirements)
+
+      expect(result).toEqual({ outcome: 'lost-race', issueNumber })
+      const after = await forge.getIssue(issueNumber)
+      expect(after.assignees).toEqual([])
+      expect(after.labels).toEqual([LABEL_FINDING, LABEL_READY])
+      expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
+      expect(readdirSync(paths.tasksDir)).toEqual([])
+    },
+  )
+
+  it('restores ready when the lifecycle drifts after claim label mutation', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` changes after label mutation')
     const issue = await forge.getIssue(issueNumber)
-    const assignIssue = forge.assignIssue.bind(forge)
-    const removeLabel = forge.removeLabel.bind(forge)
-    forge.assignIssue = async (number, assignee) => {
-      await assignIssue(number, assignee)
-      if (number === issueNumber) await removeLabel(number, LABEL_READY)
+    const getIssue = forge.getIssue.bind(forge)
+    let reads = 0
+    forge.getIssue = async (number) => {
+      if (number === issueNumber && ++reads === 3) {
+        await forge.addLabel(number, LABEL_MERGE_FAILED)
+      }
+      return getIssue(number)
     }
 
     const result = await claimIssueGroup(forge, paths, [issue], 'worker-a', appendRequirements)
@@ -1103,9 +1134,28 @@ describe('claimIssueGroup', () => {
     expect(result).toEqual({ outcome: 'lost-race', issueNumber })
     const after = await forge.getIssue(issueNumber)
     expect(after.assignees).toEqual([])
-    expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
-    expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
-    expect(readdirSync(paths.tasksDir)).toEqual([])
+    expect(after.labels).toEqual([LABEL_FINDING, LABEL_READY])
+  })
+
+  it('rejects lifecycle-drift compensation that does not restore ready', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` cannot restore ready')
+    const issue = await forge.getIssue(issueNumber)
+    const assignIssue = forge.assignIssue.bind(forge)
+    const removeLabel = forge.removeLabel.bind(forge)
+    forge.assignIssue = async (number, assignee) => {
+      await assignIssue(number, assignee)
+      if (number === issueNumber) await removeLabel(number, LABEL_READY)
+    }
+    forge.addLabel = async () => {}
+
+    await expect(claimIssueGroup(forge, paths, [issue], 'worker-a', appendRequirements))
+      .rejects.toThrow(
+        `Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`,
+      )
+
+    const after = await forge.getIssue(issueNumber)
+    expect(after.assignees).toEqual([])
+    expect(after.labels).toEqual([LABEL_FINDING])
   })
 
   it('releases the assignment when the first post-assignment read fails', async () => {
