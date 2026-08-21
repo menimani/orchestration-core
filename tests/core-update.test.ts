@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Forge } from '../src/adapters/forge.ts'
 import type { Runner } from '../src/adapters/runner.ts'
+import { loadMonitoredProject } from '../src/adapters/project.ts'
 import { loadConfig } from '../src/config.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateEvent, type CoreUpdateRuntime,
@@ -76,6 +77,7 @@ function makeLoop(
   runtime: CoreUpdateRuntime = { packageRoot, git },
   forge: Forge = makeFakeForge(),
   runnerOverride?: Runner,
+  projectAdapterChanged?: () => boolean,
 ) {
   mkdirSync(join(paths.root, 'templates'), { recursive: true })
   writeFileSync(join(paths.root, 'templates', 'scan-template.md'), '{{SCAN_SCOPE}}\n')
@@ -92,6 +94,7 @@ function makeLoop(
     forge,
     runner,
     project: stubProject,
+    projectAdapterChanged,
     log: (line) => events.push(line),
     now: () => new Date(2026, 7, 12, 0, 0, 0),
     updateCoreBeforeCycle: (cycle) =>
@@ -111,6 +114,11 @@ beforeEach(() => {
   mkdirSync(upstreamRoot)
   configureRepository(upstreamRoot)
   writeFileSync(join(upstreamRoot, 'core.txt'), 'version one\n')
+  mkdirSync(join(upstreamRoot, 'src', 'adapters'), { recursive: true })
+  writeFileSync(
+    join(upstreamRoot, 'src', 'adapters', 'project.ts'),
+    'export interface ProjectAdapter { name: string }\n',
+  )
   mkdirSync(join(upstreamRoot, 'skills'), { recursive: true })
   writeFileSync(join(upstreamRoot, 'skills', 'manifest.json'), JSON.stringify({
     commandPrefixPlaceholder: '{{ORCHESTRATION_COMMAND_PREFIX}}',
@@ -220,6 +228,49 @@ describe('pre-cycle core update', () => {
       .toBe('version two\n')
     expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
     expect(events.some((line) => line.startsWith('Restarting core'))).toBe(false)
+  })
+
+  it('continues an integration poll when a core update changes an adapter type import', async () => {
+    const adapterDirectory = join(paths.root, 'project')
+    mkdirSync(adapterDirectory, { recursive: true })
+    writeFileSync(join(adapterDirectory, 'project-consumer.ts'), `
+import type { ProjectAdapter } from '../ts/src/adapters/project.ts'
+
+export const consumerProject: ProjectAdapter & Record<string, unknown> = {
+  name: 'consumer',
+  pullRequest: {
+    categories: [{ label: 'Changes' }],
+    titleFallback: 'no changes',
+    classifyCommit: () => ({ category: 'Changes' }),
+    detectRisks: () => [],
+  },
+  preCommitChecks: [],
+  mergeChecks: () => [],
+  cycleSuite: () => [],
+}
+`)
+    commit(repoRoot, 'test: add consumer adapter fixture')
+    const monitored = await loadMonitoredProject(paths.root, { PROJECT: 'consumer' })
+    const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    writeFileSync(
+      join(upstreamRoot, 'src', 'adapters', 'project.ts'),
+      'export interface ProjectAdapter { name: string; updated?: true }\n',
+    )
+    const newCore = commit(upstreamRoot, 'feat: update project adapter types')
+    const loop = makeLoop(
+      config({ INTEGRATION_BRANCH: 'integration/run' }),
+      { packageRoot, git },
+      makeFakeForge(),
+      undefined,
+      monitored.sourceChanged,
+    )
+
+    expect(await loop.poll(), events.join('\n')).toBe('continue')
+
+    expect(monitored.sourceChanged()).toBe(false)
+    expect(runnerStarts).toHaveLength(1)
+    expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
+    expect(events.some((line) => line.startsWith('Restarting adapter'))).toBe(false)
   })
 
   it('lets the forge adapter resolve repository shorthand for Git', async () => {
