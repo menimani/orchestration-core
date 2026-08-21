@@ -33,6 +33,8 @@ export interface DaemonProcess {
 }
 
 export interface OperatingSystem {
+  /** User-facing label for the environment that exercised local verification. */
+  verificationEnvironmentLabel(): string
   launchDaemon(options: DaemonLaunchOptions): Promise<DaemonProcess>
   processTreeRootPid(env?: NodeJS.ProcessEnv): number
   /** Stable identity for this particular use of a PID, or undefined when unverifiable. */

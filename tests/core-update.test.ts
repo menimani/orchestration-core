@@ -115,6 +115,7 @@ beforeEach(() => {
   writeFileSync(join(upstreamRoot, 'skills', 'manifest.json'), JSON.stringify({
     commandPrefixPlaceholder: '{{ORCHESTRATION_COMMAND_PREFIX}}',
     packagePathPrefixPlaceholder: '{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}',
+    projectGuidancePlaceholder: '{{ORCHESTRATION_PROJECT_GUIDANCE}}',
     skills: ['loop-start'],
   }))
   writeUpstreamSkill('version one: {{ORCHESTRATION_COMMAND_PREFIX}} loop\n')
@@ -308,18 +309,17 @@ describe('pre-cycle core update', () => {
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
   })
 
-  it('preserves and reports a divergent interactive shared skill', async () => {
+  it('overwrites and commits a changed managed interactive shared skill', async () => {
     const interactiveSkill = join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md')
     writeFileSync(interactiveSkill, 'consumer command\n')
     commit(repoRoot, 'chore: customize interactive skill fixture')
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(readFileSync(interactiveSkill, 'utf8').replaceAll('\r', '')).toBe('consumer command\n')
+    expect(readFileSync(interactiveSkill, 'utf8').replaceAll('\r', ''))
+      .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
-    expect(events).toContain(
-      'WARN shared skill .claude/skills/loop-start differs from the last synced copy; left unchanged',
-    )
+    expect(events).toContain('Updated skill refreshed .claude/skills/loop-start')
   })
 
   it('stops before starting a cycle when a shared skill target fails to synchronize', async () => {
@@ -341,7 +341,7 @@ describe('pre-cycle core update', () => {
     expect(events.some((line) => line.includes('simulated target failure'))).toBe(false)
   })
 
-  it('pulls core changes but preserves and reports a committed consumer skill divergence', async () => {
+  it('pulls core changes and overwrites a committed managed skill edit', async () => {
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     writeFileSync(installed, 'consumer command\n')
     commit(repoRoot, 'chore: customize loop skill')
@@ -350,11 +350,9 @@ describe('pre-cycle core update', () => {
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
-    expect(readFileSync(installed, 'utf8').replaceAll('\r', '')).toBe('consumer command\n')
+    expect(readFileSync(installed, 'utf8').replaceAll('\r', '')).toBe('upstream command\n')
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
-    expect(events).toContain(
-      'WARN shared skill .agents/skills/loop-start differs from the last synced copy; left unchanged',
-    )
+    expect(events).toContain('Updated skill refreshed .agents/skills/loop-start')
   })
 
   it('requires managed staged changes to be cleared before syncing any destination', async () => {

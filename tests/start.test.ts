@@ -8,8 +8,10 @@ import type { Runner } from '../src/adapters/runner.ts'
 import {
   branchName, logFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
-import { recordTaskProcess } from '../src/processRegistry.ts'
-import { startTask, worktreeAddArgs } from '../src/start.ts'
+import { recordTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
+import {
+  startTask, StartupOwnershipUnknownError, StartupProcessRetainedError, worktreeAddArgs,
+} from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -155,6 +157,33 @@ describe('startTask', () => {
     expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('setup exploded')
   })
 
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'retains the task without publishing status when the runner returns invalid PID %s',
+    async (pid) => {
+      const taskId = `20260821_000000_001_invalid-pid-${String(pid).replace(/\W/g, '-')}`
+      writeFileSync(specFile(paths, taskId), '# invalid runner PID\n')
+      const terminateProcessTree = vi.spyOn(operatingSystem, 'terminateProcessTree')
+      const report = vi.fn()
+
+      await expect(startTask(paths, {
+        sharedSkills: fakeRunnerSharedSkills,
+        start: vi.fn(async () => pid),
+      }, taskId, { effort: 'medium', report })).rejects.toMatchObject({
+        name: 'StartupOwnershipUnknownError',
+        message: `Runner returned invalid PID ${String(pid)}; process ownership could not be established.`,
+      } satisfies Partial<StartupOwnershipUnknownError>)
+
+      expect(terminateProcessTree).not.toHaveBeenCalled()
+      expect(statusMocks.writeStatus).not.toHaveBeenCalled()
+      expect(readStatus(paths, taskId)).toBeUndefined()
+      expect(taskProcessPid(paths, taskId)).toBeUndefined()
+      expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+      expect(report).not.toHaveBeenCalledWith(expect.stringContaining('Started.'))
+      expect(readFileSync(logFile(paths, taskId), 'utf8'))
+        .toContain('Task startup ownership is unknown:')
+    },
+  )
+
   it('stops and verifies a launched process tree before recording status persistence failure', async () => {
     const taskId = '20260814_000000_001_status-failure'
     const pid = 54321
@@ -189,16 +218,24 @@ describe('startTask', () => {
     writeFileSync(specFile(paths, taskId), '# cleanup failure\n')
     vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
     vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('runner-start')
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
     statusMocks.writeStatus.mockRejectedValueOnce(new Error('status persistence failed'))
 
-    await expect(startTask(paths, {
+    const startup = startTask(paths, {
       sharedSkills: fakeRunnerSharedSkills,
       start: vi.fn(async () => pid),
-    }, taskId, { effort: 'medium' }))
-      .rejects.toThrow(`Task startup failed and process tree ${pid} could not be stopped.`)
+    }, taskId, { effort: 'medium' })
+
+    await expect(startup).rejects.toMatchObject({
+      name: 'StartupProcessRetainedError',
+      pid,
+      message: `Task startup failed and process tree ${pid} could not be stopped.`,
+    } satisfies Partial<StartupProcessRetainedError>)
 
     expect(statusMocks.writeStatus).toHaveBeenCalledTimes(1)
     expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(taskProcessPid(paths, taskId)).toBe(pid)
     expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('Process tree cleanup failed')
   })
 })

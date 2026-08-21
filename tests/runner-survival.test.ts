@@ -1,15 +1,16 @@
 import { spawnSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
 } from '../src/restart.ts'
+import { resolvedPath } from './pathComparison.ts'
 import { TestProcessRegistry } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -137,8 +138,8 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
   await waitUntil(() => processIsAlive(daemonPid), 'CLI daemon did not survive its launcher')
   const probes = readFileSync(probeFile, 'utf8').trim().split(/\r?\n/)
     .map((line) => JSON.parse(line) as SpawnProbe)
-  const daemonSpawn = probes.find((probe) => probe.command === process.execPath
-    && probe.args.includes('--marker-output'))
+  const daemonSpawn = probes.find((probe) => probe.args.includes('--marker-output'))
+  expect(resolvedPath(daemonSpawn?.command ?? '')).toBe(resolvedPath(process.execPath))
   if (process.platform === 'win32') {
     // The wrapper owns the independent hidden console. The daemon is deliberately
     // attached to it so every console tool in the daemon tree inherits that console.
@@ -153,8 +154,10 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
   // The daemon must inherit the repository the launcher was pointed at. Started in the
   // package directory instead, it resolves its own checkout as the repository and the
   // startup dependency install reinstalls the package it is running from.
-  expect(resolve(daemonSpawn?.cwd ?? '').toLowerCase())
-    .toBe(realpathSync.native(root).toLowerCase())
+  expect(resolvedPath(daemonSpawn?.cwd ?? '')).toBe(resolvedPath(root))
+  const repoOption = daemonSpawn?.args.indexOf('--repo') ?? -1
+  expect(repoOption).toBeGreaterThan(-1)
+  expect(resolvedPath(daemonSpawn?.args[repoOption + 1] ?? '')).toBe(resolvedPath(root))
 
   mkdirSync(dirname(stopFile), { recursive: true })
   writeFileSync(stopFile, '')

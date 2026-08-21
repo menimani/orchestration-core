@@ -28,7 +28,9 @@ import {
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, transitionStatus } from './status.ts'
-import { startTask } from './start.ts'
+import {
+  startTask, StartupOwnershipUnknownError, StartupProcessRetainedError,
+} from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
   terminateLiveTaskProcesses, type TaskProcessTermination,
@@ -42,6 +44,7 @@ import { currentBranchPushRemote, currentBranchTrackingRemote } from './gitRemot
 import { LoopWarningLog } from './loopLog.ts'
 import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
+import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
@@ -77,10 +80,12 @@ export interface LoopDeps {
   orchestrationDepsRuntime?: OrchestrationDepsRuntime | undefined
   terminateTaskProcesses?: (() => TaskProcessTermination) | undefined
   enqueueTask?: typeof enqueueTask
+  startTask?: typeof startTask
   updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
   projectAdapterChanged?: () => boolean
   branchGuard?: (() => string | undefined) | undefined
   prepareIntegrationWorktree?: (() => void) | undefined
+  os?: OperatingSystem | undefined
 }
 
 interface QueueEntry {
@@ -132,6 +137,8 @@ export function createLoop(deps: LoopDeps) {
     orchestrationDepsRuntime,
     terminateTaskProcesses = () => terminateLiveTaskProcesses(paths),
     enqueueTask: enqueueTaskImpl = enqueueTask,
+    startTask: startTaskImpl = startTask,
+    os = operatingSystem,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
@@ -1665,6 +1672,17 @@ export function createLoop(deps: LoopDeps) {
       }
     }
     if (status.state !== 'open' || status.isDraft) return false
+    const gateEnvironment = os.verificationEnvironmentLabel()
+    event(
+      'Status', 'Environments',
+      `run verification exercised ${gateEnvironment}; promoted branch was not run in any other environment`,
+    )
+    for (const check of project.manualEnvironmentChecks ?? []) {
+      event(
+        'Status', `${check.environment} check`,
+        `not run for this branch; run ${check.command}`,
+      )
+    }
     // The body reflects branch history, so it also lists intermediate changes that were
     // later reverted — the need to rewrite it must be impossible to overlook.
     marker(`LOOP_DONE: ${prUrl}`)
@@ -2031,7 +2049,7 @@ export function createLoop(deps: LoopDeps) {
         : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
       writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
       try {
-        await startTask(paths, runner, scanId, {
+        await startTaskImpl(paths, runner, scanId, {
           effort: config.scanEffort as 'high',
           model: config.scanModel === '' ? undefined : config.scanModel,
           setup: project.scanWorktreeSetup,
@@ -2503,7 +2521,7 @@ export function createLoop(deps: LoopDeps) {
           ? readFileSync(effortFile, 'utf8').replace(/[\s\r\n]/g, '')
           : config.taskEffort
         try {
-          await startTask(paths, runner, entry.taskId, {
+          await startTaskImpl(paths, runner, entry.taskId, {
             effort: effort as 'medium',
             model: config.taskModel === '' ? undefined : config.taskModel,
           })
@@ -2519,6 +2537,22 @@ export function createLoop(deps: LoopDeps) {
           previousGateFailures.delete(`task-startup-${entry.taskId}`)
           running += 1
         } catch (error) {
+          if (error instanceof StartupOwnershipUnknownError) {
+            event(
+              'ERROR', shortTaskId(entry.taskId),
+              'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+            )
+            writeFileSync(stopFile, '')
+            break
+          }
+          if (error instanceof StartupProcessRetainedError) {
+            event(
+              'ERROR', shortTaskId(entry.taskId),
+              `startup process tree PID ${error.pid} survived; task retained and loop stopped`,
+            )
+            writeFileSync(stopFile, '')
+            break
+          }
           const issueNumbers = issueNumbersForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumbers.length > 0) {
             recordIssueFailure(paths, entry.taskId)

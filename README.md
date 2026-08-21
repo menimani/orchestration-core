@@ -80,9 +80,18 @@ task dispatch, leaving any staged output available for diagnosis. Loop commands 
 rendered for
 the installed package location (`npm run` here, `npm run -C orchestration/ts` in the
 layout below).
-The sync tracks the exact content it generated: a consumer edit, deletion, or added
-support file is reported and retained, while repository skills absent from the manifest
-are never touched. Canonical skills live outside a nested runner skill directory,
+Every shared `SKILL.md` has one renderer-supplied injection point named
+`{{ORCHESTRATION_PROJECT_GUIDANCE}}` at its end. A consumer can supply the fragment for
+skill `<name>` at `orchestration/project/skills/<name>.md`, outside the vendored
+`orchestration/ts` subtree. The renderer adds Markdown separation before a non-empty
+fragment and emits nothing at the injection point when the file is absent, so consumers
+without fragments receive the same output as before.
+The sync tracks the exact content it generated. A rendered skill recorded in
+`.orchestration-core-sync.json` is core-owned; direct edits, deletions, and added support
+files are overwritten by a clean sync. Put repository-specific additions in the project
+fragment instead. A repository skill absent from the managed index is repository-owned
+and is never touched. Canonical
+skills live outside a nested runner skill directory,
 so importing the package does not expose a second qualified copy of each shared skill.
 
 Nothing here decides that shipping is safe. Deployment stays a human action.
@@ -130,6 +139,23 @@ deleted paths, and an on-demand diff reader; the adapter supplies the repository
 vocabulary and path rules. If the repository intentionally has no PR checks, it may
 explicitly declare
 `ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
+An adapter may also list manual cross-environment verification commands for operators:
+
+```ts
+manualEnvironmentChecks: [{
+  environment: 'Linux',
+  command: 'npm run test:linux',
+}],
+```
+
+Each `command` is a complete, repository-owned command that a person runs from the
+consumer repository root, against the run branch, in the named `environment`. The loop
+never executes these commands. On the final promotion path for a non-empty run, it logs
+the environment that ran the automated gate and states that the branch was not run in
+other environments. It then logs every `manualEnvironmentChecks` entry, including its
+command and the fact that it was not run for the branch. These status lines are operator
+guidance; they do not block or delay promotion.
+
 The core-owned pre-commit hook keeps its branch guard repository-neutral by reading the
 tracking remote's advertised default branch. It fails closed when that branch cannot be
 resolved, so repositories using names such as `trunk` receive the same protection without
@@ -227,6 +253,20 @@ the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision fro
 head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's
 checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
 and verifies the revision that actually came up.
+
+Every command accepts `--repo <path>` to act on that repository instead of the repository
+containing the working directory. The path may name the repository or a directory inside
+it; the CLI resolves its Git root and requires that root to contain `orchestration/`.
+Without `--repo`, repository discovery is unchanged. Repeat the option for fleet status:
+
+```bash
+npm run loop-status -- --repo ../service-a --repo ../service-b
+```
+
+With multiple repositories, `loop-status` prints one named line per repository with its
+running state, run branch, queued count, and in-flight count. With zero or one explicit
+repository, it retains the existing detailed single-repository output. Repository paths
+are supplied per invocation; the core keeps no repository registry or checkout inventory.
 
 If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a

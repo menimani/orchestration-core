@@ -9,7 +9,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
-import { branchName, finalMessageFile, orchPaths, statusFile, worktreeDir } from '../src/paths.ts'
+import {
+  absolutePackageScriptCommand, branchName, finalMessageFile, orchPaths, statusFile, worktreeDir,
+} from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import { writeStatus } from '../src/status.ts'
@@ -54,6 +56,7 @@ const CORE_ENV = {
 }
 
 let repoRoot: string
+let extraRoots: string[]
 const testProcesses = new TestProcessRegistry()
 
 beforeEach(() => {
@@ -61,6 +64,7 @@ beforeEach(() => {
   // (RUNNER~1 for runneradmin), while paths the CLI reports are canonical. Compare like
   // with like, or the assertions differ only in a place no developer machine reproduces.
   repoRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'orch-cli-')))
+  extraRoots = []
   const init = spawnSync('git', ['init'], { cwd: repoRoot, windowsHide: true })
   expect(init.status).toBe(0)
 })
@@ -68,6 +72,7 @@ beforeEach(() => {
 afterEach(async () => {
   await testProcesses.cleanup()
   rmSync(repoRoot, { recursive: true, force: true })
+  for (const root of extraRoots) rmSync(root, { recursive: true, force: true })
 })
 
 function daemonFile(name: string): string {
@@ -193,6 +198,120 @@ describe('command registry', () => {
       vi.doUnmock('node:child_process')
       vi.resetModules()
     }
+  })
+})
+
+describe('repository selection', () => {
+  it('resolves an explicit repository other than the working directory', () => {
+    const otherRepo = join(repoRoot, 'other-repository')
+    mkdirSync(otherRepo)
+    expect(spawnSync('git', ['init'], { cwd: otherRepo, windowsHide: true }).status).toBe(0)
+    mkdirSync(join(otherRepo, 'orchestration'))
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'new', 'explicit-repository-task', '--repo', otherRepo],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(otherRepo, 'orchestration', 'tasks', 'explicit-repository-task.md')))
+      .toBe(true)
+    expect(existsSync(join(repoRoot, 'orchestration', 'tasks', 'explicit-repository-task.md')))
+      .toBe(false)
+  })
+
+  it('continues to resolve the repository from the working directory without the option', () => {
+    const result = spawnSync(process.execPath, [CLI, 'new', 'working-directory-task'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(repoRoot, 'orchestration', 'tasks', 'working-directory-task.md')))
+      .toBe(true)
+  })
+
+  it('reports an explicit path that is not a git repository', () => {
+    const notRepository = mkdtempSync(join(tmpdir(), 'orch-cli-not-repo-'))
+    extraRoots.push(notRepository)
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop-status', '--repo', notRepository],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(`Repository path '${notRepository}' is not a git repository.`)
+  })
+
+  it('reports an explicit git repository without an orchestration directory', () => {
+    const repository = join(repoRoot, 'repository-without-orchestration')
+    mkdirSync(repository)
+    expect(spawnSync('git', ['init'], { cwd: repository, windowsHide: true }).status).toBe(0)
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop-status', '--repo', repository],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('is missing its orchestration directory')
+    expect(result.stderr).toContain(join(repository, 'orchestration'))
+  })
+
+  it('reports two repositories with one fleet-status line each', async () => {
+    const firstPaths = orchPaths(repoRoot)
+    writeFileSync(join(firstPaths.queueDir, 'loop.pid'), processMarkerText(processMarker(process.pid)))
+    writeFileSync(join(firstPaths.queueDir, 'run-branch.txt'), 'run/first\n')
+    writeFileSync(join(firstPaths.queueDir, 'backlog.txt'), 'first:0\nsecond:1\n')
+    await writeStatus(firstPaths, 'first-in-flight', 'running')
+
+    const secondRepo = join(repoRoot, 'second-repository')
+    mkdirSync(secondRepo)
+    expect(spawnSync('git', ['init'], { cwd: secondRepo, windowsHide: true }).status).toBe(0)
+    const secondPaths = orchPaths(secondRepo)
+    writeFileSync(join(secondPaths.queueDir, 'run-branch.txt'), 'run/second\n')
+    await writeStatus(secondPaths, 'second-completed', 'completed')
+    await writeStatus(secondPaths, 'second-failed', 'failed')
+
+    const firstRoot = git(['rev-parse', '--show-toplevel']).trim()
+    const secondRoot = git(['rev-parse', '--show-toplevel'], secondRepo).trim()
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop-status', '--repo', repoRoot, '--repo', secondRepo],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout.trim().split(/\r?\n/)).toEqual([
+      `${firstRoot}: loop=running; run branch=run/first; queued=2; in flight=1`,
+      `${secondRoot}: loop=not running; run branch=run/second; queued=0; in flight=2`,
+    ])
   })
 })
 
@@ -564,6 +683,54 @@ describe('manually promoted run ending', () => {
 })
 
 describe('loop daemon ownership', () => {
+  it('keeps a cross-repository daemon and its reported commands bound to the target', async () => {
+    const callerRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'orch-cli-caller-')))
+    extraRoots.push(callerRoot)
+    mkdirSync(join(repoRoot, 'orchestration'))
+    writeFileSync(join(repoRoot, 'relative-runner.mjs'), [
+      "import { join } from 'node:path'",
+      'export default {',
+      '  sharedSkills: {',
+      "    destinationRoot: (root) => join(root, '.test-runner', 'skills'),",
+      '    renderFile: (contents) => contents,',
+      '  },',
+      '  start: async () => process.pid,',
+      '}',
+      '',
+    ].join('\n'))
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'loop', '--approve-mode', 'local', '--daemon', '--repo', repoRoot],
+      {
+        cwd: callerRoot,
+        env: {
+          ...CORE_ENV,
+          AUTO_PR: 'false',
+          ISSUE_QUEUE_ENABLED: 'false',
+          MAX_SCAN_CYCLES: '0',
+          RUNNER: './relative-runner.mjs',
+          SCAN_ENABLED: 'true',
+        },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Started the loop in the background')
+    expect(result.stdout).toContain(
+      `Check: ${absolutePackageScriptCommand(repoRoot, 'loop-status')}`,
+    )
+    expect(result.stdout).toContain(`Stop: ${absolutePackageScriptCommand(repoRoot, 'stop')}`)
+    const match = /Started the loop in the background \(PID=(\d+)\)/.exec(result.stdout)
+    expect(match).not.toBeNull()
+    const daemonPid = Number(match?.[1])
+    testProcesses.trackPid(daemonPid, { tree: true })
+    await waitUntil(() => !pidIsAlive(daemonPid), 'cross-repository daemon did not stop')
+  })
+
   it('refuses a non-interactive start without an approved mode before side effects', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop'], {
       cwd: repoRoot,

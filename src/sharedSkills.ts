@@ -25,6 +25,7 @@ interface SharedSkillTarget {
 interface SharedSkillsManifest {
   commandPrefixPlaceholder: string
   packagePathPrefixPlaceholder: string
+  projectGuidancePlaceholder: string
   skills: string[]
 }
 
@@ -36,6 +37,11 @@ interface SharedSkillsState {
 interface RenderedFile {
   path: string
   contents: Buffer
+}
+
+/** Repository-owned guidance appended at the shared skill's named injection point. */
+export function projectGuidanceFileForSkill(repoRoot: string, skill: string): string {
+  return join(repoRoot, 'orchestration', 'project', 'skills', `${skill}.md`)
 }
 
 export interface SharedSkillsSyncResult {
@@ -61,10 +67,12 @@ export function sharedSkillManagedTargets(
   packageRoot: string,
   adapters: readonly SharedSkillsAdapter[],
 ): SharedSkillManagedTarget[] {
-  const manifest = readManifest(packageRoot)
+  readManifest(packageRoot)
   return skillTargets(repoRoot, adapters).map((target) => {
-    const paths = [join(target.destinationRoot, STATE_FILE)]
-    paths.push(...manifest.skills.map((skill) => join(target.destinationRoot, skill)))
+    const stateFile = join(target.destinationRoot, STATE_FILE)
+    const state = readState(stateFile)
+    const paths = [stateFile]
+    paths.push(...Object.keys(state.skills).map((skill) => join(target.destinationRoot, skill)))
     for (const legacyRoot of target.legacyRoots) {
       const stateFile = join(legacyRoot, STATE_FILE)
       if (!existsSync(stateFile)) continue
@@ -87,9 +95,11 @@ function readManifest(packageRoot: string): SharedSkillsManifest {
   const parsed = object(JSON.parse(readFileSync(file, 'utf8')))
   const placeholder = parsed?.commandPrefixPlaceholder
   const packagePathPrefixPlaceholder = parsed?.packagePathPrefixPlaceholder
+  const projectGuidancePlaceholder = parsed?.projectGuidancePlaceholder
   const skills = parsed?.skills
   if (typeof placeholder !== 'string' || placeholder === ''
     || typeof packagePathPrefixPlaceholder !== 'string' || packagePathPrefixPlaceholder === ''
+    || typeof projectGuidancePlaceholder !== 'string' || projectGuidancePlaceholder === ''
     || !Array.isArray(skills)
     || skills.some((skill) => typeof skill !== 'string'
       || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(skill))) {
@@ -101,6 +111,7 @@ function readManifest(packageRoot: string): SharedSkillsManifest {
   return {
     commandPrefixPlaceholder: placeholder,
     packagePathPrefixPlaceholder,
+    projectGuidancePlaceholder,
     skills: skills as string[],
   }
 }
@@ -145,15 +156,33 @@ function renderedSkill(
   if (!existsSync(join(source, 'SKILL.md'))) {
     throw new Error(`shared skill has no SKILL.md: ${source}`)
   }
-  return filesIn(source).map((file) => ({
-    ...file,
-    contents: target.renderFile(file.contents, {
-      repoRoot,
-      packageRoot,
-      commandPrefixPlaceholder: manifest.commandPrefixPlaceholder,
-      packagePathPrefixPlaceholder: manifest.packagePathPrefixPlaceholder,
-    }),
-  }))
+  const guidanceFile = projectGuidanceFileForSkill(repoRoot, skill)
+  const guidance = existsSync(guidanceFile) ? readFileSync(guidanceFile, 'utf8') : ''
+  return filesIn(source).map((file) => {
+    let contents = file.contents
+    if (file.path === 'SKILL.md') {
+      const sourceContents = contents.toString('utf8')
+      const injection = guidance === ''
+        ? ''
+        : `${sourceContents.endsWith('\n') ? '\n' : '\n\n'}${guidance}`
+      // The injection point is synthetic and always follows the canonical skill. A
+      // literal placeholder in the skill's prose documents the mechanism and must stay.
+      const withInjectionPoint = `${sourceContents}${manifest.projectGuidancePlaceholder}`
+      const injectionPoint = withInjectionPoint.length - manifest.projectGuidancePlaceholder.length
+      contents = Buffer.from(
+        `${withInjectionPoint.slice(0, injectionPoint)}${injection}`,
+      )
+    }
+    return {
+      ...file,
+      contents: target.renderFile(contents, {
+        repoRoot,
+        packageRoot,
+        commandPrefixPlaceholder: manifest.commandPrefixPlaceholder,
+        packagePathPrefixPlaceholder: manifest.packagePathPrefixPlaceholder,
+      }),
+    }
+  })
 }
 
 /** Every directory this repository's skills must appear in, each listed once. */
@@ -265,8 +294,8 @@ function migrateLegacySkills(
 
 /**
  * Materialize the package's declared shared skills into one target directory. The state
- * records the exact rendered tree last written, so later syncs never mistake a person's
- * edit (including an added support file or a deletion) for an old generated copy.
+ * records which skill trees the core owns. Later syncs replace those trees, including
+ * consumer edits, added support files, and deletions; unrecorded skills remain untouched.
  */
 function syncTarget(
   repoRoot: string,
@@ -312,10 +341,14 @@ function syncTarget(
       }
       const currentHash = hashFiles(filesIn(destination))
       if (currentHash === desiredHash) {
-        if (previousHash === desiredHash) managedPaths.push(destination)
+        if (previousHash !== undefined) {
+          nextState.skills[skill] = desiredHash
+          managedPaths.push(destination)
+          if (previousHash !== desiredHash) updated.push(reported(skill))
+        }
         continue
       }
-      if (previousHash === undefined || currentHash !== previousHash) {
+      if (previousHash === undefined) {
         conflicts.push(reported(skill))
         continue
       }
@@ -327,7 +360,11 @@ function syncTarget(
       continue
     }
     if (previousHash !== undefined) {
-      conflicts.push(reported(skill))
+      replaceDirectory(destination, desiredFiles, os)
+      nextState.skills[skill] = desiredHash
+      updated.push(reported(skill))
+      changedPaths.push(destination)
+      managedPaths.push(destination)
       continue
     }
     replaceDirectory(destination, desiredFiles, os)

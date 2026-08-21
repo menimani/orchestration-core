@@ -10,11 +10,18 @@ Current state:
 
 !`npm run loop-status`
 
+To inspect repositories other than the working directory, pass `-- --repo <path>`.
+Repeat `--repo <path>` in the same `loop-status` invocation to get one fleet-status line
+per repository. The core does not remember repository paths between invocations.
+
 ## Stopping
 
 ```bash
 npm run stop
 ```
+
+Add `-- --repo <path>` to stop the loop for an explicitly named repository. The path
+must resolve to a Git repository containing `orchestration/`.
 
 This writes a stop file. The loop notices it on its next poll, so it exits within
 `POLL_INTERVAL` seconds — 30 by default. The command also terminates every live task

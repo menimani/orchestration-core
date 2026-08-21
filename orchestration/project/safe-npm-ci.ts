@@ -39,6 +39,8 @@ export function safeNpmCi(
   )
   let previousMoved = false
   let activated = false
+  let primaryFailure: unknown
+  let hasPrimaryFailure = false
 
   try {
     for (const input of INSTALL_INPUTS) {
@@ -73,13 +75,25 @@ export function safeNpmCi(
         runtime.warn(`Installed dependencies; old dependency backup remains at ${previousModules}: ${detail}`)
       }
     }
+  } catch (error) {
+    primaryFailure = error
+    hasPrimaryFailure = true
+    throw error
   } finally {
     // Once activation succeeds the staged directory no longer contains node_modules.
     // On every failure the checkout's original tree is either untouched or restored.
     try {
       runtime.remove(stagingRoot)
     } catch (error) {
-      if (!activated) throw error
+      if (!activated) {
+        if (hasPrimaryFailure) {
+          throw new AggregateError(
+            [primaryFailure, error],
+            'Dependency setup and staging cleanup both failed',
+          )
+        }
+        throw error
+      }
       const detail = error instanceof Error ? error.message : String(error)
       runtime.warn(`Installed dependencies; staging cleanup remains at ${stagingRoot}: ${detail}`)
     }

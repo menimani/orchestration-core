@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createClaudeRunner } from '../src/adapters/runner-claude.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { createClaudeSharedSkills } from '../src/adapters/shared-skills-claude.ts'
-import { syncSharedSkills } from '../src/sharedSkills.ts'
+import { sharedSkillManagedTargets, syncSharedSkills } from '../src/sharedSkills.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 
 let fixtureRoot: string
@@ -29,6 +29,7 @@ function writeManifest(skills: string[]): void {
   writeFileSync(join(packageRoot, 'skills', 'manifest.json'), `${JSON.stringify({
     commandPrefixPlaceholder: '{{ORCHESTRATION_COMMAND_PREFIX}}',
     packagePathPrefixPlaceholder: '{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}',
+    projectGuidancePlaceholder: '{{ORCHESTRATION_PROJECT_GUIDANCE}}',
     skills,
   }, null, 2)}\n`)
 }
@@ -103,7 +104,56 @@ describe('shared skill sync', () => {
       .toBe('source: `src`\n')
   })
 
-  it('refreshes exact generated copies and retains unlisted repository skills', () => {
+  it('renders repository guidance at the shared skill injection point', () => {
+    const guidance = join(repoRoot, 'orchestration', 'project', 'skills', 'loop-start.md')
+    mkdirSync(dirname(guidance), { recursive: true })
+    writeFileSync(guidance, '## Repository guidance\n\nUse the consumer queue.\n')
+
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters())
+
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toBe([
+        "npm run -C 'orchestration/ts' loop -- --daemon",
+        '',
+        '## Repository guidance',
+        '',
+        'Use the consumer queue.',
+        '',
+      ].join('\n'))
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toContain('## Repository guidance')
+  })
+
+  it('preserves a literal guidance token while injecting repository guidance once', () => {
+    writeSkill('loop-start', [
+      'The synthetic endpoint is `{{ORCHESTRATION_PROJECT_GUIDANCE}}`.',
+      '',
+    ].join('\n'))
+    const guidance = join(repoRoot, 'orchestration', 'project', 'skills', 'loop-start.md')
+    mkdirSync(dirname(guidance), { recursive: true })
+    writeFileSync(guidance, '## Repository guidance\n\nUse the consumer queue.\n')
+
+    syncSharedSkills(repoRoot, packageRoot, [interactiveSharedSkills])
+
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toBe([
+        'The synthetic endpoint is `{{ORCHESTRATION_PROJECT_GUIDANCE}}`.',
+        '',
+        '## Repository guidance',
+        '',
+        'Use the consumer queue.',
+        '',
+      ].join('\n'))
+  })
+
+  it('renders exactly the canonical skill when repository guidance is absent', () => {
+    syncSharedSkills(repoRoot, packageRoot, [interactiveSharedSkills])
+
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'git-commit', 'SKILL.md'), 'utf8'))
+      .toBe('Commit without a command.\n')
+  })
+
+  it('refreshes exact generated copies and leaves an unmanaged repository skill untouched', () => {
     const localSkill = join(repoRoot, '.agents', 'skills', 'verify-changes', 'SKILL.md')
     mkdirSync(join(repoRoot, '.agents', 'skills', 'verify-changes'), { recursive: true })
     writeFileSync(localSkill, 'repository gates\n')
@@ -153,7 +203,7 @@ describe('shared skill sync', () => {
     )).toBe('updated commit instructions\n')
   })
 
-  it('reports and preserves a generated skill that the consumer changed', () => {
+  it('overwrites a changed managed skill across rendered targets', () => {
     syncSharedSkills(repoRoot, packageRoot, skillAdapters())
     const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     writeFileSync(installed, 'consumer version\n')
@@ -161,19 +211,39 @@ describe('shared skill sync', () => {
 
     const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
-    expect(result.conflicts).toEqual(['.agents/skills/loop-start'])
-    expect(result.updated).toEqual(['.claude/skills/loop-start'])
-    expect(readFileSync(installed, 'utf8')).toBe('consumer version\n')
+    expect(result.conflicts).toEqual([])
+    expect(result.updated).toEqual([
+      '.agents/skills/loop-start', '.claude/skills/loop-start',
+    ])
+    expect(readFileSync(installed, 'utf8')).toBe('upstream version\n')
   })
 
-  it('treats deletion of a managed skill as deliberate divergence', () => {
+  it('leaves a manifest skill untouched when the managed index does not record it', () => {
+    const localSkill = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
+    mkdirSync(dirname(localSkill), { recursive: true })
+    writeFileSync(localSkill, 'repository-owned workflow\n')
+
+    const result = syncSharedSkills(repoRoot, packageRoot, [runner.sharedSkills])
+
+    expect(result.conflicts).toEqual(['.agents/skills/loop-start'])
+    expect(readFileSync(localSkill, 'utf8')).toBe('repository-owned workflow\n')
+    const state = JSON.parse(readFileSync(
+      join(repoRoot, '.agents', 'skills', '.orchestration-core-sync.json'), 'utf8',
+    )) as { skills: Record<string, string> }
+    expect(state.skills).not.toHaveProperty('loop-start')
+    expect(sharedSkillManagedTargets(repoRoot, packageRoot, [runner.sharedSkills])[0]
+      ?.managedPaths).not.toContain(join(repoRoot, '.agents', 'skills', 'loop-start'))
+  })
+
+  it('restores a deleted managed skill', () => {
     syncSharedSkills(repoRoot, packageRoot, skillAdapters())
     rmSync(join(repoRoot, '.agents', 'skills', 'loop-start'), { recursive: true })
 
     const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters())
 
-    expect(result.conflicts).toEqual(['.agents/skills/loop-start'])
-    expect(existsSync(join(repoRoot, '.agents', 'skills', 'loop-start'))).toBe(false)
+    expect(result.conflicts).toEqual([])
+    expect(result.updated).toEqual(['.agents/skills/loop-start'])
+    expect(existsSync(join(repoRoot, '.agents', 'skills', 'loop-start'))).toBe(true)
   })
 
   it('removes hash-matching legacy copies and their one-time migration state', () => {

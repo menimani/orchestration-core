@@ -5,6 +5,9 @@ import type { OperatingSystem } from './os.ts'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
+const VERIFICATION_ENVIRONMENT_LABEL = process.platform === 'darwin'
+  ? 'macOS'
+  : process.platform === 'linux' ? 'Linux' : process.platform
 
 export interface PosixOperatingSystemRuntime {
   signalProcessGroup(processGroupId: number, signal?: NodeJS.Signals | number): void
@@ -135,6 +138,7 @@ export function createOperatingSystem(
   }
 
   return {
+    verificationEnvironmentLabel: () => VERIFICATION_ENVIRONMENT_LABEL,
     async launchDaemon(options) {
       const output = openSync(options.outputFile, 'a')
       let child

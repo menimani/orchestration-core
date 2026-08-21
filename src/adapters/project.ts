@@ -58,6 +58,13 @@ export interface InfrastructureFailure {
   remediation: string
 }
 
+export interface ManualEnvironmentCheck {
+  /** Environment exercised by this opt-in check, such as Linux. */
+  environment: string
+  /** Repository-owned command a person can run before promotion. */
+  command: string
+}
+
 export interface WorktreeSetupStep {
   label: string
   /** Directory the command runs in, relative to the new worktree root. */
@@ -117,6 +124,8 @@ export interface ProjectAdapter {
   preCommitChecks: MergeCheck[]
   /** Suites the cycle gate runs against the branch tip. Steps default to light gates only. */
   cycleSuite(): SuiteStep[]
+  /** Cross-environment checks available to a person but never run automatically by the loop. */
+  manualEnvironmentChecks?: ManualEnvironmentCheck[]
   /** Repository-specific probe used when a cycle suite step needs Docker. */
   cycleSuiteDockerProbe?: DockerProbe
   /** Classify repository-specific infrastructure failures found in command output. */

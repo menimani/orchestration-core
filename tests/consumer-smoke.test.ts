@@ -91,6 +91,8 @@ describe('consumer startup', () => {
       'loop',
       '--marker-output',
       markerLog,
+      '--repo',
+      repository,
     ]
 
     const command = restartModule.loopRestartCommand(invocation)

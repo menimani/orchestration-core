@@ -58,6 +58,15 @@ from or equivalent to `orchestration/tests/*.sh`.
   marker as an exact standalone line, while a background loop writes that exact line to
   `logs/loop-markers.log`. The corresponding result is represented separately by an
   aligned display event in `loop.log`.
+- Every command accepts a global `--repo <path>` option. When present, Git resolves the
+  named path to its repository root and the CLI verifies both that it is a Git repository
+  and that its root contains an `orchestration/` directory before dispatch. Without the
+  option, repository discovery from the working directory is unchanged. All commands
+  accept one repository; `loop-status` additionally accepts repeated `--repo` options.
+  For two or more repositories it emits one line per repository naming the root, loop
+  running state, recorded run branch, queued count, and in-flight count. Its existing
+  detailed output is unchanged for a single repository. Paths are supplied per command;
+  the core stores no repository registry, configuration inventory, or checkout list.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
@@ -321,9 +330,18 @@ are not parsed by `loadConfig` and are not operator-file settings.
     command prefix because the canonical sources already use that agent's format. Both use
     `npm run` as the command prefix in the owning repository and
     `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
-    served once. The
-    sync replaces only a tree whose content matches its recorded last output; consumer
-    divergence is warned and retained, and skills absent from the manifest are untouched.
+    served once. The renderer supplies one named
+    `{{ORCHESTRATION_PROJECT_GUIDANCE}}` injection point at the end of every shared
+    `SKILL.md`. For skill `<name>`, it reads the repository-owned fragment
+    `orchestration/project/skills/<name>.md`, outside a consumer's vendored package
+    subtree, and inserts it with Markdown separation. An absent fragment renders the point
+    to no bytes, preserving the prior output exactly. The sync replaces only a tree
+    recorded in its
+    `.orchestration-core-sync.json` managed index is core-owned, and a clean sync overwrites
+    edits, deletions, and added support files in its rendered tree; repository-specific
+    additions belong in the fragment. A skill absent from the managed index is
+    repository-owned and remains
+    entirely untouched.
     In a subtree consumer, before writing any destination, the sync verifies that every
     managed destination has no staged changes. An unverifiable or non-clean managed index
     is fatal and stops the cycle before any destination is served. A destination rendering
@@ -389,6 +407,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     for a person instead of promoting a branch its own review keeps rejecting.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
+    the event log names the host environment where the run verification executed and
+    states that the branch was not run elsewhere. Repository adapters may also declare
+    manual cross-environment checks; the log names each check and its command while
+    explicitly recording that the loop did not run it for the branch.
     `LOOP_DONE: <PR URL>` is emitted to the machine-marker sink and as a formatted
     `loop.log` copy, session state is cleaned up, and the loop exits. When the run branch
     has no commits beyond the fetched default branch, the PR, CI, and review

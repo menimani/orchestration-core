@@ -22,6 +22,13 @@ describe('operating-system adapters', () => {
     expect(createPosixOperatingSystem()).not.toHaveProperty('platform')
   })
 
+  it('labels the local verification environment without exposing the platform selector', () => {
+    expect(createWindowsOperatingSystem().verificationEnvironmentLabel()).toBe('Windows')
+    expect(createPosixOperatingSystem().verificationEnvironmentLabel()).toBe(
+      process.platform === 'darwin' ? 'macOS' : process.platform === 'linux' ? 'Linux' : process.platform,
+    )
+  })
+
   it('launches a POSIX daemon without exposing the platform choice to callers', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-os-'))
     const child = Object.assign(new EventEmitter(), {

@@ -34,7 +34,8 @@ import {
 } from './merge.ts'
 import { deploy } from './deploy.ts'
 import {
-  isScanTaskId, logFile, orchPaths, packageFile, packageScriptCommand, type OrchPaths,
+  absolutePackageScriptCommand, isScanTaskId, logFile, orchPaths, packageFile,
+  type OrchPaths,
 } from './paths.ts'
 import { pruneTasks } from './prune.ts'
 import { branchAcceptsCommits, runPreCommitChecks } from './preCommit.ts'
@@ -76,11 +77,37 @@ async function loadProject(pathsRoot: string) {
   return projectModule.loadProject(pathsRoot)
 }
 
-function repoRoot(): string {
-  return execFileSync('git', ['rev-parse', '--show-toplevel'], {
-    encoding: 'utf8',
-    windowsHide: true,
-  }).trim()
+function repoRoot(repository?: string): string {
+  const args = repository === undefined
+    ? ['rev-parse', '--show-toplevel']
+    : ['-C', repository, 'rev-parse', '--show-toplevel']
+  let root: string
+  try {
+    root = execFileSync('git', args, {
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim()
+  } catch {
+    if (repository !== undefined) {
+      throw new Error(`Repository path '${repository}' is not a git repository.`)
+    }
+    throw new Error('The working directory is not inside a git repository.')
+  }
+  if (repository !== undefined) {
+    const orchestration = join(root, 'orchestration')
+    let isDirectory = false
+    try {
+      isDirectory = statSync(orchestration).isDirectory()
+    } catch {
+      // Report a missing directory consistently for absent paths and non-directory entries.
+    }
+    if (!isDirectory) {
+      throw new Error(
+        `Repository '${root}' is missing its orchestration directory: ${orchestration}`,
+      )
+    }
+  }
+  return root
 }
 
 function loadRepositoryConfig(paths: OrchPaths, env: NodeJS.ProcessEnv = process.env): LoopConfig {
@@ -787,24 +814,51 @@ const cmdQueue: Command = async (paths) => {
   return cmdStatus(paths, [])
 }
 
-const cmdLoopStatus: Command = async (paths) => {
-  // A compact answer to "is it running, and what is in flight". Always exits 0 so it
-  // is safe to embed in a skill preamble.
+interface LoopStatusSummary {
+  running: boolean
+  pid?: number
+  runBranch: string
+  queued: number
+  inFlight: number
+}
+
+function loopStatusSummary(paths: OrchPaths): LoopStatusSummary {
   const pidFile = join(paths.queueDir, 'loop.pid')
   const ownerPid = existsSync(pidFile)
     ? currentProcessMarkerPid(readFileSync(pidFile, 'utf8'))
     : undefined
-  if (ownerPid !== undefined) {
-    console.log(`loop: running (PID=${ownerPid})`)
-  } else {
-    console.log('loop: not running')
-  }
-
   const backlog = join(paths.queueDir, 'backlog.txt')
   const queued = existsSync(backlog)
     ? readFileSync(backlog, 'utf8').split(/\r?\n/).filter((line) => line !== '').length
     : 0
-  console.log(queued === 0 ? 'queued: none' : `queued: ${queued}`)
+  const inFlight = listTaskIds(paths).filter((taskId) => {
+    const status = readStatus(paths, taskId)?.status
+    return status === 'running' || status === 'completed' || status === 'failed'
+  }).length
+  const runBranchFile = join(paths.queueDir, 'run-branch.txt')
+  const runBranch = existsSync(runBranchFile)
+    ? readFileSync(runBranchFile, 'utf8').trim() || 'none'
+    : 'none'
+  return {
+    running: ownerPid !== undefined,
+    ...(ownerPid === undefined ? {} : { pid: ownerPid }),
+    runBranch,
+    queued,
+    inFlight,
+  }
+}
+
+const cmdLoopStatus: Command = async (paths) => {
+  // A compact answer to "is it running, and what is in flight". Always exits 0 so it
+  // is safe to embed in a skill preamble.
+  const summary = loopStatusSummary(paths)
+  if (summary.pid !== undefined) {
+    console.log(`loop: running (PID=${summary.pid})`)
+  } else {
+    console.log('loop: not running')
+  }
+
+  console.log(summary.queued === 0 ? 'queued: none' : `queued: ${summary.queued}`)
 
   // Only tasks that still need a decision; merged and cleaned-up ones need none.
   console.log('in flight:')
@@ -817,6 +871,18 @@ const cmdLoopStatus: Command = async (paths) => {
     }
   }
   if (!found) console.log('  (nothing)')
+  return 0
+}
+
+async function cmdMultiLoopStatus(repositoryRoots: string[]): Promise<number> {
+  for (const root of repositoryRoots) {
+    const paths = orchPaths(root)
+    const summary = loopStatusSummary(paths)
+    console.log(
+      `${root}: loop=${summary.running ? 'running' : 'not running'}; `
+      + `run branch=${summary.runBranch}; queued=${summary.queued}; in flight=${summary.inFlight}`,
+    )
+  }
   return 0
 }
 
@@ -938,7 +1004,7 @@ const cmdLoop: Command = async (paths, args) => {
     // A daemon child inherits the launcher's approved mode. The launcher already
     // reported it, and raw child output would bypass the aligned daemon log helper.
     if (markerOutput === undefined) {
-      const runner = await loadRunner(config.runner, { env: process.env })
+      const runner = await loadRunner(config.runner, { env: process.env, repoRoot: paths.repoRoot })
       reportResolvedLoopConfig(paths, config, runner, console.log)
     }
     if (!await approveLoopStart(config, approvedMode)) return 1
@@ -969,7 +1035,7 @@ const cmdLoop: Command = async (paths, args) => {
     )
     const daemonArgs = [
       packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
-      '--approve-mode', queueMode(config),
+      '--approve-mode', queueMode(config), '--repo', paths.repoRoot,
     ]
     // The daemon must work on the repository this launcher was pointed at. Starting it
     // in the package directory instead made it resolve its own checkout as the
@@ -994,8 +1060,8 @@ const cmdLoop: Command = async (paths, args) => {
     daemon.release()
     console.log(`Started the loop in the background (PID=${daemonPid})`)
     console.log(`Log: ${loopLog}`)
-    console.log(`Check: ${packageScriptCommand(paths.repoRoot, 'loop-status')}`)
-    console.log(`Stop: ${packageScriptCommand(paths.repoRoot, 'stop')}`)
+    console.log(`Check: ${absolutePackageScriptCommand(paths.repoRoot, 'loop-status')}`)
+    console.log(`Stop: ${absolutePackageScriptCommand(paths.repoRoot, 'stop')}`)
     return 0
   }
   const startupResultFile = process.env[LOOP_STARTUP_RESULT_FILE_ENV]
@@ -1417,7 +1483,30 @@ const commands: Record<string, Command> = {
 }
 
 async function main(): Promise<number> {
-  const [commandName, ...args] = process.argv.slice(2)
+  const rawArgs = process.argv.slice(2)
+  const repositories: string[] = []
+  const positional: string[] = []
+  for (let i = 0; i < rawArgs.length; i++) {
+    const arg = rawArgs[i] as string
+    if (arg === '--repo') {
+      const value = rawArgs[++i]
+      if (value === undefined || value === '') {
+        console.error('ERROR: --repo requires a repository path')
+        return 1
+      }
+      repositories.push(value)
+    } else if (arg.startsWith('--repo=')) {
+      const value = arg.slice('--repo='.length)
+      if (value === '') {
+        console.error('ERROR: --repo requires a repository path')
+        return 1
+      }
+      repositories.push(value)
+    } else {
+      positional.push(arg)
+    }
+  }
+  const [commandName, ...args] = positional
   if (commandName === undefined || commandName === '') {
     console.error(`Usage: npm run <command>\nAvailable: ${Object.keys(commands).join(', ')}`)
     return 1
@@ -1428,8 +1517,15 @@ async function main(): Promise<number> {
     console.error(`Available commands: ${Object.keys(commands).join(', ')}`)
     return 1
   }
-  const paths = orchPaths(repoRoot(), commandName !== 'loop')
   try {
+    if (repositories.length > 1 && commandName !== 'loop-status') {
+      console.error('ERROR: only loop-status accepts more than one --repo option')
+      return 1
+    }
+    if (commandName === 'loop-status' && repositories.length > 1) {
+      return await cmdMultiLoopStatus(repositories.map((repository) => repoRoot(repository)))
+    }
+    const paths = orchPaths(repoRoot(repositories[0]), commandName !== 'loop')
     return await command(paths, args)
   } catch (error) {
     console.error((error as Error).message)

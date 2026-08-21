@@ -292,6 +292,16 @@ Edit the generated \`orchestration/project/project-<name>.ts\` from the decision
 only when init created it in this run. If an adapter already existed, report it and ask
 before changing it; deliberate divergence is not a repair target.
 
+Shared skills rendered into \`.agents/skills/\` or \`.claude/skills/\` and recorded in that
+directory's \`.orchestration-core-sync.json\` are core-owned. Do not edit their rendered
+trees: clean syncs overwrite edits, deletions, and added support files. To add
+repository-specific guidance to shared skill \`<name>\`, write the fragment at
+\`orchestration/project/skills/<name>.md\`. The renderer places it at the automatic
+\`{{ORCHESTRATION_PROJECT_GUIDANCE}}\` injection point at the end of \`SKILL.md\`; when no
+fragment exists, the point renders to nothing. Skills absent from the managed index are
+repository-owned and remain untouched, so a repository may still supply a complete local
+skill beside the rendered ones.
+
 Keep \`preCommitChecks\` fast. The core-owned hook supplies the default-branch guard and
 selects these checks from staged paths. Do not create repository-owned hook scripts.
 
@@ -327,6 +337,10 @@ Current state:
 
 Run \`npm run loop-status\` and use its output as context before continuing.
 
+To inspect repositories other than the working directory, pass \`-- --repo <path>\`.
+Repeat \`--repo <path>\` in the same \`loop-status\` invocation to get one fleet-status line
+per repository. The core does not remember repository paths between invocations.
+
 ## Before starting
 
 A second loop against the same repository will fight the first over the queue and the
@@ -339,6 +353,9 @@ The loop commits and merges on its own, so start it on a topic branch, never on 
 \`\`\`bash
 npm run loop -- --approve-mode local --daemon
 \`\`\`
+
+Add \`--repo <path>\` after \`--\` to start the loop for an explicitly named repository.
+The path must resolve to a Git repository containing \`orchestration/\`.
 
 \`--daemon\` is what puts it in the background; without it the loop holds the terminal.
 The command approves the default local queue explicitly. If
@@ -420,11 +437,18 @@ Current state:
 
 Run \`npm run loop-status\` and use its output as context before continuing.
 
+To inspect repositories other than the working directory, pass \`-- --repo <path>\`.
+Repeat \`--repo <path>\` in the same \`loop-status\` invocation to get one fleet-status line
+per repository. The core does not remember repository paths between invocations.
+
 ## Stopping
 
 \`\`\`bash
 npm run stop
 \`\`\`
+
+Add \`-- --repo <path>\` to stop the loop for an explicitly named repository. The path
+must resolve to a Git repository containing \`orchestration/\`.
 
 This writes a stop file. The loop notices it on its next poll, so it exits within
 \`POLL_INTERVAL\` seconds — 30 by default. The command also terminates every live task

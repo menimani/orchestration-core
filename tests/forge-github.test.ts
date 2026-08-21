@@ -30,6 +30,24 @@ const openIssueFixture = {
   futureIssueField: 'ignored',
 }
 
+function restIssue(issue: Record<string, unknown>): Record<string, unknown> {
+  return {
+    number: issue.number,
+    state: typeof issue.state === 'string' ? issue.state.toLowerCase() : issue.state,
+    title: issue.title,
+    body: issue.body,
+    user: issue.author,
+    labels: issue.labels,
+    assignees: issue.assignees,
+    updated_at: issue.updatedAt,
+    ...('pull_request' in issue ? { pull_request: issue.pull_request } : {}),
+  }
+}
+
+function restPages(issues: Record<string, unknown>[]): string {
+  return JSON.stringify([issues.map(restIssue)])
+}
+
 function forgeReturning(output: unknown): Forge {
   const command: GithubCommand = async (_root, args) => {
     if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
@@ -39,6 +57,9 @@ function forgeReturning(output: unknown): Forge {
         permission: login === 'outside-user' ? 'none' : 'admin',
         role_name: login === 'outside-user' ? null : 'admin',
       })
+    }
+    if (args.includes('--paginate') && Array.isArray(output)) {
+      return restPages(output as Record<string, unknown>[])
     }
     return JSON.stringify(output)
   }
@@ -254,15 +275,15 @@ describe('GitHub issue queue repository targeting', () => {
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
       if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'consumer/project' })
+      if (args.includes('--paginate')) {
+        return restPages(args.at(-1)?.includes('state=closed')
+          ? [{ ...openIssueFixture, state: 'CLOSED' }]
+          : [openIssueFixture])
+      }
       if (args[0] === 'api') return JSON.stringify({ permission: 'write' })
       if (args[0] === 'label' && args[1] === 'list') return '[]'
       if (args[0] === 'issue' && args[1] === 'create') {
         return 'https://github.com/consumer/project/issues/42\n'
-      }
-      if (args[0] === 'issue' && args[1] === 'list') {
-        return JSON.stringify(args.includes('closed')
-          ? [{ ...openIssueFixture, state: 'CLOSED' }]
-          : [openIssueFixture])
       }
       if (args[0] === 'issue' && args[1] === 'view') {
         return JSON.stringify(args.includes('comments')
@@ -315,6 +336,43 @@ describe('GitHub issue queue repository targeting', () => {
     })).rejects.toThrow('Unable to resolve the current repository for the issue queue')
     expect(calls).toEqual([['repo', 'view', '--json', 'nameWithOwner']])
   })
+
+  it.each([
+    { state: 'open' as const, list: (forge: Forge) => forge.listOpenIssues('loop:finding') },
+    { state: 'closed' as const, list: (forge: Forge) => forge.listClosedIssues('loop:finding') },
+  ])('fetches every page when more than 200 $state issues match', async ({ state, list }) => {
+    const calls: string[][] = []
+    const issues = Array.from({ length: 205 }, (_, index) => ({
+      ...openIssueFixture,
+      number: index + 1,
+      state: state.toUpperCase(),
+      body: index === 0 ? null : openIssueFixture.body,
+    }))
+    const pages = [issues.slice(0, 100), issues.slice(100, 200), issues.slice(200)]
+      .map((page) => page.map(restIssue))
+    pages[2]?.push(restIssue({
+      ...openIssueFixture,
+      number: 206,
+      state: state.toUpperCase(),
+      pull_request: { url: 'https://api.github.com/repos/example/repo/pulls/206' },
+    }))
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args.includes('--paginate')) return JSON.stringify(pages)
+      return JSON.stringify({ permission: 'write' })
+    }
+
+    const listed = await list(createGithubForge('repo-root', command))
+
+    expect(listed).toHaveLength(205)
+    expect(listed[0]?.body).toBe('')
+    expect(listed.at(-1)?.number).toBe(205)
+    expect(calls.filter((args) => args.includes('--paginate'))).toEqual([[
+      'api', '--paginate', '--slurp',
+      `repos/example/repo/issues?state=${state}&labels=loop%3Afinding&per_page=100`,
+    ]])
+  })
 })
 
 describe('GitHub author permissions', () => {
@@ -329,7 +387,7 @@ describe('GitHub author permissions', () => {
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
       if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
-      if (args[0] === 'issue') return JSON.stringify(issues)
+      if (args.includes('--paginate')) return restPages(issues)
       const login = args[1]?.split('/').at(-2)
       const permission = login === 'read-member' ? 'read'
         : login === 'triage-collaborator' ? 'triage'
@@ -342,16 +400,15 @@ describe('GitHub author permissions', () => {
 
     expect(normalized.map((issue) => issue.author.hasWriteAccess))
       .toEqual([false, false, true, true])
-    expect(calls.filter((args) => args[0] === 'api')).toHaveLength(3)
+    expect(calls.filter((args) => args[1]?.includes('/collaborators/'))).toHaveLength(3)
   })
 
   it('observes permission revocation on the fresh issue read used by a claim', async () => {
     let permission = 'write'
     const command: GithubCommand = async (_root, args) => {
       if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
-      if (args[0] === 'issue') {
-        return JSON.stringify(args[1] === 'list' ? [openIssueFixture] : openIssueFixture)
-      }
+      if (args.includes('--paginate')) return restPages([openIssueFixture])
+      if (args[0] === 'issue') return JSON.stringify(openIssueFixture)
       return JSON.stringify({ permission })
     }
     const forge = createGithubForge('repo-root', command)
@@ -445,7 +502,7 @@ describe('GitHub forge JSON schemas', () => {
     expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
     expect(calls.map((args) => args.join(' '))).toEqual([
       'repo view --json nameWithOwner',
-      'issue list --state open --repo example/repo --label loop:finding --limit 200 --json number,state,title,body,author,labels,assignees,updatedAt',
+      'api --paginate --slurp repos/example/repo/issues?state=open&labels=loop%3Afinding&per_page=100',
       'api rate_limit',
     ])
   })
@@ -550,12 +607,15 @@ describe('GitHub forge JSON schemas', () => {
       'repo-root',
       async (_root, args) => {
         if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+        if (args.includes('--paginate')) {
+          return restPages([
+            openIssueFixture,
+            { ...openIssueFixture, number: 358, state: 'CLOSED' },
+            { ...openIssueFixture, number: 359 },
+          ])
+        }
         if (args[0] === 'api') return JSON.stringify({ permission: 'write' })
-        return JSON.stringify([
-          openIssueFixture,
-          { ...openIssueFixture, number: 358, state: 'CLOSED' },
-          { ...openIssueFixture, number: 359 },
-        ])
+        return '[]'
       },
       (message) => reports.push(message),
     )
@@ -668,14 +728,14 @@ describe('GitHub forge JSON schemas', () => {
       {
         output: [{ ...openIssueFixture, number: '357' }],
         invoke: (forge) => forge.listOpenIssues('loop:ready'),
-        command: 'gh issue list',
-        path: '[0].number',
+        command: 'gh api',
+        path: '[0][0].number',
       },
       {
         output: [{ ...openIssueFixture, state: 'CLOSED', updatedAt: 42 }],
         invoke: (forge) => forge.listClosedIssues('loop:done'),
-        command: 'gh issue list',
-        path: '[0].updatedAt',
+        command: 'gh api',
+        path: '[0][0].updated_at',
       },
       {
         output: { comments: [{
@@ -707,11 +767,12 @@ describe('gh JSON field selections', () => {
     'reactionGroups', 'state', 'stateReason', 'title', 'updatedAt', 'url',
   ])
 
-  it('asks issue list and issue view only for fields gh supports', async () => {
+  it('asks issue view only for fields gh supports', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
       if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args.includes('--paginate')) return '[[]]'
       if (args[0] === 'api') return JSON.stringify({ permission: 'admin', role_name: 'admin' })
       if (args[1] === 'view') return JSON.stringify(openIssueFixture)
       return '[]'
@@ -723,10 +784,10 @@ describe('gh JSON field selections', () => {
     await forge.getIssue(1)
 
     const selections = calls
-      .filter((args) => args[0] === 'issue' && (args[1] === 'list' || args[1] === 'view'))
+      .filter((args) => args[0] === 'issue' && args[1] === 'view')
       .map((args) => args[args.indexOf('--json') + 1] as string)
 
-    expect(selections.length).toBe(3)
+    expect(selections.length).toBe(1)
     for (const selection of selections) {
       for (const field of selection.split(',')) {
         expect(ISSUE_FIELDS.has(field), `gh does not offer ${field} on issues`).toBe(true)
