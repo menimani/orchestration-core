@@ -46,6 +46,23 @@ describe('safe npm clean install', () => {
     expect(readFileSync(marker, 'utf8')).toBe('working\n')
   })
 
+  it('reports both the install and staging cleanup failures', () => {
+    const installFailure = new Error('install failed')
+    const cleanupFailure = new Error('cleanup failed')
+    const failed = runtime({
+      install: () => { throw installFailure },
+      remove: () => { throw cleanupFailure },
+    })
+
+    try {
+      safeNpmCi(root, failed)
+      expect.fail('safeNpmCi should throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError)
+      expect((error as AggregateError).errors).toEqual([installFailure, cleanupFailure])
+    }
+  })
+
   it('activates a complete staged dependency tree', () => {
     const oldMarker = writeDependency(join(root, 'node_modules'), 'old-dependency', 'old\n')
     const installed = runtime({
