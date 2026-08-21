@@ -139,6 +139,23 @@ deleted paths, and an on-demand diff reader; the adapter supplies the repository
 vocabulary and path rules. If the repository intentionally has no PR checks, it may
 explicitly declare
 `ciChecksExpected: false`; otherwise zero checks never satisfy an enabled CI gate.
+An adapter may also list manual cross-environment verification commands for operators:
+
+```ts
+manualEnvironmentChecks: [{
+  environment: 'Linux',
+  command: 'npm run test:linux',
+}],
+```
+
+Each `command` is a complete, repository-owned command that a person runs from the
+consumer repository root, against the run branch, in the named `environment`. The loop
+never executes these commands. On the final promotion path for a non-empty run, it logs
+the environment that ran the automated gate and states that the branch was not run in
+other environments. It then logs every `manualEnvironmentChecks` entry, including its
+command and the fact that it was not run for the branch. These status lines are operator
+guidance; they do not block or delay promotion.
+
 The core-owned pre-commit hook keeps its branch guard repository-neutral by reading the
 tracking remote's advertised default branch. It fails closed when that branch cannot be
 resolved, so repositories using names such as `trunk` receive the same protection without
