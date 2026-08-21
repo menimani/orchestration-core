@@ -11,6 +11,10 @@ Current state:
 
 !`npm run loop-status`
 
+To inspect repositories other than the working directory, pass `-- --repo <path>`.
+Repeat `--repo <path>` in the same `loop-status` invocation to get one fleet-status line
+per repository. The core does not remember repository paths between invocations.
+
 ## Before starting
 
 A second loop against the same repository will fight the first over the queue and the
@@ -21,11 +25,34 @@ The loop commits and merges on its own, so start it on a topic branch, never on 
 ## Starting
 
 ```bash
-npm run loop -- --daemon
+npm run loop -- --approve-mode local --daemon
 ```
 
+Add `--repo <path>` after `--` to start the loop for an explicitly named repository.
+The path must resolve to a Git repository containing `orchestration/`.
+
 `--daemon` is what puts it in the background; without it the loop holds the terminal.
-Settings go in front of the command:
+The command approves the default local queue explicitly. If
+`ISSUE_QUEUE_ENABLED=true`, replace `local` with `issue`; the loop refuses a mismatch.
+It prints the resolved configuration before asking for terminal confirmation or checking
+the non-interactive approval flag.
+Settings may go in front of the command, or in `orchestration/config.json` under the same
+uppercase names. Manage that file with `npm run config -- list`,
+`get <SETTING>`, `set <SETTING> <value>`, and `unset <SETTING>`; do not hand-edit it. File
+values take precedence over environment variables, which take precedence over defaults.
+The configuration command writes through a temporary file and renames it atomically. The
+loop picks up valid file changes at the next use and logs old and new values; a malformed
+file or invalid value stops the run and reports the file, setting, and failure instead of
+using the last good or environment value.
+
+`FORGE` and `RUNNER` stay pinned because changing the owning component abandons in-flight
+work. `ISSUE_QUEUE_ENABLED` and `WORKER_MODE` stay pinned because mode changes strand
+claimed issues. `INTEGRATION_BRANCH` stays pinned to avoid splitting a run across branches.
+`UPSTREAM_REMOTE` and `UPSTREAM_BRANCH` stay pinned so the run cannot switch the core source
+it was built on. Changes to these seven settings are logged as ignored until restart; every
+other setting is live.
+
+Settings:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -38,15 +65,17 @@ Settings go in front of the command:
 | `REVIEW_EVERY_N_CYCLES` | 1 | Review every Nth cycle (the final cycle is always reviewed) |
 | `MAX_FINAL_REVIEW_ROUNDS` | 4 | Final-cycle rounds before the loop stops instead of promoting unresolved findings |
 | `MAX_BURST_FAILURES` | 3 | Task failures in one poll before the loop stops and blames the environment |
+| `MAX_ISSUE_RETRIES` | 3 | Consecutive task failures per issue before parking it as `loop:retry-exhausted` |
+| `INTEGRATION_BRANCH` | empty | Separate task/merge/PR branch; when set, the daemon checkout stays fixed for the run |
 | `ISSUE_QUEUE_ENABLED` | false | Findings become claimable forge issues instead of local queue entries (each concurrent worker requires a distinct forge account) |
 | `ISSUE_LEASE_HOURS` | 3 | Hours a claimed issue may sit untouched before its lease is reaped back to ready |
 | `CI_GATE_ENABLED` | false | Whether the gate waits for CI — a draft PR has no checks, so waiting would hang |
 | `MAX_CONSECUTIVE_MERGE_FAILURES` | 3 | Merges failing in a row before it stops — the task finished, its verification did not |
 | `SCAN_ENABLED` | true | Set false to work the existing queue without scanning |
 | `SCAN_PARALLEL` | 2 | Scans per cycle, splitting the checklist between them (1 = single full scan, up to 4) |
-| `SCAN_EFFORT` | high | Codex reasoning effort for scan tasks |
+| `SCAN_EFFORT` | medium | Codex reasoning effort for scan tasks |
 | `TASK_EFFORT` | medium | Codex reasoning effort for queued tasks (`delegate --effort` overrides per task) |
-| `REVIEW_EFFORT` | high | Codex reasoning effort for automatic review tasks |
+| `REVIEW_EFFORT` | medium | Codex reasoning effort for automatic review tasks |
 | `TASK_GATE` | full | `light` runs compile/lint per task and the full suites once at each cycle gate — faster, but a suite break names no task |
 
 ## While it runs
@@ -55,7 +84,8 @@ Work can be handed to a running loop without stopping it — `/loop-delegate`
 turns a decision from the conversation into a queued task the loop picks up on
 its next poll, ahead of any future scan.
 
-The daemon holds the code it started with. **Editing the loop source under `src` changes
+The daemon holds the code it started with. **Editing the loop source under
+`src` changes
 nothing until the loop is restarted**, and reporting that a fix took effect without
 restarting is how a fix gets credited that never ran.
 
