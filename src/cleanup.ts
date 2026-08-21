@@ -106,8 +106,14 @@ export function cleanupTask(
   const status = readStatus(
     paths, taskId, runtime.os.processStartIdentity, runtime.os.processIsAlive,
   )
-  if (status !== undefined && status.pid !== null) {
-    stopTaskProcess(runtime, paths, taskId, status.pid)
+  // startTask records ownership before persisting status. A StartupProcessRetainedError
+  // can therefore leave a live registry-only runner, which must be stopped before its
+  // worktree can safely be removed.
+  const pid = status?.pid ?? taskProcessPid(
+    paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processIsAlive,
+  )
+  if (pid !== undefined) {
+    stopTaskProcess(runtime, paths, taskId, pid)
   }
 
   const worktree = worktreeDir(paths, taskId)

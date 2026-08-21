@@ -140,6 +140,23 @@ afterEach(() => {
 })
 
 describe('cleanupTask', () => {
+  it('retains a registry-only startup-failure task when termination cannot be verified', () => {
+    mkdirSync(worktree, { recursive: true })
+    recordTaskProcess(paths, taskId, 12345, () => 'started:12345')
+    let now = 0
+    const runtime = makeRuntime({ os: windowsOperatingSystem({
+      probeProcess: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+    }) })
+
+    expect(() => cleanupTask(paths, taskId, runtime))
+      .toThrow('Could not stop process 12345; task state was retained.')
+
+    expect(existsSync(statusFile(paths, taskId))).toBe(false)
+    expect(existsSync(worktree)).toBe(true)
+  })
+
   it('retains task state when taskkill does not stop the process', () => {
     seedTask(12345)
     let now = 0
