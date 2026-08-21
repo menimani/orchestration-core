@@ -1467,6 +1467,32 @@ describe('issue claim release', () => {
     expect(parked).toEqual([[issueNumber, 3]])
   })
 
+  it('does not report a parked release when the forge accepts but ignores the mutation', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'persistently failing issue', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'failed-task', [issueNumber])
+    recordIssueFailure(paths, 'failed-task')
+    recordIssueReleaseIntent(paths, 'failed-task', [issueNumber])
+    forge.addLabel = async () => {}
+    const parked: Array<[number, number]> = []
+
+    const failures = await reconcileIssueReleaseIntent(forge, paths, 'failed-task', {
+      maxIssueRetries: 1,
+      onPark: (number, count) => parked.push([number, count]),
+    })
+
+    expect(failures).toMatchObject([{
+      issueNumber,
+      error: {
+        message: `Issue #${issueNumber} did not reach the single ${LABEL_RETRY_EXHAUSTED} lifecycle state`,
+      },
+    }])
+    expect(parked).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'failed-task'))).toBe(true)
+  })
+
   it('clears an issue failure streak when its task completes successfully', () => {
     const issueNumber = 42
     recordIssuesForTask(paths, 'successful-task', [issueNumber])
@@ -1541,6 +1567,20 @@ describe('issue claim release', () => {
     expect(issue.labels).toEqual(labels)
   })
 
+  it('rejects a claim release when the forge accepts but ignores the mutation', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'startup claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
+    })
+    forge.unassignIssue = async () => {}
+
+    await expect(releaseIssueClaim(forge, issueNumber, 'worker-a')).rejects.toThrow(
+      `Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`,
+    )
+
+    expect((await forge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
   it.each([
     {
       failure: 'unassign:worker-a',
@@ -1613,6 +1653,26 @@ describe('issue claim release', () => {
     const issue = await forge.getIssue(issueNumber)
     expect(issue.assignees).toEqual(assignees)
     expect(issue.labels).toEqual(labels)
+  })
+
+  it('keeps release intent when the forge accepts but ignores a ready mutation', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'claimed issue', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-release', [issueNumber])
+    recordIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    forge.addLabel = async () => {}
+
+    const failures = await reconcileIssueReleaseIntent(forge, paths, 'task-release')
+
+    expect(failures).toMatchObject([{
+      issueNumber,
+      error: {
+        message: `Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`,
+      },
+    }])
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(true)
   })
 })
 
