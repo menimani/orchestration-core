@@ -1,13 +1,14 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { orchPaths } from '../src/paths.ts'
 import {
   runWorkerCommand, verifyWorkerModeSupported, type WorkerCommandDependencies,
 } from '../src/worker.ts'
+import { resolvedPath } from './pathComparison.ts'
 
 let tempRoot: string
 let origin: string
@@ -238,12 +239,13 @@ describe('worker daemon subprocess boundary', () => {
     const { probe, outcome } = runProductionLaunchProbe(23)
 
     expect(outcome).toEqual({ status: 23 })
-    expect(resolve(probe.command).toLowerCase()).toBe(resolve(process.execPath).toLowerCase())
-    expect(probe.args).toEqual([
-      join(worker, 'orchestration', 'ts', 'src', 'cli.ts'),
+    expect(resolvedPath(probe.command)).toBe(resolvedPath(process.execPath))
+    expect(resolvedPath(probe.args[0] ?? ''))
+      .toBe(resolvedPath(join(worker, 'orchestration', 'ts', 'src', 'cli.ts')))
+    expect(probe.args.slice(1)).toEqual([
       'loop', '--approve-mode', 'issue', '--daemon',
     ])
-    expect(resolve(probe.cwd).toLowerCase()).toBe(realpathSync.native(worker).toLowerCase())
+    expect(resolvedPath(probe.cwd)).toBe(resolvedPath(worker))
     expect(probe).toMatchObject({
       issueQueueEnabled: 'true',
       workerMode: 'true',
