@@ -102,6 +102,8 @@ interface FindingDispatch {
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
 const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
 
+class InvalidPersistedCounterError extends Error {}
+
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -369,9 +371,23 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function readCount(file: string): number {
-    if (!existsSync(file)) return 0
-    const raw = readFileSync(file, 'utf8').replace(/[\s\r\n]/g, '')
-    return /^\d+$/.test(raw) ? Number(raw) : 0
+    let raw: string
+    try {
+      raw = readFileSync(file, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
+      throw error
+    }
+    const value = raw.trim()
+    const count = Number(value)
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(count)) {
+      const stateFile = relative(paths.root, file).replaceAll('\\', '/')
+      const message = `persisted counter ${stateFile} is invalid; expected a non-negative integer; stopping the loop`
+      event('ERROR', message)
+      writeFileSync(stopFile, '')
+      throw new InvalidPersistedCounterError(message)
+    }
+    return count
   }
 
   function git(args: string[], quietSuccess = ''): string {
@@ -2664,6 +2680,7 @@ export function createLoop(deps: LoopDeps) {
       // Even a reset far beyond the ordinary poll window is an external wait, not a
       // branch failure. The proxy suppresses all further forge calls until it expires.
       if (error instanceof ForgeRateLimitError) return 'continue'
+      if (error instanceof InvalidPersistedCounterError) return 'stopped'
       throw error
     }
   }
