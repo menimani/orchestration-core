@@ -120,6 +120,33 @@ describe('deploy', () => {
     )).rejects.toThrow('Deployment verification request failed with HTTP 404.')
   })
 
+  it('rejects a completed failed workflow before fetching the deployed revision', async () => {
+    const forge = makeFakeForge()
+    forge.findWorkflowRun = async () => ({
+      id: 77,
+      createdAt: '2026-08-08T15:00:00Z',
+      headSha: 'failed-sha',
+      status: 'completed',
+      conclusion: 'failure',
+    })
+    const fetcher = vi.fn(async () => response('failed-sha'))
+
+    await expect(deploy(
+      {
+        workflow: 'deploy.yml',
+        revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
+      },
+      'main',
+      forge,
+      {
+        clock: clock(),
+        fetcher,
+        createDispatchToken: () => 'failed-dispatch',
+      },
+    )).rejects.toThrow("Deployment workflow run 77 finished with conclusion 'failure'.")
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
   it('times out when the dispatched workflow never appears', async () => {
     const forge = makeFakeForge()
     forge.findWorkflowRun = vi.fn(async () => undefined)
