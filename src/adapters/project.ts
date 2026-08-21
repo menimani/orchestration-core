@@ -531,6 +531,46 @@ async function importProject(adapterPath: string, name?: string): Promise<Projec
 
 const LOCAL_MODULE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs', '.json']
 
+function typeOnlyModuleSpecifiers(source: string, path: string): Set<string> {
+  const typeOnly = new Set<string>()
+  const runtime = new Set<string>()
+  const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true)
+  const classify = (specifier: ts.Node | undefined, isTypeOnly: boolean): void => {
+    if (specifier === undefined) return
+    const literal = ts.isLiteralTypeNode(specifier) ? specifier.literal : specifier
+    if (!ts.isStringLiteralLike(literal)) return
+    const imports = isTypeOnly ? typeOnly : runtime
+    imports.add(literal.text)
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node)) {
+      const clause = node.importClause
+      const namedImports = clause?.namedBindings !== undefined
+        && ts.isNamedImports(clause.namedBindings) ? clause.namedBindings : undefined
+      classify(
+        node.moduleSpecifier,
+        clause?.isTypeOnly === true
+          || (namedImports !== undefined && namedImports.elements.length > 0
+            && namedImports.elements.every((element) => element.isTypeOnly)),
+      )
+    } else if (ts.isExportDeclaration(node)) {
+      const namedExports = node.exportClause !== undefined
+        && ts.isNamedExports(node.exportClause) ? node.exportClause : undefined
+      classify(
+        node.moduleSpecifier,
+        node.isTypeOnly
+          || (namedExports !== undefined && namedExports.elements.length > 0
+            && namedExports.elements.every((element) => element.isTypeOnly)),
+      )
+    } else if (ts.isImportTypeNode(node)) {
+      classify(node.argument, true)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return new Set([...typeOnly].filter((specifier) => !runtime.has(specifier)))
+}
+
 function resolveLocalModule(importer: string, specifier: string): string | undefined {
   if (!specifier.startsWith('./') && !specifier.startsWith('../')) return undefined
   const imported = resolve(dirname(importer), specifier)
@@ -555,8 +595,11 @@ function projectSources(adapterPath: string): Map<string, Buffer> {
     if (sources.has(path)) continue
     const source = readFileSync(path)
     sources.set(path, source)
-    const imports = ts.preProcessFile(source.toString('utf8'), true, true).importedFiles
+    const sourceText = source.toString('utf8')
+    const typeOnlyImports = typeOnlyModuleSpecifiers(sourceText, path)
+    const imports = ts.preProcessFile(sourceText, true, true).importedFiles
     for (const imported of imports) {
+      if (typeOnlyImports.has(imported.fileName)) continue
       const dependency = resolveLocalModule(path, imported.fileName)
       if (dependency !== undefined && !sources.has(dependency)) pending.push(dependency)
     }
