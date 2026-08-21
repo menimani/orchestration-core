@@ -811,17 +811,32 @@ function failureCountFile(paths: OrchPaths, issueNumber: number): string {
 export function issueFailureCount(paths: OrchPaths, issueNumber: number): number {
   const file = failureCountFile(paths, issueNumber)
   if (!existsSync(file)) return 0
-  const value = Number(readFileSync(file, 'utf8').trim())
-  return Number.isSafeInteger(value) && value > 0 ? value : 0
+  const persisted = readFileSync(file, 'utf8').replace(/\r?\n$/, '')
+  const value = Number(persisted)
+  if (!/^[1-9]\d*$/.test(persisted) || !Number.isSafeInteger(value)) {
+    throw new Error(
+      `Persisted issue failure count ${file} is invalid; expected a positive safe integer`,
+    )
+  }
+  return value
 }
 
 /** Count one terminal task failure for each issue before its claim is released. */
 export function recordIssueFailure(paths: OrchPaths, taskId: string): number[] {
   const issueNumbers = issueNumbersForTask(paths, taskId)
   if (issueNumbers.length === 0) return []
-  mkdirSync(failureCountDir(paths), { recursive: true })
-  return issueNumbers.map((issueNumber) => {
+  const counts = issueNumbers.map((issueNumber) => {
     const count = issueFailureCount(paths, issueNumber) + 1
+    if (!Number.isSafeInteger(count)) {
+      throw new Error(
+        `Persisted issue failure count ${failureCountFile(paths, issueNumber)} cannot be safely incremented`,
+      )
+    }
+    return count
+  })
+  mkdirSync(failureCountDir(paths), { recursive: true })
+  issueNumbers.forEach((issueNumber, index) => {
+    const count = counts[index]!
     const file = failureCountFile(paths, issueNumber)
     const temporaryFile = `${file}.${process.pid}.tmp`
     try {
@@ -830,8 +845,8 @@ export function recordIssueFailure(paths: OrchPaths, taskId: string): number[] {
     } finally {
       rmSync(temporaryFile, { force: true })
     }
-    return count
   })
+  return counts
 }
 
 /** A completed task breaks the issue's consecutive failure streak. */
@@ -853,9 +868,22 @@ export function recordIssuesForTask(
 export function issueNumbersForTask(paths: OrchPaths, taskId: string): number[] {
   const file = issueMapFile(paths, taskId)
   if (!existsSync(file)) return []
-  return readFileSync(file, 'utf8').split(/\r?\n/)
-    .filter((line) => /^\d+$/.test(line))
-    .map(Number)
+  return readPersistedIssueNumbers(file)
+}
+
+function readPersistedIssueNumbers(file: string): number[] {
+  const persisted = readFileSync(file, 'utf8')
+  if (/^(?:\r?\n)?$/.test(persisted)) return []
+  const lines = persisted.split(/\r?\n/)
+  if (lines.at(-1) === '') lines.pop()
+  const issueNumbers = lines.map((line) => Number(line))
+  if (lines.length === 0 || lines.some((line, index) =>
+    !/^[1-9]\d*$/.test(line) || !Number.isSafeInteger(issueNumbers[index]))) {
+    throw new Error(
+      `Persisted issue list ${file} is invalid; expected one positive safe integer per line`,
+    )
+  }
+  return issueNumbers
 }
 
 function writeIssueNumbers(file: string, issueNumbers: readonly number[]): void {
@@ -898,17 +926,13 @@ export function completeIssueReleaseIntent(paths: OrchPaths, taskId: string): vo
 export function issueReleaseIntentForTask(paths: OrchPaths, taskId: string): number[] {
   const file = releaseIntentFile(paths, taskId)
   if (!existsSync(file)) return []
-  return readFileSync(file, 'utf8').split(/\r?\n/)
-    .filter((line) => /^\d+$/.test(line))
-    .map(Number)
+  return readPersistedIssueNumbers(file)
 }
 
 export function issueReleasePreparationForTask(paths: OrchPaths, taskId: string): number[] {
   const file = releasePreparationFile(paths, taskId)
   if (!existsSync(file)) return []
-  return readFileSync(file, 'utf8').split(/\r?\n/)
-    .filter((line) => /^\d+$/.test(line))
-    .map(Number)
+  return readPersistedIssueNumbers(file)
 }
 
 /** Cancel a release preparation that did not reach completed local cleanup. */
