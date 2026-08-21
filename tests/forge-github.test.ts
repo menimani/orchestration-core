@@ -154,6 +154,54 @@ describe('GitHub pull request bodies', () => {
   })
 })
 
+describe('GitHub pull request promotion and workflow dispatch', () => {
+  it.each([
+    {
+      name: 'marks a pull request ready',
+      invoke: (forge: Forge) => forge.markPrReady('task/branch'),
+      expectedArgs: ['pr', 'ready', 'task/branch'],
+    },
+    {
+      name: 'dispatches a workflow with its correlation token',
+      invoke: (forge: Forge) => forge.dispatchWorkflow(
+        'deploy.yml', 'release/production', 'dispatch-token-123',
+      ),
+      expectedArgs: [
+        'workflow', 'run', 'deploy.yml', '--ref', 'release/production',
+        '--field', 'dispatch_token=dispatch-token-123',
+      ],
+    },
+  ])('$name with the exact gh arguments', async ({ invoke, expectedArgs }) => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return ''
+    }
+
+    await invoke(createGithubForge('repo-root', command))
+
+    expect(calls).toEqual([expectedArgs])
+  })
+
+  it.each([
+    {
+      name: 'markPrReady',
+      invoke: (forge: Forge) => forge.markPrReady('task/branch'),
+    },
+    {
+      name: 'dispatchWorkflow',
+      invoke: (forge: Forge) => forge.dispatchWorkflow(
+        'deploy.yml', 'release/production', 'dispatch-token-123',
+      ),
+    },
+  ])('propagates command failures from $name', async ({ invoke }) => {
+    const failure = new Error('gh command failed')
+    const command: GithubCommand = async () => { throw failure }
+
+    await expect(invoke(createGithubForge('repo-root', command))).rejects.toBe(failure)
+  })
+})
+
 describe('GitHub workflow dispatch correlation', () => {
   it('ignores newer concurrent and same-second runs with another token or ref', () => {
     const wanted = run({ databaseId: 71 })
