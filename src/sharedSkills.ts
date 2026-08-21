@@ -161,14 +161,16 @@ function renderedSkill(
   return filesIn(source).map((file) => {
     let contents = file.contents
     if (file.path === 'SKILL.md') {
+      const sourceContents = contents.toString('utf8')
       const injection = guidance === ''
         ? ''
-        : `${contents.toString('utf8').endsWith('\n') ? '\n' : '\n\n'}${guidance}`
+        : `${sourceContents.endsWith('\n') ? '\n' : '\n\n'}${guidance}`
+      // The injection point is synthetic and always follows the canonical skill. A
+      // literal placeholder in the skill's prose documents the mechanism and must stay.
+      const withInjectionPoint = `${sourceContents}${manifest.projectGuidancePlaceholder}`
+      const injectionPoint = withInjectionPoint.length - manifest.projectGuidancePlaceholder.length
       contents = Buffer.from(
-        `${contents.toString('utf8')}${manifest.projectGuidancePlaceholder}`.replaceAll(
-          manifest.projectGuidancePlaceholder,
-          injection,
-        ),
+        `${withInjectionPoint.slice(0, injectionPoint)}${injection}`,
       )
     }
     return {
