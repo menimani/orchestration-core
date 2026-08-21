@@ -12,13 +12,6 @@ import { fileURLToPath } from 'node:url'
 
 const PACKAGE_ROOT = resolve(import.meta.dirname, '..')
 
-// Accented forms admitted by the repository's English examples. Keep these explicit:
-// script-wide ranges also admit non-English Latin orthographies such as Vietnamese.
-const ENGLISH_LATIN: ReadonlySet<string> = new Set([
-  '\u00e9', // e with acute, as in cafe
-  '\u0301', // combining acute accent, for the decomposed spelling of the same word
-])
-
 // Typography and symbols the core's sources use. Each is explicit so adding a new
 // non-ASCII character remains a decision instead of silently widening the rule.
 const PUNCTUATION: ReadonlySet<string> = new Set([
@@ -59,7 +52,6 @@ const ESCAPED_NON_ENGLISH_FIXTURE_LINES: ReadonlyMap<string, ReadonlySet<string>
 const permitted = (character: string): boolean =>
   character.codePointAt(0)! < 128
   || PUNCTUATION.has(character)
-  || ENGLISH_LATIN.has(character)
 
 const decodedEscapes = (line: string): string => line.replace(
   /\\(?:u\{([\da-f]{1,6})\}|u([\da-f]{4})|x([\da-f]{2}))/gi,

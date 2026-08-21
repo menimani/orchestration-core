@@ -13,9 +13,8 @@ afterEach(() => {
 describe('English-only source check', () => {
   const characters = (...codePoints: number[]): string => String.fromCodePoint(...codePoints)
 
-  it('accepts ASCII, English typography, and borrowed Latin letters', () => {
-    expect(scanText(`A cafe${characters(0x301)} is not the same spelling as cafe.`)).toEqual([])
-    expect(scanText(`A caf${characters(0xe9)} menu — previous ← next →`)).toEqual([])
+  it('accepts ASCII and English typography', () => {
+    expect(scanText('A cafe menu — previous ← next →')).toEqual([])
   })
 
   it('reports non-English scripts, full-width punctuation, and invisible characters', () => {
@@ -37,11 +36,11 @@ describe('English-only source check', () => {
   })
 
   it('rejects non-English Latin letters and combining marks', () => {
-    const violations = scanText(`Ti${characters(0x1ebf)}ng Vi${characters(0x1ec7)}t va${characters(0x300)} tie${characters(0x302)}ng`)
+    const violations = scanText(`caf${characters(0xe9)} cafe${characters(0x301)} Ti${characters(0x1ebf)}ng Vi${characters(0x1ec7)}t va${characters(0x300)} tie${characters(0x302)}ng`)
 
     expect(violations).toHaveLength(1)
     expect(violations[0]?.codePoints).toEqual([
-      'U+1EBF', 'U+1EC7', 'U+0300', 'U+0302',
+      'U+00E9', 'U+0301', 'U+1EBF', 'U+1EC7', 'U+0300', 'U+0302',
     ])
   })
 
