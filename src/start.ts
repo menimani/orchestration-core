@@ -6,6 +6,7 @@ import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
+import { recordTaskProcess } from './processRegistry.ts'
 import { readStatus, writeStatus } from './status.ts'
 import { specFile } from './tasks.ts'
 
@@ -18,6 +19,20 @@ export interface StartOptions {
   model?: string | undefined
   setup?: WorktreeSetupStep[] | undefined
   report?: ((line: string) => void) | undefined
+}
+
+/** Startup failed, but the launched runner still owns the task and must be retained. */
+export class StartupProcessRetainedError extends AggregateError {
+  readonly pid: number
+
+  constructor(pid: number, startupError: unknown, terminationError: unknown) {
+    super(
+      [startupError, terminationError],
+      `Task startup failed and process tree ${pid} could not be stopped.`,
+    )
+    this.name = 'StartupProcessRetainedError'
+    this.pid = pid
+  }
 }
 
 export function worktreeAddArgs(worktree: string, branch: string): string[] {
@@ -105,6 +120,10 @@ export async function startTask(
       model: options.model,
     })
     launchedPid = pid
+    // Ownership must survive a failure to acquire or publish the status record. The
+    // loop consults this registry before deciding whether failed startup work is safe
+    // to release or retry.
+    recordTaskProcess(paths, taskId, pid)
     await writeStatus(paths, taskId, 'running', pid)
     options.report?.(`Started. task_id=${taskId} pid=${pid} log=${log}`)
     return { outcome: 'started', pid }
@@ -124,10 +143,7 @@ export async function startTask(
           log,
           `Task startup failed:\n${detail}\nProcess tree cleanup failed:\n${terminationDetail}\n`,
         )
-        throw new AggregateError(
-          [error, terminationError],
-          `Task startup failed and process tree ${launchedPid} could not be stopped.`,
-        )
+        throw new StartupProcessRetainedError(launchedPid, error, terminationError)
       }
     }
     appendFileSync(log, `Task startup failed:\n${detail}\n`)

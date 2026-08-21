@@ -28,6 +28,7 @@ import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
 import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
+import { StartupProcessRetainedError, startTask } from '../src/start.ts'
 import { enqueueTask } from '../src/tasks.ts'
 import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
@@ -91,6 +92,7 @@ function makeLoop(
   runner: Runner = makeRunner(),
   enqueueTaskImpl: NonNullable<LoopDeps['enqueueTask']> = enqueueTask,
   terminateTaskProcesses?: () => TaskProcessTermination,
+  startTaskImpl: typeof startTask = startTask,
 ): Loop {
   const config = { ...loadConfig({}), ...overrides }
   return createLoop({
@@ -104,6 +106,7 @@ function makeLoop(
     orchestrationDepsRuntime,
     enqueueTask: enqueueTaskImpl,
     terminateTaskProcesses,
+    startTask: startTaskImpl,
   })
 }
 
@@ -2618,6 +2621,55 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(reclaimed.labels).toContain(LABEL_IN_PROGRESS)
     expect(reclaimed.labels).not.toContain(LABEL_READY)
     expect(reclaimed.assignees).toEqual(['worker-a'])
+  })
+
+  it('stops without releasing or retrying a claimed task whose startup process survives', async () => {
+    initializeGitRepo()
+    const description = '[BUG] retain work owned by a surviving startup process'
+    const retainedPid = process.pid
+    const retainedStarts: string[] = []
+    const retainStartup: typeof startTask = async (startPaths, _runner, taskId) => {
+      retainedStarts.push(taskId)
+      recordTaskProcess(startPaths, taskId, retainedPid)
+      throw new StartupProcessRetainedError(
+        retainedPid,
+        new Error('status persistence failed'),
+        new Error('process tree survived'),
+      )
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, maxParallel: 1 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      makeRunner(),
+      enqueueTask,
+      undefined,
+      retainStartup,
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'retained startup process',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    const taskId = retainedStarts[0]!
+    const retained = await fakeForge.getIssue(issueNumber)
+    expect(retained.labels).toContain(LABEL_IN_PROGRESS)
+    expect(retained.labels).not.toContain(LABEL_READY)
+    expect(retained.assignees).toEqual(['worker-a'])
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(existsSync(join(paths.tasksDir, `${taskId}.md`))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      `startup process tree PID ${retainedPid} survived; task retained and loop stopped`,
+    )
+
+    expect(await loop.poll()).toBe('stopped')
+    expect(retainedStarts).toEqual([taskId])
   })
 
   it('persists a startup-failure release and stops after three failed reconciliations', async () => {
