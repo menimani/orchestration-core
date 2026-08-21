@@ -1,0 +1,44 @@
+import { describe, expect, it } from 'vitest'
+import {
+  PLATFORM_SUITES, platformCoverageReport, uncollectedSuites,
+} from './platformCoverage.ts'
+
+describe('platform coverage', () => {
+  it('leaves a suite uncollected only on the platforms that cannot attempt it', () => {
+    expect(uncollectedSuites('win32')).toEqual(['tests/posix-process-group.test.ts'])
+    expect(uncollectedSuites('linux')).toEqual(['tests/windows-console.test.ts'])
+  })
+
+  it('names an uncollected suite, the platform it needs, and why', () => {
+    const report = platformCoverageReport('linux')
+    expect(report).toContain('not run    tests/windows-console.test.ts')
+    expect(report).toContain('needs win32')
+    // The reason travels with the name: a reader who has never opened the file learns
+    // why another platform cannot stand in for the one that runs it.
+    expect(report).toContain('launches a Windows process tree')
+  })
+
+  it('reports a suite as collected on the platform that runs it', () => {
+    const report = platformCoverageReport('win32')
+    expect(report).toContain('collected  tests/windows-console.test.ts')
+    expect(report).toContain('not run    tests/posix-process-group.test.ts')
+  })
+
+  it('accounts for every platform-specific suite on both platforms', () => {
+    for (const platform of ['win32', 'linux'] as const) {
+      const report = platformCoverageReport(platform)
+      for (const suite of PLATFORM_SUITES) expect(report).toContain(suite.file)
+    }
+  })
+
+  it('covers each platform with the same number of real-process suites', () => {
+    // The asymmetry this pins is the one that prompted the suite: Windows had a test
+    // that drove real processes and POSIX had none, so a signal reaching a whole
+    // process group was only ever asserted through an injected runtime.
+    const perPlatform = new Map<NodeJS.Platform, number>()
+    for (const suite of PLATFORM_SUITES) {
+      perPlatform.set(suite.platform, (perPlatform.get(suite.platform) ?? 0) + 1)
+    }
+    expect([...perPlatform.entries()].sort()).toEqual([['linux', 1], ['win32', 1]])
+  })
+})

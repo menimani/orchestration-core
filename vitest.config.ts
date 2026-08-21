@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config'
+import { uncollectedSuites } from './tests/platformCoverage.ts'
 
 export default defineConfig({
   test: {
@@ -6,7 +7,15 @@ export default defineConfig({
     // orchestration/worktrees, tests included. Without excluding them the suite collects
     // its own copies out of every task in flight and fails on their unfinished state —
     // which is what happened the first time the core improved itself.
-    exclude: ['**/node_modules/**', '**/dist/**', 'orchestration/worktrees/**'],
+    // A suite another platform cannot attempt is left uncollected rather than collected
+    // and reported as a skip, which reads as a test somebody disabled. What it is and why
+    // it did not run is stated by globalSetup instead, so leaving it out stays visible.
+    // Both sides read tests/platformCoverage.ts, so neither can drift from the other.
+    exclude: [
+      '**/node_modules/**', '**/dist/**', 'orchestration/worktrees/**',
+      ...uncollectedSuites(),
+    ],
+    globalSetup: ['tests/globalSetup.ts'],
     // Fork IPC times out while the git-heavy suites run on Windows under Node 24;
     // worker threads use the same isolation without that process-channel failure.
     pool: process.platform === 'win32' ? 'threads' : 'forks',
