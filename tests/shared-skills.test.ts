@@ -124,6 +124,28 @@ describe('shared skill sync', () => {
       .toContain('## Repository guidance')
   })
 
+  it('preserves a literal guidance token while injecting repository guidance once', () => {
+    writeSkill('loop-start', [
+      'The synthetic endpoint is `{{ORCHESTRATION_PROJECT_GUIDANCE}}`.',
+      '',
+    ].join('\n'))
+    const guidance = join(repoRoot, 'orchestration', 'project', 'skills', 'loop-start.md')
+    mkdirSync(dirname(guidance), { recursive: true })
+    writeFileSync(guidance, '## Repository guidance\n\nUse the consumer queue.\n')
+
+    syncSharedSkills(repoRoot, packageRoot, [interactiveSharedSkills])
+
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toBe([
+        'The synthetic endpoint is `{{ORCHESTRATION_PROJECT_GUIDANCE}}`.',
+        '',
+        '## Repository guidance',
+        '',
+        'Use the consumer queue.',
+        '',
+      ].join('\n'))
+  })
+
   it('renders exactly the canonical skill when repository guidance is absent', () => {
     syncSharedSkills(repoRoot, packageRoot, [interactiveSharedSkills])
 
