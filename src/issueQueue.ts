@@ -494,15 +494,11 @@ async function reconcileOpenFindings(
         issueSuppressesFingerprint(paths, issue, fingerprint)))
     .map((issue) => [issue.number, issue]))
   if (createdIssueNumber !== undefined && !issues.has(createdIssueNumber)) {
-    try {
-      const created = await forge.getIssue(createdIssueNumber)
-      if (created.state === 'open'
-        && isTrustedFingerprintOwner(created)
-        && hasExactFingerprints(created, fingerprints)) {
-        issues.set(created.number, created)
-      }
-    } catch {
-      // A concurrent close can make a just-created issue disappear from the open set.
+    const created = await forge.getIssue(createdIssueNumber)
+    if (created.state === 'open'
+      && isTrustedFingerprintOwner(created)
+      && hasExactFingerprints(created, fingerprints)) {
+      issues.set(created.number, created)
     }
   }
   const ordered = [...issues.values()].sort((a, b) => a.number - b.number)
@@ -513,12 +509,7 @@ async function reconcileOpenFindings(
     await withIssueCoordination(forge, duplicate.number, async () => {
       // Assignment and labels may have changed since listOpenIssues returned. Re-read
       // inside the same critical section used by claims before closing.
-      let current: ForgeIssue
-      try {
-        current = await forge.getIssue(duplicate.number)
-      } catch {
-        return
-      }
+      const current = await forge.getIssue(duplicate.number)
       if (isReadyToClose(current, fingerprints)) {
         await closeDuplicate(forge, current.number, survivor, onMutation)
       }
@@ -605,12 +596,7 @@ export async function reconcileFindingFingerprints(
       && !isClaimed(issue)
       && coveredBy.every((owner) => owner !== undefined)) {
       await withIssueCoordination(forge, issue.number, async () => {
-        let current: ForgeIssue
-        try {
-          current = await forge.getIssue(issue.number)
-        } catch {
-          return
-        }
+        const current = await forge.getIssue(issue.number)
         if (isReadyToClose(current, fingerprints)) {
           await closeDuplicate(
             forge, issue.number, coveredBy[0] as number,

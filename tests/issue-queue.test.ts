@@ -299,6 +299,17 @@ describe('issue body round-trip', () => {
 })
 
 describe('publishFinding', () => {
+  it('propagates a failed re-read of a newly created finding', async () => {
+    forge.listOpenIssues = async () => []
+    forge.getIssue = async () => {
+      throw new Error('created issue re-read unavailable')
+    }
+
+    await expect(publishFinding(
+      forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1',
+    )).rejects.toThrow('created issue re-read unavailable')
+  })
+
   it('reports an immediate duplicate while the remote issue list still lags', async () => {
     forge.listOpenIssues = async () => []
     const firstDescription = '[BUG] `src/a/b.ts` Remove empty .live-event-form rules'
@@ -533,6 +544,28 @@ describe('publishFinding', () => {
         `${fingerprintOf(findingA)} ${combined.issueNumber}`,
         `${fingerprintOf(findingB)} ${combined.issueNumber}`,
       ]))
+  })
+
+  it('propagates a failed re-read while reconciling a subsumed finding', async () => {
+    const findingA = '[BUG] `src/a.ts` breaks'
+    const findingB = '[TEST] `src/b.test.ts` lacks coverage'
+    await publishFinding(
+      forge, paths, `1. ${findingA}\n2. ${findingB}`, 'review-1', 'high',
+      'Review round fixes', [findingA, findingB],
+    )
+    const individual = await forge.createIssue({
+      title: findingA,
+      body: buildIssueBody(findingA, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const getIssue = forge.getIssue.bind(forge)
+    forge.getIssue = async (issueNumber) => {
+      if (issueNumber === individual) throw new Error('subsumed issue re-read unavailable')
+      return getIssue(issueNumber)
+    }
+
+    await expect(reconcileFindingFingerprints(forge, paths))
+      .rejects.toThrow('subsumed issue re-read unavailable')
   })
 
   it('keeps a partially overlapping issue that carries an unmatched finding', async () => {
