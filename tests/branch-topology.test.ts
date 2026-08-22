@@ -327,6 +327,23 @@ describe('integration branch topology', () => {
       .toThrow('The resumed run is fixed')
   })
 
+  it('refuses to reuse a dirty integration worktree on the expected branch', () => {
+    const worktree = join(paths.worktreesDir, '.integration')
+    git(repoRoot, ['worktree', 'add', '-q', worktree, '-b', 'integration/run'])
+    writeFileSync(join(worktree, 'uncommitted.txt'), 'not promoted\n')
+
+    expect(() => prepareBranchTopology(paths, 'integration/run'))
+      .toThrow(`Integration worktree ${worktree} has uncommitted changes.`)
+  })
+
+  it('refuses a dirty integration worktree when resuming', () => {
+    const topology = prepareBranchTopology(paths, 'integration/run')
+    writeFileSync(join(topology.paths.repoRoot, 'uncommitted.txt'), 'not promoted\n')
+
+    expect(() => prepareBranchTopology(paths, 'integration/run'))
+      .toThrow(`Integration worktree ${topology.paths.repoRoot} has uncommitted changes.`)
+  })
+
   it('refuses direct mode when resuming an integration run', () => {
     prepareBranchTopology(paths, 'integration/run')
 
