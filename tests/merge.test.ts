@@ -24,11 +24,19 @@ import {
   removeWorktreeWithFallback, type WorktreeRemovalRuntime,
 } from '../src/worktree.ts'
 import { stubProject } from './stubProject.ts'
-import { TestProcessRegistry } from './testProcess.ts'
+import { PROCESS_TEST_TIMEOUT_MS, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
 const testProcesses = new TestProcessRegistry()
+
+async function waitForFile(file: string, message: string): Promise<void> {
+  const deadline = Date.now() + PROCESS_TEST_TIMEOUT_MS
+  while (!existsSync(file)) {
+    if (Date.now() >= deadline) throw new Error(message)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
 
 const installProject: ProjectAdapter = {
   ...stubProject,
@@ -474,7 +482,12 @@ describe('mergeTask', () => {
   it('stops and verifies a completed runner with a live PID before merging', async () => {
     const taskId = '20260808_000000_017_user-runner-finishes-output-first'
     const worktree = await makeCompletedTask(taskId, { commit: true })
-    const runner = testProcesses.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    const runnerReady = join(repoRoot, 'runner-ready')
+    const runner = testProcesses.spawn(process.execPath, [
+      '--input-type=module', '--eval',
+      "const { writeFileSync } = await import('node:fs'); writeFileSync(process.argv[1], ''); setInterval(() => {}, 1000)",
+      runnerReady,
+    ], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
@@ -483,6 +496,7 @@ describe('mergeTask', () => {
     if (runnerPid === undefined) throw new Error('Runner did not publish a PID.')
     runner.unref()
     await writeStatus(paths, taskId, 'completed', runnerPid)
+    await waitForFile(runnerReady, 'Runner fixture did not become ready.')
 
     await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
 
