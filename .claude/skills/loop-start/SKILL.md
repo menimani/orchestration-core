@@ -72,7 +72,7 @@ Settings:
 | `CI_GATE_ENABLED` | false | Whether the gate waits for CI — a draft PR has no checks, so waiting would hang |
 | `MAX_CONSECUTIVE_MERGE_FAILURES` | 3 | Merges failing in a row before it stops — the task finished, its verification did not |
 | `SCAN_ENABLED` | true | Set false to work the existing queue without scanning |
-| `SCAN_PARALLEL` | 2 | Scans per cycle, splitting the checklist between them (1 = single full scan, up to 4) |
+| `SCAN_PARALLEL` | 2 | Requested scans per cycle, splitting the checklist between them (1 = single full scan; requests above the numbered section count are reduced at launch) |
 | `SCAN_EFFORT` | medium | Codex reasoning effort for scan tasks |
 | `TASK_EFFORT` | medium | Codex reasoning effort for queued tasks (`delegate --effort` overrides per task) |
 | `REVIEW_EFFORT` | medium | Codex reasoning effort for automatic review tasks |

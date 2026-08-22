@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   createGithubForge, workflowRunForDispatch, type GithubCommand, type GithubWorkflowRun,
 } from '../src/adapters/forge-github.ts'
-import { ForgeRateLimitError, type Forge } from '../src/adapters/forge.ts'
+import { ForgeIssueNotFoundError, ForgeRateLimitError, type Forge } from '../src/adapters/forge.ts'
 import { ensureQueueLabels, QUEUE_LABELS } from '../src/issueQueue.ts'
 
 const workflowRunFixture = {
@@ -647,6 +647,18 @@ describe('GitHub forge JSON schemas', () => {
     }).getIssue(357)).resolves.toMatchObject({
       author: { login: '(unknown)', hasWriteAccess: false },
     })
+  })
+
+  it('distinguishes a confirmed missing issue from other lookup failures', async () => {
+    const missing = Object.assign(new Error('issue lookup failed'), {
+      stderr: 'GraphQL: Could not resolve to an Issue with the number of 357. (repository.issue)',
+    })
+    const forge = createGithubForge('repo-root', async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      throw missing
+    })
+
+    await expect(forge.getIssue(357)).rejects.toBeInstanceOf(ForgeIssueNotFoundError)
   })
 
   it('drops and reports stale closed entries from an open issue listing', async () => {

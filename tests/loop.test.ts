@@ -19,7 +19,8 @@ import {
 import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
-  syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
+  pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup,
+  type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, PACKAGE_ROOT, statusFile, worktreeDir,
@@ -329,6 +330,20 @@ describe('daemon startup', () => {
     })
 
     expect(install).toHaveBeenCalledOnce()
+  })
+
+  it('retries a durable pending sync even when the recorded lockfile is current', () => {
+    writeOrchestrationManifests('{"lockfileVersion":3}\n')
+    const install = vi.fn(successfulInstall)
+    const packageRoot = fixturePackageRoot()
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot })
+    const pendingFile = pendingOrchestrationDepsFile(paths, packageRoot)
+    writeFileSync(pendingFile, '{}\n')
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot })
+
+    expect(install).toHaveBeenCalledTimes(2)
+    expect(existsSync(pendingFile)).toBe(false)
   })
 
   it('stops startup with recovery instructions after a lockfile upgrade fails', () => {
@@ -1599,6 +1614,23 @@ describe('cycle gate', () => {
       return [...assignment.matchAll(/\d+/g)].length
     })
     expect(Math.max(...assignmentSizes) - Math.min(...assignmentSizes)).toBeLessThanOrEqual(1)
+  })
+
+  it('clamps parallel scans to the numbered section count and reports the request', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n\n### 1. First check\n\n### 2. Second check\n',
+    )
+    const loop = makeLoop({ scanParallel: 5, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(2)
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-1'), 'utf8')).toBe('2\n')
+    expect(logText()).toContain(
+      'WARN requested 5 parallel scans but scan-template.md has 2 numbered sections; running 2 scans',
+    )
   })
 
   it('falls back to one full scan with a warning when the template has no numbered sections', async () => {
@@ -3281,6 +3313,43 @@ describe('completion marker output', () => {
     expect(logged.some((line) => line.startsWith('Status Linux check'))).toBe(false)
   })
 
+  it('treats a PR merged while it is being promoted as complete', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    const loop = makeLoop()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false }
+    }
+
+    expect(await loop.postLoopPr()).toBe(true)
+
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(logged).toContain('Completed Loop        PR https://example.test/pull/1')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('reports a PR closed while it is being promoted and stops after repetition', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    const loop = makeLoop()
+    const markPrReady = vi.fn(async () => {
+      forgeStatus = { ...forgeStatus, state: 'closed', isDraft: false }
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.postLoopPr()).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(await loop.postLoopPr()).toBe(false)
+
+    expect(markPrReady).toHaveBeenCalledOnce()
+    expect(logText()).toContain('WARN could not promote PR because it is closed')
+    expect(logText()).toContain(
+      'ERROR could not promote PR because it is closed (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+  })
+
   it('reports repeated pre-promotion status errors and stops the loop', async () => {
     initializeGitRepo()
     const remote = join(repoRoot, 'remote.git')
@@ -3339,7 +3408,7 @@ describe('completion marker output', () => {
     expect(logged.some((line) => line.startsWith('Status Environments'))).toBe(false)
   })
 
-  it('does not emit LOOP_DONE until the forge confirms the PR is ready', async () => {
+  it('reports a persistently draft PR and stops without emitting LOOP_DONE', async () => {
     initializeGitRepo()
     const remote = join(repoRoot, 'remote.git')
     execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
@@ -3349,8 +3418,15 @@ describe('completion marker output', () => {
     const loop = makeLoop()
 
     expect(await loop.postLoopPr()).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(await loop.postLoopPr()).toBe(false)
 
-    expect(prStatusCalls).toBe(3)
+    expect(prStatusCalls).toBe(6)
+    expect(logText()).toContain('WARN could not confirm PR promotion; PR is still draft')
+    expect(logText()).toContain(
+      'ERROR could not confirm PR promotion; PR is still draft (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
     expect(logged).not.toContain('Completed Loop        PR https://example.test/pull/1')
     expect(logged.some((line) => line.startsWith('Status Environments'))).toBe(false)
@@ -3407,7 +3483,7 @@ describe('completed task merge recovery', () => {
     return worktree
   }
 
-  it('skips dependency installation when a task process tree survives', async () => {
+  it('persists pending dependency installation and stops when a task process tree survives', async () => {
     const taskId = '20260820_181834_032_auto-dependency-installation'
     makeDependencyChangingTask(taskId)
     const oldDependency = join(repoRoot, 'node_modules', 'old-dependency', 'package.json')
@@ -3431,7 +3507,9 @@ describe('completed task merge recovery', () => {
     )
     loop.initializeSessionStateForBranch()
 
-    expect(await loop.poll()).toBe('continue')
+    await expect(loop.poll()).rejects.toThrow(
+      /dependency installation after 032_auto remains pending.*live task process tree survived/,
+    )
 
     expect(install).not.toHaveBeenCalled()
     expect(readFileSync(oldDependency, 'utf8')).toBe('{}\n')
@@ -3442,6 +3520,16 @@ describe('completed task merge recovery', () => {
       'Skipped orchestration deps  after 032_auto; a live task process tree survived',
     )
     expect(readStatus(paths, taskId)?.status).toBe('merged')
+    const pendingFile = pendingOrchestrationDepsFile(paths, repoRoot)
+    expect(existsSync(pendingFile)).toBe(true)
+
+    const retryInstall = vi.fn()
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install: retryInstall, packageRoot: repoRoot,
+    })
+
+    expect(retryInstall).toHaveBeenCalledOnce()
+    expect(existsSync(pendingFile)).toBe(false)
   })
 
   it('installs dependencies after every task process tree stops cleanly', async () => {

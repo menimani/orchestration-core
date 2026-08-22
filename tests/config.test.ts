@@ -111,8 +111,8 @@ describe('loadConfig', () => {
     )
   })
 
-  it('clamps SCAN_PARALLEL to four concurrent scans', () => {
-    expect(loadConfig({ SCAN_PARALLEL: '9' }).scanParallel).toBe(4)
+  it('accepts SCAN_PARALLEL above four', () => {
+    expect(loadConfig({ SCAN_PARALLEL: '9' }).scanParallel).toBe(9)
   })
 
   it('rejects SCAN_PARALLEL below one', () => {

@@ -8,7 +8,7 @@ import type {
   CheckConclusion, CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge,
   ForgeAuthor, ForgeIssue, ForgeIssueComment, PrReference, PrStatus, WorkflowRun,
 } from './forge.ts'
-import { ForgeRateLimitError } from './forge.ts'
+import { ForgeIssueNotFoundError, ForgeRateLimitError } from './forge.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -210,6 +210,10 @@ function isMissingPrFailure(error: unknown): boolean {
   const text = commandErrorText(error)
   return /\bno (?:open )?pull requests found for branch\b/i.test(text)
     || /\bCould not resolve to a PullRequest with the number of \d+\b/i.test(text)
+}
+
+function isMissingIssueFailure(error: unknown): boolean {
+  return /\bCould not resolve to an Issue with the number of \d+\b/i.test(commandErrorText(error))
 }
 
 function githubPrBody(body: string): string {
@@ -539,7 +543,15 @@ export function createGithubForge(
       const args = ['issue', 'view', String(issueNumber),
         '--repo', repository,
         '--json', 'number,state,title,body,author,labels,assignees,updatedAt']
-      const stdout = await checkedGh(repoRoot, args)
+      let stdout: string
+      try {
+        stdout = await checkedGh(repoRoot, args)
+      } catch (error) {
+        if (isMissingIssueFailure(error)) {
+          throw new ForgeIssueNotFoundError(issueNumber, { cause: error })
+        }
+        throw error
+      }
       return normalizeIssue(parseGhJson(args, stdout, githubIssueSchema))
     },
 

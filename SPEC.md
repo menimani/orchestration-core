@@ -119,6 +119,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `AUTO_MERGE` | `true` | Merge completed local task worktrees automatically. `false` leaves them completed and eligible for an explicit or later merge. |
 | `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
+| `SCAN_PARALLEL` | `2` | Requested scan processes per cycle. It must be at least 1 and is reduced at launch when the scan template has fewer numbered sections. |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
 | `REVIEW_EFFORT` | `medium` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
 | `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter, or an external adapter module. |
@@ -141,9 +142,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    investigation proves the requested change is already unnecessary. A missing task
    status file means no status, but an existing file must be valid JSON with string
    `task_id`, `started_at`, `updated_at`, `worktree`, and `branch` fields and a recognized
-   task state; `merged` additionally requires string `merge_commit` and `run_branch`
-   fields. Malformed JSON or a schema mismatch is not treated as absent: the read fails,
-   stopping the poll that encountered it, and the file is retained for operator repair.
+   task state. Current writes of `merged` additionally require string `merge_commit` and
+   `run_branch` fields; reads remain compatible with legacy `merged` records that predate
+   those fields. Malformed JSON or any other schema mismatch is not treated as absent:
+   the read fails, stopping the poll that encountered it, and the file is retained for
+   operator repair.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
    `scan` for scans, are `review-c<n>` for automatic reviews of cycle `<n>`, and start
    with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes, scan findings, review-origin
@@ -286,7 +289,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 ## Scans and cycles
 
 12. Scans start on idle (nothing queued or running), with `SCAN_PARALLEL` scans at a
-    time; the value must be at least 1, and values above 4 are clamped to 4. Scans run
+    time; the value must be at least 1. A request above the number of numbered scan
+    sections is reduced to that section count and reported in the event log. Scans run
     over disjoint groups of the checklist's sections. A cycle counts as empty only when
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
@@ -426,7 +430,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
     for a person instead of promoting a branch its own review keeps rejecting.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
-    the event log names the host environment where the run verification executed and
+    unless it is already open and ready. A PR found merged before promotion, or merged
+    while the ready operation is being confirmed, is also a successful terminal state;
+    both paths emit the normal completion records without another ready operation.
+    A PR found closed before or during promotion is not success: the first observation
+    warns and leaves the final gate resumable, while the same closed-state failure on the
+    next poll logs `ERROR`, writes the stop file, and ends the retry. Promotion errors,
+    status-query errors, and a PR that remains draft use the same two-attempt bound, and
+    no `LOOP_DONE` marker is emitted until an open ready or merged state is confirmed.
+    The event log names the host environment where the run verification executed and
     states that the branch was not run elsewhere. Repository adapters may also declare
     manual cross-environment checks; the log names each check and its command while
     explicitly recording that the loop did not run it for the branch.
@@ -438,7 +450,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
      promoted by hand. It requires exactly one positive PR number (with an optional `#`)
      or absolute HTTP(S) URL
      and refuses to run while the loop is active, because an active loop records its own
-     ending. It performs no forge operation: it appends a cycle-aware `Completed Loop`
+     ending after observing the already-ready or merged PR itself. Use `shipped` only
+     when that automatic ending was not recorded. It performs no forge operation: it
+     appends a cycle-aware `Completed Loop`
      event to `logs/loop.log`, appends the exact standalone marker
      `LOOP_DONE: <pr-number-or-url>` to `logs/loop-markers.log`, and confirms the record
      on stdout.

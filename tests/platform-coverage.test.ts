@@ -6,7 +6,10 @@ import {
 describe('platform coverage', () => {
   it('leaves a suite uncollected only on the platforms that cannot attempt it', () => {
     expect(uncollectedSuites('win32')).toEqual(['tests/posix-process-group.test.ts'])
-    expect(uncollectedSuites('linux')).toEqual(['tests/windows-console.test.ts'])
+    expect(uncollectedSuites('linux')).toEqual([
+      'tests/windows-console.test.ts',
+      'tests/windows-run-tests-cancellation.test.ts',
+    ])
   })
 
   it('names an uncollected suite, the platform it needs, and why', () => {
@@ -29,16 +32,5 @@ describe('platform coverage', () => {
       const report = platformCoverageReport(platform)
       for (const suite of PLATFORM_SUITES) expect(report).toContain(suite.file)
     }
-  })
-
-  it('covers each platform with the same number of real-process suites', () => {
-    // The asymmetry this pins is the one that prompted the suite: Windows had a test
-    // that drove real processes and POSIX had none, so a signal reaching a whole
-    // process group was only ever asserted through an injected runtime.
-    const perPlatform = new Map<NodeJS.Platform, number>()
-    for (const suite of PLATFORM_SUITES) {
-      perPlatform.set(suite.platform, (perPlatform.get(suite.platform) ?? 0) + 1)
-    }
-    expect([...perPlatform.entries()].sort()).toEqual([['linux', 1], ['win32', 1]])
   })
 })

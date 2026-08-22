@@ -2,6 +2,7 @@ import type {
   CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue,
   ForgeIssueComment, PrReference, PrStatus,
 } from '../src/adapters/forge.ts'
+import { ForgeIssueNotFoundError } from '../src/adapters/forge.ts'
 
 // An in-memory forge for tests: PR calls answer from a settable status, and the issue
 // operations behave like a real tracker — including multiple simultaneous assignees,
@@ -105,7 +106,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     },
     async getIssue(issueNumber: number): Promise<ForgeIssue> {
       const issue = fake.issues.get(issueNumber)
-      if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
+      if (issue === undefined) throw new ForgeIssueNotFoundError(issueNumber)
       return { ...issue, labels: [...issue.labels], assignees: [...issue.assignees] }
     },
     async commentIssue(issueNumber: number, comment: string): Promise<void> {

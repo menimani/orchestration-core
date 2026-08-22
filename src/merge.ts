@@ -144,6 +144,12 @@ function orchestrationLockHashFile(root: string): string {
   return join(root, 'node_modules', '.orchestration-lock.sha256')
 }
 
+/** Durable retry state, scoped to the exact package checkout whose tree must be replaced. */
+export function pendingOrchestrationDepsFile(paths: OrchPaths, root: string): string {
+  const packageKey = createHash('sha256').update(resolve(root)).digest('hex').slice(0, 16)
+  return join(paths.queueDir, `orchestration-deps-pending-${packageKey}.json`)
+}
+
 function installFailureSummary(error: unknown): string {
   const failure = error as { stderr?: string | Buffer }
   const stderr = Buffer.isBuffer(failure.stderr)
@@ -157,12 +163,25 @@ function installOrchestrationDeps(
   subject: string,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime,
+  pendingFile: string,
   beforeInstall?: (() => boolean) | undefined,
 ): void {
   const root = runtime.packageRoot ?? PACKAGE_ROOT
+  try {
+    mkdirSync(dirname(pendingFile), { recursive: true })
+    writeFileSync(pendingFile, `${JSON.stringify({ packageRoot: resolve(root), subject })}\n`)
+  } catch (error) {
+    throw new OrchestrationDepsInstallError(
+      `Could not persist pending orchestration dependency installation ${subject}: `
+      + installFailureSummary(error),
+    )
+  }
   if (beforeInstall?.() === false) {
     event('Skipped', `${subject}; a live task process tree survived`)
-    return
+    throw new OrchestrationDepsInstallError(
+      `Orchestration dependency installation ${subject} remains pending in ${root} because `
+      + 'a live task process tree survived. Restart the loop after the process is stopped.',
+    )
   }
   try {
     runtime.install(root)
@@ -172,6 +191,7 @@ function installOrchestrationDeps(
       mkdirSync(join(root, 'node_modules'), { recursive: true })
       writeFileSync(hashFile, `${lockHash}\n`)
     }
+    rmSync(pendingFile, { force: true })
     event('Installed', subject)
   } catch (error) {
     throw new OrchestrationDepsInstallError(
@@ -200,7 +220,11 @@ function syncOrchestrationDepsAfterMerge(
   ]).split(/\r?\n/).filter((path) => path !== '')
   const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
   if (!changed.some((path) => manifests.has(resolve(paths.repoRoot, path)))) return
-  installOrchestrationDeps(`after ${shortTaskId(taskId)}`, event, runtime, beforeInstall)
+  const root = runtime.packageRoot ?? PACKAGE_ROOT
+  installOrchestrationDeps(
+    `after ${shortTaskId(taskId)}`, event, runtime,
+    pendingOrchestrationDepsFile(paths, root), beforeInstall,
+  )
 }
 
 function orchestrationDepsMissing(root: string): boolean {
@@ -250,8 +274,9 @@ export function syncOrchestrationDepsAtStartup(
   // at its own package: that is why the daemon starts in the repository it was given
   // rather than in the package directory (see `cmdLoop`).
   if (!isInside(paths.repoRoot, root)) return
-  if (!orchestrationDepsMissing(root)) return
-  installOrchestrationDeps('at startup', event, runtime)
+  const pendingFile = pendingOrchestrationDepsFile(paths, root)
+  if (!existsSync(pendingFile) && !orchestrationDepsMissing(root)) return
+  installOrchestrationDeps('at startup', event, runtime, pendingFile)
 }
 
 interface MergeIo {
@@ -727,6 +752,25 @@ function reclaimMalformedMergeGuard(dir: string): boolean {
   return mergeGuardRemovalWasVerified(dir)
 }
 
+function reclaimRetiredMergeGuard(dir: string): boolean {
+  try {
+    rmSync(join(dir, 'owner.json'))
+  } catch {
+    // A concurrent waiter may already have removed the owner.
+  }
+  try {
+    rmSync(join(dir, 'retired'))
+  } catch {
+    // A concurrent waiter may already have removed the retirement marker.
+  }
+  try {
+    rmdirSync(dir)
+  } catch {
+    // A concurrent waiter reclaimed it, or an unexpected marker keeps it non-empty.
+  }
+  return mergeGuardRemovalWasVerified(dir)
+}
+
 type MergeGuardAcquisition = { acquired: true; file: string; owner: MergeGuardOwner } | {
   acquired: false
   reason: 'active' | 'succeeded'
@@ -747,6 +791,18 @@ function acquireMergeGuard(
       return { acquired: true, file: dir, owner }
     }
     if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
+    if (existsSync(join(dir, 'retired'))) {
+      reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      if (reclaimRetiredMergeGuard(dir)) {
+        reclaimDeadline = undefined
+        continue
+      }
+      if (Date.now() >= reclaimDeadline) {
+        throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
+      }
+      return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+    }
     const recorded = activeMergeGuardOwner(dir)
     if (recorded === undefined) {
       // Atomic publication means a fresh ownerless or malformed directory may belong to
@@ -801,9 +857,20 @@ function finishMergeGuard(
   }
   if (!ownsGuard) return
   const retiredGuard = `${guard.file}.retired-${randomUUID()}`
-  // Renaming the whole guard is the release operation. Once it succeeds, a failed
-  // cleanup cannot leave this daemon's live PID at the well-known path or block a retry.
-  renameSync(guard.file, retiredGuard)
+  // Publish retirement before the preferred atomic rename. If Windows refuses the
+  // directory rename, a waiter can still distinguish this guard from a live operation.
+  try {
+    writeFileSync(join(guard.file, 'retired'), '', { flag: 'wx' })
+  } catch {
+    // The rename can still retire the guard without the fallback marker.
+  }
+  try {
+    renameSync(guard.file, retiredGuard)
+  } catch {
+    // Retirement must not replace the merge result. A published marker lets the next
+    // attempt reclaim this daemon's otherwise-live owner without waiting for restart.
+    return
+  }
   try {
     rmSync(retiredGuard, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   } catch {

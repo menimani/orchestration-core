@@ -123,6 +123,9 @@ export function prepareBranchTopology(
       `Integration worktree ${worktree} is on ${checkedOutBranch}, expected ${integrationBranch}.`,
     )
   }
+  if (git(worktree, ['status', '--porcelain']).trim() !== '') {
+    throw new Error(`Integration worktree ${worktree} has uncommitted changes.`)
+  }
   if (!resuming) {
     try {
       git(paths.repoRoot, ['merge-base', '--is-ancestor', daemonHead, integrationBranch])
