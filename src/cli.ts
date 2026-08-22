@@ -1295,6 +1295,17 @@ async function runLoopDaemon(
     )
     const topology = prepareBranchTopology(paths, config.integrationBranch)
     const loopPaths = topology.paths
+    // A dependency-changing merge may have landed in the integration worktree before a
+    // surviving task process forced the previous daemon to stop. Its package-scoped
+    // pending marker must be retried here; synchronizing the frozen daemon checkout above
+    // cannot satisfy or clear that worktree's state.
+    syncOrchestrationDepsAtStartup(
+      loopPaths,
+      (name, subject) => log(name === 'Installed'
+        ? formatEventLine(name, 'orchestration deps', subject)
+        : formatEventLine(name, subject)),
+      orchestrationDepsRuntimeForPackage(topology.packageRoot),
+    )
     const forge = await loadForge(
       config.forge,
       loopPaths.repoRoot,

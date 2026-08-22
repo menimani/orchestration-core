@@ -144,6 +144,12 @@ function orchestrationLockHashFile(root: string): string {
   return join(root, 'node_modules', '.orchestration-lock.sha256')
 }
 
+/** Durable retry state, scoped to the exact package checkout whose tree must be replaced. */
+export function pendingOrchestrationDepsFile(paths: OrchPaths, root: string): string {
+  const packageKey = createHash('sha256').update(resolve(root)).digest('hex').slice(0, 16)
+  return join(paths.queueDir, `orchestration-deps-pending-${packageKey}.json`)
+}
+
 function installFailureSummary(error: unknown): string {
   const failure = error as { stderr?: string | Buffer }
   const stderr = Buffer.isBuffer(failure.stderr)
@@ -157,12 +163,25 @@ function installOrchestrationDeps(
   subject: string,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime,
+  pendingFile: string,
   beforeInstall?: (() => boolean) | undefined,
 ): void {
   const root = runtime.packageRoot ?? PACKAGE_ROOT
+  try {
+    mkdirSync(dirname(pendingFile), { recursive: true })
+    writeFileSync(pendingFile, `${JSON.stringify({ packageRoot: resolve(root), subject })}\n`)
+  } catch (error) {
+    throw new OrchestrationDepsInstallError(
+      `Could not persist pending orchestration dependency installation ${subject}: `
+      + installFailureSummary(error),
+    )
+  }
   if (beforeInstall?.() === false) {
     event('Skipped', `${subject}; a live task process tree survived`)
-    return
+    throw new OrchestrationDepsInstallError(
+      `Orchestration dependency installation ${subject} remains pending in ${root} because `
+      + 'a live task process tree survived. Restart the loop after the process is stopped.',
+    )
   }
   try {
     runtime.install(root)
@@ -172,6 +191,7 @@ function installOrchestrationDeps(
       mkdirSync(join(root, 'node_modules'), { recursive: true })
       writeFileSync(hashFile, `${lockHash}\n`)
     }
+    rmSync(pendingFile, { force: true })
     event('Installed', subject)
   } catch (error) {
     throw new OrchestrationDepsInstallError(
@@ -200,7 +220,11 @@ function syncOrchestrationDepsAfterMerge(
   ]).split(/\r?\n/).filter((path) => path !== '')
   const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
   if (!changed.some((path) => manifests.has(resolve(paths.repoRoot, path)))) return
-  installOrchestrationDeps(`after ${shortTaskId(taskId)}`, event, runtime, beforeInstall)
+  const root = runtime.packageRoot ?? PACKAGE_ROOT
+  installOrchestrationDeps(
+    `after ${shortTaskId(taskId)}`, event, runtime,
+    pendingOrchestrationDepsFile(paths, root), beforeInstall,
+  )
 }
 
 function orchestrationDepsMissing(root: string): boolean {
@@ -250,8 +274,9 @@ export function syncOrchestrationDepsAtStartup(
   // at its own package: that is why the daemon starts in the repository it was given
   // rather than in the package directory (see `cmdLoop`).
   if (!isInside(paths.repoRoot, root)) return
-  if (!orchestrationDepsMissing(root)) return
-  installOrchestrationDeps('at startup', event, runtime)
+  const pendingFile = pendingOrchestrationDepsFile(paths, root)
+  if (!existsSync(pendingFile) && !orchestrationDepsMissing(root)) return
+  installOrchestrationDeps('at startup', event, runtime, pendingFile)
 }
 
 interface MergeIo {
