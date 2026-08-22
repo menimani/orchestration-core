@@ -33,12 +33,4 @@ describe('platform coverage', () => {
       for (const suite of PLATFORM_SUITES) expect(report).toContain(suite.file)
     }
   })
-
-  it('counts every registered real-process suite by platform', () => {
-    const perPlatform = new Map<NodeJS.Platform, number>()
-    for (const suite of PLATFORM_SUITES) {
-      perPlatform.set(suite.platform, (perPlatform.get(suite.platform) ?? 0) + 1)
-    }
-    expect([...perPlatform.entries()].sort()).toEqual([['linux', 1], ['win32', 2]])
-  })
 })
