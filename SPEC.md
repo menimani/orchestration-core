@@ -142,9 +142,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    investigation proves the requested change is already unnecessary. A missing task
    status file means no status, but an existing file must be valid JSON with string
    `task_id`, `started_at`, `updated_at`, `worktree`, and `branch` fields and a recognized
-   task state; `merged` additionally requires string `merge_commit` and `run_branch`
-   fields. Malformed JSON or a schema mismatch is not treated as absent: the read fails,
-   stopping the poll that encountered it, and the file is retained for operator repair.
+   task state. Current writes of `merged` additionally require string `merge_commit` and
+   `run_branch` fields; reads remain compatible with legacy `merged` records that predate
+   those fields. Malformed JSON or any other schema mismatch is not treated as absent:
+   the read fails, stopping the poll that encountered it, and the file is retained for
+   operator repair.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
    `scan` for scans, are `review-c<n>` for automatic reviews of cycle `<n>`, and start
    with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes, scan findings, review-origin
