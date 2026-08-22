@@ -277,6 +277,10 @@ subtree installation). The command requires exactly one positive PR number, opti
 prefixed with `#`, or one absolute HTTP(S) URL. It refuses to run while the loop is active,
 performs no forge operation, records the completion in `logs/loop.log`, and emits the exact
 standalone `LOOP_DONE: <pr-number-or-url>` marker to `logs/loop-markers.log`.
+An active loop that observes the PR already ready or merged records its normal ending
+itself, so `shipped` is only needed when that ending is absent. If the PR is closed rather
+than ready or merged, the loop warns once and retries; observing the same closed state on
+the next poll logs an error, writes the stop file, and stops without emitting `LOOP_DONE`.
 
 Automatic pulls are enabled by default. To pull later improvements manually, or when
 `CORE_AUTO_UPDATE=false` pins the consumed version, use:

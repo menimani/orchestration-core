@@ -430,7 +430,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
     for a person instead of promoting a branch its own review keeps rejecting.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
-    the event log names the host environment where the run verification executed and
+    unless it is already open and ready. A PR found merged before promotion, or merged
+    while the ready operation is being confirmed, is also a successful terminal state;
+    both paths emit the normal completion records without another ready operation.
+    A PR found closed before or during promotion is not success: the first observation
+    warns and leaves the final gate resumable, while the same closed-state failure on the
+    next poll logs `ERROR`, writes the stop file, and ends the retry. Promotion errors,
+    status-query errors, and a PR that remains draft use the same two-attempt bound, and
+    no `LOOP_DONE` marker is emitted until an open ready or merged state is confirmed.
+    The event log names the host environment where the run verification executed and
     states that the branch was not run elsewhere. Repository adapters may also declare
     manual cross-environment checks; the log names each check and its command while
     explicitly recording that the loop did not run it for the branch.
@@ -442,7 +450,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
      promoted by hand. It requires exactly one positive PR number (with an optional `#`)
      or absolute HTTP(S) URL
      and refuses to run while the loop is active, because an active loop records its own
-     ending. It performs no forge operation: it appends a cycle-aware `Completed Loop`
+     ending after observing the already-ready or merged PR itself. Use `shipped` only
+     when that automatic ending was not recorded. It performs no forge operation: it
+     appends a cycle-aware `Completed Loop`
      event to `logs/loop.log`, appends the exact standalone marker
      `LOOP_DONE: <pr-number-or-url>` to `logs/loop-markers.log`, and confirms the record
      on stdout.
