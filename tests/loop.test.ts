@@ -19,7 +19,8 @@ import {
 import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
-  syncOrchestrationDepsAtStartup, type OrchestrationDepsRuntime,
+  pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup,
+  type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, PACKAGE_ROOT, statusFile, worktreeDir,
@@ -329,6 +330,20 @@ describe('daemon startup', () => {
     })
 
     expect(install).toHaveBeenCalledOnce()
+  })
+
+  it('retries a durable pending sync even when the recorded lockfile is current', () => {
+    writeOrchestrationManifests('{"lockfileVersion":3}\n')
+    const install = vi.fn(successfulInstall)
+    const packageRoot = fixturePackageRoot()
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot })
+    const pendingFile = pendingOrchestrationDepsFile(paths, packageRoot)
+    writeFileSync(pendingFile, '{}\n')
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot })
+
+    expect(install).toHaveBeenCalledTimes(2)
+    expect(existsSync(pendingFile)).toBe(false)
   })
 
   it('stops startup with recovery instructions after a lockfile upgrade fails', () => {
@@ -3468,7 +3483,7 @@ describe('completed task merge recovery', () => {
     return worktree
   }
 
-  it('skips dependency installation when a task process tree survives', async () => {
+  it('persists pending dependency installation and stops when a task process tree survives', async () => {
     const taskId = '20260820_181834_032_auto-dependency-installation'
     makeDependencyChangingTask(taskId)
     const oldDependency = join(repoRoot, 'node_modules', 'old-dependency', 'package.json')
@@ -3492,7 +3507,9 @@ describe('completed task merge recovery', () => {
     )
     loop.initializeSessionStateForBranch()
 
-    expect(await loop.poll()).toBe('continue')
+    await expect(loop.poll()).rejects.toThrow(
+      /dependency installation after 032_auto remains pending.*live task process tree survived/,
+    )
 
     expect(install).not.toHaveBeenCalled()
     expect(readFileSync(oldDependency, 'utf8')).toBe('{}\n')
@@ -3503,6 +3520,16 @@ describe('completed task merge recovery', () => {
       'Skipped orchestration deps  after 032_auto; a live task process tree survived',
     )
     expect(readStatus(paths, taskId)?.status).toBe('merged')
+    const pendingFile = pendingOrchestrationDepsFile(paths, repoRoot)
+    expect(existsSync(pendingFile)).toBe(true)
+
+    const retryInstall = vi.fn()
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
+      install: retryInstall, packageRoot: repoRoot,
+    })
+
+    expect(retryInstall).toHaveBeenCalledOnce()
+    expect(existsSync(pendingFile)).toBe(false)
   })
 
   it('installs dependencies after every task process tree stops cleanly', async () => {
