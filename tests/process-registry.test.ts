@@ -3,7 +3,28 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const fsFailures = vi.hoisted(() => ({
+  read: undefined as NodeJS.ErrnoException | undefined,
+  stat: undefined as NodeJS.ErrnoException | undefined,
+}))
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    readFileSync: ((...args: Parameters<typeof actual.readFileSync>) => {
+      if (fsFailures.read !== undefined) throw fsFailures.read
+      return Reflect.apply(actual.readFileSync, actual, args)
+    }) as typeof actual.readFileSync,
+    statSync: ((...args: Parameters<typeof actual.statSync>) => {
+      if (fsFailures.stat !== undefined) throw fsFailures.stat
+      return Reflect.apply(actual.statSync, actual, args)
+    }) as typeof actual.statSync,
+  }
+})
+
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import {
   bootedAt, forgetTaskProcess, recordTaskProcess, taskProcessPid, terminableTaskProcessPid,
@@ -15,6 +36,8 @@ describe('task process registry', () => {
   const taskId = '20260813_120000_001_auto-registry'
 
   beforeEach(() => {
+    fsFailures.read = undefined
+    fsFailures.stat = undefined
     repoRoot = mkdtempSync(join(tmpdir(), 'orch process-registry-'))
     paths = orchPaths(repoRoot)
   })
@@ -35,6 +58,18 @@ describe('task process registry', () => {
   it('answers with nothing for a task it never recorded', () => {
     expect(taskProcessPid(paths, taskId)).toBeUndefined()
   })
+
+  it.each(['read', 'stat'] as const)(
+    'propagates a non-ENOENT registry %s failure',
+    (operation) => {
+      recordTaskProcess(paths, taskId, 4321, identity)
+      const error = Object.assign(new Error(`${operation} denied`), { code: 'EACCES' })
+      fsFailures[operation] = error
+
+      expect(() => taskProcessPid(paths, taskId, undefined, identity)).toThrow(error)
+      expect(existsSync(registryFile())).toBe(true)
+    },
+  )
 
   it('releases the process on stop', () => {
     recordTaskProcess(paths, taskId, 4321, identity)
