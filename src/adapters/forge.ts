@@ -105,6 +105,17 @@ export class ForgeRateLimitError extends Error {
   }
 }
 
+/** A forge lookup that positively confirmed the requested issue does not exist. */
+export class ForgeIssueNotFoundError extends Error {
+  readonly issueNumber: number
+
+  constructor(issueNumber: number, options?: ErrorOptions) {
+    super(`Forge issue #${issueNumber} does not exist`, options)
+    this.name = 'ForgeIssueNotFoundError'
+    this.issueNumber = issueNumber
+  }
+}
+
 export interface Forge {
   /** Resolve forge-specific repository shorthand into a Git remote or URL. */
   resolveGitRemote(remote: string): string
