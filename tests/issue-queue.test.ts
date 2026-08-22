@@ -339,6 +339,40 @@ describe('publishFinding', () => {
     expect(forge.issues.size).toBe(1)
   })
 
+  it('preserves the fingerprint ledger and propagates a transient issue lookup failure', async () => {
+    const finding = '[BUG] `src/a/b.ts` breaks'
+    const fingerprint = fingerprintOf(finding)
+    const issueNumber = await forge.createIssue({
+      title: finding,
+      body: buildIssueBody(finding, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const ledgerFile = join(paths.queueDir, 'issue-fingerprints')
+    writeFileSync(ledgerFile, `${fingerprint} ${issueNumber}\n`)
+    forge.listOpenIssues = async () => []
+    forge.getIssue = async () => {
+      throw new Error('transient issue lookup failure')
+    }
+
+    await expect(publishFinding(forge, paths, finding, 'scan-2'))
+      .rejects.toThrow('transient issue lookup failure')
+
+    expect(readFileSync(ledgerFile, 'utf8')).toBe(`${fingerprint} ${issueNumber}\n`)
+    expect(forge.issues.size).toBe(1)
+  })
+
+  it('replaces a ledger entry after the recorded issue is confirmed absent', async () => {
+    const finding = '[BUG] `src/a/b.ts` breaks'
+    const fingerprint = fingerprintOf(finding)
+    const ledgerFile = join(paths.queueDir, 'issue-fingerprints')
+    writeFileSync(ledgerFile, `${fingerprint} 999\n`)
+
+    const result = await publishFinding(forge, paths, finding, 'scan-1')
+
+    expect(result).toEqual({ outcome: 'created', issueNumber: 1 })
+    expect(readFileSync(ledgerFile, 'utf8')).toBe(`${fingerprint} 1\n`)
+  })
+
   it.each([
     ['an outsider author', false, []],
     ['the untrusted-author label', true, [LABEL_UNTRUSTED_AUTHOR]],

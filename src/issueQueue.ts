@@ -4,6 +4,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
+import { ForgeIssueNotFoundError } from './adapters/forge.ts'
 import {
   descSlug, existingTaskIdForDesc, forgetTaskId, newTaskId, recordTaskIdForDesc, taskIdForDesc,
 } from './ids.ts'
@@ -627,8 +628,9 @@ async function findExistingFinding(
     let recordedIssue: ForgeIssue | undefined
     try {
       recordedIssue = await forge.getIssue(recorded.issueNumber)
-    } catch {
-      // A missing issue cannot validate even a durable advisory ledger entry.
+    } catch (error) {
+      if (!(error instanceof ForgeIssueNotFoundError)) throw error
+      writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
     }
     const durableClosedAdvisory = recordedIssue?.state === 'closed'
       && isAdvisoryFingerprint(fingerprint)
@@ -650,7 +652,9 @@ async function findExistingFinding(
       recordFingerprint(paths, fingerprint, survivor)
       return survivor
     }
-    writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
+    if (recordedIssue !== undefined) {
+      writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
+    }
   }
   const matching = (await forge.listOpenIssues(LABEL_FINDING))
     .filter((issue) => isTrustedFingerprintOwner(issue)
