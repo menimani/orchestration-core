@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ rmSync: vi.fn() }))
+const mocks = vi.hoisted(() => ({ renameSync: vi.fn(), rmSync: vi.fn() }))
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
-  return { ...actual, rmSync: mocks.rmSync }
+  return { ...actual, renameSync: mocks.renameSync, rmSync: mocks.rmSync }
 })
 
 import { mergeTask, MergeError } from '../src/merge.ts'
@@ -52,6 +52,8 @@ beforeEach(() => {
   git(repoRoot, ['commit', '-qm', 'chore: initial commit'])
   mocks.rmSync.mockReset().mockImplementation((...args: unknown[]) =>
     Reflect.apply(actualFs.rmSync, actualFs, args))
+  mocks.renameSync.mockReset().mockImplementation((...args: unknown[]) =>
+    Reflect.apply(actualFs.renameSync, actualFs, args))
 })
 
 afterEach(() => {
@@ -60,6 +62,43 @@ afterEach(() => {
 })
 
 describe('merge guard retirement', () => {
+  it('reclaims a failed merge after guard retirement rename fails', async () => {
+    const taskId = '20260822_093823_001_auto-failed-guard-rename'
+    await makeCompletedTask(taskId, { dirty: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mocks.renameSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === guard) throw new Error('guard retirement rename failed')
+      return Reflect.apply(actualFs.renameSync, actualFs, args)
+    })
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject,
+    })).rejects.toBeInstanceOf(MergeError)
+    expect(actualFs.existsSync(join(guard, 'retired'))).toBe(true)
+
+    const onMergeStart = vi.fn()
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onMergeStart,
+    })).rejects.toBeInstanceOf(MergeError)
+    expect(onMergeStart).toHaveBeenCalledOnce()
+  })
+
+  it('does not turn a successful merge into failure when guard retirement rename fails', async () => {
+    const taskId = '20260822_093823_002_auto-successful-guard-rename'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mocks.renameSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === guard) throw new Error('guard retirement rename failed')
+      return Reflect.apply(actualFs.renameSync, actualFs, args)
+    })
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject,
+    })).resolves.toMatchObject({ outcome: 'merged' })
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(actualFs.existsSync(join(guard, 'retired'))).toBe(true)
+  })
+
   it('releases a failed merge before non-fatal retired guard cleanup', async () => {
     const taskId = '20260820_205825_001_auto-failed-guard-cleanup'
     await makeCompletedTask(taskId, { dirty: true })

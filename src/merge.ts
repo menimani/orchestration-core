@@ -727,6 +727,25 @@ function reclaimMalformedMergeGuard(dir: string): boolean {
   return mergeGuardRemovalWasVerified(dir)
 }
 
+function reclaimRetiredMergeGuard(dir: string): boolean {
+  try {
+    rmSync(join(dir, 'owner.json'))
+  } catch {
+    // A concurrent waiter may already have removed the owner.
+  }
+  try {
+    rmSync(join(dir, 'retired'))
+  } catch {
+    // A concurrent waiter may already have removed the retirement marker.
+  }
+  try {
+    rmdirSync(dir)
+  } catch {
+    // A concurrent waiter reclaimed it, or an unexpected marker keeps it non-empty.
+  }
+  return mergeGuardRemovalWasVerified(dir)
+}
+
 type MergeGuardAcquisition = { acquired: true; file: string; owner: MergeGuardOwner } | {
   acquired: false
   reason: 'active' | 'succeeded'
@@ -747,6 +766,18 @@ function acquireMergeGuard(
       return { acquired: true, file: dir, owner }
     }
     if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
+    if (existsSync(join(dir, 'retired'))) {
+      reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      if (reclaimRetiredMergeGuard(dir)) {
+        reclaimDeadline = undefined
+        continue
+      }
+      if (Date.now() >= reclaimDeadline) {
+        throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
+      }
+      return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+    }
     const recorded = activeMergeGuardOwner(dir)
     if (recorded === undefined) {
       // Atomic publication means a fresh ownerless or malformed directory may belong to
@@ -801,9 +832,20 @@ function finishMergeGuard(
   }
   if (!ownsGuard) return
   const retiredGuard = `${guard.file}.retired-${randomUUID()}`
-  // Renaming the whole guard is the release operation. Once it succeeds, a failed
-  // cleanup cannot leave this daemon's live PID at the well-known path or block a retry.
-  renameSync(guard.file, retiredGuard)
+  // Publish retirement before the preferred atomic rename. If Windows refuses the
+  // directory rename, a waiter can still distinguish this guard from a live operation.
+  try {
+    writeFileSync(join(guard.file, 'retired'), '', { flag: 'wx' })
+  } catch {
+    // The rename can still retire the guard without the fallback marker.
+  }
+  try {
+    renameSync(guard.file, retiredGuard)
+  } catch {
+    // Retirement must not replace the merge result. A published marker lets the next
+    // attempt reclaim this daemon's otherwise-live owner without waiting for restart.
+    return
+  }
   try {
     rmSync(retiredGuard, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   } catch {
