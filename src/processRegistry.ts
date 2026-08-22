@@ -117,8 +117,9 @@ function registeredTaskProcessPid(
   try {
     recorded = readFileSync(file, 'utf8')
     writtenAt = statSync(file).mtimeMs
-  } catch {
-    return undefined
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
   }
   try {
     entry = JSON.parse(recorded) as ProcessRegistryEntry
