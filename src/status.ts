@@ -127,6 +127,7 @@ function sleep(ms: number): Promise<void> {
 
 const STATUS_LOCK_WAIT_MS = 10_000
 const STATUS_LOCK_RETRY_MS = 10
+const releasedStatusLockTokens = new Set<string>()
 
 function lockIsAged(dir: string): boolean {
   try {
@@ -149,7 +150,9 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
   const dir = lockDir(paths, taskId)
   const pidFile = join(dir, 'pid')
   const identityFile = join(dir, 'start-identity')
-  const owner = JSON.stringify(currentProcessStartIdentity())
+  const tokenFile = join(dir, 'owner-token')
+  const startIdentity = JSON.stringify(currentProcessStartIdentity())
+  const token = randomUUID()
   const deadline = Date.now() + STATUS_LOCK_WAIT_MS
   for (;;) {
     if (Date.now() >= deadline) {
@@ -183,8 +186,31 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
       } catch {
         // Legacy owner or identity not published yet.
       }
+      let recordedToken = ''
+      try {
+        recordedToken = readFileSync(tokenFile, 'utf8').trim()
+      } catch {
+        // Legacy owner or token not published yet.
+      }
+      if (recordedToken !== '' && releasedStatusLockTokens.has(recordedToken)) {
+        try {
+          rmSync(tokenFile)
+          rmSync(identityFile, { force: true })
+          rmSync(pidFile, { force: true })
+          rmdirSync(dir)
+        } catch {
+          // another waiter won the reclaim
+        }
+        if (lockRemovalWasVerified(dir)) {
+          releasedStatusLockTokens.delete(recordedToken)
+          continue
+        }
+        await sleep(STATUS_LOCK_RETRY_MS)
+        continue
+      }
       if (validOwner && !lockOwnerIsCurrent(Number(recordedOwner), startIdentity)) {
         try {
+          rmSync(tokenFile, { force: true })
           rmSync(identityFile, { force: true })
           rmSync(pidFile)
           rmdirSync(dir)
@@ -199,6 +225,8 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
       }
       if (!validOwner && lockIsAged(dir)) {
         try {
+          rmSync(tokenFile, { force: true })
+          rmSync(identityFile, { force: true })
           if (recordedOwner !== '') rmSync(pidFile)
           rmdirSync(dir)
         } catch {
@@ -215,8 +243,9 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
     try {
       // Keep the PID file readable by older cores and publish identity separately.
       writeFileSync(pidFile, `${process.pid}\n`)
-      writeFileSync(identityFile, `${owner}\n`)
-      return owner
+      writeFileSync(identityFile, `${startIdentity}\n`)
+      writeFileSync(tokenFile, `${token}\n`)
+      return token
     } catch (error) {
       // Publishing metadata is part of acquisition, not contention. A writer that
       // cannot finish it must not leave its own PID looking like a live lock owner.
@@ -226,24 +255,33 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
   }
 }
 
-function releaseStatusLock(paths: OrchPaths, taskId: string, owner: string): void {
+function releaseStatusLock(paths: OrchPaths, taskId: string, token: string): void {
   const dir = lockDir(paths, taskId)
   const pidFile = join(dir, 'pid')
-  const identityFile = join(dir, 'start-identity')
+  const tokenFile = join(dir, 'owner-token')
   let recordedPid = ''
-  let recordedOwner = ''
+  let recordedToken = ''
   try {
     recordedPid = readFileSync(pidFile, 'utf8').trim()
-    recordedOwner = readFileSync(identityFile, 'utf8').trim()
+    recordedToken = readFileSync(tokenFile, 'utf8').trim()
   } catch {
     return
   }
-  if (recordedPid !== String(process.pid) || recordedOwner !== owner) return
+  if (recordedPid !== String(process.pid) || recordedToken !== token) return
   const releasedDir = join(paths.statusDir, `.${taskId}.lock.released-${randomUUID()}`)
   // Renaming the whole lock is the release operation. Once it succeeds, failures
   // while removing the retired metadata cannot leave a live-looking owner at the
   // well-known lock path or block the next writer.
-  renameSync(dir, releasedDir)
+  try {
+    renameSync(dir, releasedDir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    // The status mutation has already committed. Let the next acquisition reclaim
+    // this exact lock token even while this process remains alive.
+    releasedStatusLockTokens.add(token)
+    return
+  }
+  releasedStatusLockTokens.delete(token)
   try {
     rmSync(releasedDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 })
   } catch {
