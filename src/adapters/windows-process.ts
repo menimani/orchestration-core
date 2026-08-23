@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import {
   closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -13,6 +14,16 @@ const WINDOWS_LAUNCH_CONFIG_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_CONFIG'
 const WINDOWS_LAUNCH_ERROR_FILE_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_ERROR_FILE'
 const WINDOWS_LAUNCH_TIMEOUT_MS = 10_000
 const WINDOWS_LAUNCH_POLL_MS = 10
+
+export interface WindowsProcessRuntime {
+  platform: NodeJS.Platform
+  now(): number
+  sleep(milliseconds: number): Promise<void>
+  spawnLauncher(command: string, args: readonly string[], options: SpawnOptions): ChildProcess
+  terminateLauncherTree(launcher: ChildProcess): boolean
+  launchTimeoutMs: number
+  launchPollMs: number
+}
 
 interface WindowsProcessDescriptor {
   args: string[]
@@ -80,6 +91,23 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+const systemRuntime: WindowsProcessRuntime = {
+  platform: process.platform,
+  now: Date.now,
+  sleep,
+  spawnLauncher: (command, args, options) => spawn(command, [...args], options),
+  terminateLauncherTree: (launcher) => {
+    if (launcher.pid === undefined) return launcher.kill()
+    const result = spawnSync('taskkill', ['/PID', String(launcher.pid), '/T', '/F'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    return result.status === 0
+  },
+  launchTimeoutMs: WINDOWS_LAUNCH_TIMEOUT_MS,
+  launchPollMs: WINDOWS_LAUNCH_POLL_MS,
+}
+
 const START_HIDDEN_PROCESS = [
   "$ErrorActionPreference = 'Stop'",
   `$errorFile = $env:${WINDOWS_LAUNCH_ERROR_FILE_ENV}`,
@@ -88,7 +116,7 @@ const START_HIDDEN_PROCESS = [
   '  $config = $json | ConvertFrom-Json',
   `  Remove-Item Env:${WINDOWS_LAUNCH_CONFIG_ENV}`,
   `  Remove-Item Env:${WINDOWS_LAUNCH_ERROR_FILE_ENV}`,
-  '  Start-Process -FilePath $config.executable -ArgumentList $config.argumentLine -WorkingDirectory $config.cwd -WindowStyle Hidden | Out-Null',
+  '  Start-Process -FilePath $config.executable -ArgumentList $config.argumentLine -WorkingDirectory $config.cwd -WindowStyle Hidden -Wait | Out-Null',
   '} catch {',
   '  $_.Exception.Message | Set-Content -LiteralPath $errorFile -Encoding utf8',
   '  exit 1',
@@ -103,8 +131,11 @@ const START_HIDDEN_PROCESS = [
  * Start-Process with WindowStyle Hidden instead created one non-visible console whose
  * handle was shared by repeated descendants, and the process survived its launcher.
  */
-export async function startWindowsProcess(options: WindowsProcessOptions): Promise<number> {
-  if (process.platform !== 'win32') {
+export async function startWindowsProcess(
+  options: WindowsProcessOptions,
+  runtime: WindowsProcessRuntime = systemRuntime,
+): Promise<number> {
+  if (runtime.platform !== 'win32') {
     throw new Error('The hidden Windows process launcher is available only on Windows.')
   }
 
@@ -131,7 +162,7 @@ export async function startWindowsProcess(options: WindowsProcessOptions): Promi
   }
   const encodedScript = Buffer.from(START_HIDDEN_PROCESS, 'utf16le').toString('base64')
   const encodedConfig = Buffer.from(JSON.stringify(launchConfig)).toString('base64')
-  const launcher = spawn('powershell.exe', [
+  const launcher = runtime.spawnLauncher('powershell.exe', [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript,
   ], {
     cwd: options.cwd,
@@ -151,25 +182,33 @@ export async function startWindowsProcess(options: WindowsProcessOptions): Promi
   let launcherError: Error | undefined
   let launched = false
   launcher.once('error', (error) => { launcherError = error })
-  const deadline = Date.now() + WINDOWS_LAUNCH_TIMEOUT_MS
+  const deadline = runtime.now() + runtime.launchTimeoutMs
   try {
     for (;;) {
       if (existsSync(readyFile)) {
         const value = readFileSync(readyFile, 'utf8').trim()
-        if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+        if (value !== '' && (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)))) {
           throw new Error(`Windows process wrapper published an invalid PID (${value || 'empty'})`)
         }
-        launched = true
-        launcher.unref()
-        return Number(value)
+        if (value !== '') {
+          launched = true
+          launcher.unref()
+          return Number(value)
+        }
       }
       if (existsSync(errorFile)) {
         throw new Error(readFileSync(errorFile, 'utf8').trim() || 'Windows process launch failed')
       }
       if (launcherError !== undefined) throw launcherError
-      if (Date.now() >= deadline) throw new Error('Timed out starting hidden Windows process')
-      await sleep(WINDOWS_LAUNCH_POLL_MS)
+      if (runtime.now() >= deadline) {
+        throw new Error('Windows process wrapper never published a PID before startup timed out')
+      }
+      await runtime.sleep(runtime.launchPollMs)
     }
+  } catch (error) {
+    const foundAlive = runtime.terminateLauncherTree(launcher)
+    const detail = foundAlive ? 'found and terminated a live process tree' : 'found no live process tree'
+    throw new Error(`${errorSummary(error)}; startup cleanup ${detail}`, { cause: error })
   } finally {
     if (!launched) launcher.kill()
     rmSync(root, { recursive: true, force: true })
