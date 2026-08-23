@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -245,6 +245,29 @@ describe('loop replacement startup', () => {
       startupTimeoutMs: 1_000,
     })).resolves.toEqual({ ok: true, pid: 43212 })
     expect(launchDaemon).toHaveBeenCalledOnce()
+  })
+
+  it('releases the replacement and resolves when ready-marker cleanup fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    const child = fakeChild(43220)
+    const os = fakeOperatingSystem(child, () => {
+      setTimeout(() => writeFileSync(readyFile, '43220\n'), 0)
+    })
+
+    await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      onReady: () => {
+        rmSync(readyFile)
+        mkdirSync(readyFile)
+      },
+      startupTimeoutMs: 1_000,
+    })).resolves.toEqual({ ok: true, pid: 43220 })
+    expect(child.unref).toHaveBeenCalledOnce()
   })
 
   it('terminates the replacement tree when publishing readiness fails', async () => {

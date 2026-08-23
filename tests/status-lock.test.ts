@@ -58,8 +58,14 @@ describe('status lock publication', () => {
     expect(releaseFailed).toBe(true)
     expect(readStatus(paths, taskId)?.status).toBe('running')
     expect(actualFs.existsSync(lockDirectory)).toBe(true)
+    expect(actualFs.readFileSync(join(lockDirectory, 'retired-owner-token'), 'utf8').trim())
+      .toBe(actualFs.readFileSync(join(lockDirectory, 'owner-token'), 'utf8').trim())
 
-    await expect(writeStatus(paths, taskId, 'completed')).resolves.toBeUndefined()
+    // A fresh module has none of the releasing module's process-local recovery state,
+    // matching the relevant boundary between the daemon and a CLI invocation.
+    vi.resetModules()
+    const { writeStatus: writeStatusFromAnotherProcess } = await import('../src/status.ts')
+    await expect(writeStatusFromAnotherProcess(paths, taskId, 'completed')).resolves.toBeUndefined()
     expect(readStatus(paths, taskId)?.status).toBe('completed')
     expect(actualFs.existsSync(lockDirectory)).toBe(false)
   })

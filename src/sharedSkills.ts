@@ -40,7 +40,7 @@ interface RenderedFile {
 }
 
 /** Repository-owned guidance appended at the shared skill's named injection point. */
-export function projectGuidanceFileForSkill(repoRoot: string, skill: string): string {
+function projectGuidanceFileForSkill(repoRoot: string, skill: string): string {
   return join(repoRoot, 'orchestration', 'project', 'skills', `${skill}.md`)
 }
 

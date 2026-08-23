@@ -20,7 +20,6 @@ import {
   recordIssueCompletions,
   recordIssueFailure, recordIssueReleaseIntent, recordIssuesForTask,
   recordIssuePromotions,
-  releaseIssueClaim,
   returnIssueToReady, LABEL_FINDING,
   LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
@@ -1687,65 +1686,6 @@ describe('issue claim release', () => {
     const unchanged = await forge.getIssue(issueNumber)
     expect(unchanged.assignees).toEqual([])
     expect(unchanged.labels).toEqual([LABEL_FINDING, LABEL_READY, LABEL_MERGE_FAILED])
-  })
-
-  it.each([
-    {
-      failure: 'unassign:worker-a',
-      assignees: ['worker-a'],
-      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-    },
-    {
-      failure: `add:${LABEL_READY}`,
-      assignees: [],
-      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-    },
-    {
-      failure: `remove:${LABEL_IN_PROGRESS}`,
-      assignees: [],
-      labels: [LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY],
-    },
-  ])('keeps a failed $failure release recoverable', async ({ failure, assignees, labels }) => {
-    const issueNumber = await forge.createIssue({
-      title: 'startup claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-      assignees: ['worker-a'],
-    })
-    const unassignIssue = forge.unassignIssue.bind(forge)
-    const addLabel = forge.addLabel.bind(forge)
-    const removeLabel = forge.removeLabel.bind(forge)
-    forge.unassignIssue = async (number, assignee) => {
-      if (`unassign:${assignee}` === failure) throw new Error(`${failure} failed`)
-      await unassignIssue(number, assignee)
-    }
-    forge.addLabel = async (number, label) => {
-      if (`add:${label}` === failure) throw new Error(`${failure} failed`)
-      await addLabel(number, label)
-    }
-    forge.removeLabel = async (number, label) => {
-      if (`remove:${label}` === failure) throw new Error(`${failure} failed`)
-      await removeLabel(number, label)
-    }
-
-    await expect(releaseIssueClaim(forge, issueNumber, 'worker-a'))
-      .rejects.toThrow(`${failure} failed`)
-
-    const issue = await forge.getIssue(issueNumber)
-    expect(issue.assignees).toEqual(assignees)
-    expect(issue.labels).toEqual(labels)
-  })
-
-  it('rejects a claim release when the forge accepts but ignores the mutation', async () => {
-    const issueNumber = await forge.createIssue({
-      title: 'startup claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-      assignees: ['worker-a'],
-    })
-    forge.unassignIssue = async () => {}
-
-    await expect(releaseIssueClaim(forge, issueNumber, 'worker-a')).rejects.toThrow(
-      `Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`,
-    )
-
-    expect((await forge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
   })
 
   it.each([

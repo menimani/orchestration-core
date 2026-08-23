@@ -1850,6 +1850,39 @@ describe('cycle gate', () => {
     }
   })
 
+  it('retains integration markers on stop and removes them only after LOOP_DONE', async () => {
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    const markerNames = [
+      'daemon-branch.txt',
+      'daemon-head.txt',
+      'integration-branch.txt',
+    ]
+    const loop = makeLoop({
+      scanEnabled: false,
+      autoPr: true,
+      reviewEnabled: false,
+      integrationBranch: 'integration/run',
+    })
+    loop.initializeSessionStateForBranch()
+    for (const name of markerNames) writeFileSync(join(paths.queueDir, name), `${name}\n`)
+    writeFileSync(join(paths.queueDir, 'stop'), '')
+
+    expect(await loop.poll()).toBe('stopped')
+    expect(markerNames.map((name) => existsSync(join(paths.queueDir, name))))
+      .toEqual([true, true, true])
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+    expect(await loop.poll()).toBe('done')
+
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(markerNames.map((name) => existsSync(join(paths.queueDir, name))))
+      .toEqual([false, false, false])
+  })
+
   it('names an available cross-platform check that was not run for the branch', async () => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
@@ -3283,7 +3316,7 @@ describe('completion marker output', () => {
       .toBeLessThan(logged.indexOf('Completed Loop        PR https://example.test/pull/1'))
   })
 
-  it('reports repeated draft promotion errors and stops without emitting LOOP_DONE', async () => {
+  it('reports varying draft promotion errors and stops after two gate failures', async () => {
     initializeGitRepo()
     const remote = join(repoRoot, 'remote.git')
     execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
@@ -3294,17 +3327,21 @@ describe('completion marker output', () => {
       ...stubProject,
       manualEnvironmentChecks: [{ environment: 'Linux', command: 'npm run test:linux' }],
     })
+    let promotions = 0
     fakeForge.markPrReady = async () => {
-      throw new Error('promotion failed')
+      promotions += 1
+      throw new Error(`promotion failed with diagnostic ${promotions}`)
     }
 
     expect(await loop.postLoopPr()).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(await loop.postLoopPr()).toBe(false)
 
-    expect(logText()).toContain('WARN could not promote PR: promotion failed')
     expect(logText()).toContain(
-      'ERROR could not promote PR: promotion failed (repeated 2 times)',
+      'WARN could not promote PR: promotion failed with diagnostic 1',
+    )
+    expect(logText()).toContain(
+      'ERROR could not promote PR: promotion failed with diagnostic 2 (repeated 2 times)',
     )
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)

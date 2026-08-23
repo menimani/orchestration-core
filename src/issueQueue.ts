@@ -144,7 +144,7 @@ function findingParts(description: string): { tag: string | undefined; path: str
 }
 
 /** The first path in a finding title is its established primary-file convention. */
-export function findingPrimaryFile(title: string): string | undefined {
+function findingPrimaryFile(title: string): string | undefined {
   return findingParts(title).path
 }
 
@@ -945,7 +945,7 @@ export function removeIssueReleasePreparation(paths: OrchPaths, taskId: string):
 }
 
 /** Remove release work after it has reconciled successfully. */
-export function removeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
+function removeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
   rmSync(releaseIntentFile(paths, taskId), { force: true })
 }
 
@@ -994,25 +994,6 @@ export function dropClaimedTaskMaterialization(
   if (errors.length > 0) {
     throw new AggregateError(errors, `Could not remove materialization for task ${taskId}`)
   }
-}
-
-/** Return a startup claim to the shared queue before another worker can be blocked by it. */
-export async function releaseIssueClaim(
-  forge: Forge,
-  issueNumber: number,
-  assignee: string,
-): Promise<void> {
-  await withIssueCoordination(forge, issueNumber, async () => {
-    await forge.unassignIssue(issueNumber, assignee)
-    await forge.addLabel(issueNumber, LABEL_READY)
-    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
-    const released = await forge.getIssue(issueNumber)
-    if (released.state === 'open'
-      && (released.assignees.length !== 0
-        || !issueHasExactlyLifecycleLabel(released, LABEL_READY))) {
-      throw new Error(`Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`)
-    }
-  })
 }
 
 /** Restore any open claimed lifecycle state to an individually claimable finding. */
