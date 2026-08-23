@@ -265,7 +265,7 @@ export function validateConfigFileValues(
   return resolveConfig(environmentWithFile(env, values))
 }
 
-export function defaultConfigFilePath(cwd = process.cwd()): string {
+function defaultConfigFilePath(cwd = process.cwd()): string {
   return join(cwd, 'orchestration', 'config.json')
 }
 

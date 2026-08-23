@@ -144,7 +144,7 @@ function findingParts(description: string): { tag: string | undefined; path: str
 }
 
 /** The first path in a finding title is its established primary-file convention. */
-export function findingPrimaryFile(title: string): string | undefined {
+function findingPrimaryFile(title: string): string | undefined {
   return findingParts(title).path
 }
 
@@ -945,7 +945,7 @@ export function removeIssueReleasePreparation(paths: OrchPaths, taskId: string):
 }
 
 /** Remove release work after it has reconciled successfully. */
-export function removeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
+function removeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
   rmSync(releaseIntentFile(paths, taskId), { force: true })
 }
 
