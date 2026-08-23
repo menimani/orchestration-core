@@ -345,9 +345,7 @@ export function createLoop(deps: LoopDeps) {
     gate = 'draft-pr',
   ): void {
     const previous = previousGateFailures.get(gate)
-    const count = previous?.message === message
-      ? previous.count + 1
-      : 1
+    const count = (previous?.count ?? 0) + 1
     previousGateFailures.set(gate, { message, count })
     const detail = count === 1 ? message : `${message} (repeated ${count} times)`
     if (stopWhenRepeated && count > 1) {
