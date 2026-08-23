@@ -124,6 +124,48 @@ describe('backlog process lock', () => {
     }
   })
 
+  it('publishes failed lock release so another process can acquire it', async () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    const acquired = join(repoRoot, 'acquired-by-child')
+    const originalRename = fs.renameSync
+    let releaseFailed = false
+    fs.renameSync = function (source, destination) {
+      if (!releaseFailed && source === lockDir) {
+        releaseFailed = true
+        const error = new Error('release failed') as NodeJS.ErrnoException
+        error.code = 'EPERM'
+        throw error
+      }
+      return originalRename(source, destination)
+    }
+    syncBuiltinESMExports()
+
+    try {
+      expect(withBacklogLock(backlog, () => 'committed')).toBe('committed')
+      expect(releaseFailed).toBe(true)
+      expect(existsSync(join(lockDir, 'retired'))).toBe(true)
+
+      const backlogModule = pathToFileURL(join(process.cwd(), 'src', 'backlog.ts')).href
+      const child = testProcesses.spawn(process.execPath, [
+        '--input-type=module', '--eval',
+        [
+          "import { writeFileSync } from 'node:fs'",
+          `const { withBacklogLock } = await import(${JSON.stringify(backlogModule)})`,
+          "withBacklogLock(process.argv[1], () => writeFileSync(process.argv[2], 'acquired\\n'))",
+        ].join('\n'),
+        backlog, acquired,
+      ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+
+      await completion(child)
+      expect(readFileSync(acquired, 'utf8')).toBe('acquired\n')
+      expect(existsSync(lockDir)).toBe(false)
+    } finally {
+      fs.renameSync = originalRename
+      syncBuiltinESMExports()
+    }
+  })
+
   it('reclaims a lock when its live PID belongs to a different process start', () => {
     const backlog = join(paths.queueDir, 'backlog.txt')
     const lockDir = `${backlog}.lock`

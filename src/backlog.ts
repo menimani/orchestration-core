@@ -24,6 +24,11 @@ function ownerText(lockDir: string): string {
 }
 
 function lockOwnerIsStale(lockDir: string): boolean {
+  // Release publishes this durable marker before attempting the directory rename.
+  // Unlike the process-local token cache, it remains visible to other processes when
+  // Windows refuses to rename a lock whose owning daemon is still alive.
+  if (existsSync(join(lockDir, 'retired'))) return true
+
   const lockIsAged = (): boolean => {
     try {
       return Date.now() - statSync(lockDir).mtimeMs >= OWNER_GRACE_MS
@@ -71,6 +76,12 @@ function releaseOwnedLock(lockDir: string, token: string): void {
   if (ownerText(lockDir).split(/\s+/)[2] !== token) return
 
   const displaced = `${lockDir}.released.${process.pid}-${randomUUID()}`
+  try {
+    writeFileSync(join(lockDir, 'retired'), '', { flag: 'wx' })
+  } catch {
+    // The preferred atomic rename can still release the lock. Keep the local token
+    // fallback for filesystems that reject both marker publication and the rename.
+  }
   try {
     renameSync(lockDir, displaced)
   } catch (error) {
