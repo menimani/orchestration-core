@@ -1,7 +1,7 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { dirname, join } from 'node:path'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
   processTreeRootPid, quoteWindowsArgument, startWindowsProcess,
@@ -36,12 +36,18 @@ function testRuntime(
   launchTimeoutMs = 100,
 ): WindowsProcessRuntime & {
   sleep: ReturnType<typeof vi.fn>
-  terminateLauncherTree: ReturnType<typeof vi.fn>
+  requestLauncherTreeTermination: ReturnType<typeof vi.fn>
+  removeDirectory: ReturnType<typeof vi.fn>
 } {
   const sleep = vi.fn(
     (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
   )
-  const terminateLauncherTree = vi.fn(() => true)
+  const alive = new Set([43210])
+  const requestLauncherTreeTermination = vi.fn(() => {
+    alive.clear()
+    return true
+  })
+  const removeDirectory = vi.fn((path: string) => rmSync(path, { recursive: true, force: true }))
   return {
     platform: 'win32',
     now: Date.now,
@@ -60,7 +66,12 @@ function testRuntime(
       }) as unknown as ChildProcess
       return launcher
     },
-    terminateLauncherTree,
+    listProcesses: () => [{ pid: 43210, parentPid: 1 }],
+    probeProcess: (pid) => {
+      if (!alive.has(pid)) throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+    },
+    requestLauncherTreeTermination,
+    removeDirectory,
     launchTimeoutMs,
     launchPollMs: 5,
   }
@@ -80,7 +91,7 @@ it('waits for an empty PID file to finish publishing', async () => {
   })
 
   await expect(startWindowsProcess(options, runtime)).resolves.toBe(43211)
-  expect(runtime.terminateLauncherTree).not.toHaveBeenCalled()
+  expect(runtime.requestLauncherTreeTermination).not.toHaveBeenCalled()
 })
 
 it('times out when the PID is never published and terminates the spawned tree', async () => {
@@ -89,7 +100,7 @@ it('times out when the PID is never published and terminates the spawned tree', 
   await expect(startWindowsProcess(options, runtime)).rejects.toThrow(
     'never published a PID before startup timed out; startup cleanup found and terminated a live process tree',
   )
-  expect(runtime.terminateLauncherTree).toHaveBeenCalledOnce()
+  expect(runtime.requestLauncherTreeTermination).toHaveBeenCalledOnce()
 })
 
 it('rejects a malformed published PID immediately and terminates the spawned tree', async () => {
@@ -99,5 +110,42 @@ it('rejects a malformed published PID immediately and terminates the spawned tre
     'published an invalid PID (not-a-pid); startup cleanup found and terminated a live process tree',
   )
   expect(runtime.sleep).not.toHaveBeenCalled()
-  expect(runtime.terminateLauncherTree).toHaveBeenCalledOnce()
+  expect(runtime.requestLauncherTreeTermination).toHaveBeenCalledOnce()
+})
+
+it('rejects cleanup while any captured startup descendant remains alive', async () => {
+  const runtime = testRuntime(() => {}, 20)
+  const alive = new Set([43210, 43211])
+  let now = 0
+  runtime.listProcesses = () => [
+    { pid: 43210, parentPid: 1 },
+    { pid: 43211, parentPid: 43210 },
+  ]
+  runtime.probeProcess = (pid) => {
+    if (!alive.has(pid)) throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+  }
+  runtime.requestLauncherTreeTermination = vi.fn(() => {
+    alive.delete(43210)
+    return true
+  })
+  runtime.now = () => now
+  runtime.sleep = vi.fn(async (milliseconds: number) => { now += milliseconds })
+
+  await expect(startWindowsProcess(options, runtime)).rejects.toThrow(
+    'Could not stop Windows startup process tree 43210.',
+  )
+  expect(runtime.requestLauncherTreeTermination).toHaveBeenCalledOnce()
+  expect(runtime.sleep).toHaveBeenCalled()
+})
+
+it('returns the published PID when temporary-directory cleanup fails', async () => {
+  const runtime = testRuntime((readyFile) => writeFileSync(readyFile, '43211\n'))
+  runtime.removeDirectory = vi.fn((path: string) => {
+    rmSync(path, { recursive: true, force: true })
+    throw new Error('temporary directory is locked')
+  })
+
+  await expect(startWindowsProcess(options, runtime)).resolves.toBe(43211)
+  expect(runtime.removeDirectory).toHaveBeenCalledOnce()
+  expect(runtime.requestLauncherTreeTermination).not.toHaveBeenCalled()
 })

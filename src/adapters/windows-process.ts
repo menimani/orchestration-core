@@ -14,15 +14,25 @@ const WINDOWS_LAUNCH_CONFIG_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_CONFIG'
 const WINDOWS_LAUNCH_ERROR_FILE_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_ERROR_FILE'
 const WINDOWS_LAUNCH_TIMEOUT_MS = 10_000
 const WINDOWS_LAUNCH_POLL_MS = 10
+const WINDOWS_EXIT_TIMEOUT_MS = 5_000
+const WINDOWS_EXIT_POLL_MS = 50
 
 export interface WindowsProcessRuntime {
   platform: NodeJS.Platform
   now(): number
   sleep(milliseconds: number): Promise<void>
   spawnLauncher(command: string, args: readonly string[], options: SpawnOptions): ChildProcess
-  terminateLauncherTree(launcher: ChildProcess): boolean
+  listProcesses(): readonly WindowsProcess[]
+  probeProcess(pid: number): void
+  requestLauncherTreeTermination(launcher: ChildProcess): boolean
+  removeDirectory(path: string): void
   launchTimeoutMs: number
   launchPollMs: number
+}
+
+export interface WindowsProcess {
+  pid: number
+  parentPid: number
 }
 
 interface WindowsProcessDescriptor {
@@ -96,7 +106,29 @@ const systemRuntime: WindowsProcessRuntime = {
   now: Date.now,
   sleep,
   spawnLauncher: (command, args, options) => spawn(command, [...args], options),
-  terminateLauncherTree: (launcher) => {
+  listProcesses: () => {
+    const result = spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId | ForEach-Object { '{0},{1}' -f $_.ProcessId,$_.ParentProcessId }",
+    ], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    if (result.error !== undefined) throw result.error
+    if (result.status !== 0) throw new Error('Could not inspect the Windows startup process tree.')
+    return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+      const match = /^(\d+),(\d+)$/.exec(line)
+      if (match === null) throw new Error('Could not parse the Windows startup process tree.')
+      return { pid: Number(match[1]), parentPid: Number(match[2]) }
+    })
+  },
+  probeProcess: (pid) => {
+    process.kill(pid, 0)
+  },
+  requestLauncherTreeTermination: (launcher) => {
     if (launcher.pid === undefined) return launcher.kill()
     const result = spawnSync('taskkill', ['/PID', String(launcher.pid), '/T', '/F'], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -104,8 +136,77 @@ const systemRuntime: WindowsProcessRuntime = {
     })
     return result.status === 0
   },
+  removeDirectory: (path) => rmSync(path, { recursive: true, force: true }),
   launchTimeoutMs: WINDOWS_LAUNCH_TIMEOUT_MS,
   launchPollMs: WINDOWS_LAUNCH_POLL_MS,
+}
+
+function processIsAlive(runtime: WindowsProcessRuntime, pid: number): boolean {
+  try {
+    runtime.probeProcess(pid)
+    return true
+  } catch (error) {
+    // A permission or other probe failure does not prove that the process stopped.
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+function launcherTreePids(
+  runtime: WindowsProcessRuntime,
+  launcherPid: number,
+): ReadonlySet<number> {
+  const processes = runtime.listProcesses()
+  const runningPids = new Set(processes.map(({ pid }) => pid))
+  const childrenByParent = new Map<number, number[]>()
+  for (const { pid, parentPid } of processes) {
+    const children = childrenByParent.get(parentPid) ?? []
+    children.push(pid)
+    childrenByParent.set(parentPid, children)
+  }
+
+  const treePids = new Set<number>()
+  const visited = new Set<number>()
+  const pending = [launcherPid]
+  while (pending.length > 0) {
+    const pid = pending.pop()!
+    if (visited.has(pid)) continue
+    visited.add(pid)
+    if (runningPids.has(pid)) treePids.add(pid)
+    pending.push(...(childrenByParent.get(pid) ?? []))
+  }
+  return treePids
+}
+
+function anyProcessIsAlive(runtime: WindowsProcessRuntime, pids: ReadonlySet<number>): boolean {
+  return [...pids].some((pid) => processIsAlive(runtime, pid))
+}
+
+async function terminateLauncherTree(
+  runtime: WindowsProcessRuntime,
+  launcher: ChildProcess,
+): Promise<boolean> {
+  if (launcher.pid === undefined) return runtime.requestLauncherTreeTermination(launcher)
+
+  let trackedPids: ReadonlySet<number>
+  try {
+    trackedPids = launcherTreePids(runtime, launcher.pid)
+  } catch (error) {
+    runtime.requestLauncherTreeTermination(launcher)
+    throw error
+  }
+  if (!anyProcessIsAlive(runtime, trackedPids)) return false
+
+  // taskkill's status is only a request result. Descendants can survive after their
+  // parent exits, so retain the snapshot and verify every captured PID below.
+  runtime.requestLauncherTreeTermination(launcher)
+  const deadline = runtime.now() + WINDOWS_EXIT_TIMEOUT_MS
+  while (anyProcessIsAlive(runtime, trackedPids) && runtime.now() < deadline) {
+    await runtime.sleep(WINDOWS_EXIT_POLL_MS)
+  }
+  if (anyProcessIsAlive(runtime, trackedPids)) {
+    throw new Error(`Could not stop Windows startup process tree ${launcher.pid}.`)
+  }
+  return true
 }
 
 const START_HIDDEN_PROCESS = [
@@ -206,12 +307,18 @@ export async function startWindowsProcess(
       await runtime.sleep(runtime.launchPollMs)
     }
   } catch (error) {
-    const foundAlive = runtime.terminateLauncherTree(launcher)
+    const foundAlive = await terminateLauncherTree(runtime, launcher)
     const detail = foundAlive ? 'found and terminated a live process tree' : 'found no live process tree'
     throw new Error(`${errorSummary(error)}; startup cleanup ${detail}`, { cause: error })
   } finally {
     if (!launched) launcher.kill()
-    rmSync(root, { recursive: true, force: true })
+    try {
+      runtime.removeDirectory(root)
+    } catch (error) {
+      // Once the wrapper PID has been published, cleanup must not turn a live process
+      // into an unregistered launch. The OS temporary directory can be reclaimed later.
+      if (!launched) throw error
+    }
   }
 }
 
