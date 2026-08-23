@@ -150,7 +150,27 @@ function reclaimAbandonedLock() {
   removeDirectory(abandoned)
 }
 
-async function acquireLock() {
+function waitForLockRetry(milliseconds, cancellationSignal) {
+  if (cancellationSignal?.aborted) return Promise.resolve()
+  if (cancellationSignal === undefined) {
+    return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds))
+  }
+  return new Promise((resolveWait) => {
+    const onCancel = () => {
+      clearTimeout(timer)
+      cancellationSignal.removeEventListener('abort', onCancel)
+      resolveWait()
+    }
+    const timer = setTimeout(() => {
+      cancellationSignal.removeEventListener('abort', onCancel)
+      resolveWait()
+    }, milliseconds)
+    cancellationSignal.addEventListener('abort', onCancel, { once: true })
+    if (cancellationSignal.aborted) onCancel()
+  })
+}
+
+async function acquireLock(cancellationSignal) {
   let announced = false
   const waitStartedAt = performance.now()
   const configuredMaximumWait = Number(process.env.ORCHESTRATION_TEST_LOCK_TIMEOUT_MS)
@@ -158,6 +178,7 @@ async function acquireLock() {
     ? Math.min(configuredMaximumWait, maximumWaitMilliseconds)
     : maximumWaitMilliseconds
   for (;;) {
+    cancellationSignal?.throwIfAborted()
     try {
       mkdirSync(lockDirectory)
       try {
@@ -190,9 +211,7 @@ async function acquireLock() {
     if (remainingWait <= 0) {
       throw new Error(`Timed out after ${waitLimit}ms waiting for the repository test lock. Lock owner: ${owner.diagnostic}.`)
     }
-    await new Promise((resolveWait) => setTimeout(
-      resolveWait, Math.min(retryMilliseconds, remainingWait),
-    ))
+    await waitForLockRetry(Math.min(retryMilliseconds, remainingWait), cancellationSignal)
   }
 }
 
@@ -258,14 +277,35 @@ async function runVitest(args, invokingPid) {
   }
 }
 
-if (process.argv[2] === '--windows-vitest-supervisor') {
-  const invokingPid = Number(process.argv[3])
-  if (!Number.isSafeInteger(invokingPid) || invokingPid <= 0) {
-    throw new Error('The Windows test supervisor requires an invoking process PID.')
+async function runTestSuite() {
+  const invokingPid = process.platform === 'win32' ? invokingWindowsShellPid() : undefined
+  const lockCancellation = invokingPid === undefined ? undefined : new AbortController()
+  const cancelIfParentExited = invokingPid === undefined ? undefined : () => {
+    if (!processIsAlive(invokingPid)) lockCancellation.abort()
   }
-  await runVitest(process.argv.slice(4), invokingPid)
-} else {
-  await acquireLock()
+  cancelIfParentExited?.()
+  const lockParentMonitor = invokingPid === undefined
+    ? undefined
+    : setInterval(cancelIfParentExited, windowsParentPollMilliseconds)
+  try {
+    await acquireLock(lockCancellation?.signal)
+    cancelIfParentExited?.()
+  } catch (error) {
+    if (!lockCancellation?.signal.aborted) throw error
+    console.error('Test suite stopped because its invoking process exited while waiting for the repository lock.')
+    process.exitCode = 1
+    return
+  } finally {
+    if (lockParentMonitor !== undefined) clearInterval(lockParentMonitor)
+  }
+
+  if (lockCancellation?.signal.aborted) {
+    releaseLock()
+    console.error('Test suite stopped because its invoking process exited while waiting for the repository lock.')
+    process.exitCode = 1
+    return
+  }
+
   let child
   const forwardSignal = (signal) => {
     if (child?.pid === undefined) return
@@ -281,7 +321,7 @@ if (process.argv[2] === '--windows-vitest-supervisor') {
     child = process.platform === 'win32'
       ? spawn(process.execPath, [
         import.meta.filename, '--windows-vitest-supervisor',
-        String(invokingWindowsShellPid()), ...args,
+        String(invokingPid), ...args,
       ], {
         cwd: packageRoot,
         stdio: 'inherit',
@@ -306,4 +346,14 @@ if (process.argv[2] === '--windows-vitest-supervisor') {
     process.removeListener('SIGTERM', forwardSignal)
     releaseLock()
   }
+}
+
+if (process.argv[2] === '--windows-vitest-supervisor') {
+  const invokingPid = Number(process.argv[3])
+  if (!Number.isSafeInteger(invokingPid) || invokingPid <= 0) {
+    throw new Error('The Windows test supervisor requires an invoking process PID.')
+  }
+  await runVitest(process.argv.slice(4), invokingPid)
+} else {
+  await runTestSuite()
 }

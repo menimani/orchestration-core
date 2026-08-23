@@ -138,3 +138,69 @@ it('terminates Vitest and releases its lock when the invoking PowerShell exits',
   expect(contender.status).toBe(0)
   expect(contender.stderr).toBe('')
 })
+
+it('stops a locked waiter when its invoking PowerShell exits', async () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-locked-cancel-'))
+  fixtures.push(fixture)
+  const scripts = join(fixture, 'scripts')
+  const vitest = join(fixture, 'node_modules', 'vitest')
+  const invocationFile = join(fixture, 'invocations')
+  const waiterPidFile = join(fixture, 'waiter-pid')
+  const waitingFile = join(fixture, 'waiting')
+  mkdirSync(scripts, { recursive: true })
+  mkdirSync(vitest, { recursive: true })
+  const wrapper = readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs'), 'utf8')
+    .replace(
+      'async function runTestSuite() {',
+      "async function runTestSuite() {\n  if (process.env.ORCHESTRATION_TEST_WAITER_PID_FILE) writeFileSync(process.env.ORCHESTRATION_TEST_WAITER_PID_FILE, String(process.pid))",
+    )
+    .replace(
+      'console.log(`Another worktree is running the test suite;',
+      "if (process.env.ORCHESTRATION_TEST_WAITING_FILE) writeFileSync(process.env.ORCHESTRATION_TEST_WAITING_FILE, '')\n      console.log(`Another worktree is running the test suite;",
+    )
+  writeFileSync(join(scripts, 'run-tests.mjs'), wrapper)
+  writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+  writeFileSync(join(vitest, 'vitest.mjs'), [
+    "import { appendFileSync } from 'node:fs'",
+    "appendFileSync(process.env.ORCHESTRATION_TEST_INVOCATION_FILE, `${process.pid}\\n`)",
+    '',
+  ].join('\n'))
+  const lock = join(fixture, '.orchestration-test-suite-lock')
+  mkdirSync(lock)
+  writeFileSync(join(lock, 'owner.json'), `${JSON.stringify({
+    pid: process.pid,
+    token: 'fixture-owner',
+  })}\n`)
+
+  const invoker = spawn('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    '& $env:ORCHESTRATION_TEST_NODE $env:ORCHESTRATION_TEST_WRAPPER',
+  ], {
+    cwd: fixture,
+    env: {
+      ...process.env,
+      ORCHESTRATION_TEST_INVOCATION_FILE: invocationFile,
+      ORCHESTRATION_TEST_NODE: process.execPath,
+      ORCHESTRATION_TEST_WAITER_PID_FILE: waiterPidFile,
+      ORCHESTRATION_TEST_WAITING_FILE: waitingFile,
+      ORCHESTRATION_TEST_WRAPPER: join(scripts, 'run-tests.mjs'),
+    },
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+  if (invoker.pid !== undefined) processRoots.push(invoker.pid)
+  await waitForPath(waiterPidFile)
+  const waiterPid = Number(readFileSync(waiterPidFile, 'utf8'))
+  processRoots.push(waiterPid)
+  expect(processIsAlive(waiterPid)).toBe(true)
+  await waitForPath(waitingFile)
+
+  invoker.kill('SIGKILL')
+  await waitUntil(
+    () => !processIsAlive(waiterPid),
+    `Test wrapper ${waiterPid} survived its invoking PowerShell process while waiting for the lock`,
+  )
+  rmSync(lock, { recursive: true, force: true })
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  expect(existsSync(invocationFile)).toBe(false)
+})
