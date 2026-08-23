@@ -1,4 +1,7 @@
-import { mkdirSync, readdirSync, rmSync, statSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import {
+  mkdirSync, readdirSync, renameSync, rmSync, statSync, readFileSync, writeFileSync,
+} from 'node:fs'
 import { uptime } from 'node:os'
 import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
@@ -47,7 +50,8 @@ function registryFile(paths: OrchPaths, taskId: string): string {
 export function registeredTaskIds(paths: OrchPaths): string[] {
   try {
     return readdirSync(registryDir(paths), { withFileTypes: true })
-      .filter((entry) => entry.isFile())
+      .filter((entry) => entry.isFile()
+        && !(entry.name.startsWith('.') && entry.name.endsWith('.tmp')))
       .map((entry) => entry.name)
       .sort()
   } catch (error) {
@@ -92,9 +96,18 @@ export function recordTaskProcess(
     }
   }
   mkdirSync(registryDir(paths), { recursive: true })
-  writeFileSync(registryFile(paths, taskId), `${JSON.stringify({
-    pid, startIdentity: startIdentity ?? null,
-  })}\n`)
+  const file = registryFile(paths, taskId)
+  const temporary = join(
+    registryDir(paths), `.${taskId}.${process.pid}.${randomUUID()}.tmp`,
+  )
+  try {
+    writeFileSync(temporary, `${JSON.stringify({
+      pid, startIdentity: startIdentity ?? null,
+    })}\n`, { flag: 'wx' })
+    renameSync(temporary, file)
+  } finally {
+    rmSync(temporary, { force: true })
+  }
 }
 
 /** Forget the process for `taskId`. Safe to call when nothing was recorded. */
@@ -123,17 +136,23 @@ function registeredTaskProcessPid(
   }
   try {
     entry = JSON.parse(recorded) as ProcessRegistryEntry
-  } catch {
+  } catch (error) {
+    // Atomic publication prevents new partial records. Keep any malformed published
+    // ownership visible as an error instead of turning a possibly live runner into an
+    // apparently unowned task.
+    throw new Error(`Malformed task process registry entry: ${file}`, { cause: error })
+  }
+
+  // Bare PIDs predate process-start identities and cannot safely establish ownership.
+  if (Number.isSafeInteger(entry) && (entry as unknown as number) > 0) {
     forgetTaskProcess(paths, taskId)
     return undefined
   }
-
   if (entry === null || typeof entry !== 'object'
     || !Number.isSafeInteger(entry.pid) || entry.pid <= 0
     || (typeof entry.startIdentity !== 'string' && entry.startIdentity !== null)
     || entry.startIdentity === '') {
-    forgetTaskProcess(paths, taskId)
-    return undefined
+    throw new Error(`Malformed task process registry entry: ${file}`)
   }
   if (writtenAt + BOOT_COMPARISON_TOLERANCE_MS < boot()) {
     forgetTaskProcess(paths, taskId)
