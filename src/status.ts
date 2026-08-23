@@ -151,6 +151,7 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
   const pidFile = join(dir, 'pid')
   const identityFile = join(dir, 'start-identity')
   const tokenFile = join(dir, 'owner-token')
+  const retiredFile = join(dir, 'retired-owner-token')
   const startIdentity = JSON.stringify(currentProcessStartIdentity())
   const token = randomUUID()
   const deadline = Date.now() + STATUS_LOCK_WAIT_MS
@@ -192,8 +193,17 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
       } catch {
         // Legacy owner or token not published yet.
       }
-      if (recordedToken !== '' && releasedStatusLockTokens.has(recordedToken)) {
+      let retiredToken = ''
+      try {
+        retiredToken = readFileSync(retiredFile, 'utf8').trim()
+      } catch {
+        // The owner has not marked this lock as retired.
+      }
+      if (recordedToken !== '' && (
+        retiredToken === recordedToken || releasedStatusLockTokens.has(recordedToken)
+      )) {
         try {
+          rmSync(retiredFile, { force: true })
           rmSync(tokenFile)
           rmSync(identityFile, { force: true })
           rmSync(pidFile, { force: true })
@@ -210,6 +220,7 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
       }
       if (validOwner && !lockOwnerIsCurrent(Number(recordedOwner), startIdentity)) {
         try {
+          rmSync(retiredFile, { force: true })
           rmSync(tokenFile, { force: true })
           rmSync(identityFile, { force: true })
           rmSync(pidFile)
@@ -225,6 +236,7 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
       }
       if (!validOwner && lockIsAged(dir)) {
         try {
+          rmSync(retiredFile, { force: true })
           rmSync(tokenFile, { force: true })
           rmSync(identityFile, { force: true })
           if (recordedOwner !== '') rmSync(pidFile)
@@ -259,6 +271,7 @@ function releaseStatusLock(paths: OrchPaths, taskId: string, token: string): voi
   const dir = lockDir(paths, taskId)
   const pidFile = join(dir, 'pid')
   const tokenFile = join(dir, 'owner-token')
+  const retiredFile = join(dir, 'retired-owner-token')
   let recordedPid = ''
   let recordedToken = ''
   try {
@@ -279,6 +292,11 @@ function releaseStatusLock(paths: OrchPaths, taskId: string, token: string): voi
     // The status mutation has already committed. Let the next acquisition reclaim
     // this exact lock token even while this process remains alive.
     releasedStatusLockTokens.add(token)
+    try {
+      writeFileSync(retiredFile, `${token}\n`)
+    } catch {
+      // Preserve same-process recovery when the retirement marker cannot be written.
+    }
     return
   }
   releasedStatusLockTokens.delete(token)
