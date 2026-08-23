@@ -143,7 +143,12 @@ export async function startLoopReplacement(
       clearTimeout(timeout)
       replacement.offError(onError)
       replacement.offExit(onExit)
-      rmSync(readyFile, { force: true })
+      try {
+        rmSync(readyFile, { force: true })
+      } catch {
+        // Readiness has already been decided. Marker cleanup must not keep the
+        // replacement attached or leave the caller's restart promise unsettled.
+      }
       if (result.ok) replacement.release()
       resolve(result)
     }
