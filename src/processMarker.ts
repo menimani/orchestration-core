@@ -38,7 +38,7 @@ export function parseProcessMarker(text: string): ProcessMarker | undefined {
   }
 }
 
-export function processMarkerIsCurrent(marker: ProcessMarker): boolean {
+function processMarkerIsCurrent(marker: ProcessMarker): boolean {
   return lockOwnerIsCurrent(marker.pid, marker.startIdentity)
 }
 
