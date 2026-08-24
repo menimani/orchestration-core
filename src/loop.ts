@@ -388,13 +388,13 @@ export function createLoop(deps: LoopDeps) {
     return count
   }
 
-  function git(args: string[], quietSuccess = ''): string {
+  function git(args: string[]): string {
+    return gitIn(paths.repoRoot, args)
+  }
+
+  function optionalGit(args: string[], quietSuccess = ''): string {
     try {
-      const output = execFileSync('git', args, {
-        cwd: paths.repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
+      const output = git(args)
       return output === '' ? quietSuccess : output
     } catch {
       return ''
@@ -417,7 +417,7 @@ export function createLoop(deps: LoopDeps) {
     // The comparison base is the checkout's HEAD SHA, not its branch name: a detached
     // worker checkout has an empty branch name, which read as zero commits and left
     // completed work permanently unpublished.
-    const baseSha = git(['rev-parse', 'HEAD']).trim()
+    const baseSha = optionalGit(['rev-parse', 'HEAD']).trim()
     if (gitIn(worktree, ['status', '--porcelain']).trim() !== '') {
       throw new Error(`${taskId} has uncommitted changes`)
     }
@@ -564,7 +564,7 @@ export function createLoop(deps: LoopDeps) {
           throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
 
-        const runBranch = git(['branch', '--show-current']).trim()
+        const runBranch = optionalGit(['branch', '--show-current']).trim()
         let appliedMergeCommit: string | undefined
         let promotionPersistenceError: unknown
         const persistPromotion = (mergedCommit: string): void => {
@@ -1188,12 +1188,12 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const remotePrefix = `${remote}/`
-    let baseBranch = git([
+    let baseBranch = optionalGit([
       'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`,
     ]).trim()
     if (!baseBranch.startsWith(remotePrefix)
-      || git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
-      const advertised = git(['ls-remote', '--symref', remote, 'HEAD'])
+      || optionalGit(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
+      const advertised = optionalGit(['ls-remote', '--symref', remote, 'HEAD'])
       const branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(advertised)?.[1] ?? ''
       baseBranch = branch === '' ? '' : `${remote}/${branch}`
     }
@@ -1208,7 +1208,7 @@ export function createLoop(deps: LoopDeps) {
       }
     }
     if (!baseBranch.startsWith(remotePrefix)
-      || git(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
+      || optionalGit(['rev-parse', '--verify', `${baseBranch}^{commit}`]).trim() === '') {
       event('WARN', `could not resolve a valid default branch for ${remote}`)
       return false
     }
@@ -1472,7 +1472,7 @@ export function createLoop(deps: LoopDeps) {
   /** Push the branch and create or update the draft PR. Returns false when it must retry. */
   async function ensureDraftPr(mode: 'cycle' | 'final'): Promise<boolean> {
     emptyRun = false
-    const branch = git(['branch', '--show-current']).trim()
+    const branch = optionalGit(['branch', '--show-current']).trim()
     if (branch === '') {
       reportGateFailure('could not get branch name; PR skipped', true)
       return false
@@ -1482,7 +1482,7 @@ export function createLoop(deps: LoopDeps) {
     try {
       pushRemote = currentBranchPushRemote(paths.repoRoot)
       baseRemote = currentBranchTrackingRemote(paths.repoRoot)
-      const hasUpstream = git([
+      const hasUpstream = optionalGit([
         'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}',
       ]).trim() !== ''
       execFileSync('git', [
@@ -1497,7 +1497,7 @@ export function createLoop(deps: LoopDeps) {
       return false
     }
 
-    const baseRef = git([
+    const baseRef = optionalGit([
       'symbolic-ref', '--quiet', '--short', `refs/remotes/${baseRemote}/HEAD`,
     ]).trim()
     if (!baseRef.startsWith(`${baseRemote}/`)) {
@@ -1653,7 +1653,7 @@ export function createLoop(deps: LoopDeps) {
     }
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     if (prUrl === '') return false
-    const branch = git(['branch', '--show-current']).trim()
+    const branch = optionalGit(['branch', '--show-current']).trim()
     let status
     try {
       status = await forge.prStatus({ kind: 'branch', value: branch })
@@ -1864,7 +1864,7 @@ export function createLoop(deps: LoopDeps) {
               .filter((comment) => comment.author.hasWriteAccess)
               .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment.body)?.[1])
               .find((sha) => sha !== undefined
-                && git(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
+                && optionalGit(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
             if (mergeSha !== undefined) continue
           } catch (error) {
             if (error instanceof ForgeRateLimitError) return 'continue'
@@ -1943,7 +1943,7 @@ export function createLoop(deps: LoopDeps) {
             }
           }
 
-          const currentTip = git(['rev-parse', 'HEAD']).trim()
+          const currentTip = optionalGit(['rev-parse', 'HEAD']).trim()
           const cycleSuiteEnabled = cycleSuiteEnabledForTaskGate()
           const suitePassedForTip = cycleSuiteEnabled
             && currentTip !== ''
@@ -2136,7 +2136,7 @@ export function createLoop(deps: LoopDeps) {
       writeFileSync(stopFile, '')
       return 'stopped'
     }
-    const currentBranch = git(['branch', '--show-current']).trim()
+    const currentBranch = optionalGit(['branch', '--show-current']).trim()
     const recordedBranch = existsSync(runBranchFile)
       ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
       : ''
@@ -2261,7 +2261,7 @@ export function createLoop(deps: LoopDeps) {
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
         writeFileSync(mergeFailureFile, '0\n')
         if (linkedIssues.length > 0) {
-          const runBranch = git(['branch', '--show-current']).trim()
+          const runBranch = optionalGit(['branch', '--show-current']).trim()
           await reconcileMergedIssues(taskId, linkedIssues, mergeCommit, runBranch)
         }
         // A task delegated while the gate was waiting merges commits the gate has
