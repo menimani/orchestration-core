@@ -1255,6 +1255,7 @@ export function createLoop(deps: LoopDeps) {
   function runAutoReview(cycle: number, isFinal: boolean): boolean {
     const roundFile = join(paths.queueDir, `review-round-${cycle}`)
     const idFile = join(paths.queueDir, `review-id-${cycle}`)
+    const pendingIdFile = join(paths.queueDir, `review-pending-id-${cycle}`)
 
     if (!isFinal && cycle % config.reviewEveryNCycles !== 0) {
       return true
@@ -1294,7 +1295,11 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
-    const reviewId = newTaskId(paths, `review-c${cycle}`, now())
+    const pendingId = existsSync(pendingIdFile)
+      ? readFileSync(pendingIdFile, 'utf8').replace(/[\s\r\n]/g, '')
+      : ''
+    const reviewId = pendingId || newTaskId(paths, `review-c${cycle}`, now())
+    if (pendingId === '') writeFileSync(pendingIdFile, `${reviewId}\n`)
     if (!generateReviewTask(reviewId, cycle, prUrl)) {
       event('Stopped', 'Loop', 'review base unavailable')
       writeFileSync(stopFile, '')
@@ -1314,12 +1319,13 @@ export function createLoop(deps: LoopDeps) {
     // being able to perform it, so keep them behind the enqueue boundary.
     writeFileSync(roundFile, `${rounds + 1}\n`)
     writeFileSync(idFile, `${reviewId}\n`)
+    rmSync(pendingIdFile, { force: true })
     return false
   }
 
   function cleanupSessionState(preserveTaskMarkers = false): void {
     for (const name of readdirSync(paths.queueDir)) {
-      if (/^(cycle-complete-|cycle-suite-tip-|cycle-resume-|ci-fix-emitted-|review-round-|review-id-|failed-|scan-yield-|scan-expected-)/.test(name)
+      if (/^(cycle-complete-|cycle-suite-tip-|cycle-resume-|ci-fix-emitted-|ci-fix-pending-id-|review-round-|review-id-|review-pending-id-|failed-|scan-yield-|scan-expected-)/.test(name)
         || name === 'decisions.txt' || name === 'pr-url.txt'
         || name === 'empty-scan-count.txt' || name === 'merge-failure-count.txt') {
         rmSync(join(paths.queueDir, name), { force: true })
@@ -1539,8 +1545,13 @@ export function createLoop(deps: LoopDeps) {
     return 'success'
   }
 
-  function generateCiFixTask(cycle: number, prUrl: string, failSummary: string): void {
-    const fixId = newTaskId(paths, `ci-fix-c${cycle}`, now())
+  function generateCiFixTask(cycle: number, prUrl: string, failSummary: string): string {
+    const pendingIdFile = join(paths.queueDir, `ci-fix-pending-id-${cycle}`)
+    const pendingId = existsSync(pendingIdFile)
+      ? readFileSync(pendingIdFile, 'utf8').replace(/[\s\r\n]/g, '')
+      : ''
+    const fixId = pendingId || newTaskId(paths, `ci-fix-c${cycle}`, now())
+    if (pendingId === '') writeFileSync(pendingIdFile, `${fixId}\n`)
     const text = repositoryInspectionPreamble() + renderTemplate('ci-fix-template.md', {
       FIX_ID: fixId,
       CYCLE: String(cycle),
@@ -1551,6 +1562,7 @@ export function createLoop(deps: LoopDeps) {
     })
     writeFileSync(specFile(paths, fixId), text)
     enqueueTaskImpl(paths, fixId, 0)
+    return pendingIdFile
   }
 
   /** After the final gate: promote the draft PR and print LOOP_DONE. */
@@ -1896,13 +1908,15 @@ export function createLoop(deps: LoopDeps) {
             } catch {
               failSummary = ''
             }
+            let pendingIdFile: string
             try {
-              generateCiFixTask(currentScans, prUrl, failSummary)
+              pendingIdFile = generateCiFixTask(currentScans, prUrl, failSummary)
             } catch (error) {
               event('WARN', `could not enqueue CI fix: ${errorSummary(error)}`)
               return 'continue'
             }
             writeFileSync(ciFixFlag, `${attempts + 1}\n`)
+            rmSync(pendingIdFile, { force: true })
             rmSync(completeFlag, { force: true })
           } else {
             event('ERROR', `CI still failing after ${attempts} fixes; stopping the loop`)
