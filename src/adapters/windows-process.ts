@@ -190,9 +190,11 @@ async function terminateLauncherTree(
   let trackedPids: ReadonlySet<number>
   try {
     trackedPids = launcherTreePids(runtime, launcher.pid)
-  } catch (error) {
-    runtime.requestLauncherTreeTermination(launcher)
-    throw error
+  } catch {
+    // Process enumeration can fail independently of taskkill. The launcher is the
+    // only PID available for a direct check in that case; do not trust taskkill's
+    // request status or discard the descriptor until that PID is confirmed gone.
+    trackedPids = new Set([launcher.pid])
   }
   if (!anyProcessIsAlive(runtime, trackedPids)) return false
 
@@ -207,6 +209,13 @@ async function terminateLauncherTree(
     throw new Error(`Could not stop Windows startup process tree ${launcher.pid}.`)
   }
   return true
+}
+
+class WindowsStartupProcessRetainedError extends Error {
+  constructor(stateDirectory: string, cause: unknown) {
+    super(`${errorSummary(cause)} Startup state was retained at ${stateDirectory}.`, { cause })
+    this.name = 'WindowsStartupProcessRetainedError'
+  }
 }
 
 const START_HIDDEN_PROCESS = [
@@ -282,6 +291,7 @@ export async function startWindowsProcess(
 
   let launcherError: Error | undefined
   let launched = false
+  let retainStartupState = false
   launcher.once('error', (error) => { launcherError = error })
   const deadline = runtime.now() + runtime.launchTimeoutMs
   try {
@@ -307,17 +317,25 @@ export async function startWindowsProcess(
       await runtime.sleep(runtime.launchPollMs)
     }
   } catch (error) {
-    const foundAlive = await terminateLauncherTree(runtime, launcher)
+    let foundAlive: boolean
+    try {
+      foundAlive = await terminateLauncherTree(runtime, launcher)
+    } catch (cleanupError) {
+      retainStartupState = true
+      throw new WindowsStartupProcessRetainedError(root, cleanupError)
+    }
     const detail = foundAlive ? 'found and terminated a live process tree' : 'found no live process tree'
     throw new Error(`${errorSummary(error)}; startup cleanup ${detail}`, { cause: error })
   } finally {
     if (!launched) launcher.kill()
-    try {
-      runtime.removeDirectory(root)
-    } catch (error) {
-      // Once the wrapper PID has been published, cleanup must not turn a live process
-      // into an unregistered launch. The OS temporary directory can be reclaimed later.
-      if (!launched) throw error
+    if (!retainStartupState) {
+      try {
+        runtime.removeDirectory(root)
+      } catch (error) {
+        // Once the wrapper PID has been published, cleanup must not turn a live process
+        // into an unregistered launch. The OS temporary directory can be reclaimed later.
+        if (!launched) throw error
+      }
     }
   }
 }
