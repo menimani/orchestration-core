@@ -8,8 +8,7 @@ import { operatingSystem } from './adapters/os.ts'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
-  forgetTaskProcess, recordTaskProcess, taskProcessPid, type ProcessIsAlive,
-  type ProcessStartIdentity,
+  recordTaskProcess, taskProcessPid, type ProcessStartIdentity, type ProcessTreeIsAlive,
 } from './processRegistry.ts'
 
 // A task reads `running` while its runner process is alive, `completed` once the
@@ -90,7 +89,7 @@ export function readStatus(
   paths: OrchPaths,
   taskId: string,
   processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
-  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
+  processTreeIsAlive: ProcessTreeIsAlive = operatingSystem.processTreeIsAlive,
 ): TaskStatus | undefined {
   let parsed: unknown
   try {
@@ -113,7 +112,7 @@ export function readStatus(
   // process, so a number left in an old record is not read back as a live task.
   return {
     ...record,
-    pid: taskProcessPid(paths, taskId, undefined, processStartIdentity, processIsAlive) ?? null,
+    pid: taskProcessPid(paths, taskId, undefined, processStartIdentity, processTreeIsAlive) ?? null,
   }
 }
 
@@ -348,7 +347,9 @@ function writeStatusUnlocked(
   } finally {
     rmSync(temporaryFile, { force: true })
   }
-  if (pid === undefined || !Number.isInteger(pid)) forgetTaskProcess(paths, taskId)
+  // Publishing a terminal status does not prove that the runner's descendants stopped.
+  // Reading the registry releases it only after the whole tree is confirmed gone.
+  if (pid === undefined || !Number.isInteger(pid)) taskProcessPid(paths, taskId)
 }
 
 export async function writeStatus(
