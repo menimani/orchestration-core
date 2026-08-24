@@ -531,6 +531,7 @@ describe('mergeTask', () => {
     const runnerPid = 12345
     vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue(undefined)
     vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
     await writeStatus(paths, taskId, 'completed', runnerPid)
 
@@ -550,6 +551,7 @@ describe('mergeTask', () => {
       'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
     vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue(undefined)
     vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
     await writeStatus(paths, taskId, 'completed', runnerPid)
 
