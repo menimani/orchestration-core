@@ -292,6 +292,25 @@ describe('process-group liveness', () => {
     expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '4321', '/T', '/F'])
   })
 
+  it('refuses to terminate a Windows tree containing the test runner', () => {
+    const spawn = vi.fn()
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn,
+      listProcesses: () => [
+        { pid: 4321, parentPid: 0 },
+        { pid: process.pid, parentPid: 4321 },
+      ],
+      probeProcess: () => {},
+      remove: () => {},
+      now: Date.now,
+      sleep: () => {},
+    }
+
+    expect(() => createWindowsOperatingSystem(runtime).terminateProcessTree(4321))
+      .toThrow(`Refusing to stop process tree 4321 because it contains the current process ${process.pid}.`)
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
   it('verifies captured Windows descendants after taskkill stops the parent', () => {
     const alive = new Set([4321, 4322])
     let now = 0

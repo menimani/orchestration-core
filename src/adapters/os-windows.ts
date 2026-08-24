@@ -167,6 +167,11 @@ export function createOperatingSystem(
   const terminateProcessTree = (pid: number): boolean => {
     const trackedPids = processTreePids(runtime, pid)
     if (!anyProcessIsAlive(runtime, trackedPids)) return false
+    if (pid === process.pid || trackedPids?.has(process.pid)) {
+      throw new Error(
+        `Refusing to stop process tree ${pid} because it contains the current process ${process.pid}.`,
+      )
+    }
 
     try {
       runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
