@@ -1784,6 +1784,50 @@ describe('issue claim release', () => {
 })
 
 describe('reapStaleLeases', () => {
+  it('stops reconciliation and preserves a stale lease when promotion JSON needs repair', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged with damaged promotion state', body: '',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
+    })
+    const promotion = join(paths.queueDir, 'issue-promotion', `${issueNumber}.json`)
+    mkdirSync(join(paths.queueDir, 'issue-promotion'), { recursive: true })
+    writeFileSync(promotion, '{"taskId":"merged-task"')
+
+    await expect(reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).rejects.toThrow(
+      `Malformed issue promotion record ${promotion}; repair this file before issue reconciliation can continue`,
+    )
+
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-gone'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.labels).not.toContain(LABEL_READY)
+    expect(readFileSync(promotion, 'utf8')).toBe('{"taskId":"merged-task"')
+  })
+
+  it.each([
+    ['a scalar', 'null'],
+    ['an empty task id', JSON.stringify({
+      taskId: '', issueNumber: 41, mergeCommit: 'abc123', runBranch: 'main',
+    })],
+    ['a mismatched issue number', JSON.stringify({
+      taskId: 'merged-task', issueNumber: 42, mergeCommit: 'abc123', runBranch: 'main',
+    })],
+    ['an invalid confirmation flag', JSON.stringify({
+      taskId: 'merged-task', issueNumber: 41, mergeCommit: 'abc123', runBranch: 'main',
+      commentConfirmed: 'yes',
+    })],
+  ])('rejects a promotion record containing %s', (_description, contents) => {
+    const promotion = join(paths.queueDir, 'issue-promotion', '41.json')
+    mkdirSync(join(paths.queueDir, 'issue-promotion'), { recursive: true })
+    writeFileSync(promotion, contents)
+
+    expect(() => issuePromotionForIssue(paths, 41)).toThrow(/repair this file/)
+    expect(readFileSync(promotion, 'utf8')).toBe(contents)
+  })
+
   it('surfaces persisted release failures before reporting stale-lease recovery', async () => {
     const issueNumber = await forge.createIssue({
       title: 'cleanup release', body: '',
