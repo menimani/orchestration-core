@@ -140,6 +140,97 @@ describe('setup verification', () => {
     )
   })
 
+  it.each([
+    {
+      name: 'typecheck',
+      run: (_cwd: string, command: string) => command !== 'npm run typecheck',
+      expected: [
+        /^FAIL: orchestration TypeScript typecheck$/,
+      ],
+    },
+    {
+      name: 'adapter loading',
+      omitAdapter: true,
+      expected: [
+        /^FAIL: loadProject adapter discovery;/,
+        /^SKIP: adapter suite; adapter could not be loaded$/,
+        /^SKIP: adapter referenced paths; adapter could not be loaded$/,
+      ],
+    },
+    {
+      name: 'adapter suite',
+      run: (_cwd: string, command: string) => command !== 'suite',
+      expected: [
+        /^FAIL: adapter suite step 'Consumer suite'$/,
+        /^FAIL: adapter suite$/,
+      ],
+    },
+    {
+      name: 'push upstream',
+      failGitCall: '--dry-run',
+      expected: [
+        /^FAIL: current branch has no pushable upstream; simulated push upstream failure$/,
+      ],
+    },
+    {
+      name: 'hooks',
+      configuredHooks: 'wrong/hooks',
+      expected: [
+        /^FAIL: core\.hooksPath is not orchestration\/ts\/\.githooks; wrong\/hooks != orchestration\/ts\/\.githooks$/,
+      ],
+    },
+    {
+      name: 'labels',
+      missingLabel: QUEUE_LABELS[0].name,
+      expected: [
+        new RegExp(`^FAIL: loop labels; missing ${QUEUE_LABELS[0].name}$`),
+      ],
+    },
+  ])('returns failure and reports the $name failure distinctly', async ({
+    name,
+    omitAdapter = false,
+    run = () => true,
+    failGitCall,
+    configuredHooks = 'orchestration/ts/.githooks',
+    missingLabel,
+    expected,
+  }) => {
+    const repository = mkdtempSync(join(tmpdir(), 'orchestration-verify-failure-'))
+    repositories.push(repository)
+    const packageRoot = join(repository, 'orchestration', 'ts')
+    mkdirSync(join(packageRoot, '.githooks'), { recursive: true })
+    const projectDirectory = join(repository, 'orchestration', 'project')
+    mkdirSync(projectDirectory, { recursive: true })
+    if (!omitAdapter) {
+      const adapter = renderProjectAdapter('consumer', '../ts/src/adapters/project.ts')
+        .replace('cycleSuite: () => []', "cycleSuite: () => [{ label: 'Consumer suite', cwd: '', command: 'suite' }]")
+      writeFileSync(join(projectDirectory, 'project-consumer.ts'), adapter)
+    }
+    const forge = makeFakeForge()
+    for (const label of QUEUE_LABELS) {
+      if (label.name !== missingLabel) forge.labels.add(label.name)
+    }
+    const reports: string[] = []
+    const git = (args: string[]): string => {
+      if (args.includes(failGitCall ?? 'never')) throw new Error(`simulated ${name} failure`)
+      if (args.includes('@{upstream}')) return 'origin/topic'
+      if (args.includes('core.hooksPath')) return configuredHooks
+      if (args.includes('--dry-run')) return ''
+      throw new Error(`unexpected git call: ${args.join(' ')}`)
+    }
+
+    const ok = await verifyRepositorySetup(orchPaths(repository), forge, {
+      packageRoot,
+      env: {},
+      report: (line) => reports.push(line),
+      git,
+      run,
+    })
+
+    expect(ok).toBe(false)
+    for (const report of expected) expect(reports).toContainEqual(expect.stringMatching(report))
+  })
+
   it('uses PROJECT to select one of multiple supported adapters', async () => {
     const repository = mkdtempSync(join(tmpdir(), 'orchestration-verify-project-'))
     repositories.push(repository)
