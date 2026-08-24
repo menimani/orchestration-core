@@ -51,6 +51,7 @@ describe('terminateLiveTaskProcesses', () => {
     const os = {
       processStartIdentity: (pid: number) => alive.has(pid) ? `started:${pid}` : undefined,
       processIsAlive: (pid: number) => alive.has(pid),
+      processTreeIsAlive: (pid: number) => alive.has(pid),
       terminateProcessTree,
     } as unknown as OperatingSystem
 
@@ -109,6 +110,7 @@ describe('terminateLiveTaskProcesses', () => {
     const os = {
       processStartIdentity: () => 'started:possibly-reused',
       processIsAlive: () => true,
+      processTreeIsAlive: () => true,
       terminateProcessTree,
     } as unknown as OperatingSystem
 
@@ -130,6 +132,7 @@ describe('terminateLiveTaskProcesses', () => {
     const os = {
       processStartIdentity: () => 'started:101',
       processIsAlive: () => true,
+      processTreeIsAlive: () => true,
       terminateProcessTree: () => false,
     } as unknown as OperatingSystem
 
@@ -142,6 +145,28 @@ describe('terminateLiveTaskProcesses', () => {
       }],
     })
     expect(taskProcessPid(paths, 'still-live', undefined, () => 'started:101')).toBe(101)
+  })
+
+  it('finds an orphaned tree after its runner root exits and retains failed cleanup', () => {
+    writeRunningTask('orphaned-tree', 101)
+    const terminateProcessTree = vi.fn(() => false)
+    const os = {
+      processStartIdentity: () => undefined,
+      processIsAlive: () => false,
+      processTreeIsAlive: () => true,
+      terminateProcessTree,
+    } as unknown as OperatingSystem
+
+    const result = terminateLiveTaskProcesses(paths, os)
+
+    expect(terminateProcessTree).not.toHaveBeenCalled()
+    expect(result.failures).toEqual([{
+      taskId: 'orphaned-tree', pid: 101,
+      error: 'process identity was not captured at launch or is currently unavailable',
+    }])
+    expect(taskProcessPid(
+      paths, 'orphaned-tree', undefined, () => undefined, () => true,
+    )).toBe(101)
   })
 })
 

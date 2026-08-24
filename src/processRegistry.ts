@@ -37,6 +37,7 @@ type ProcessRegistryEntry = VerifiedProcessRegistryEntry | UnverifiedProcessRegi
 
 export type ProcessStartIdentity = (pid: number) => string | undefined
 export type ProcessIsAlive = (pid: number) => boolean
+export type ProcessTreeIsAlive = (pid: number) => boolean
 
 function registryDir(paths: OrchPaths): string {
   return join(paths.queueDir, 'pids')
@@ -120,7 +121,7 @@ function registeredTaskProcessPid(
   taskId: string,
   boot: () => number,
   processStartIdentity: ProcessStartIdentity,
-  processIsAlive: ProcessIsAlive,
+  processTreeIsAlive: ProcessTreeIsAlive,
   requireVerifiedIdentity: boolean,
 ): number | undefined {
   const file = registryFile(paths, taskId)
@@ -168,7 +169,7 @@ function registeredTaskProcessPid(
   if (currentStartIdentity === undefined) {
     let alive = true
     try {
-      alive = processIsAlive(entry.pid)
+      alive = processTreeIsAlive(entry.pid)
     } catch {
       // An unavailable liveness probe does not prove that the process stopped.
     }
@@ -177,6 +178,13 @@ function registeredTaskProcessPid(
     return undefined
   }
   if (entry.startIdentity !== null && currentStartIdentity !== entry.startIdentity) {
+    let alive = true
+    try {
+      alive = processTreeIsAlive(entry.pid)
+    } catch {
+      // A failed tree probe cannot prove that the recorded tree was cleaned up.
+    }
+    if (alive) return requireVerifiedIdentity ? undefined : entry.pid
     forgetTaskProcess(paths, taskId)
     return undefined
   }
@@ -193,10 +201,10 @@ export function taskProcessPid(
   taskId: string,
   boot: () => number = bootedAt,
   processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
-  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
+  processTreeIsAlive: ProcessTreeIsAlive = operatingSystem.processTreeIsAlive,
 ): number | undefined {
   return registeredTaskProcessPid(
-    paths, taskId, boot, processStartIdentity, processIsAlive, false,
+    paths, taskId, boot, processStartIdentity, processTreeIsAlive, false,
   )
 }
 
@@ -210,9 +218,9 @@ export function terminableTaskProcessPid(
   taskId: string,
   boot: () => number = bootedAt,
   processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
-  processIsAlive: ProcessIsAlive = operatingSystem.processIsAlive,
+  processTreeIsAlive: ProcessTreeIsAlive = operatingSystem.processTreeIsAlive,
 ): number | undefined {
   return registeredTaskProcessPid(
-    paths, taskId, boot, processStartIdentity, processIsAlive, true,
+    paths, taskId, boot, processStartIdentity, processTreeIsAlive, true,
   )
 }

@@ -174,6 +174,27 @@ describe('task process registry', () => {
     expect(existsSync(registryFile())).toBe(false)
   })
 
+  it('retains ownership while descendants remain after the runner root exits', () => {
+    recordTaskProcess(paths, taskId, 4321, identity)
+
+    expect(taskProcessPid(paths, taskId, undefined, () => undefined, () => true)).toBe(4321)
+    expect(terminableTaskProcessPid(
+      paths, taskId, undefined, () => undefined, () => true,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(true)
+  })
+
+  it('retains blocking ownership but refuses termination after identity replacement', () => {
+    recordTaskProcess(paths, taskId, 4321, identity)
+    const replacementIdentity = (): string => 'started:replacement'
+
+    expect(taskProcessPid(paths, taskId, undefined, replacementIdentity, () => true)).toBe(4321)
+    expect(terminableTaskProcessPid(
+      paths, taskId, undefined, replacementIdentity, () => true,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(true)
+  })
+
   it('drops a legacy bare-PID entry because it has no process-start identity', () => {
     recordTaskProcess(paths, taskId, 4321, identity)
     writeFileSync(registryFile(), '4321\n')

@@ -187,6 +187,7 @@ describe('cleanupTask', () => {
       os: {
         ...windowsOperatingSystem(),
         processIsAlive: () => true,
+        processTreeIsAlive: () => true,
         processStartIdentity: () => undefined,
         terminateProcessTree,
       },
