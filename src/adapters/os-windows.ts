@@ -134,7 +134,10 @@ function processTreePids(
     childrenByParent.set(parentPid, children)
   }
 
-  const treePids = new Set<number>()
+  // CIM can omit a process that is still alive while it builds the snapshot. Always
+  // retain the root so its direct probe, rather than its presence in the snapshot,
+  // decides whether the tree is alive and whether taskkill must be attempted.
+  const treePids = new Set<number>([rootPid])
   const visited = new Set<number>()
   const pending = [rootPid]
   while (pending.length > 0) {

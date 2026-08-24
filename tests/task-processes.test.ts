@@ -124,6 +124,25 @@ describe('terminateLiveTaskProcesses', () => {
     expect(taskProcessPid(paths, 'blocked-task', undefined, () => 'started:possibly-reused'))
       .toBe(101)
   })
+
+  it('retains registry state when termination is not verified', () => {
+    writeRunningTask('still-live', 101)
+    const os = {
+      processStartIdentity: () => 'started:101',
+      processIsAlive: () => true,
+      terminateProcessTree: () => false,
+    } as unknown as OperatingSystem
+
+    const result = terminateLiveTaskProcesses(paths, os)
+
+    expect(result).toEqual({
+      terminated: [],
+      failures: [{
+        taskId: 'still-live', pid: 101, error: 'process tree termination could not be verified',
+      }],
+    })
+    expect(taskProcessPid(paths, 'still-live', undefined, () => 'started:101')).toBe(101)
+  })
 })
 
 describe('orphanedWorktreeDirectories', () => {
@@ -215,6 +234,37 @@ describe('process-group liveness', () => {
     }
 
     expect(createWindowsOperatingSystem(runtime).processTreeIsAlive(4321)).toBe(true)
+  })
+
+  it('probes a live Windows root omitted from the CIM snapshot', () => {
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn: () => {},
+      listProcesses: () => [],
+      probeProcess: () => {},
+      remove: () => {},
+      now: Date.now,
+      sleep: () => {},
+    }
+
+    expect(createWindowsOperatingSystem(runtime).processTreeIsAlive(4321)).toBe(true)
+  })
+
+  it('terminates a live Windows root omitted from the CIM snapshot', () => {
+    let alive = true
+    const spawn = vi.fn(() => { alive = false })
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn,
+      listProcesses: () => [],
+      probeProcess: () => {
+        if (!alive) throw gone()
+      },
+      remove: () => {},
+      now: Date.now,
+      sleep: () => {},
+    }
+
+    expect(createWindowsOperatingSystem(runtime).terminateProcessTree(4321)).toBe(true)
+    expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '4321', '/T', '/F'])
   })
 
   it('verifies captured Windows descendants after taskkill stops the parent', () => {
