@@ -166,6 +166,13 @@ describe('loadConfig', () => {
     expect(config.pollIntervalSeconds).toBe(30)
   })
 
+  it('validates only the effective value when a file overrides the environment', () => {
+    const filePath = configFile(JSON.stringify({ MAX_PARALLEL: 7 }))
+    const config = loadConfig({ MAX_PARALLEL: 'invalid' }, { filePath })
+
+    expect(config.maxParallel).toBe(7)
+  })
+
   it('stops when a file value fails startup validation', () => {
     const events: string[] = []
     const filePath = configFile(JSON.stringify({ TASK_GATE: 'fast' }))
