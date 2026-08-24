@@ -302,9 +302,8 @@ export function loadConfig(
     ? undefined
     : options.filePath ?? defaultConfigFilePath()
   const report = options.onEvent ?? ((event: ConfigEvent) => console.error(event.message))
-  const environmentConfig = resolveConfig(env)
   let activeValues: ConfigFileValues = {}
-  let activeConfig = environmentConfig
+  let activeConfig!: LoopConfig
   let observedStamp: string | undefined
   let refreshError: Error | undefined
 
