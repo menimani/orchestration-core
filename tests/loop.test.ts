@@ -1274,12 +1274,20 @@ describe('runAutoReview', () => {
     expect(existsSync(idFile)).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logText()).toContain('WARN could not enqueue review: queue unavailable')
+    const failedReviewId = enqueue.mock.calls[0]?.[1] as string
+    expect(readFileSync(join(paths.queueDir, 'review-pending-id-7'), 'utf8').trim())
+      .toBe(failedReviewId)
+    expect(existsSync(join(paths.tasksDir, `${failedReviewId}.md`))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'effort', failedReviewId))).toBe(true)
 
     expect(loop.runAutoReview(7, false)).toBe(false)
     expect(enqueue).toHaveBeenCalledTimes(2)
+    expect(enqueue.mock.calls[1]?.[1]).toBe(failedReviewId)
     expect(readFileSync(roundFile, 'utf8')).toBe('1\n')
     const reviewId = readFileSync(idFile, 'utf8').trim()
+    expect(reviewId).toBe(failedReviewId)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(reviewId)
+    expect(existsSync(join(paths.queueDir, 'review-pending-id-7'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
@@ -2055,6 +2063,10 @@ describe('cycle gate', () => {
     expect(existsSync(completeFlag)).toBe(true)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logText()).toContain('WARN could not enqueue CI fix: queue unavailable')
+    const failedFixId = enqueue.mock.calls[0]?.[1] as string
+    expect(readFileSync(join(paths.queueDir, 'ci-fix-pending-id-1'), 'utf8').trim())
+      .toBe(failedFixId)
+    expect(existsSync(join(paths.tasksDir, `${failedFixId}.md`))).toBe(true)
   })
 
   it('stops instead of resetting a malformed CI fix attempt count', async () => {
@@ -2098,13 +2110,15 @@ describe('cycle gate', () => {
     expect(readFileSync(attemptFile, 'utf8')).toBe('1\n')
     expect(existsSync(completeFlag)).toBe(false)
     expect(existsSync(stopFile)).toBe(false)
+    expect(enqueue.mock.calls[1]?.[1]).toBe(enqueue.mock.calls[0]?.[1])
+    expect(existsSync(join(paths.queueDir, 'ci-fix-pending-id-1'))).toBe(false)
 
     // Reaching the numeric cap does not stop while the dispatched fix remains queued.
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(existsSync(stopFile)).toBe(false)
 
     const fixId = enqueue.mock.calls[1]?.[1]
-    expect(fixId).toMatch(/^20260808_120000_002_ci-fix-c1$/)
+    expect(fixId).toMatch(/^20260808_120000_001_ci-fix-c1$/)
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     writeRawStatus(fixId as string, 'completed')
     writeFileSync(join(paths.queueDir, 'scanned', fixId as string), '')
