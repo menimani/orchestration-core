@@ -544,6 +544,7 @@ describe('forge poll budget', () => {
   })
 
   it('does not claim from a poll whose duplicate re-read cannot be verified', async () => {
+    initializeGitRepo()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
