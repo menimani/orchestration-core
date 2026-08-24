@@ -59,7 +59,15 @@ export function terminateLiveTaskProcesses(
       continue
     }
     try {
-      if (os.terminateProcessTree(terminablePid)) result.terminated.push(task)
+      const terminated = os.terminateProcessTree(terminablePid)
+      if (!terminated) {
+        result.failures.push({
+          ...task,
+          error: 'process tree termination could not be verified',
+        })
+        continue
+      }
+      result.terminated.push(task)
       // Stopping is what makes the recorded number false, so it is dropped here rather
       // than left for whoever reads next. A tree that resisted termination keeps its
       // entry: something is still running under that number.
