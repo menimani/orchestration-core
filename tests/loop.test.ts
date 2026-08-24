@@ -393,59 +393,6 @@ describe('daemon startup', () => {
   })
 })
 
-describe('stranded run branch startup report', () => {
-  const currentRun = 'chore/loop-20260820-core-run12'
-  const previousRun = 'chore/loop-20260814-core-run11'
-
-  function startCurrentRun(): ReturnType<typeof makeLoop> {
-    git(['switch', '-c', currentRun, 'main'])
-    return makeLoop({ integrationBranch: currentRun })
-  }
-
-  it('reports commits stranded on a remote run branch', () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
-    git(['switch', '-c', previousRun])
-    writeFileSync(join(repoRoot, 'stranded.txt'), 'unfinished work\n')
-    git(['add', 'stranded.txt'])
-    git(['commit', '-m', 'feat: stranded work'])
-    git(['push', 'origin', previousRun])
-    git(['switch', 'main'])
-    git(['branch', '-D', previousRun])
-
-    const loop = startCurrentRun()
-    loop.reportStrandedRunBranches()
-
-    expect(logged).toContain(
-      `WARN stranded run branch ${previousRun} has 1 commit not on main`,
-    )
-  })
-
-  it('stays silent for a fully merged run branch', () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
-    git(['branch', previousRun, 'main'])
-
-    const loop = startCurrentRun()
-    loop.reportStrandedRunBranches()
-
-    expect(logged).toEqual([])
-  })
-
-  it('never reports the current run branch', () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
-    const loop = startCurrentRun()
-    writeFileSync(join(repoRoot, 'current-run.txt'), 'current work\n')
-    git(['add', 'current-run.txt'])
-    git(['commit', '-m', 'feat: current run work'])
-
-    loop.reportStrandedRunBranches()
-
-    expect(logged).toEqual([])
-  })
-})
-
 describe('status file safety', () => {
   it('stops the poll when an existing task status is malformed', async () => {
     const taskId = '20260811_000000_001_user-existing'

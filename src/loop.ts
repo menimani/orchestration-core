@@ -1361,96 +1361,6 @@ export function createLoop(deps: LoopDeps) {
     writeFileSync(runBranchFile, `${currentBranch}\n`)
   }
 
-  /**
-   * Warn about earlier branches from the same integration-run series which still carry
-   * commits absent from the advertised default branch. Remote objects are fetched
-   * without a destination ref, so this observation never creates, advances, or deletes
-   * a branch.
-   */
-  function reportStrandedRunBranches(): void {
-    try {
-      const currentBranch = gitIn(paths.repoRoot, ['branch', '--show-current']).trim()
-      const runName = /^(.*(?:^|\/)loop-)\d{8}(-.+-run)\d+$/.exec(currentBranch)
-      if (runName === null) return
-
-      const escapeRegex = (value: string): string =>
-        value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const runBranchPattern = new RegExp(
-        `^${escapeRegex(runName[1]!)}\\d{8}${escapeRegex(runName[2]!)}\\d+$`,
-      )
-      const remote = currentBranchTrackingRemote(paths.repoRoot)
-      const remoteListing = gitIn(paths.repoRoot, [
-        'ls-remote', '--symref', remote, 'HEAD', 'refs/heads/*',
-      ])
-      const defaultBranch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(remoteListing)?.[1]
-      if (defaultBranch === undefined) {
-        throw new Error(`${remote} does not advertise a default branch`)
-      }
-
-      const tips = new Map<string, Set<string>>()
-      const addTip = (branch: string, tip: string): void => {
-        if (branch === currentBranch || !runBranchPattern.test(branch)) return
-        const branchTips = tips.get(branch) ?? new Set<string>()
-        branchTips.add(tip)
-        tips.set(branch, branchTips)
-      }
-      for (const branch of gitIn(paths.repoRoot, [
-        'for-each-ref', '--format=%(refname:short)', 'refs/heads/',
-      ]).split(/\r?\n/).filter(Boolean)) {
-        addTip(branch, branch)
-      }
-
-      const remoteHeads = new Map<string, string>()
-      for (const line of remoteListing.split(/\r?\n/)) {
-        const match = /^([0-9a-fA-F]+)\trefs\/heads\/(.+)$/.exec(line)
-        if (match === null) continue
-        remoteHeads.set(match[2]!, match[1]!)
-        addTip(match[2]!, match[1]!)
-      }
-      const defaultTip = remoteHeads.get(defaultBranch)
-      if (defaultTip === undefined) {
-        throw new Error(`could not resolve ${remote}/${defaultBranch}`)
-      }
-
-      const requiredObjects = new Set([defaultTip, ...[...tips.values()].flatMap((refs) =>
-        [...refs].filter((ref) => /^[0-9a-fA-F]+$/.test(ref)))])
-      const missingObjects = [...requiredObjects].filter((object) => {
-        try {
-          gitIn(paths.repoRoot, ['cat-file', '-e', `${object}^{commit}`])
-          return false
-        } catch {
-          return true
-        }
-      })
-      if (missingObjects.length > 0) {
-        gitIn(paths.repoRoot, [
-          'fetch', '--no-tags', '--no-write-fetch-head', remote,
-          ...missingObjects,
-        ])
-      }
-
-      for (const [branch, branchTips] of [...tips].sort(([left], [right]) =>
-        left.localeCompare(right))) {
-        try {
-          const counts = [...branchTips].map((tip) => Number(gitIn(
-            paths.repoRoot, ['rev-list', '--count', `${defaultTip}..${tip}`],
-          ).trim()))
-          const count = Math.max(...counts)
-          if (count > 0) {
-            event(
-              'WARN',
-              `stranded run branch ${branch} has ${count} commit${count === 1 ? '' : 's'} not on ${defaultBranch}`,
-            )
-          }
-        } catch (error) {
-          event('WARN', `stranded run branch ${branch} could not be checked; continuing: ${errorSummary(error)}`)
-        }
-      }
-    } catch (error) {
-      event('WARN', `stranded run branch check failed; continuing: ${errorSummary(error)}`)
-    }
-  }
-
   /** Fail startup before work begins when this run can never publish its branch. */
   function validatePushTarget(): boolean {
     if (!config.autoPr && !config.workerMode) return true
@@ -2734,7 +2644,6 @@ export function createLoop(deps: LoopDeps) {
     initializeIssueQueue,
     validatePushTarget,
     initializeSessionStateForBranch,
-    reportStrandedRunBranches,
     cleanupSessionState,
     restartSubject: () => restartSubject,
     // exported for tests
