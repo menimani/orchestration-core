@@ -1349,7 +1349,6 @@ async function runLoopDaemon(
     await loop.initializeIssueQueue()
 
     loop.initializeSessionStateForBranch()
-    loop.reportStrandedRunBranches()
     signalLoopRestartReady()
     ready()
 
