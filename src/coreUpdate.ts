@@ -10,7 +10,7 @@ import { sharedSkillManagedTargets, syncSharedSkills } from './sharedSkills.ts'
 export type CoreUpdateOutcome = 'continue' | 'restart'
 
 export type CoreUpdateEvent = (
-  name: 'Updated' | 'Restarting' | 'WARN',
+  name: 'Updated' | 'Restarting' | 'Status' | 'WARN',
   subject: string,
   detail?: string,
 ) => void
@@ -43,6 +43,23 @@ function importSplit(message: string, prefix: string): string | undefined {
   const dir = /^git-subtree-dir:\s*(.+?)\s*$/im.exec(message)?.[1]
   const split = /^git-subtree-split:\s*([0-9a-f]{7,64})\s*$/im.exec(message)?.[1]
   return dir === prefix ? split : undefined
+}
+
+function matchingUpstreamSplit(
+  repoRoot: string,
+  prefix: string,
+  upstream: string,
+  runtime: CoreUpdateRuntime,
+): string | undefined {
+  const subtreeTree = runtime.git(repoRoot, ['rev-parse', `HEAD:${prefix}`]).trim()
+  const commits = runtime.git(repoRoot, [
+    'log', '--format=%H%x09%T', upstream,
+  ]).split(/\r?\n/)
+  for (const commit of commits) {
+    const [revision, tree] = commit.split('\t')
+    if (revision !== undefined && tree === subtreeTree) return revision
+  }
+  return undefined
 }
 
 function warn(event: CoreUpdateEvent, message: string): void {
@@ -184,20 +201,6 @@ export async function updateCoreBeforeCycle(
     return finish('continue')
   }
 
-  let imported: string | undefined
-  try {
-    imported = importSplit(runtime.git(paths.repoRoot, [
-      'log', '-1', '--format=%B', `--grep=git-subtree-dir: ${prefix}`, '--fixed-strings',
-    ]), prefix)
-  } catch (error) {
-    warn(event, `core update check failed: ${summary(error)}`)
-    return finish('continue')
-  }
-  if (imported === undefined) {
-    warn(event, `core update skipped: ${prefix} has no git subtree import`)
-    return finish('continue')
-  }
-
   const remote = forge.resolveGitRemote(config.upstreamRemote.trim())
   try {
     runtime.git(paths.repoRoot, ['fetch', '--quiet', remote, config.upstreamBranch])
@@ -207,8 +210,24 @@ export async function updateCoreBeforeCycle(
   }
 
   let upstream: string
+  let imported: string | undefined
+  let recordedImport: string | undefined
   try {
     upstream = runtime.git(paths.repoRoot, ['rev-parse', 'FETCH_HEAD']).trim()
+    recordedImport = importSplit(runtime.git(paths.repoRoot, [
+      'log', '-1', '--format=%B', `--grep=git-subtree-dir: ${prefix}`, '--fixed-strings',
+    ]), prefix)
+    imported = matchingUpstreamSplit(paths.repoRoot, prefix, upstream, runtime)
+      ?? recordedImport
+  } catch (error) {
+    warn(event, `core update check failed: ${summary(error)}`)
+    return finish('continue')
+  }
+  if (imported === undefined) {
+    warn(event, `core update skipped: ${prefix} has no git subtree import`)
+    return finish('continue')
+  }
+  try {
     if (upstream !== imported) {
       runtime.git(paths.repoRoot, ['merge-base', '--is-ancestor', imported, upstream])
     }
@@ -219,20 +238,37 @@ export async function updateCoreBeforeCycle(
   }
   if (upstream === imported) return finish('continue')
 
+  const behind = (reason: string): void => {
+    event(
+      'Status',
+      'core',
+      `behind imported ${imported.slice(0, 8)} upstream ${upstream.slice(0, 8)}; ${reason}`,
+    )
+  }
+
   let dirty: boolean
   try {
     dirty = runtime.git(paths.repoRoot, ['status', '--porcelain']).trim() !== ''
   } catch (error) {
     warn(event, `core update status check failed: ${summary(error)}`)
+    behind('continuing on old code')
     return finish('continue')
   }
   if (dirty) {
     warn(event, 'core update skipped: working tree is dirty')
+    behind('continuing on old code: working tree is dirty')
     return finish('continue')
   }
 
   const oldHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  const needsImportBridge = recordedImport !== imported
   try {
+    if (needsImportBridge) {
+      runtime.git(paths.repoRoot, [
+        'commit', '--allow-empty', '-m', 'chore: record core subtree import',
+        '-m', `git-subtree-dir: ${prefix}\ngit-subtree-split: ${imported}`,
+      ])
+    }
     runtime.git(paths.repoRoot, [
       'subtree', 'pull', `--prefix=${prefix}`, remote, config.upstreamBranch, '--squash',
     ])
@@ -245,6 +281,7 @@ export async function updateCoreBeforeCycle(
         + `pull failure: ${summary(error)}`,
       )
     }
+    if (needsImportBridge) runtime.git(paths.repoRoot, ['reset', '--soft', oldHead])
     let recoveredHead: string
     let recoveredStatus: string
     try {
@@ -264,6 +301,7 @@ export async function updateCoreBeforeCycle(
       )
     }
     warn(event, `core update pull conflicted; continuing on old code: ${summary(error)}`)
+    behind('continuing on old code: pull conflicted')
     return finish('continue')
   }
 
@@ -272,7 +310,10 @@ export async function updateCoreBeforeCycle(
   const changed = runtime.git(paths.repoRoot, [
     'diff', '--name-only', oldHead, newHead, '--', prefix,
   ]).trim()
-  if (changed === '') return 'continue'
+  if (changed === '') {
+    behind('continuing on old code: pull did not change the subtree')
+    return 'continue'
+  }
 
   event('Updated', 'core', `${imported.slice(0, 8)}..${upstream.slice(0, 8)}`)
   // The updated source belongs to the integration branch. This daemon deliberately
