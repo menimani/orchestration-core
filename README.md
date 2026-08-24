@@ -126,7 +126,9 @@ to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explici
 it overrides the conventional path selected by `PROJECT`.
 
 An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, absolute
-path, or path relative to the consumer repository root. A forge module exports a `Forge`
+path, or path relative to the consumer repository root. A repository-relative selector
+must begin with `./` or `../`; for example, use `./custom/runner.mjs`, because
+`custom/runner.mjs` is treated as a package specifier. A forge module exports a `Forge`
 as its default or `forge` export, or exports `createForge(repoRoot, report)`. A runner
 module likewise exports a `Runner` as its default or `runner` export, or exports
 `createRunner(options)`. Factories may be asynchronous.
