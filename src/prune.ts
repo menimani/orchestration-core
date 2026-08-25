@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { join, toNamespacedPath } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { logFile, worktreeDir, type OrchPaths } from './paths.ts'
 
 // Deletes what finished tasks leave behind: logs, status files, generated specs, and
@@ -27,20 +28,17 @@ function olderThan(file: string, days: number): boolean {
   }
 }
 
-export function pruneTasks(paths: OrchPaths, options: PruneOptions): PruneReport {
+export function pruneTasks(
+  paths: OrchPaths,
+  options: PruneOptions,
+  os: OperatingSystem = operatingSystem,
+): PruneReport {
   const report: PruneReport = { prunedTasks: 0, removed: [], kept: [] }
 
   const remove = (...files: string[]): void => {
     for (const file of files) {
       if (!existsSync(file)) continue
-      if (!options.dryRun) {
-        try {
-          rmSync(file, { recursive: true, force: true, maxRetries: 3 })
-        } catch (error) {
-          if (process.platform !== 'win32') throw error
-          rmSync(toNamespacedPath(file), { recursive: true, force: true, maxRetries: 3 })
-        }
-      }
+      if (!options.dryRun) os.removeDirectory(file)
       report.removed.push(file)
     }
   }
