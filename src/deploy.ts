@@ -16,7 +16,10 @@ export interface DeploymentResponse {
   text(): Promise<string>
 }
 
-export type DeploymentFetcher = (url: string) => Promise<DeploymentResponse>
+export type DeploymentFetcher = (
+  url: string,
+  options?: { signal?: AbortSignal },
+) => Promise<DeploymentResponse>
 
 export interface DeploymentResult {
   run: WorkflowRun
@@ -32,6 +35,7 @@ const systemClock: DeploymentClock = {
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 5 * 60_000
 const DEFAULT_COMPLETION_TIMEOUT_MS = 30 * 60_000
+const DEFAULT_REVISION_TIMEOUT_MS = 30_000
 
 /** Dispatch, identify, and verify one deployment by identities unique to this request. */
 export async function deploy(
@@ -44,6 +48,7 @@ export async function deploy(
     pollMilliseconds?: number
     discoveryTimeoutMilliseconds?: number
     completionTimeoutMilliseconds?: number
+    revisionTimeoutMilliseconds?: number
     now?: () => number
     createDispatchToken?: () => string
   } = {},
@@ -55,6 +60,8 @@ export async function deploy(
     ?? DEFAULT_DISCOVERY_TIMEOUT_MS
   const completionTimeoutMilliseconds = options.completionTimeoutMilliseconds
     ?? DEFAULT_COMPLETION_TIMEOUT_MS
+  const revisionTimeoutMilliseconds = options.revisionTimeoutMilliseconds
+    ?? DEFAULT_REVISION_TIMEOUT_MS
   const now = options.now ?? Date.now
   const dispatchToken = (options.createDispatchToken ?? randomUUID)()
 
@@ -90,11 +97,29 @@ export async function deploy(
     throw new Error(`Deployment workflow run ${run.id} finished with conclusion '${run.conclusion ?? 'unknown'}'.`)
   }
 
-  const response = await fetcher(deployment.revisionUrl)
-  if (!response.ok) {
-    throw new Error(`Deployment verification request failed with HTTP ${response.status}.`)
+  const controller = new AbortController()
+  let rejectTimeout: (error: Error) => void = () => {}
+  const timeout = new Promise<never>((_resolve, reject) => { rejectTimeout = reject })
+  const timeoutHandle = setTimeout(() => {
+    controller.abort()
+    rejectTimeout(new Error(
+      `Timed out after ${revisionTimeoutMilliseconds}ms fetching deployed revision from '${deployment.revisionUrl}'.`,
+    ))
+  }, revisionTimeoutMilliseconds)
+
+  let deployedRevision: string
+  try {
+    const response = await Promise.race([
+      fetcher(deployment.revisionUrl, { signal: controller.signal }),
+      timeout,
+    ])
+    if (!response.ok) {
+      throw new Error(`Deployment verification request failed with HTTP ${response.status}.`)
+    }
+    deployedRevision = (await Promise.race([response.text(), timeout])).trim()
+  } finally {
+    clearTimeout(timeoutHandle)
   }
-  const deployedRevision = (await response.text()).trim()
 
   return {
     run,
