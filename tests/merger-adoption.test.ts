@@ -122,6 +122,66 @@ describe('remote task adoption', () => {
     expect(logged.filter((line) => line.startsWith('Merged '))).toHaveLength(1)
   })
 
+  it('quarantines every reporter when a forged group names an unavailable issue', async () => {
+    const task = pushWorkerBranch('20260809_000000_010_auto-forged-unavailable-group')
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'forged unavailable grouped task',
+      body: 'A worker report names an issue outside the available findings.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+      assignees: ['worker-a'],
+    })))
+    const unavailableIssueNumber = 999
+    await Promise.all(issueNumbers.map((issueNumber) => forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${task.branch}\nHead commit: ${task.head}\nIssues: #${issueNumber} #${unavailableIssueNumber}`)))
+
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    expect(existsSync(join(repoRoot, 'worker-change.txt'))).toBe(false)
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_MERGE_FAILED)
+      expect(issue.labels).not.toContain(LABEL_MERGE_READY)
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+      expect(forge.issueComments.get(issueNumber)?.join('\n'))
+        .toContain(`names unavailable issue #${unavailableIssueNumber}`)
+    }
+  })
+
+  it('releases every member when forged grouped reports name different worker branches', async () => {
+    const firstTask = pushWorkerBranch('20260809_000000_011_auto-forged-group-a')
+    const secondTask = pushWorkerBranch('20260809_000000_012_auto-forged-group-b')
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'inconsistent grouped worker task',
+      body: 'Grouped members report different worker branches.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+      assignees: ['worker-a'],
+    })))
+    const issueList = issueNumbers.map((number) => `#${number}`).join(' ')
+    await forge.commentIssue(issueNumbers[0]!,
+      `Worker completed the task.\nBranch: ${firstTask.branch}\nHead commit: ${firstTask.head}\nIssues: ${issueList}`)
+    await forge.commentIssue(issueNumbers[1]!,
+      `Worker completed the task.\nBranch: ${secondTask.branch}\nHead commit: ${secondTask.head}\nIssues: ${issueList}`)
+
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    expect(existsSync(join(repoRoot, 'worker-change.txt'))).toBe(false)
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_READY)
+      expect(issue.labels).toContain(LABEL_GROUP_SINGLETON)
+      expect(issue.labels).not.toContain(LABEL_MERGE_READY)
+      expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+      expect(issue.assignees).toEqual([])
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+      expect(forge.issueComments.get(issueNumber)?.join('\n'))
+        .toContain('does not report the same worker branch')
+    }
+  })
+
   it('returns every member of an abandoned remote group as singleton-ready', async () => {
     const branch = 'task/20260809_000000_099_auto-missing-group'
     const head = 'a'.repeat(40)
