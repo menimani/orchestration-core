@@ -56,7 +56,10 @@ describe('deploy', () => {
     expect(dispatchWorkflow).toHaveBeenCalledWith('deploy.yml', 'main', 'dispatch-73')
     expect(findWorkflowRun).toHaveBeenLastCalledWith('deploy.yml', 'main', 'dispatch-73')
     expect(getWorkflowRun).toHaveBeenCalledWith(73)
-    expect(fetcher).toHaveBeenCalledWith('https://shiora.jp/.well-known/shiora-revision')
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://shiora.jp/.well-known/shiora-revision',
+      { signal: expect.any(AbortSignal) },
+    )
     expect(result).toMatchObject({
       dispatchToken: 'dispatch-73',
       expectedRevision: '73aa',
@@ -118,6 +121,96 @@ describe('deploy', () => {
         createDispatchToken: () => 'dispatch-75',
       },
     )).rejects.toThrow('Deployment verification request failed with HTTP 404.')
+  })
+
+  it('aborts when fetching the deployed revision exceeds its deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const forge = makeFakeForge()
+      forge.findWorkflowRun = async () => ({
+        id: 78,
+        createdAt: '2026-08-08T15:00:00Z',
+        headSha: 'expected-sha',
+        status: 'completed',
+        conclusion: 'success',
+      })
+      let signal: AbortSignal | undefined
+      const fetcher = vi.fn(async (_url: string, options?: { signal?: AbortSignal }) => {
+        signal = options?.signal
+        return await new Promise<never>(() => {})
+      })
+
+      const result = deploy(
+        {
+          workflow: 'deploy.yml',
+          revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
+        },
+        'main',
+        forge,
+        {
+          clock: clock(),
+          fetcher,
+          revisionTimeoutMilliseconds: 2_000,
+          createDispatchToken: () => 'fetch-timeout-dispatch',
+        },
+      )
+      const rejection = expect(result).rejects.toThrow(
+        "Timed out after 2000ms fetching deployed revision from 'https://shiora.jp/.well-known/shiora-revision'.",
+      )
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      await rejection
+      expect(signal?.aborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the abort deadline active while reading the revision response body', async () => {
+    vi.useFakeTimers()
+    try {
+      const forge = makeFakeForge()
+      forge.findWorkflowRun = async () => ({
+        id: 79,
+        createdAt: '2026-08-08T15:00:00Z',
+        headSha: 'expected-sha',
+        status: 'completed',
+        conclusion: 'success',
+      })
+      let signal: AbortSignal | undefined
+      const fetcher = vi.fn(async (_url: string, options?: { signal?: AbortSignal }) => {
+        signal = options?.signal
+        return {
+          ok: true,
+          status: 200,
+          text: async () => await new Promise<string>(() => {}),
+        }
+      })
+
+      const result = deploy(
+        {
+          workflow: 'deploy.yml',
+          revisionUrl: 'https://shiora.jp/.well-known/shiora-revision',
+        },
+        'main',
+        forge,
+        {
+          clock: clock(),
+          fetcher,
+          revisionTimeoutMilliseconds: 2_000,
+          createDispatchToken: () => 'body-timeout-dispatch',
+        },
+      )
+      const rejection = expect(result).rejects.toThrow(
+        "Timed out after 2000ms fetching deployed revision from 'https://shiora.jp/.well-known/shiora-revision'.",
+      )
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      await rejection
+      expect(signal?.aborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('rejects a completed failed workflow before fetching the deployed revision', async () => {
