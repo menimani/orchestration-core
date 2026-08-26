@@ -12,6 +12,7 @@ import { mergeTask } from '../src/merge.ts'
 import {
   branchName, orchPaths, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
+import { forgetTaskProcess } from '../src/processRegistry.ts'
 import { startTask } from '../src/start.ts'
 import { writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
@@ -121,6 +122,9 @@ describe('integration branch topology', () => {
       'chore: update orchestration package',
     )
     const taskHead = git(taskRoot, ['rev-parse', 'HEAD'])
+    // The fake runner uses this Vitest worker's PID without launching a process. Drop
+    // that synthetic ownership before merge cleanup considers stopping the runner.
+    forgetTaskProcess(paths, taskId)
     await writeStatus(paths, taskId, 'completed')
     const install = vi.fn()
 

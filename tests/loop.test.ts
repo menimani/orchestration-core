@@ -393,59 +393,6 @@ describe('daemon startup', () => {
   })
 })
 
-describe('stranded run branch startup report', () => {
-  const currentRun = 'chore/loop-20260820-core-run12'
-  const previousRun = 'chore/loop-20260814-core-run11'
-
-  function startCurrentRun(): ReturnType<typeof makeLoop> {
-    git(['switch', '-c', currentRun, 'main'])
-    return makeLoop({ integrationBranch: currentRun })
-  }
-
-  it('reports commits stranded on a remote run branch', () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
-    git(['switch', '-c', previousRun])
-    writeFileSync(join(repoRoot, 'stranded.txt'), 'unfinished work\n')
-    git(['add', 'stranded.txt'])
-    git(['commit', '-m', 'feat: stranded work'])
-    git(['push', 'origin', previousRun])
-    git(['switch', 'main'])
-    git(['branch', '-D', previousRun])
-
-    const loop = startCurrentRun()
-    loop.reportStrandedRunBranches()
-
-    expect(logged).toContain(
-      `WARN stranded run branch ${previousRun} has 1 commit not on main`,
-    )
-  })
-
-  it('stays silent for a fully merged run branch', () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
-    git(['branch', previousRun, 'main'])
-
-    const loop = startCurrentRun()
-    loop.reportStrandedRunBranches()
-
-    expect(logged).toEqual([])
-  })
-
-  it('never reports the current run branch', () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
-    const loop = startCurrentRun()
-    writeFileSync(join(repoRoot, 'current-run.txt'), 'current work\n')
-    git(['add', 'current-run.txt'])
-    git(['commit', '-m', 'feat: current run work'])
-
-    loop.reportStrandedRunBranches()
-
-    expect(logged).toEqual([])
-  })
-})
-
 describe('status file safety', () => {
   it('stops the poll when an existing task status is malformed', async () => {
     const taskId = '20260811_000000_001_user-existing'
@@ -544,6 +491,7 @@ describe('forge poll budget', () => {
   })
 
   it('does not claim from a poll whose duplicate re-read cannot be verified', async () => {
+    initializeGitRepo()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -1326,12 +1274,20 @@ describe('runAutoReview', () => {
     expect(existsSync(idFile)).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logText()).toContain('WARN could not enqueue review: queue unavailable')
+    const failedReviewId = enqueue.mock.calls[0]?.[1] as string
+    expect(readFileSync(join(paths.queueDir, 'review-pending-id-7'), 'utf8').trim())
+      .toBe(failedReviewId)
+    expect(existsSync(join(paths.tasksDir, `${failedReviewId}.md`))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'effort', failedReviewId))).toBe(true)
 
     expect(loop.runAutoReview(7, false)).toBe(false)
     expect(enqueue).toHaveBeenCalledTimes(2)
+    expect(enqueue.mock.calls[1]?.[1]).toBe(failedReviewId)
     expect(readFileSync(roundFile, 'utf8')).toBe('1\n')
     const reviewId = readFileSync(idFile, 'utf8').trim()
+    expect(reviewId).toBe(failedReviewId)
     expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(reviewId)
+    expect(existsSync(join(paths.queueDir, 'review-pending-id-7'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
@@ -1935,6 +1891,55 @@ describe('cycle gate', () => {
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('retries and stops when the branch comparison fails instead of reporting an empty run', async () => {
+    const head = initializeGitRepo()
+    configureRemoteDefaultBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const loop = makeLoop({
+      scanEnabled: false,
+      autoPr: true,
+      reviewEnabled: false,
+    })
+    loop.initializeSessionStateForBranch()
+    const createPr = vi.fn(async () => 'https://example.test/pull/1')
+    fakeForge.createPr = createPr
+    const objectPath = join(
+      repoRoot,
+      git(['rev-parse', '--git-path', `objects/${head.slice(0, 2)}/${head.slice(2)}`]),
+    )
+    const commitObject = readFileSync(objectPath)
+    fakeForge.prStatus = async () => {
+      rmSync(objectPath)
+      return forgeStatus
+    }
+
+    try {
+      expect(await loop.poll()).toBe('continue')
+    } finally {
+      writeFileSync(objectPath, commitObject)
+    }
+
+    expect(logText()).toContain('WARN could not compare branch with origin/main:')
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(createPr).not.toHaveBeenCalled()
+
+    try {
+      expect(await loop.poll()).toBe('continue')
+    } finally {
+      writeFileSync(objectPath, commitObject)
+    }
+
+    expect(logText()).toContain('ERROR could not compare branch with origin/main:')
+    expect(logText()).toContain('(repeated 2 times)')
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(createPr).not.toHaveBeenCalled()
+  })
+
   it('retains empty-cap session state when promotion fails, then retries', async () => {
     initializeGitRepo()
     configureRemoteDefaultBranch()
@@ -2033,6 +2038,35 @@ describe('cycle gate', () => {
     return { attemptFile, completeFlag }
   }
 
+  it.each([
+    ['pending', [{ name: 'frontend', conclusion: 'pending', startedAt: '' }]],
+    ['unknown', []],
+  ] as const)('keeps the completed cycle resumable while CI is %s', async (
+    _verdict, checks,
+  ) => {
+    const enqueue = vi.fn<typeof enqueueTask>()
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 1,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+    forgeStatus.checks = [...checks]
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(prStatusCalls).toBe(2)
+    expect(enqueue).not.toHaveBeenCalled()
+    expect(existsSync(attemptFile)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'ci-fix-pending-id-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(existsSync(completeFlag)).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+  })
+
   it('enqueues a task with the failed checks and consumes one CI fix attempt', async () => {
     const enqueue = vi.fn<typeof enqueueTask>((_paths, taskId, depth) => ({
       outcome: 'enqueued', taskId, depth: depth ?? 0,
@@ -2107,6 +2141,10 @@ describe('cycle gate', () => {
     expect(existsSync(completeFlag)).toBe(true)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logText()).toContain('WARN could not enqueue CI fix: queue unavailable')
+    const failedFixId = enqueue.mock.calls[0]?.[1] as string
+    expect(readFileSync(join(paths.queueDir, 'ci-fix-pending-id-1'), 'utf8').trim())
+      .toBe(failedFixId)
+    expect(existsSync(join(paths.tasksDir, `${failedFixId}.md`))).toBe(true)
   })
 
   it('stops instead of resetting a malformed CI fix attempt count', async () => {
@@ -2150,13 +2188,15 @@ describe('cycle gate', () => {
     expect(readFileSync(attemptFile, 'utf8')).toBe('1\n')
     expect(existsSync(completeFlag)).toBe(false)
     expect(existsSync(stopFile)).toBe(false)
+    expect(enqueue.mock.calls[1]?.[1]).toBe(enqueue.mock.calls[0]?.[1])
+    expect(existsSync(join(paths.queueDir, 'ci-fix-pending-id-1'))).toBe(false)
 
     // Reaching the numeric cap does not stop while the dispatched fix remains queued.
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(existsSync(stopFile)).toBe(false)
 
     const fixId = enqueue.mock.calls[1]?.[1]
-    expect(fixId).toMatch(/^20260808_120000_002_ci-fix-c1$/)
+    expect(fixId).toMatch(/^20260808_120000_001_ci-fix-c1$/)
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     writeRawStatus(fixId as string, 'completed')
     writeFileSync(join(paths.queueDir, 'scanned', fixId as string), '')
@@ -3943,6 +3983,61 @@ describe('completed task merge recovery', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
     expect(attempts).toBe(2)
+  })
+
+  it('keeps promotion unconfirmed while a published merge marker is absent from read-back', async () => {
+    const taskId = '20260811_120000_068_auto-listing-lag'
+    initializeGitRepo()
+    configureRemoteDefaultBranch()
+    makeCompletedTask(taskId)
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'review-template.md'),
+      '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: true,
+      scanEnabled: true,
+      maxParallel: 0,
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: true,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'lagging merge marker', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    const issue = fakeForge.issues.get(issueNumber)
+    if (issue !== undefined) issue.updatedAt = '2026-08-01T00:00:00.000Z'
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    const listIssueComments = fakeForge.listIssueComments.bind(fakeForge)
+    let markerVisible = false
+    fakeForge.listIssueComments = async (number) => {
+      const comments = await listIssueComments(number)
+      return markerVisible ? comments : []
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    const mergedStatus = readStatus(paths, taskId)
+    const expectedMarker = `MERGED: ${taskId}\nMerged as ${mergedStatus?.merge_commit} into run branch main. This issue closes on promotion.`
+    expect(mergedStatus).toMatchObject({ status: 'merged', run_branch: 'main' })
+    expect(fakeForge.issueComments.get(issueNumber)).toEqual([expectedMarker])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(logText()).toContain('merge comment is not visible after publishing it')
+
+    markerVisible = true
+    expect(await loop.poll()).toBe('continue')
+
+    expect(fakeForge.issueComments.get(issueNumber)).toEqual([expectedMarker])
+    expect(fakeForge.issueCommentAuthors.get(issueNumber)).toEqual([
+      { login: 'worker-a', hasWriteAccess: true },
+    ])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
   })
 
   it('retries a failed automerge on the next poll and lets the cycle gate proceed', async () => {

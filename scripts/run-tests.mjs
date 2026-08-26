@@ -1,6 +1,8 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync,
+} from 'node:fs'
 import { dirname, join, resolve, toNamespacedPath } from 'node:path'
 import { performance } from 'node:perf_hooks'
 
@@ -9,7 +11,7 @@ const lockName = '.orchestration-test-suite-lock'
 const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
 const retryMilliseconds = 250
 const unpublishedOwnerGraceMilliseconds = 30_000
-const maximumWaitMilliseconds = 10 * 60_000
+const maximumWaitMilliseconds = 15 * 60_000
 const windowsParentPollMilliseconds = 50
 
 function commonGitDirectory() {
@@ -26,6 +28,9 @@ function commonGitDirectory() {
 
 const lockDirectory = join(commonGitDirectory(), lockName)
 const ownerFile = join(lockDirectory, 'owner.json')
+const queueDirectory = `${lockDirectory}-queue`
+const ticketName = `${String(Date.now()).padStart(13, '0')}-${token}.json`
+const ticketFile = join(queueDirectory, ticketName)
 
 function processIsAlive(pid) {
   try {
@@ -150,49 +155,122 @@ function reclaimAbandonedLock() {
   removeDirectory(abandoned)
 }
 
-async function acquireLock() {
+function removeQueueTicket(path) {
+  try {
+    unlinkSync(path)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+}
+
+function queueTicketIsAlive(path) {
+  try {
+    const ticket = JSON.parse(readFileSync(path, 'utf8'))
+    if (
+      !Number.isSafeInteger(ticket.pid) || ticket.pid <= 0
+      || typeof ticket.processIdentity !== 'string' || ticket.processIdentity === ''
+    ) return false
+    const alive = processIsAlive(ticket.pid)
+    const currentIdentity = alive ? processIdentity(ticket.pid) : null
+    return alive && (currentIdentity === null || currentIdentity === ticket.processIdentity)
+  } catch {
+    try {
+      // A ticket is visible while its contents are being published. Only discard an
+      // unreadable record after the same grace period used for a new lock owner.
+      return Date.now() - statSync(path).mtimeMs < unpublishedOwnerGraceMilliseconds
+    } catch {
+      return false
+    }
+  }
+}
+
+function isFirstQueuedProcess() {
+  const tickets = readdirSync(queueDirectory)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+  for (const queuedTicket of tickets) {
+    const path = join(queueDirectory, queuedTicket)
+    if (!queueTicketIsAlive(path)) {
+      removeQueueTicket(path)
+      continue
+    }
+    return queuedTicket === ticketName
+  }
+  return false
+}
+
+function waitForLockRetry(milliseconds, cancellationSignal) {
+  if (cancellationSignal?.aborted) return Promise.resolve()
+  if (cancellationSignal === undefined) {
+    return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds))
+  }
+  return new Promise((resolveWait) => {
+    const onCancel = () => {
+      clearTimeout(timer)
+      cancellationSignal.removeEventListener('abort', onCancel)
+      resolveWait()
+    }
+    const timer = setTimeout(() => {
+      cancellationSignal.removeEventListener('abort', onCancel)
+      resolveWait()
+    }, milliseconds)
+    cancellationSignal.addEventListener('abort', onCancel, { once: true })
+    if (cancellationSignal.aborted) onCancel()
+  })
+}
+
+async function acquireLock(cancellationSignal) {
   let announced = false
   const waitStartedAt = performance.now()
   const configuredMaximumWait = Number(process.env.ORCHESTRATION_TEST_LOCK_TIMEOUT_MS)
   const waitLimit = Number.isSafeInteger(configuredMaximumWait) && configuredMaximumWait > 0
     ? Math.min(configuredMaximumWait, maximumWaitMilliseconds)
     : maximumWaitMilliseconds
-  for (;;) {
-    try {
-      mkdirSync(lockDirectory)
-      try {
-        const identity = processIdentity(process.pid)
-        if (identity === null) throw new Error('Unable to determine the test lock process identity.')
-        writeFileSync(ownerFile, `${JSON.stringify({
-          pid: process.pid,
-          token,
-          processIdentity: identity,
-          acquiredAt: new Date().toISOString(),
-          cwd: packageRoot,
-        })}\n`)
-      } catch (error) {
-        removeDirectory(lockDirectory)
-        throw error
-      }
-      return
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error
-    }
+  const identity = processIdentity(process.pid)
+  if (identity === null) throw new Error('Unable to determine the test lock process identity.')
+  mkdirSync(queueDirectory, { recursive: true })
+  writeFileSync(ticketFile, `${JSON.stringify({ pid: process.pid, processIdentity: identity })}\n`, { flag: 'wx' })
+  try {
+    for (;;) {
+      cancellationSignal?.throwIfAborted()
+      let owner = { alive: false, diagnostic: 'lock not currently held' }
+      if (isFirstQueuedProcess()) {
+        try {
+          mkdirSync(lockDirectory)
+          try {
+            writeFileSync(ownerFile, `${JSON.stringify({
+              pid: process.pid,
+              token,
+              processIdentity: identity,
+              acquiredAt: new Date().toISOString(),
+              cwd: packageRoot,
+            })}\n`)
+          } catch (error) {
+            removeDirectory(lockDirectory)
+            throw error
+          }
+          return
+        } catch (error) {
+          if (error?.code !== 'EEXIST') throw error
+        }
 
-    const owner = readLockOwner()
-    if (!owner.alive) {
-      reclaimAbandonedLock()
-    } else if (!announced) {
-      console.log(`Another worktree is running the test suite; waiting for its repository lock (${owner.diagnostic}).`)
-      announced = true
+        owner = readLockOwner()
+        if (!owner.alive) reclaimAbandonedLock()
+      } else {
+        owner = readLockOwner()
+      }
+      if (owner.alive && !announced) {
+        console.log(`Another worktree is running the test suite; waiting for its repository lock (${owner.diagnostic}).`)
+        announced = true
+      }
+      const remainingWait = waitLimit - (performance.now() - waitStartedAt)
+      if (remainingWait <= 0) {
+        throw new Error(`Timed out after ${waitLimit}ms waiting for the repository test lock. Lock owner: ${owner.diagnostic}.`)
+      }
+      await waitForLockRetry(Math.min(retryMilliseconds, remainingWait), cancellationSignal)
     }
-    const remainingWait = waitLimit - (performance.now() - waitStartedAt)
-    if (remainingWait <= 0) {
-      throw new Error(`Timed out after ${waitLimit}ms waiting for the repository test lock. Lock owner: ${owner.diagnostic}.`)
-    }
-    await new Promise((resolveWait) => setTimeout(
-      resolveWait, Math.min(retryMilliseconds, remainingWait),
-    ))
+  } finally {
+    removeQueueTicket(ticketFile)
   }
 }
 
@@ -258,14 +336,35 @@ async function runVitest(args, invokingPid) {
   }
 }
 
-if (process.argv[2] === '--windows-vitest-supervisor') {
-  const invokingPid = Number(process.argv[3])
-  if (!Number.isSafeInteger(invokingPid) || invokingPid <= 0) {
-    throw new Error('The Windows test supervisor requires an invoking process PID.')
+async function runTestSuite() {
+  const invokingPid = process.platform === 'win32' ? invokingWindowsShellPid() : undefined
+  const lockCancellation = invokingPid === undefined ? undefined : new AbortController()
+  const cancelIfParentExited = invokingPid === undefined ? undefined : () => {
+    if (!processIsAlive(invokingPid)) lockCancellation.abort()
   }
-  await runVitest(process.argv.slice(4), invokingPid)
-} else {
-  await acquireLock()
+  cancelIfParentExited?.()
+  const lockParentMonitor = invokingPid === undefined
+    ? undefined
+    : setInterval(cancelIfParentExited, windowsParentPollMilliseconds)
+  try {
+    await acquireLock(lockCancellation?.signal)
+    cancelIfParentExited?.()
+  } catch (error) {
+    if (!lockCancellation?.signal.aborted) throw error
+    console.error('Test suite stopped because its invoking process exited while waiting for the repository lock.')
+    process.exitCode = 1
+    return
+  } finally {
+    if (lockParentMonitor !== undefined) clearInterval(lockParentMonitor)
+  }
+
+  if (lockCancellation?.signal.aborted) {
+    releaseLock()
+    console.error('Test suite stopped because its invoking process exited while waiting for the repository lock.')
+    process.exitCode = 1
+    return
+  }
+
   let child
   const forwardSignal = (signal) => {
     if (child?.pid === undefined) return
@@ -281,7 +380,7 @@ if (process.argv[2] === '--windows-vitest-supervisor') {
     child = process.platform === 'win32'
       ? spawn(process.execPath, [
         import.meta.filename, '--windows-vitest-supervisor',
-        String(invokingWindowsShellPid()), ...args,
+        String(invokingPid), ...args,
       ], {
         cwd: packageRoot,
         stdio: 'inherit',
@@ -306,4 +405,14 @@ if (process.argv[2] === '--windows-vitest-supervisor') {
     process.removeListener('SIGTERM', forwardSignal)
     releaseLock()
   }
+}
+
+if (process.argv[2] === '--windows-vitest-supervisor') {
+  const invokingPid = Number(process.argv[3])
+  if (!Number.isSafeInteger(invokingPid) || invokingPid <= 0) {
+    throw new Error('The Windows test supervisor requires an invoking process PID.')
+  }
+  await runVitest(process.argv.slice(4), invokingPid)
+} else {
+  await runTestSuite()
 }

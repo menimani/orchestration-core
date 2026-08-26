@@ -3,24 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { pruneTasks } from '../src/prune.ts'
-
-const fsMockState = vi.hoisted(() => ({ removalFailurePath: undefined as string | undefined }))
-
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>()
-  return {
-    ...actual,
-    rmSync: vi.fn((path: Parameters<typeof actual.rmSync>[0], options?: Parameters<typeof actual.rmSync>[1]) => {
-      if (fsMockState.removalFailurePath !== undefined
-          && String(path).includes(fsMockState.removalFailurePath)) {
-        throw new Error('simulated removal failure')
-      }
-      actual.rmSync(path, options)
-    }),
-  }
-})
 
 let repoRoot: string
 let paths: OrchPaths
@@ -46,7 +31,6 @@ function makeTask(id: string, status: string, age: 'old' | 'new'): void {
 }
 
 beforeEach(() => {
-  fsMockState.removalFailurePath = undefined
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-prune-'))
   paths = orchPaths(repoRoot)
   git(['init', '-q'])
@@ -125,19 +109,31 @@ describe('pruneTasks', () => {
     mkdirSync(mergeGuard, { recursive: true })
     writeFileSync(join(mergeGuard, 'succeeded'), '')
 
-    const report = pruneTasks(paths, { days: 14, dryRun: false })
+    const removeDirectory = vi.fn((path: string) => {
+      rmSync(path, { recursive: true, force: true })
+    })
+    const os = { ...operatingSystem, removeDirectory } satisfies OperatingSystem
+
+    const report = pruneTasks(paths, { days: 14, dryRun: false }, os)
 
     expect(report.removed).toContain(mergeGuard)
+    expect(removeDirectory).toHaveBeenCalledWith(mergeGuard)
     expect(existsSync(mergeGuard)).toBe(false)
   })
 
   it('retains the status file when removing an earlier artifact fails', () => {
     makeTask(OLD_MERGED, 'merged', 'old')
-    fsMockState.removalFailurePath = `${OLD_MERGED}.log`
+    const failedPath = join(paths.logsDir, `${OLD_MERGED}.log`)
+    const removeDirectory = vi.fn((path: string) => {
+      if (path === failedPath) throw new Error('simulated removal failure')
+      rmSync(path, { recursive: true, force: true })
+    })
+    const os = { ...operatingSystem, removeDirectory } satisfies OperatingSystem
 
-    expect(() => pruneTasks(paths, { days: 14, dryRun: false }))
+    expect(() => pruneTasks(paths, { days: 14, dryRun: false }, os))
       .toThrow('simulated removal failure')
 
+    expect(removeDirectory).toHaveBeenCalledWith(failedPath)
     expect(existsSync(join(paths.statusDir, `${OLD_MERGED}.json`))).toBe(true)
   })
 

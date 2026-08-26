@@ -207,6 +207,28 @@ describe('pre-cycle core update', () => {
     expect(events).toContain('Restarting core for cycle 1')
   })
 
+  it('finds the newest squash-import after its run branch is squash-merged', async () => {
+    const runBranch = 'chore/import-core'
+    git(repoRoot, ['switch', '-c', runBranch])
+    const importedCore = advanceUpstream('version two\n')
+    git(repoRoot, [
+      'subtree', 'pull', '--prefix=orchestration/ts', upstreamRoot, 'main', '--squash',
+    ])
+    git(repoRoot, ['switch', 'main'])
+    git(repoRoot, ['merge', '--squash', runBranch])
+    commit(repoRoot, 'Merge pull request #1 from consumer/chore/import-core')
+    git(repoRoot, ['branch', '-D', runBranch])
+    const newCore = advanceUpstream('version three\n')
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('restart')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+      .toBe('version three\n')
+    expect(events).toContain(
+      `Updated core ${importedCore.slice(0, 8)}..${newCore.slice(0, 8)}`,
+    )
+  })
+
   it('updates integration source without restarting the fixed daemon', async () => {
     const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
     const newCore = advanceUpstream('version two\n')
@@ -492,6 +514,12 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
       .toBe('version one\n')
     expect(runnerStarts).toHaveLength(1)
     expect(events, events.join('\n')).toContain('WARN core update skipped: working tree is dirty')
+    const imported = git(upstreamRoot, ['rev-parse', 'HEAD^'])
+    const upstream = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    expect(events).toContain(
+      `Status core behind imported ${imported.slice(0, 8)} upstream ${upstream.slice(0, 8)}; `
+      + 'continuing on old code: working tree is dirty',
+    )
   })
 
   it('aborts a conflicting pull, warns, and starts the cycle on the old code', async () => {
@@ -510,6 +538,12 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     expect(events.some((line) => line.startsWith(
       'WARN core update pull conflicted; continuing on old code:',
     )), events.join('\n')).toBe(true)
+    const imported = git(upstreamRoot, ['rev-parse', 'HEAD^'])
+    const upstream = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    expect(events).toContain(
+      `Status core behind imported ${imported.slice(0, 8)} upstream ${upstream.slice(0, 8)}; `
+      + 'continuing on old code: pull conflicted',
+    )
   })
 
   it('stops when a failed core pull cannot confirm a successful merge abort', async () => {

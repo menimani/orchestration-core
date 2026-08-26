@@ -67,11 +67,11 @@ function stopTaskProcess(
   pid: number,
 ): void {
   const terminablePid = terminableTaskProcessPid(
-    paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processIsAlive,
+    paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processTreeIsAlive,
   )
   if (terminablePid === undefined) {
     const blockingPid = taskProcessPid(
-      paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processIsAlive,
+      paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processTreeIsAlive,
     )
     if (blockingPid !== undefined) {
       throw new Error(`Could not verify process ${blockingPid}; task state was retained.`)
@@ -82,9 +82,11 @@ function stopTaskProcess(
     throw new Error('Task process ownership changed; task state was retained.')
   }
   try {
-    if (runtime.os.terminateProcessTree(terminablePid)) {
-      console.log(`Stopping running process: pid=${terminablePid}`)
+    if (!runtime.os.terminateProcessTree(terminablePid)
+      || runtime.os.processTreeIsAlive(terminablePid)) {
+      throw new Error(`Process tree ${terminablePid} is still alive.`)
     }
+    console.log(`Stopping running process: pid=${terminablePid}`)
     forgetTaskProcess(paths, taskId)
   } catch {
     throw new Error(`Could not stop process ${terminablePid}; task state was retained.`)
@@ -104,13 +106,13 @@ export function cleanupTask(
   announce = true,
 ): void {
   const status = readStatus(
-    paths, taskId, runtime.os.processStartIdentity, runtime.os.processIsAlive,
+    paths, taskId, runtime.os.processStartIdentity, runtime.os.processTreeIsAlive,
   )
   // startTask records ownership before persisting status. A StartupProcessRetainedError
   // can therefore leave a live registry-only runner, which must be stopped before its
   // worktree can safely be removed.
   const pid = status?.pid ?? taskProcessPid(
-    paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processIsAlive,
+    paths, taskId, undefined, runtime.os.processStartIdentity, runtime.os.processTreeIsAlive,
   )
   if (pid !== undefined) {
     stopTaskProcess(runtime, paths, taskId, pid)

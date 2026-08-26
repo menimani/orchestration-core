@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const fsFailures = vi.hoisted(() => ({
   read: undefined as NodeJS.ErrnoException | undefined,
   stat: undefined as NodeJS.ErrnoException | undefined,
+  rename: undefined as ((source: string, destination: string) => void) | undefined,
 }))
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -18,6 +19,12 @@ vi.mock('node:fs', async (importOriginal) => {
       if (fsFailures.read !== undefined) throw fsFailures.read
       return Reflect.apply(actual.readFileSync, actual, args)
     }) as typeof actual.readFileSync,
+    renameSync: ((...args: Parameters<typeof actual.renameSync>) => {
+      if (fsFailures.rename !== undefined) {
+        return fsFailures.rename(String(args[0]), String(args[1]))
+      }
+      return Reflect.apply(actual.renameSync, actual, args)
+    }) as typeof actual.renameSync,
     statSync: ((...args: Parameters<typeof actual.statSync>) => {
       if (fsFailures.stat !== undefined) throw fsFailures.stat
       return Reflect.apply(actual.statSync, actual, args)
@@ -27,7 +34,8 @@ vi.mock('node:fs', async (importOriginal) => {
 
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import {
-  bootedAt, forgetTaskProcess, recordTaskProcess, taskProcessPid, terminableTaskProcessPid,
+  bootedAt, forgetTaskProcess, recordTaskProcess, registeredTaskIds, taskProcessPid,
+  terminableTaskProcessPid,
 } from '../src/processRegistry.ts'
 
 describe('task process registry', () => {
@@ -38,6 +46,7 @@ describe('task process registry', () => {
   beforeEach(() => {
     fsFailures.read = undefined
     fsFailures.stat = undefined
+    fsFailures.rename = undefined
     repoRoot = mkdtempSync(join(tmpdir(), 'orch process-registry-'))
     paths = orchPaths(repoRoot)
   })
@@ -53,6 +62,26 @@ describe('task process registry', () => {
     recordTaskProcess(paths, taskId, 4321, identity)
 
     expect(taskProcessPid(paths, taskId, undefined, identity)).toBe(4321)
+  })
+
+  it('keeps the previous owner published if replacing it is interrupted', () => {
+    recordTaskProcess(paths, taskId, 4321, identity)
+    fsFailures.rename = (temporary, destination) => {
+      expect(destination).toBe(registryFile())
+      expect(JSON.parse(readFileSync(temporary, 'utf8'))).toEqual({
+        pid: 9876, startIdentity: 'started:9876',
+      })
+      expect(taskProcessPid(paths, taskId, undefined, identity)).toBe(4321)
+      expect(registeredTaskIds(paths)).toEqual([taskId])
+      throw new Error('publication interrupted')
+    }
+
+    expect(() => recordTaskProcess(paths, taskId, 9876, identity))
+      .toThrow('publication interrupted')
+
+    expect(taskProcessPid(paths, taskId, undefined, identity)).toBe(4321)
+    expect(readFileSync(registryFile(), 'utf8')).toContain('"pid":4321')
+    expect(registeredTaskIds(paths)).toEqual([taskId])
   })
 
   it('answers with nothing for a task it never recorded', () => {
@@ -145,6 +174,27 @@ describe('task process registry', () => {
     expect(existsSync(registryFile())).toBe(false)
   })
 
+  it('retains ownership while descendants remain after the runner root exits', () => {
+    recordTaskProcess(paths, taskId, 4321, identity)
+
+    expect(taskProcessPid(paths, taskId, undefined, () => undefined, () => true)).toBe(4321)
+    expect(terminableTaskProcessPid(
+      paths, taskId, undefined, () => undefined, () => true,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(true)
+  })
+
+  it('retains blocking ownership but refuses termination after identity replacement', () => {
+    recordTaskProcess(paths, taskId, 4321, identity)
+    const replacementIdentity = (): string => 'started:replacement'
+
+    expect(taskProcessPid(paths, taskId, undefined, replacementIdentity, () => true)).toBe(4321)
+    expect(terminableTaskProcessPid(
+      paths, taskId, undefined, replacementIdentity, () => true,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(true)
+  })
+
   it('drops a legacy bare-PID entry because it has no process-start identity', () => {
     recordTaskProcess(paths, taskId, 4321, identity)
     writeFileSync(registryFile(), '4321\n')
@@ -153,20 +203,24 @@ describe('task process registry', () => {
     expect(existsSync(registryFile())).toBe(false)
   })
 
-  it('drops an entry that does not name a process', () => {
+  it('fails closed and retains an entry that is not valid JSON', () => {
     recordTaskProcess(paths, taskId, 4321, identity)
     writeFileSync(registryFile(), 'not-a-pid\n')
 
-    expect(taskProcessPid(paths, taskId)).toBeUndefined()
-    expect(existsSync(registryFile())).toBe(false)
+    expect(() => taskProcessPid(paths, taskId)).toThrow(
+      `Malformed task process registry entry: ${registryFile()}`,
+    )
+    expect(existsSync(registryFile())).toBe(true)
   })
 
-  it('drops a JSON entry that is not a registry object', () => {
+  it('fails closed and retains a malformed current-format entry', () => {
     recordTaskProcess(paths, taskId, 4321, identity)
-    writeFileSync(registryFile(), 'null\n')
+    writeFileSync(registryFile(), '{"pid":4321}\n')
 
-    expect(taskProcessPid(paths, taskId, undefined, identity)).toBeUndefined()
-    expect(existsSync(registryFile())).toBe(false)
+    expect(() => taskProcessPid(paths, taskId, undefined, identity)).toThrow(
+      `Malformed task process registry entry: ${registryFile()}`,
+    )
+    expect(existsSync(registryFile())).toBe(true)
   })
 
   it('derives the boot time from how long the system has been up', () => {

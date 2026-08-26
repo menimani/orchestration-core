@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -113,6 +115,29 @@ describe('initializeSessionStateForBranch', () => {
     makeLoop().initializeSessionStateForBranch()
 
     expect(logged).toHaveLength(0)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8').trim()).toBe('4')
+    for (const name of cycleFileNames) {
+      expect(readFileSync(join(paths.queueDir, name), 'utf8').trim()).toBe('cycle state')
+    }
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('3')
+    assertPersistentState()
+  })
+
+  it('preserves resumable state when the current branch cannot be queried', () => {
+    seedState()
+    writeFileSync(join(paths.queueDir, 'run-branch.txt'), 'current-branch\n')
+    const gitDir = join(repoRoot, '.git')
+    const unavailableGitDir = join(repoRoot, '.git-unavailable')
+    renameSync(gitDir, unavailableGitDir)
+
+    try {
+      expect(() => makeLoop().initializeSessionStateForBranch()).toThrow()
+    } finally {
+      renameSync(unavailableGitDir, gitDir)
+    }
+
+    expect(readFileSync(join(paths.queueDir, 'run-branch.txt'), 'utf8').trim())
+      .toBe('current-branch')
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8').trim()).toBe('4')
     for (const name of cycleFileNames) {
       expect(readFileSync(join(paths.queueDir, name), 'utf8').trim()).toBe('cycle state')

@@ -28,13 +28,12 @@ export function liveTaskProcesses(
   const taskIds = new Set([...listTaskIds(paths), ...registeredTaskIds(paths)])
   for (const taskId of [...taskIds].sort()) {
     const pid = taskProcessPid(
-      paths, taskId, bootedAt, os.processStartIdentity, os.processIsAlive,
+      paths, taskId, bootedAt, os.processStartIdentity, os.processTreeIsAlive,
     )
     if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue
-    // Detection asks whether that process is running, not whether it leads a group. A
-    // recorded PID that is not a group leader answered "gone" on POSIX, so this waved
-    // through a daemon starting beside a live foreign task.
-    if (os.processIsAlive(pid)) {
+    // Ownership blocks while any member of the recorded tree is alive. The runner root
+    // can exit before a descendant, and cleanup must still find that orphaned tree.
+    if (os.processTreeIsAlive(pid)) {
       live.push({ taskId, pid })
     }
   }
@@ -49,7 +48,7 @@ export function terminateLiveTaskProcesses(
   const result: TaskProcessTermination = { terminated: [], failures: [] }
   for (const task of liveTaskProcesses(paths, os)) {
     const terminablePid = terminableTaskProcessPid(
-      paths, task.taskId, bootedAt, os.processStartIdentity, os.processIsAlive,
+      paths, task.taskId, bootedAt, os.processStartIdentity, os.processTreeIsAlive,
     )
     if (terminablePid === undefined) {
       result.failures.push({
@@ -59,7 +58,15 @@ export function terminateLiveTaskProcesses(
       continue
     }
     try {
-      if (os.terminateProcessTree(terminablePid)) result.terminated.push(task)
+      const terminated = os.terminateProcessTree(terminablePid)
+      if (!terminated) {
+        result.failures.push({
+          ...task,
+          error: 'process tree termination could not be verified',
+        })
+        continue
+      }
+      result.terminated.push(task)
       // Stopping is what makes the recorded number false, so it is dropped here rather
       // than left for whoever reads next. A tree that resisted termination keeps its
       // entry: something is still running under that number.

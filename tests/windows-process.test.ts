@@ -135,7 +135,34 @@ it('rejects cleanup while any captured startup descendant remains alive', async 
     'Could not stop Windows startup process tree 43210.',
   )
   expect(runtime.requestLauncherTreeTermination).toHaveBeenCalledOnce()
+  expect(runtime.removeDirectory).not.toHaveBeenCalled()
   expect(runtime.sleep).toHaveBeenCalled()
+})
+
+it('verifies cleanup directly when startup process enumeration fails', async () => {
+  const runtime = testRuntime(() => {}, 20)
+  runtime.listProcesses = () => { throw new Error('process enumeration failed') }
+
+  await expect(startWindowsProcess(options, runtime)).rejects.toThrow(
+    'never published a PID before startup timed out; startup cleanup found and terminated a live process tree',
+  )
+  expect(runtime.requestLauncherTreeTermination).toHaveBeenCalledOnce()
+  expect(runtime.removeDirectory).toHaveBeenCalledOnce()
+})
+
+it('retains startup state when direct cleanup verification cannot prove the launcher stopped', async () => {
+  const runtime = testRuntime(() => {}, 20)
+  let now = 0
+  runtime.listProcesses = () => { throw new Error('process enumeration failed') }
+  runtime.requestLauncherTreeTermination = vi.fn(() => true)
+  runtime.now = () => now
+  runtime.sleep = vi.fn(async (milliseconds: number) => { now += milliseconds })
+
+  await expect(startWindowsProcess(options, runtime)).rejects.toThrow(
+    /Could not stop Windows startup process tree 43210\. Startup state was retained at .+\./,
+  )
+  expect(runtime.requestLauncherTreeTermination).toHaveBeenCalledOnce()
+  expect(runtime.removeDirectory).not.toHaveBeenCalled()
 })
 
 it('returns the published PID when temporary-directory cleanup fails', async () => {

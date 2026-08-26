@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +13,14 @@ async function waitForPath(path: string): Promise<void> {
   const deadline = Date.now() + 5_000
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+async function waitForTicketCount(path: string, count: number): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (!existsSync(path) || readdirSync(path).filter((name) => name.endsWith('.json')).length < count) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${count} tickets in ${path}`)
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
 }
@@ -86,7 +94,11 @@ describe('test suite wrapper', () => {
     })
     const sharedRoot = join(fixture, 'shared')
     mkdirSync(sharedRoot)
-    const env = { ...process.env, ORCHESTRATION_TEST_SHARED_ROOT: sharedRoot }
+    const env = {
+      ...process.env,
+      ORCHESTRATION_TEST_DELAY_MS: '1500',
+      ORCHESTRATION_TEST_SHARED_ROOT: sharedRoot,
+    }
 
     const first = run(
       process.execPath,
@@ -94,22 +106,33 @@ describe('test suite wrapper', () => {
       firstWorktree,
       env,
     )
+    await waitForPath(join(sharedRoot, 'active'))
     const second = run(
       process.execPath,
       [join(secondWorktree, 'scripts', 'run-tests.mjs'), '--poolOptions.threads.singleThread'],
       secondWorktree,
       env,
     )
-    const results = await Promise.all([first, second])
+    const queue = join(repository, '.git', '.orchestration-test-suite-lock-queue')
+    await waitForTicketCount(queue, 1)
+    const third = run(
+      process.execPath,
+      [join(firstWorktree, 'scripts', 'run-tests.mjs'), '--pool=forks'],
+      firstWorktree,
+      env,
+    )
+    const results = await Promise.all([first, second, third])
 
-    expect(results.map(({ status }) => status)).toEqual([0, 0])
-    expect(results.map(({ stderr }) => stderr)).toEqual(['', ''])
+    expect(results.map(({ status }) => status)).toEqual([0, 0, 0])
+    expect(results.map(({ stderr }) => stderr)).toEqual(['', '', ''])
     expect(() => readFileSync(join(sharedRoot, 'overlap'), 'utf8')).toThrow()
     const invocations = readFileSync(join(sharedRoot, 'args'), 'utf8')
       .trim().split(/\r?\n/).map((line) => JSON.parse(line) as string[])
-    expect(invocations).toHaveLength(2)
-    expect(invocations).toContainEqual(['run', '--pool=threads'])
-    expect(invocations).toContainEqual(['run', '--poolOptions.threads.singleThread'])
+    expect(invocations).toEqual([
+      ['run', '--pool=threads'],
+      ['run', '--poolOptions.threads.singleThread'],
+      ['run', '--pool=forks'],
+    ])
     expect(results.some(({ stdout }) => stdout.includes('waiting for its repository lock'))).toBe(true)
   })
 
@@ -237,7 +260,9 @@ describe('test suite wrapper', () => {
       "import { join } from 'node:path'",
       "const active = join(process.env.ORCHESTRATION_TEST_SHARED_ROOT, 'active')",
       'mkdirSync(active)',
-      'await new Promise((resolve) => setTimeout(resolve, 1_500))',
+      // Leave enough time for the waiter to start and inspect the owner on a loaded
+      // Windows runner, where process identity lookup starts a PowerShell process.
+      'await new Promise((resolve) => setTimeout(resolve, 5_000))',
       'rmSync(active, { recursive: true, force: true })',
       '',
     ].join('\n'))

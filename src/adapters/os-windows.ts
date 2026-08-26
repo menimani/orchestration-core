@@ -134,7 +134,10 @@ function processTreePids(
     childrenByParent.set(parentPid, children)
   }
 
-  const treePids = new Set<number>()
+  // CIM can omit a process that is still alive while it builds the snapshot. Always
+  // retain the root so its direct probe, rather than its presence in the snapshot,
+  // decides whether the tree is alive and whether taskkill must be attempted.
+  const treePids = new Set<number>([rootPid])
   const visited = new Set<number>()
   const pending = [rootPid]
   while (pending.length > 0) {
@@ -164,6 +167,11 @@ export function createOperatingSystem(
   const terminateProcessTree = (pid: number): boolean => {
     const trackedPids = processTreePids(runtime, pid)
     if (!anyProcessIsAlive(runtime, trackedPids)) return false
+    if (pid === process.pid || trackedPids?.has(process.pid)) {
+      throw new Error(
+        `Refusing to stop process tree ${pid} because it contains the current process ${process.pid}.`,
+      )
+    }
 
     try {
       runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])

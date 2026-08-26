@@ -11,8 +11,8 @@ import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  completeTaskWithoutChanges, MergeError, mergeRemoteTask, mergeTask, removeMergedWorktree,
-  removeTemporaryWorktree,
+  completeTaskWithoutChanges, MergeError, MergeRecoveryError, mergeRemoteTask, mergeTask,
+  removeMergedWorktree, removeTemporaryWorktree,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
@@ -531,6 +531,7 @@ describe('mergeTask', () => {
     const runnerPid = 12345
     vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue(undefined)
     vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
     await writeStatus(paths, taskId, 'completed', runnerPid)
 
@@ -550,6 +551,7 @@ describe('mergeTask', () => {
       'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
     vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue(undefined)
     vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
     await writeStatus(paths, taskId, 'completed', runnerPid)
 
@@ -1045,6 +1047,37 @@ describe('mergeTask', () => {
     expect(event).not.toHaveBeenCalled()
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
+
+  it('stops when a failed local merge cannot prove that the worktree was restored', async () => {
+    const taskId = '20260824_084607_019_auto-merge-recovery'
+    await makeCompletedTask(taskId, { commit: true })
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    let mergeCalls = 0
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string => {
+        if (args[0] === 'merge' && args[1] === '--quiet') {
+          mergeCalls += 1
+          if (mergeCalls === 2) {
+            git(cwd, ['merge', '--no-commit', '--no-ff', args[3]!])
+            throw new Error('merge result was not reported')
+          }
+        }
+        if (args[0] === 'merge' && args[1] === '--abort') {
+          throw new Error('abort failed')
+        }
+        return git(cwd, args)
+      },
+    }
+
+    const failure = mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+    })
+    await expect(failure).rejects.toThrow(MergeRecoveryError)
+    await expect(failure).rejects.toThrow('merge is still in progress; merge abort failed')
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expectNoTemporaryWorktree('.merge-')
+  })
 })
 
 describe('mergeRemoteTask', () => {
@@ -1261,6 +1294,65 @@ describe('mergeRemoteTask', () => {
     expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toBe('# run version\n')
     expect(git(repoRoot, ['rev-parse', remoteRef]).trim()).toBe(expectedHead)
     expect(git(repoRoot, ['show', `${remoteRef}:README.md`])).toBe('# remote version\n')
+    expectNoTemporaryWorktree('.adopt-')
+  })
+
+  it('stops when abort leaves a remote adoption merge in progress', async () => {
+    const branch = 'task/remote-unrecoverable-conflict'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'remote recovery work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote recovery work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    let mergeCalls = 0
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string => {
+        if (args[0] === 'merge' && args[1] === '--quiet') {
+          mergeCalls += 1
+          if (mergeCalls === 2) {
+            git(cwd, ['merge', '--no-commit', '--no-ff', args[3]!])
+            throw new Error('merge result was not reported')
+          }
+        }
+        if (args[0] === 'merge' && args[1] === '--abort') throw new Error('abort is blocked')
+        return git(cwd, args)
+      },
+    }
+
+    await expect(mergeRemoteTask(paths, 228, 'origin', branch, expectedHead, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow('merge is still in progress; merge abort failed: abort is blocked')
+
+    expectNoTemporaryWorktree('.adopt-')
+  })
+
+  it('returns a retryable conflict when a failed abort is proven harmless', async () => {
+    const branch = 'task/remote-safe-abort-failure'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add safe abort fixture'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string => {
+        if (args[0] === 'merge' && args[1] === '--quiet') throw new Error('merge did not start')
+        if (args[0] === 'merge' && args[1] === '--abort') throw new Error('nothing to abort')
+        return git(cwd, args)
+      },
+    }
+
+    const failure = mergeRemoteTask(paths, 229, 'origin', branch, expectedHead, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })
+    await expect(failure).rejects.toThrow(MergeError)
+    await expect(failure).rejects.not.toThrow(MergeRecoveryError)
+    await expect(failure).rejects.toThrow(`A merge conflict occurred while adopting ${branch}.`)
     expectNoTemporaryWorktree('.adopt-')
   })
 })

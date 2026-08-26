@@ -1202,18 +1202,28 @@ export function issuePromotionForIssue(
 ): IssuePromotion | undefined {
   const file = promotionFile(paths, issueNumber)
   if (!existsSync(file)) return undefined
+  const malformed = (cause?: unknown): Error => new Error(
+    `Malformed issue promotion record ${file}; repair this file before issue reconciliation can continue`,
+    cause === undefined ? undefined : { cause },
+  )
+  let parsed: unknown
   try {
-    const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<IssuePromotion>
-    if (typeof value.taskId !== 'string'
-      || value.issueNumber !== issueNumber
-      || typeof value.mergeCommit !== 'string'
-      || value.mergeCommit === ''
-      || typeof value.runBranch !== 'string'
-      || value.runBranch === '') return undefined
-    return value as IssuePromotion
-  } catch {
-    return undefined
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    throw malformed(error)
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw malformed()
+  const value = parsed as Partial<IssuePromotion>
+  if (typeof value.taskId !== 'string'
+    || value.taskId === ''
+    || value.issueNumber !== issueNumber
+    || typeof value.mergeCommit !== 'string'
+    || value.mergeCommit === ''
+    || typeof value.runBranch !== 'string'
+    || value.runBranch === ''
+    || (value.commentConfirmed !== undefined
+      && typeof value.commentConfirmed !== 'boolean')) throw malformed()
+  return value as IssuePromotion
 }
 
 /** Persist the merge identity independently of task status until promotion closes its issue. */
