@@ -17,9 +17,10 @@ export function encodeProcessStartIdentity(startIdentity: string | null): string
 /** Decode a recorded identity, treating legacy or invalid metadata as unverifiable. */
 export function decodeProcessStartIdentity(encoded: string | undefined): string | undefined {
   if (encoded === undefined || encoded === '-') return undefined
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) return undefined
   try {
     const decoded = Buffer.from(encoded, 'base64url').toString()
-    return decoded === '' ? undefined : decoded
+    return decoded !== '' && encodeProcessStartIdentity(decoded) === encoded ? decoded : undefined
   } catch {
     return undefined
   }

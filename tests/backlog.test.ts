@@ -182,6 +182,25 @@ describe('backlog process lock', () => {
     expect(existsSync(lockDir)).toBe(false)
   })
 
+  it('does not reclaim an aged lock with a live PID and malformed identity token', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    const encodedIdentity = Buffer.from('previous-start').toString('base64url')
+    writeFileSync(
+      join(lockDir, 'owner'),
+      `${process.pid} ${Date.now() - 31_000} v2.old-token.${encodedIdentity}!\n`,
+    )
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('current-start')
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out')
+
+    expect(() => withBacklogLock(backlog, () => undefined))
+      .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+    expect(processIsAlive).toHaveBeenCalledWith(process.pid)
+    expect(existsSync(lockDir)).toBe(true)
+  })
+
   it('recovers an aged recovery mutex abandoned beside a stale lock', () => {
     const backlog = join(paths.queueDir, 'backlog.txt')
     const lockDir = `${backlog}.lock`
