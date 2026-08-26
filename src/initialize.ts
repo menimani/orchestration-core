@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync,
 } from 'node:fs'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import { renderProjectAdapter, repairProjectAdapterSource } from './adapters/project.ts'
 import { ensureQueueLabels, QUEUE_LABELS } from './issueQueue.ts'
@@ -55,6 +55,9 @@ function currentGitConfig(git: (args: string[]) => string, key: string): string 
 
 function relativeImport(fromDirectory: string, target: string): string {
   const path = relative(fromDirectory, target).replaceAll('\\', '/')
+  if (isAbsolute(path)) {
+    throw new Error('The orchestration package and repository must be on the same filesystem volume.')
+  }
   return path.startsWith('.') ? path : `./${path}`
 }
 
@@ -70,8 +73,25 @@ export async function initializeRepository(
   const projectName = projectSlug(requestedName ?? basename(paths.repoRoot))
   let ok = true
 
-  mkdirSync(paths.root, { recursive: true })
   const projectDirectory = join(paths.root, 'project')
+  const typeImport = relativeImport(
+    projectDirectory,
+    join(packageRoot, 'src', 'adapters', 'project.ts'),
+  )
+  const hooksDirectory = join(packageRoot, '.githooks')
+  const hooksPath = relative(paths.repoRoot, hooksDirectory).replaceAll('\\', '/') || '.'
+  if (isAbsolute(hooksPath)) {
+    throw new Error('The orchestration package and repository must be on the same filesystem volume.')
+  }
+  if (hooksPath === '..' || hooksPath.startsWith('../')) {
+    throw new Error('The orchestration package must be inside the repository before init runs.')
+  }
+  if (!existsSync(join(hooksDirectory, 'commit-msg'))
+    || !existsSync(join(hooksDirectory, 'pre-commit'))) {
+    throw new Error(`Core-owned hooks are missing from ${hooksDirectory}.`)
+  }
+
+  mkdirSync(paths.root, { recursive: true })
   mkdirSync(projectDirectory, { recursive: true })
   const existingAdapters = readdirSync(projectDirectory, { withFileTypes: true })
     .filter((entry) => entry.isFile() && /^project-.+\.ts$/.test(entry.name))
@@ -79,10 +99,6 @@ export async function initializeRepository(
     .sort()
   let adapterPath = join(projectDirectory, `project-${projectName}.ts`)
   if (existingAdapters.length === 0) {
-    const typeImport = relativeImport(
-      projectDirectory,
-      join(packageRoot, 'src', 'adapters', 'project.ts'),
-    )
     writeFileSync(adapterPath, renderProjectAdapter(projectName, typeImport))
     report(`CREATED: ${adapterPath}`)
   } else {
@@ -122,15 +138,6 @@ export async function initializeRepository(
     report(`CREATED: ${destination}`)
   }
 
-  const hooksDirectory = join(packageRoot, '.githooks')
-  if (!existsSync(join(hooksDirectory, 'commit-msg'))
-    || !existsSync(join(hooksDirectory, 'pre-commit'))) {
-    throw new Error(`Core-owned hooks are missing from ${hooksDirectory}.`)
-  }
-  const hooksPath = relative(paths.repoRoot, hooksDirectory).replaceAll('\\', '/') || '.'
-  if (hooksPath === '..' || hooksPath.startsWith('../')) {
-    throw new Error('The orchestration package must be inside the repository before init runs.')
-  }
   const configuredHooksPath = currentGitConfig(git, 'core.hooksPath')
   if (configuredHooksPath === '') {
     git(['config', '--local', 'core.hooksPath', hooksPath])
