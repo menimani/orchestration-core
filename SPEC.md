@@ -330,9 +330,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     missing, or unreadable adapter logs `Restarting adapter     for cycle <n>` and replaces
     the daemon before continuing, so every adapter consumer changes atomically at the same
     restart-safe boundary. In integration mode the monitored source is the adapter in the
-    integration worktree. The daemon then fetches the
-    configured core upstream and compares its tip with the last `git-subtree-split` for
-    this package's prefix. If it is behind, the daemon runs `git subtree pull --squash`.
+    integration worktree. The daemon then fetches the configured core upstream. It
+    recovers the imported revision by first matching the current subtree tree against
+    commit trees in the fetched upstream history, which preserves detection after a
+    squash-import commit is itself squash-merged. When no upstream tree matches, it falls
+    back to the last `git-subtree-split` whose `git-subtree-dir` matches this package's
+    prefix. It compares the recovered revision with the upstream tip and, if it is behind,
+    runs `git subtree pull --squash`.
     A package-file change logs an aligned `Updated    core        <old8>..<new8>` event.
     In direct layout only, it also logs `Restarting core        for cycle <n>`, releases
     daemon ownership, and starts the package's absolute CLI entry point from the package
