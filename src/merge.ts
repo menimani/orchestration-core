@@ -757,11 +757,13 @@ interface MergeGuardOwner {
   state: 'active'
   pid: number
   startIdentity: string | null
+  token: string | null
 }
 
 const MALFORMED_MERGE_GUARD_MAX_AGE_MS = 30_000
 const MERGE_GUARD_RECLAIM_TIMEOUT_MS = 10_000
 const MERGE_GUARD_RECLAIM_RETRY_MS = 10
+const retiredMergeGuardTokens = new Set<string>()
 
 function mergeGuardDir(paths: OrchPaths, taskId: string): string {
   return join(paths.queueDir, 'merge-guards', taskId)
@@ -777,6 +779,7 @@ function activeMergeGuardOwner(dir: string): MergeGuardOwner | undefined {
       state: 'active',
       pid: Number(value.pid),
       startIdentity: typeof value.startIdentity === 'string' ? value.startIdentity : null,
+      token: typeof value.token === 'string' ? value.token : null,
     }
   } catch {
     return undefined
@@ -871,6 +874,7 @@ function acquireMergeGuard(
   mkdirSync(dirname(dir), { recursive: true })
   const owner: MergeGuardOwner = {
     state: 'active', pid: process.pid, startIdentity: currentProcessStartIdentity(),
+    token: randomUUID(),
   }
   for (;;) {
     if (publishMergeGuard(dir, owner)) {
@@ -898,6 +902,19 @@ function acquireMergeGuard(
         reclaimDeadline = Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       }
       if (reclaimMalformedMergeGuard(dir)) {
+        reclaimDeadline = undefined
+        continue
+      }
+      if (Date.now() >= reclaimDeadline) {
+        throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
+      }
+      return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+    }
+    if (recorded.token !== null && retiredMergeGuardTokens.has(recorded.token)) {
+      reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      if (reclaimRetiredMergeGuard(dir)) {
+        retiredMergeGuardTokens.delete(recorded.token)
         reclaimDeadline = undefined
         continue
       }
@@ -952,11 +969,14 @@ function finishMergeGuard(
   }
   try {
     renameSync(guard.file, retiredGuard)
-  } catch {
-    // Retirement must not replace the merge result. A published marker lets the next
-    // attempt reclaim this daemon's otherwise-live owner without waiting for restart.
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    // Retirement must not replace the merge result. The marker or process-local token
+    // lets the next attempt reclaim this daemon's otherwise-live owner before restart.
+    if (guard.owner.token !== null) retiredMergeGuardTokens.add(guard.owner.token)
     return
   }
+  if (guard.owner.token !== null) retiredMergeGuardTokens.delete(guard.owner.token)
   try {
     rmSync(retiredGuard, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   } catch {

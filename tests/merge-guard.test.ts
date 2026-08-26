@@ -4,11 +4,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ renameSync: vi.fn(), rmSync: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  renameSync: vi.fn(), rmSync: vi.fn(), writeFileSync: vi.fn(),
+}))
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
-  return { ...actual, renameSync: mocks.renameSync, rmSync: mocks.rmSync }
+  return {
+    ...actual,
+    renameSync: mocks.renameSync,
+    rmSync: mocks.rmSync,
+    writeFileSync: mocks.writeFileSync,
+  }
 })
 
 import { mergeTask, MergeError } from '../src/merge.ts'
@@ -42,6 +49,12 @@ async function makeCompletedTask(
 }
 
 beforeEach(() => {
+  mocks.rmSync.mockReset().mockImplementation((...args: unknown[]) =>
+    Reflect.apply(actualFs.rmSync, actualFs, args))
+  mocks.renameSync.mockReset().mockImplementation((...args: unknown[]) =>
+    Reflect.apply(actualFs.renameSync, actualFs, args))
+  mocks.writeFileSync.mockReset().mockImplementation((...args: unknown[]) =>
+    Reflect.apply(actualFs.writeFileSync, actualFs, args))
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-merge-guard-'))
   paths = orchPaths(repoRoot)
   git(repoRoot, ['init', '-q', '-b', 'main'])
@@ -50,10 +63,6 @@ beforeEach(() => {
   writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
   git(repoRoot, ['add', '-A'])
   git(repoRoot, ['commit', '-qm', 'chore: initial commit'])
-  mocks.rmSync.mockReset().mockImplementation((...args: unknown[]) =>
-    Reflect.apply(actualFs.rmSync, actualFs, args))
-  mocks.renameSync.mockReset().mockImplementation((...args: unknown[]) =>
-    Reflect.apply(actualFs.renameSync, actualFs, args))
 })
 
 afterEach(() => {
@@ -62,6 +71,31 @@ afterEach(() => {
 })
 
 describe('merge guard retirement', () => {
+  it('reclaims a failed merge when guard retirement marker and rename both fail', async () => {
+    const taskId = '20260826_203919_001_auto-failed-guard-retirement'
+    await makeCompletedTask(taskId, { dirty: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mocks.writeFileSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === join(guard, 'retired')) throw new Error('retirement marker failed')
+      return Reflect.apply(actualFs.writeFileSync, actualFs, args)
+    })
+    mocks.renameSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === guard) throw new Error('guard retirement rename failed')
+      return Reflect.apply(actualFs.renameSync, actualFs, args)
+    })
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject,
+    })).rejects.toBeInstanceOf(MergeError)
+    expect(actualFs.existsSync(join(guard, 'retired'))).toBe(false)
+
+    const onMergeStart = vi.fn()
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onMergeStart,
+    })).rejects.toBeInstanceOf(MergeError)
+    expect(onMergeStart).toHaveBeenCalledOnce()
+  })
+
   it('reclaims a failed merge after guard retirement rename fails', async () => {
     const taskId = '20260822_093823_001_auto-failed-guard-rename'
     await makeCompletedTask(taskId, { dirty: true })
