@@ -405,7 +405,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     pending → keep polling; failure → generate a ci-fix task, up to
     `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
-    explicitly sets `ciChecksExpected: false`.
+    explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
+    persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
+    the pending ID remains while the attempt count and cycle-complete flag remain
+    unchanged; the next poll regenerates and retries the task with that same ID. A
+    successful enqueue records the attempt, clears the cycle-complete flag, and removes
+    the pending-ID file. Session cleanup also removes any remaining pending-ID file.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a
@@ -428,6 +433,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     reviewed, and its rounds continue until one is clean, bounded by
     `MAX_FINAL_REVIEW_ROUNDS`; exceeding that stops the loop
     for a person instead of promoting a branch its own review keeps rejecting.
+    Before generating a review task, the loop persists its candidate task ID in a
+    per-cycle pending-ID file. If enqueueing fails, that pending ID remains and neither
+    the review round nor the dispatched review ID is recorded; the next gate pass
+    regenerates and retries the task with the same ID. A successful enqueue records the
+    round and dispatched ID, then removes the pending-ID file. Session cleanup also
+    removes any remaining pending-ID file.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
     unless it is already open and ready. A PR found merged before promotion, or merged
