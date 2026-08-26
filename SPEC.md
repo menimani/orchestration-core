@@ -709,6 +709,13 @@ so authorship and verified ancestry must both hold.
     degrades a poll to local-only work. Persisted cleanup release failures are retried each
     poll and stop the loop after three consecutive failures. Labels are ensured at loop
     startup.
+    Promotion retry state is one JSON object per issue at
+    `queue/issue-promotion/<issueNumber>.json`. It requires non-empty string `taskId`,
+    numeric `issueNumber` equal to the filename's issue number, non-empty string
+    `mergeCommit`, and non-empty string `runBranch`; optional `commentConfirmed`, when
+    present, is boolean. Invalid JSON, a non-object value, or any schema violation is not
+    treated as absent state: issue reconciliation fails closed, leaves the record and issue
+    state unchanged for repair, and resumes only after the record is repaired.
     The daemon lists open `loop:finding` issues once per poll and partitions that snapshot
     locally for adoption, reconciliation, lease reaping, claiming, and cycle-gate idle
     detection. MERGED-marker comment reads are cached by issue number and `updatedAt`.
@@ -745,7 +752,9 @@ so authorship and verified ancestry must both hold.
     the project adapter's path-selected checks in a detached worktree, and merges with
     `--no-ff` and `closes #N` for every issue named by a grouped worker report. It persists
     a successful adoption for every member before updating the issues, so a later poll
-    retries failed metadata updates without merging again. A
+    retries failed metadata updates without merging again. These per-issue promotion
+    records use the schema and fail-closed repair behavior in item 35; malformed persisted
+    state stops reconciliation rather than permitting a duplicate merge or issue release. A
     successful adoption logs aligned `Merging` and `Merged` events keyed by the short
     task id, with the latter naming the first eight characters of the merge commit;
     promotion closes the issue. A failure logs the aligned `Failed` event with the short
