@@ -608,11 +608,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     ref, and token. Run discovery is polled for at most five minutes; after discovery,
     only that run id is polled for at most thirty minutes. Both use five-second polling
     capped to the remaining deadline. The run must complete with conclusion `success`,
-    and the revision endpoint must return a successful response. Its trimmed body is
-    compared exactly with the run's `headSha`. The command reports the workflow success
-    and revision `PASS` or `FAIL`, and exits zero only for an exact revision match;
-    invalid usage, a missing deployment declaration, either timeout, an unsuccessful
-    workflow or revision response, and a revision mismatch exit non-zero.
+    and the revision endpoint must return a successful response. Fetching that response
+    and reading its body share a thirty-second deadline; reaching it aborts the request
+    and fails the command. The trimmed body is compared exactly with the run's `headSha`.
+    The command reports the workflow success and revision `PASS` or `FAIL`, and exits zero
+    only for an exact revision match; invalid usage, a missing deployment declaration,
+    any of the three timeouts, an unsuccessful workflow or revision response, and a
+    revision mismatch exit non-zero.
 
 ## The issue queue (new in the rewrite, opt-in)
 
