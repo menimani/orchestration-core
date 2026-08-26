@@ -2038,6 +2038,35 @@ describe('cycle gate', () => {
     return { attemptFile, completeFlag }
   }
 
+  it.each([
+    ['pending', [{ name: 'frontend', conclusion: 'pending', startedAt: '' }]],
+    ['unknown', []],
+  ] as const)('keeps the completed cycle resumable while CI is %s', async (
+    _verdict, checks,
+  ) => {
+    const enqueue = vi.fn<typeof enqueueTask>()
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 1,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+    forgeStatus.checks = [...checks]
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(prStatusCalls).toBe(2)
+    expect(enqueue).not.toHaveBeenCalled()
+    expect(existsSync(attemptFile)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'ci-fix-pending-id-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(existsSync(completeFlag)).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+  })
+
   it('enqueues a task with the failed checks and consumes one CI fix attempt', async () => {
     const enqueue = vi.fn<typeof enqueueTask>((_paths, taskId, depth) => ({
       outcome: 'enqueued', taskId, depth: depth ?? 0,
