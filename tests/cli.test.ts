@@ -1074,6 +1074,14 @@ describe('loop daemon ownership', () => {
   it('refuses startup while a task status names a foreign live PID', async () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260812_010203_040_auto-foreign-task'
+    const foreignProcess = testProcesses.spawn(process.execPath, [
+      '-e', 'setInterval(() => {}, 1000)',
+    ], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    const foreignPid = foreignProcess.pid
+    expect(foreignPid).toBeTypeOf('number')
     writeFileSync(statusFile(paths, taskId), JSON.stringify({
       task_id: taskId,
       status: 'running',
@@ -1081,10 +1089,10 @@ describe('loop daemon ownership', () => {
       updated_at: '2026-08-12T01:02:03Z',
       worktree: worktreeDir(paths, taskId),
       branch: branchName(taskId),
-      pid: process.pid,
+      pid: foreignPid,
     }))
     // A task's process lives in the registry, not in the record.
-    recordTaskProcess(paths, taskId, process.pid)
+    recordTaskProcess(paths, taskId, foreignPid as number)
 
     const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
@@ -1096,7 +1104,7 @@ describe('loop daemon ownership', () => {
 
     expect(result.status).toBe(1)
     expect(result.stdout).toContain(taskId)
-    expect(result.stdout).toContain(`foreign live process tree PID ${process.pid}`)
+    expect(result.stdout).toContain(`foreign live process tree PID ${foreignPid}`)
     expect(result.stdout).toContain('terminate or adopt the foreign task before starting')
     expect(existsSync(daemonFile('loop.pid'))).toBe(false)
     expect(existsSync(daemonFile('cycle-cap.txt'))).toBe(false)
