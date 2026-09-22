@@ -546,6 +546,39 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     )
   })
 
+  it('rolls back an import bridge when the pull fails before creating merge state', async () => {
+    const runBranch = 'chore/import-core'
+    git(repoRoot, ['switch', '-c', runBranch])
+    advanceUpstream('version two\n')
+    git(repoRoot, [
+      'subtree', 'pull', '--prefix=orchestration/ts', upstreamRoot, 'main', '--squash',
+    ])
+    git(repoRoot, ['switch', 'main'])
+    git(repoRoot, ['merge', '--squash', runBranch])
+    commit(repoRoot, 'Merge pull request #1 from consumer/chore/import-core')
+    git(repoRoot, ['branch', '-D', runBranch])
+    advanceUpstream('version three\n')
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+    const failingGit = vi.fn((root: string, args: string[]) => {
+      if (args[0] === 'subtree' && args[1] === 'pull') {
+        throw new Error('simulated pre-merge pull failure')
+      }
+      return git(root, args)
+    })
+    const loop = makeLoop(config(), { packageRoot, git: failingGit })
+
+    expect(await loop.poll()).toBe('continue')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(oldHead)
+    expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+      .toBe('version two\n')
+    expect(failingGit).not.toHaveBeenCalledWith(repoRoot, ['merge', '--abort'])
+    expect(runnerStarts).toHaveLength(1)
+    expect(events).toContain(
+      'WARN core update pull conflicted; continuing on old code: simulated pre-merge pull failure',
+    )
+  })
+
   it('stops when a failed core pull cannot confirm a successful merge abort', async () => {
     writeFileSync(join(packageRoot, 'core.txt'), 'consumer version\n')
     commit(repoRoot, 'fix: local core divergence')
