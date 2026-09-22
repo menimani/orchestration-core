@@ -1462,7 +1462,7 @@ describe('loop daemon ownership', () => {
 describe('stop', () => {
   it('terminates a running task process tree and reports the task and PID', async () => {
     const paths = orchPaths(repoRoot)
-    const taskId = '20260812_010203_041_auto-stop-tree'
+    const taskId = '20260812_010203_041_scan'
     const childPidFile = join(repoRoot, 'child.pid')
     testProcesses.trackPid(() => {
       if (!existsSync(childPidFile)) return undefined
@@ -1488,6 +1488,7 @@ describe('stop', () => {
     expect(pidIsAlive(parentPid as number)).toBe(true)
     expect(pidIsAlive(childPid)).toBe(true)
     await writeStatus(paths, taskId, 'running', parentPid)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
 
     const result = spawnSync(process.execPath, [CLI, 'stop'], {
       cwd: repoRoot,
@@ -1499,6 +1500,8 @@ describe('stop', () => {
     expect(result.status).toBe(0)
     expect(result.stdout).toContain(`Stopped ${taskId}`)
     expect(result.stdout).toContain(`process tree PID ${parentPid}`)
+    expect(readFileSync(join(paths.queueDir, 'stop-interrupted-scans'), 'utf8'))
+      .toBe(`2\t${taskId}\n`)
     await waitUntil(
       () => !pidIsAlive(parentPid as number) && !pidIsAlive(childPid),
       'stop left a task process or its child running',

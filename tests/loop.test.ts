@@ -1706,6 +1706,41 @@ describe('cycle gate', () => {
     )
   })
 
+  it('discards a scan interrupted by stop and restarts the same cycle', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const interrupted = '20260809_000000_001_scan'
+    writeRawStatus(interrupted, 'failed')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-2'), '1\n')
+    writeFileSync(join(paths.queueDir, 'failed-2'), `${interrupted}\n`)
+    mkdirSync(join(paths.queueDir, 'scanned'), { recursive: true })
+    writeFileSync(join(paths.queueDir, 'scanned', `${interrupted}.failed`), '')
+    writeFileSync(
+      join(paths.queueDir, 'stop-interrupted-scans'),
+      `2\t${interrupted}\n`,
+    )
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-2'), 'utf8')).toBe('1\n')
+    expect(existsSync(statusFile(paths, interrupted))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'failed-2'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scanned', `${interrupted}.failed`))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop-interrupted-scans'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).toContain('Recovered scan cycle  2 after operator stop')
+    expect(logText()).not.toContain('did not receive every expected scan yield')
+  })
+
   it('does not derive sections when only one scan is requested', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
