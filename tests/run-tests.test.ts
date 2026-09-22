@@ -65,14 +65,19 @@ describe('test suite wrapper', () => {
     )
     writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
     writeFileSync(join(vitest, 'vitest.mjs'), [
-      "import { appendFileSync, mkdirSync, rmSync } from 'node:fs'",
+      "import { appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'",
       "import { join } from 'node:path'",
       "const root = process.env.ORCHESTRATION_TEST_SHARED_ROOT",
       "if (root === undefined) throw new Error('missing shared test root')",
       "const active = join(root, 'active')",
       "try { mkdirSync(active) } catch { appendFileSync(join(root, 'overlap'), 'overlap\\n') }",
       "appendFileSync(join(root, 'args'), `${JSON.stringify(process.argv.slice(2))}\\n`)",
-      'await new Promise((resolve) => setTimeout(resolve, Number(process.env.ORCHESTRATION_TEST_DELAY_MS ?? 400)))',
+      "if (process.argv.includes('--pool=threads')) {",
+      "  const release = join(root, 'release-first')",
+      '  while (!existsSync(release)) await new Promise((resolve) => setTimeout(resolve, 20))',
+      '} else {',
+      '  await new Promise((resolve) => setTimeout(resolve, 400))',
+      '}',
       'rmSync(active, { recursive: true, force: true })',
       '',
     ].join('\n'))
@@ -96,7 +101,6 @@ describe('test suite wrapper', () => {
     mkdirSync(sharedRoot)
     const env = {
       ...process.env,
-      ORCHESTRATION_TEST_DELAY_MS: '1500',
       ORCHESTRATION_TEST_SHARED_ROOT: sharedRoot,
     }
 
@@ -106,7 +110,7 @@ describe('test suite wrapper', () => {
       firstWorktree,
       env,
     )
-    await waitForPath(join(sharedRoot, 'active'))
+    await waitForPath(join(repository, '.git', '.orchestration-test-suite-lock', 'owner.json'))
     const second = run(
       process.execPath,
       [join(secondWorktree, 'scripts', 'run-tests.mjs'), '--poolOptions.threads.singleThread'],
@@ -121,7 +125,16 @@ describe('test suite wrapper', () => {
       firstWorktree,
       env,
     )
+    let contentionError: unknown
+    try {
+      await waitForTicketCount(queue, 2)
+    } catch (error) {
+      contentionError = error
+    } finally {
+      writeFileSync(join(sharedRoot, 'release-first'), '')
+    }
     const results = await Promise.all([first, second, third])
+    if (contentionError !== undefined) throw contentionError
 
     expect(results.map(({ status }) => status)).toEqual([0, 0, 0])
     expect(results.map(({ stderr }) => stderr)).toEqual(['', '', ''])
@@ -256,26 +269,27 @@ describe('test suite wrapper', () => {
     writeFileSync(join(scripts, 'run-tests.mjs'), readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')))
     writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
     writeFileSync(join(vitest, 'vitest.mjs'), [
-      "import { mkdirSync, rmSync } from 'node:fs'",
+      "import { existsSync } from 'node:fs'",
       "import { join } from 'node:path'",
-      "const active = join(process.env.ORCHESTRATION_TEST_SHARED_ROOT, 'active')",
-      'mkdirSync(active)',
-      // Leave enough time for the waiter to start and inspect the owner on a loaded
-      // Windows runner, where process identity lookup starts a PowerShell process.
-      'await new Promise((resolve) => setTimeout(resolve, 5_000))',
-      'rmSync(active, { recursive: true, force: true })',
+      "const release = join(process.env.ORCHESTRATION_TEST_SHARED_ROOT, 'release')",
+      'while (!existsSync(release)) await new Promise((resolve) => setTimeout(resolve, 20))',
       '',
     ].join('\n'))
     const owner = run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
       ...process.env,
       ORCHESTRATION_TEST_SHARED_ROOT: sharedRoot,
     })
-    await waitForPath(join(sharedRoot, 'active'))
+    await waitForPath(join(fixture, '.orchestration-test-suite-lock', 'owner.json'))
 
-    const waiter = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
-      ...process.env,
-      ORCHESTRATION_TEST_LOCK_TIMEOUT_MS: '100',
-    })
+    let waiter
+    try {
+      waiter = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
+        ...process.env,
+        ORCHESTRATION_TEST_LOCK_TIMEOUT_MS: '100',
+      })
+    } finally {
+      writeFileSync(join(sharedRoot, 'release'), '')
+    }
     const ownerResult = await owner
 
     expect(ownerResult.status).toBe(0)
