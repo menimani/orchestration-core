@@ -47,6 +47,7 @@ import {
   liveTaskProcesses, orphanedWorktreeDirectories, terminateLiveTaskProcesses,
   worktreeHolderHint, type TaskProcessTermination,
 } from './taskProcesses.ts'
+import { recordInterruptedScans } from './scanRecovery.ts'
 import {
   delegateTaskVisible, enqueueTask, isLoopRunning, newTaskSpec, removeIssueModeMarker,
   writeIssueModeMarker,
@@ -887,6 +888,9 @@ async function cmdMultiLoopStatus(repositoryRoots: string[]): Promise<number> {
 }
 
 const cmdStop: Command = async (paths) => {
+  // Snapshot before publishing the stop request: the daemon can observe queue/stop and
+  // terminate its runners before this command gets another chance to inspect them.
+  recordInterruptedScans(paths, liveTaskProcesses(paths))
   writeFileSync(join(paths.queueDir, 'stop'), '')
   const stopped = terminateLiveTaskProcesses(paths)
   const success = reportTaskProcessTermination(stopped, console.log, true)
