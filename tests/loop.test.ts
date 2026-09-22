@@ -1741,6 +1741,68 @@ describe('cycle gate', () => {
     expect(logText()).not.toContain('did not receive every expected scan yield')
   })
 
+  it('stops and retains a malformed interrupted-scan marker without rewinding', async () => {
+    initializeGitRepo()
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    const cycleState = join(paths.queueDir, 'scan-expected-2')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(cycleState, '1\n')
+    writeFileSync(marker, 'not-a-recovery-entry\n')
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('stopped')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(readFileSync(marker, 'utf8')).toBe('not-a-recovery-entry\n')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(readFileSync(cycleState, 'utf8')).toBe('1\n')
+    expect(runnerStarts).toHaveLength(0)
+  })
+
+  it('stops and retains a marker for another cycle without rewinding', async () => {
+    initializeGitRepo()
+    const interrupted = '20260809_000000_002_scan'
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    const cycleState = join(paths.queueDir, 'scan-expected-2')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(cycleState, '1\n')
+    writeFileSync(marker, `1\t${interrupted}\n`)
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('stopped')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(readFileSync(marker, 'utf8')).toBe(`1\t${interrupted}\n`)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(readFileSync(cycleState, 'utf8')).toBe('1\n')
+    expect(runnerStarts).toHaveLength(0)
+  })
+
+  it('stops and retains recovery state when interrupted-scan cleanup fails', async () => {
+    initializeGitRepo()
+    const interrupted = '20260809_000000_003_scan'
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    const cycleState = join(paths.queueDir, 'scan-expected-2')
+    const retainedWorktree = join(repoRoot, 'retained-scan-worktree')
+    git(['branch', branchName(interrupted)])
+    git(['worktree', 'add', retainedWorktree, branchName(interrupted)])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(cycleState, '1\n')
+    writeFileSync(marker, `2\t${interrupted}\n`)
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('stopped')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(readFileSync(marker, 'utf8')).toBe(`2\t${interrupted}\n`)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(readFileSync(cycleState, 'utf8')).toBe('1\n')
+    expect(runnerStarts).toHaveLength(0)
+  })
+
   it('does not derive sections when only one scan is requested', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
