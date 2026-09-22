@@ -19,11 +19,25 @@ export function recordInterruptedScans(
   if (scans.length === 0) return
 
   const scanCountFile = join(paths.queueDir, 'scan-count.txt')
-  if (!existsSync(scanCountFile)) return
+  if (!existsSync(scanCountFile)) {
+    throw new Error(
+      'Cannot stop live scans: queue/scan-count.txt is missing; no stop file was created.',
+    )
+  }
   const rawCycle = readFileSync(scanCountFile, 'utf8').trim()
-  if (!/^[1-9][0-9]*$/.test(rawCycle)) return
+  if (!/^[1-9][0-9]*$/.test(rawCycle)) {
+    throw new Error(
+      'Cannot stop live scans: queue/scan-count.txt must contain a positive integer; '
+      + 'no stop file was created.',
+    )
+  }
   const cycle = Number(rawCycle)
-  if (!Number.isSafeInteger(cycle)) return
+  if (!Number.isSafeInteger(cycle)) {
+    throw new Error(
+      'Cannot stop live scans: queue/scan-count.txt must contain a safe integer; '
+      + 'no stop file was created.',
+    )
+  }
 
   const marker = join(paths.queueDir, interruptedScansFileName)
   appendFileSync(marker, scans.map((task) => `${cycle}\t${task.taskId}\n`).join(''))
