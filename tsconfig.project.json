@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler"
+  },
+  "include": [
+    "orchestration/project/project-*.ts",
+    "../project/project-*.ts"
+  ]
+}
