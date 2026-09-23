@@ -309,6 +309,13 @@ async function runVitest(args, invokingPid) {
     stdio: 'inherit',
     windowsHide: true,
   })
+  const forwardSignal = (signal) => {
+    if (child.pid === undefined) return
+    if (process.platform === 'win32') terminateWindowsProcessTree(child.pid)
+    else child.kill(signal)
+  }
+  process.once('SIGINT', forwardSignal)
+  process.once('SIGTERM', forwardSignal)
   let cancelled = false
   const parentMonitor = invokingPid === undefined ? undefined : setInterval(() => {
     if (processIsAlive(invokingPid)) return
@@ -324,6 +331,8 @@ async function runVitest(args, invokingPid) {
     })
   } finally {
     if (parentMonitor !== undefined) clearInterval(parentMonitor)
+    process.removeListener('SIGINT', forwardSignal)
+    process.removeListener('SIGTERM', forwardSignal)
   }
   if (cancelled) {
     console.error('Vitest stopped because its invoking process exited.')
@@ -336,14 +345,13 @@ async function runVitest(args, invokingPid) {
   }
 }
 
-async function runTestSuite() {
-  const invokingPid = process.platform === 'win32' ? invokingWindowsShellPid() : undefined
-  const lockCancellation = invokingPid === undefined ? undefined : new AbortController()
-  const cancelIfParentExited = invokingPid === undefined ? undefined : () => {
-    if (!processIsAlive(invokingPid)) lockCancellation.abort()
+async function runLockedTestSuite(args, supervisingParentPid) {
+  const lockCancellation = supervisingParentPid === undefined ? undefined : new AbortController()
+  const cancelIfParentExited = supervisingParentPid === undefined ? undefined : () => {
+    if (!processIsAlive(supervisingParentPid)) lockCancellation.abort()
   }
   cancelIfParentExited?.()
-  const lockParentMonitor = invokingPid === undefined
+  const lockParentMonitor = supervisingParentPid === undefined
     ? undefined
     : setInterval(cancelIfParentExited, windowsParentPollMilliseconds)
   try {
@@ -365,54 +373,62 @@ async function runTestSuite() {
     return
   }
 
-  let child
-  const forwardSignal = (signal) => {
-    if (child?.pid === undefined) return
-    if (process.platform === 'win32') terminateWindowsProcessTree(child.pid)
-    else child.kill(signal)
-  }
-  process.once('SIGINT', forwardSignal)
-  process.once('SIGTERM', forwardSignal)
   try {
-    // The package script deliberately supplies no Vitest flags. npm appends gate flags to
-    // this argument list once, so the merge gate remains `npm test -- ...` compatible.
-    const args = process.argv.slice(2)
-    child = process.platform === 'win32'
-      ? spawn(process.execPath, [
-        import.meta.filename, '--windows-vitest-supervisor',
-        String(invokingPid), ...args,
-      ], {
-        cwd: packageRoot,
-        stdio: 'inherit',
-        windowsHide: true,
-      })
-      : spawn(process.execPath, [vitestEntryPoint(), 'run', ...args], {
-        cwd: packageRoot,
-        stdio: 'inherit',
-      })
-    const status = await new Promise((resolveStatus, reject) => {
-      child.once('error', reject)
-      child.once('exit', (code, signal) => resolveStatus({ code, signal }))
-    })
-    if (status.signal !== null) {
-      console.error(`Vitest stopped on signal ${status.signal}.`)
-      process.exitCode = 1
-    } else {
-      process.exitCode = status.code ?? 1
-    }
+    await runVitest(args, supervisingParentPid)
   } finally {
-    process.removeListener('SIGINT', forwardSignal)
-    process.removeListener('SIGTERM', forwardSignal)
     releaseLock()
   }
 }
 
-if (process.argv[2] === '--windows-vitest-supervisor') {
-  const invokingPid = Number(process.argv[3])
-  if (!Number.isSafeInteger(invokingPid) || invokingPid <= 0) {
-    throw new Error('The Windows test supervisor requires an invoking process PID.')
+async function runTestSuite() {
+  // The package script deliberately supplies no Vitest flags. npm appends gate flags to
+  // this argument list once, so the merge gate remains `npm test -- ...` compatible.
+  const args = process.argv.slice(2)
+  if (process.platform !== 'win32') {
+    await runLockedTestSuite(args, undefined)
+    return
   }
-  await runVitest(process.argv.slice(4), invokingPid)
+
+  const invokingPid = invokingWindowsShellPid()
+  const child = spawn(process.execPath, [
+    import.meta.filename, '--windows-vitest-supervisor', String(process.pid), ...args,
+  ], {
+    cwd: packageRoot,
+    stdio: 'inherit',
+    windowsHide: true,
+  })
+  let cancelled = false
+  const parentMonitor = setInterval(() => {
+    if (processIsAlive(invokingPid)) return
+    cancelled = true
+    clearInterval(parentMonitor)
+    if (child.pid !== undefined) terminateWindowsProcessTree(child.pid)
+  }, windowsParentPollMilliseconds)
+  const forwardSignal = () => {
+    if (child.pid !== undefined) terminateWindowsProcessTree(child.pid)
+  }
+  process.once('SIGINT', forwardSignal)
+  process.once('SIGTERM', forwardSignal)
+  try {
+    const status = await new Promise((resolveStatus, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code, signal) => resolveStatus({ code, signal }))
+    })
+    if (cancelled || status.signal !== null) process.exitCode = 1
+    else process.exitCode = status.code ?? 1
+  } finally {
+    clearInterval(parentMonitor)
+    process.removeListener('SIGINT', forwardSignal)
+    process.removeListener('SIGTERM', forwardSignal)
+  }
+}
+
+if (process.argv[2] === '--windows-vitest-supervisor') {
+  const wrapperPid = Number(process.argv[3])
+  if (!Number.isSafeInteger(wrapperPid) || wrapperPid <= 0) {
+    throw new Error('The Windows test supervisor requires its wrapper process PID.')
+  }
+  await runLockedTestSuite(process.argv.slice(4), wrapperPid)
 } else {
   await runTestSuite()
 }
