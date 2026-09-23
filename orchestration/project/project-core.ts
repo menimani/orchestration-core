@@ -6,13 +6,14 @@ import { createClaudeSharedSkills } from '../../src/adapters/shared-skills-claud
 // executed under, and the suite that pins SPEC.md. A task runs in a fresh worktree, which
 // carries the lockfile but no node_modules, so commands that need dependencies install first.
 //
-// The suite is single-threaded because its fixtures drive real git repositories in
-// temporary directories, and parallel workers made those fixtures race.
+// The suite runs one file at a time because its fixtures drive real git repositories in
+// temporary directories, and parallel workers made those fixtures race. Vitest 4 dropped
+// the per-pool `singleThread` option, so the flag is the pool-neutral one.
 
 const INSTALL = 'node orchestration/project/safe-npm-ci.ts'
 const ENGLISH_ONLY = 'node checks/english-only.ts'
 const TYPECHECK = 'npx tsc --noEmit'
-const SUITE = 'npm test -- --pool=threads --poolOptions.threads.singleThread'
+const SUITE = 'npm test -- --pool=threads --no-file-parallelism'
 
 export const coreProject: ProjectAdapter = {
   name: 'core',

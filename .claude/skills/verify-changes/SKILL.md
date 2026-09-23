@@ -35,7 +35,7 @@ The suite drives real git repositories in temporary directories. Parallel worker
 their fixtures race, so CI runs it single-threaded:
 
 ```
-npm test -- --pool=threads --poolOptions.threads.singleThread
+npm test -- --pool=threads --no-file-parallelism
 ```
 
 Use that form when a failure will not reproduce, before concluding it is a flake.

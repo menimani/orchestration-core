@@ -113,7 +113,7 @@ describe('test suite wrapper', () => {
     await waitForPath(join(repository, '.git', '.orchestration-test-suite-lock', 'owner.json'))
     const second = run(
       process.execPath,
-      [join(secondWorktree, 'scripts', 'run-tests.mjs'), '--poolOptions.threads.singleThread'],
+      [join(secondWorktree, 'scripts', 'run-tests.mjs'), '--no-file-parallelism'],
       secondWorktree,
       env,
     )
@@ -143,7 +143,7 @@ describe('test suite wrapper', () => {
       .trim().split(/\r?\n/).map((line) => JSON.parse(line) as string[])
     expect(invocations).toEqual([
       ['run', '--pool=threads'],
-      ['run', '--poolOptions.threads.singleThread'],
+      ['run', '--no-file-parallelism'],
       ['run', '--pool=forks'],
     ])
     expect(results.some(({ stdout }) => stdout.includes('waiting for its repository lock'))).toBe(true)

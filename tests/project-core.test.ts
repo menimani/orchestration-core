@@ -46,6 +46,6 @@ describe('core project verification', () => {
     expect(packageJson.scripts.test).toBe('node scripts/run-tests.mjs')
     const command = coreProject.mergeChecks('full')[0]?.command ?? ''
     expect(command.match(/--pool=threads/g)).toHaveLength(1)
-    expect(command.match(/--poolOptions\.threads\.singleThread/g)).toHaveLength(1)
+    expect(command.match(/--no-file-parallelism/g)).toHaveLength(1)
   })
 })

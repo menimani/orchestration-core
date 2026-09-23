@@ -8,7 +8,7 @@ const containerCommand = [
   'npm ci --no-audit --no-fund',
   'node checks/english-only.ts',
   'npm run typecheck',
-  'npm test -- --pool=threads --poolOptions.threads.singleThread',
+  'npm test -- --pool=threads --no-file-parallelism',
 ].join(' && ')
 
 const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=normal'], {

@@ -23,7 +23,7 @@ node checks/english-only.ts
 npx tsc --noEmit
 ```
 ```bash
-npm test -- --pool=threads --poolOptions.threads.singleThread 2>&1 | tail -40
+npm test -- --pool=threads --no-file-parallelism 2>&1 | tail -40
 ```
 
 Any type error or failing test is a finding. A test that fails only sometimes is a finding
@@ -96,7 +96,7 @@ State in the finding what the loop would do wrongly, not merely that the code lo
 ### 7. Tests worth having or deleting
 
 ```bash
-npm test -- --pool=threads --poolOptions.threads.singleThread --coverage 2>&1 | tail -30
+npm test -- --pool=threads --no-file-parallelism --coverage 2>&1 | tail -30
 ```
 
 Report untested behaviour rather than uncovered lines: a state transition in the gate, a

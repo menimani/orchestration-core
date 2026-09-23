@@ -26,7 +26,9 @@ function commit(cwd: string, file: string, contents: string, message: string): v
   git(cwd, ['commit', '-qm', message])
 }
 
-function dependencies(launchDaemon = vi.fn(() => 0)): WorkerCommandDependencies {
+function dependencies(
+  launchDaemon: WorkerCommandDependencies['launchDaemon'] = vi.fn(() => 0),
+): WorkerCommandDependencies {
   return {
     verifyWorkerSupport: () => {},
     launchDaemon,
