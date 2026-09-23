@@ -360,6 +360,21 @@ describe('publishFinding', () => {
     expect(forge.issues.size).toBe(1)
   })
 
+  it('rejects a malformed fingerprint ledger without dropping any of its lines', async () => {
+    const ledgerFile = join(paths.queueDir, 'issue-fingerprints')
+    const contents = `${fingerprintOf('[BUG] existing')} 41\nmalformed line here\n`
+    writeFileSync(ledgerFile, contents)
+
+    await expect(publishFinding(
+      forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1',
+    )).rejects.toThrow(
+      `Malformed fingerprint ledger ${ledgerFile}; repair this file before issue reconciliation can continue`,
+    )
+
+    expect(readFileSync(ledgerFile, 'utf8')).toBe(contents)
+    expect(forge.issues.size).toBe(0)
+  })
+
   it('replaces a ledger entry after the recorded issue is confirmed absent', async () => {
     const finding = '[BUG] `src/a/b.ts` breaks'
     const fingerprint = fingerprintOf(finding)
@@ -1784,6 +1799,50 @@ describe('issue claim release', () => {
 })
 
 describe('reapStaleLeases', () => {
+  it('rejects malformed advisory completion JSON instead of filing the advisory again', async () => {
+    const finding = '[SECURITY] GHSA-qwww-vcr4-c8h2 affects a dependency'
+    const issueNumber = await forge.createIssue({
+      title: finding,
+      body: buildIssueBody(finding, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    await forge.closeIssue(issueNumber, 'Completed')
+    writeFileSync(
+      join(paths.queueDir, 'issue-fingerprints'),
+      `${fingerprintOf(finding)} ${issueNumber}\n`,
+    )
+    const completion = join(paths.queueDir, 'issue-completion', `${issueNumber}.json`)
+    mkdirSync(join(paths.queueDir, 'issue-completion'), { recursive: true })
+    writeFileSync(completion, '{"taskId":"completed-task"')
+
+    await expect(publishFinding(
+      forge, paths, '[SECURITY] Different wording for GHSA-QWWW-VCR4-C8H2', 'scan-2',
+    )).rejects.toThrow(
+      `Malformed issue completion record ${completion}; repair this file before issue reconciliation can continue`,
+    )
+
+    expect(readFileSync(completion, 'utf8')).toBe('{"taskId":"completed-task"')
+    expect(forge.issues.size).toBe(1)
+  })
+
+  it.each([
+    ['a scalar', 'null'],
+    ['an empty task id', JSON.stringify({ taskId: '', issueNumber: 41, outcome: 'merged' })],
+    ['a mismatched issue number', JSON.stringify({
+      taskId: 'completed-task', issueNumber: 42, outcome: 'merged',
+    })],
+    ['an invalid outcome', JSON.stringify({
+      taskId: 'completed-task', issueNumber: 41, outcome: 'unknown',
+    })],
+  ])('rejects a completion record containing %s', (_description, contents) => {
+    const completion = join(paths.queueDir, 'issue-completion', '41.json')
+    mkdirSync(join(paths.queueDir, 'issue-completion'), { recursive: true })
+    writeFileSync(completion, contents)
+
+    expect(() => issueCompletionForIssue(paths, 41)).toThrow(/repair this file/)
+    expect(readFileSync(completion, 'utf8')).toBe(contents)
+  })
+
   it('stops reconciliation and preserves a stale lease when promotion JSON needs repair', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
