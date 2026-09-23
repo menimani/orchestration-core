@@ -1,6 +1,7 @@
 import type { ChildProcess } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync,
+  writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -289,6 +290,43 @@ describe('task ids', () => {
     newTaskId(paths, 'a', new Date(2026, 7, 8, 9, 0, 0))
     const next = newTaskId(paths, 'b', new Date(2026, 7, 9, 9, 0, 0))
     expect(next).toBe('20260809_090000_001_b')
+  })
+
+  it.each([
+    '',
+    '20260808',
+    'not-a-day 12',
+    '20260230 12',
+    '20260808 zero',
+    '20260808 0',
+    '20260808 12 trailing',
+    '20260808 9007199254740992',
+  ])('rejects malformed persisted sequence state without replacing it: %j', (contents) => {
+    const file = join(paths.queueDir, 'task-seq.txt')
+    writeFileSync(file, contents)
+
+    expect(() => newTaskId(paths, 'unsafe', new Date(2026, 7, 8, 9, 0, 0)))
+      .toThrow(`Invalid task sequence file: ${file}`)
+    expect(readFileSync(file, 'utf8')).toBe(contents)
+  })
+
+  it('rejects a sequence whose next value would not be safe', () => {
+    const file = join(paths.queueDir, 'task-seq.txt')
+    writeFileSync(file, '20260808 9007199254740991\n')
+
+    expect(() => newTaskId(paths, 'exhausted', new Date(2026, 7, 8, 9, 0, 0)))
+      .toThrow('Task sequence exhausted for 20260808')
+    expect(readFileSync(file, 'utf8')).toBe('20260808 9007199254740991\n')
+  })
+
+  it('atomically publishes the next sequence without leaving a temporary file', () => {
+    const file = join(paths.queueDir, 'task-seq.txt')
+    writeFileSync(file, '20260808 41\r\n')
+
+    expect(newTaskId(paths, 'atomic', new Date(2026, 7, 8, 9, 0, 0)))
+      .toBe('20260808_090000_042_atomic')
+    expect(readFileSync(file, 'utf8')).toBe('20260808 42\n')
+    expect(readdirSync(paths.queueDir).filter((name) => name.endsWith('.tmp'))).toEqual([])
   })
 
   it('serializes sequence allocation across processes', async () => {
