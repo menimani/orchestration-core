@@ -139,6 +139,74 @@ it('terminates Vitest and releases its lock when the invoking PowerShell exits',
   expect(contender.stderr).toBe('')
 })
 
+it('keeps the lock owned by the Vitest supervisor when the wrapper exits', async () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-wrapper-cancel-'))
+  fixtures.push(fixture)
+  const scripts = join(fixture, 'scripts')
+  const vitest = join(fixture, 'node_modules', 'vitest')
+  const completedFile = join(fixture, 'completed')
+  const pidFile = join(fixture, 'vitest-pid')
+  const startedFile = join(fixture, 'started')
+  mkdirSync(scripts, { recursive: true })
+  mkdirSync(vitest, { recursive: true })
+  writeFileSync(
+    join(scripts, 'run-tests.mjs'),
+    readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')),
+  )
+  writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+  writeFileSync(join(vitest, 'vitest.mjs'), [
+    "import { writeFileSync } from 'node:fs'",
+    'if (process.env.ORCHESTRATION_TEST_STARTED_FILE) {',
+    '  writeFileSync(process.env.ORCHESTRATION_TEST_PID_FILE, String(process.pid))',
+    "  writeFileSync(process.env.ORCHESTRATION_TEST_STARTED_FILE, '')",
+    '  await new Promise((resolve) => setTimeout(resolve, 2000))',
+    "  writeFileSync(process.env.ORCHESTRATION_TEST_COMPLETED_FILE, '')",
+    '}',
+    '',
+  ].join('\n'))
+
+  const wrapper = spawn(process.execPath, [join(scripts, 'run-tests.mjs')], {
+    cwd: fixture,
+    env: {
+      ...process.env,
+      ORCHESTRATION_TEST_COMPLETED_FILE: completedFile,
+      ORCHESTRATION_TEST_PID_FILE: pidFile,
+      ORCHESTRATION_TEST_STARTED_FILE: startedFile,
+    },
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+  if (wrapper.pid === undefined) throw new Error('Test wrapper did not publish a PID')
+  processRoots.push(wrapper.pid)
+  await waitForPath(startedFile)
+  const vitestPid = Number(readFileSync(pidFile, 'utf8'))
+  processRoots.push(vitestPid)
+  const lock = join(fixture, '.orchestration-test-suite-lock')
+  const ownerFile = join(lock, 'owner.json')
+  await waitForPath(ownerFile)
+  const owner = JSON.parse(readFileSync(ownerFile, 'utf8')) as { pid: number }
+  processRoots.push(owner.pid)
+  expect(owner.pid).not.toBe(wrapper.pid)
+  expect(owner.pid).not.toBe(vitestPid)
+  expect(processIsAlive(owner.pid)).toBe(true)
+
+  wrapper.kill('SIGKILL')
+  await waitUntil(
+    () => !processIsAlive(vitestPid),
+    `Vitest process ${vitestPid} survived its direct wrapper process`,
+  )
+  expect(existsSync(completedFile)).toBe(false)
+
+  const contender = await run(
+    process.execPath,
+    [join(scripts, 'run-tests.mjs')],
+    fixture,
+    process.env,
+  )
+  expect(contender.status, contender.stderr).toBe(0)
+  expect(contender.stderr).toBe('')
+})
+
 it('stops a locked waiter when its invoking PowerShell exits', async () => {
   const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-locked-cancel-'))
   fixtures.push(fixture)
