@@ -1460,9 +1460,38 @@ describe('loop daemon ownership', () => {
 })
 
 describe('stop', () => {
+  it('does not publish stop or terminate a live scan when its cycle counter is invalid', async () => {
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260812_010203_040_scan'
+    const scan = testProcesses.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    const scanPid = scan.pid
+    expect(scanPid).toBeTypeOf('number')
+    scan.unref()
+
+    await writeStatus(paths, taskId, 'running', scanPid)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), 'not-a-cycle\n')
+
+    const result = spawnSync(process.execPath, [CLI, 'stop'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('queue/scan-count.txt must contain a positive integer')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop-interrupted-scans'))).toBe(false)
+    expect(pidIsAlive(scanPid as number)).toBe(true)
+  })
+
   it('terminates a running task process tree and reports the task and PID', async () => {
     const paths = orchPaths(repoRoot)
-    const taskId = '20260812_010203_041_auto-stop-tree'
+    const taskId = '20260812_010203_041_scan'
     const childPidFile = join(repoRoot, 'child.pid')
     testProcesses.trackPid(() => {
       if (!existsSync(childPidFile)) return undefined
@@ -1488,6 +1517,7 @@ describe('stop', () => {
     expect(pidIsAlive(parentPid as number)).toBe(true)
     expect(pidIsAlive(childPid)).toBe(true)
     await writeStatus(paths, taskId, 'running', parentPid)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
 
     const result = spawnSync(process.execPath, [CLI, 'stop'], {
       cwd: repoRoot,
@@ -1499,6 +1529,8 @@ describe('stop', () => {
     expect(result.status).toBe(0)
     expect(result.stdout).toContain(`Stopped ${taskId}`)
     expect(result.stdout).toContain(`process tree PID ${parentPid}`)
+    expect(readFileSync(join(paths.queueDir, 'stop-interrupted-scans'), 'utf8'))
+      .toBe(`2\t${taskId}\n`)
     await waitUntil(
       () => !pidIsAlive(parentPid as number) && !pidIsAlive(childPid),
       'stop left a task process or its child running',

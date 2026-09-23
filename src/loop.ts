@@ -45,6 +45,7 @@ import { LoopWarningLog } from './loopLog.ts'
 import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
+import { interruptedScansFileName } from './scanRecovery.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
@@ -1345,6 +1346,74 @@ export function createLoop(deps: LoopDeps) {
   }
 
   /**
+   * An operator stop is not evidence that a scan failed. Discard every scan that was
+   * live when stop was requested and rewind the incomplete cycle so its full scan set
+   * is dispatched again. The marker stays in place until cleanup is complete, making a
+   * partial recovery safe to retry after another daemon start.
+   */
+  function recoverInterruptedScans(): boolean {
+    const marker = join(paths.queueDir, interruptedScansFileName)
+    if (!existsSync(marker)) return true
+
+    try {
+      const entries = readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => {
+        const match = /^([1-9][0-9]*)\t([^\t]+)$/.exec(line)
+        const cycle = match === null ? Number.NaN : Number(match[1])
+        const taskId = match?.[2] ?? ''
+        if (!Number.isSafeInteger(cycle) || !isScanTaskId(taskId)) {
+          throw new Error(`invalid stopped-scan recovery entry: ${line}`)
+        }
+        return { cycle, taskId }
+      })
+      if (entries.length === 0) {
+        rmSync(marker, { force: true })
+        return true
+      }
+
+      const cycles = new Set(entries.map((entry) => entry.cycle))
+      const currentCycle = readCount(scanCountFile)
+      if (cycles.size !== 1 || !cycles.has(currentCycle)) {
+        event('ERROR', `stopped-scan recovery does not match current cycle ${currentCycle}; stopping the loop`)
+        writeFileSync(stopFile, '')
+        return false
+      }
+
+      const taskIds = [...new Set(entries.map((entry) => entry.taskId))]
+      for (const taskId of taskIds) cleanupTask(paths, taskId, undefined, false)
+
+      const failedFile = join(paths.queueDir, `failed-${currentCycle}`)
+      if (existsSync(failedFile)) {
+        const interrupted = new Set(taskIds)
+        const retained = readFileSync(failedFile, 'utf8').split(/\r?\n/)
+          .filter((taskId) => taskId !== '' && !interrupted.has(taskId))
+        if (retained.length === 0) rmSync(failedFile, { force: true })
+        else writeFileSync(failedFile, `${retained.join('\n')}\n`)
+      }
+
+      for (const name of [
+        `scan-expected-${currentCycle}`,
+        `scan-yield-${currentCycle}`,
+        `cycle-complete-${currentCycle}`,
+        `cycle-suite-tip-${currentCycle}`,
+        `cycle-resume-${currentCycle}`,
+        `ci-fix-emitted-${currentCycle}`,
+        `ci-fix-pending-id-${currentCycle}`,
+        `review-round-${currentCycle}`,
+        `review-id-${currentCycle}`,
+        `review-pending-id-${currentCycle}`,
+      ]) rmSync(join(paths.queueDir, name), { force: true })
+      writeFileSync(scanCountFile, `${currentCycle - 1}\n`)
+      rmSync(marker, { force: true })
+      event('Recovered', 'scan cycle', `${currentCycle} after operator stop`)
+      return true
+    } catch (error) {
+      event('ERROR', `could not recover scans interrupted by stop: ${errorSummary(error)}`)
+      writeFileSync(stopFile, '')
+      return false
+    }
+  }
+
+  /**
    * A stopped loop deliberately keeps its cycle state so it can resume after an
    * environment repair. That state belongs only to the branch which created it;
    * carrying it onto another branch could skip scans or resume a completed gate.
@@ -2074,6 +2143,8 @@ export function createLoop(deps: LoopDeps) {
       rmSync(stopFile, { force: true })
       return 'stopped'
     }
+
+    if (!recoverInterruptedScans()) return 'stopped'
 
     // Label setup is a remote prerequisite, not a prerequisite for observing and
     // advancing local work. If it is unavailable, keep this poll local-only and

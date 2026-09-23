@@ -298,6 +298,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     counter once, at the gate, only when every expected scan completed successfully. A
     scan launch failure stops the loop without advancing the cycle number, and a cycle
     missing any expected yield stops rather than advancing to another cycle or completion.
+    A scan interrupted by the operator `stop` command is the exception: the command
+    records the live scan before terminating it, and the next daemon discards that scan's
+    task state, rewinds the incomplete cycle, and dispatches the cycle's full scan set
+    again. A scan that dies without that stop record remains a failure.
     For parallel scans, sections in the rendered `scan-template.md` are Markdown ATX
     headings whose text begins with a number and period (for example, `### 1. Tests`),
     and every section number must be unique; headings inside fenced code blocks do not
@@ -522,6 +526,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
     /T /F` on Windows and the detached process group on POSIX), retain task state for
     recovery, and report each terminated task or that no live task processes were found.
+    Before publishing its stop file, the `stop` command durably records any live scan so
+    the next daemon can discard it and restart the interrupted cycle instead of treating
+    the intentional termination as a missing scan yield.
 26. The daemon holds the code it started with; the wrapper prints where the log lives
     and how to stop.
 27. `prune --days N` deletes logs/status/generated specs/queue markers of tasks finished

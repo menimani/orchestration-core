@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -21,20 +21,50 @@ function sequenceFile(paths: OrchPaths): string {
   return join(paths.queueDir, 'task-seq.txt')
 }
 
+function persistedSequence(seqFile: string): { day: string; seq: number } {
+  const fields = readFileSync(seqFile, 'utf8').trim().split(/\s+/)
+  if (fields.length !== 2) throw new Error(`Invalid task sequence file: ${seqFile}`)
+
+  const [day, seqText] = fields as [string, string]
+  const dayMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(day)
+  const year = Number(dayMatch?.[1])
+  const month = Number(dayMatch?.[2])
+  const date = Number(dayMatch?.[3])
+  const daysInMonth = month >= 1 && month <= 12 ? new Date(year, month, 0).getDate() : 0
+  const seq = Number(seqText)
+  if (
+    dayMatch === null
+    || year < 1000
+    || date < 1
+    || date > daysInMonth
+    || !/^[1-9]\d*$/.test(seqText)
+    || !Number.isSafeInteger(seq)
+  ) throw new Error(`Invalid task sequence file: ${seqFile}`)
+
+  return { day, seq }
+}
+
+function publishSequence(seqFile: string, day: string, seq: number): void {
+  const replacement = `${seqFile}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(replacement, `${day} ${seq}\n`, { flag: 'wx' })
+    renameSync(replacement, seqFile)
+  } finally {
+    rmSync(replacement, { force: true })
+  }
+}
+
 function newTaskIdUnlocked(paths: OrchPaths, taskName: string, now: Date): string {
   const { full, day } = timestamp(now)
   const seqFile = sequenceFile(paths)
   let seq = 0
   if (existsSync(seqFile)) {
-    // A carriage return read into the sequence once made it compare equal to nothing;
-    // strip whitespace wholesale so the file's line endings can never matter.
-    const [prevDay, prevSeq] = readFileSync(seqFile, 'utf8').trim().split(/\s+/)
-    if (prevDay === day && prevSeq !== undefined && /^\d+$/.test(prevSeq)) {
-      seq = Number(prevSeq)
-    }
+    const previous = persistedSequence(seqFile)
+    if (previous.day === day) seq = previous.seq
   }
   seq += 1
-  writeFileSync(seqFile, `${day} ${seq}\n`)
+  if (!Number.isSafeInteger(seq)) throw new Error(`Task sequence exhausted for ${day}`)
+  publishSequence(seqFile, day, seq)
   return `${full}_${String(seq).padStart(3, '0')}_${taskName}`
 }
 

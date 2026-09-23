@@ -66,6 +66,16 @@ function warn(event: CoreUpdateEvent, message: string): void {
   event('WARN', message)
 }
 
+function mergeInProgress(repoRoot: string, runtime: CoreUpdateRuntime): boolean {
+  try {
+    return runtime.git(repoRoot, [
+      'rev-parse', '--verify', '--quiet', 'MERGE_HEAD',
+    ]).trim() !== ''
+  } catch {
+    return false
+  }
+}
+
 function repositoryPaths(repoRoot: string, paths: string[]): string[] {
   return paths.map((path) => {
     const repositoryPath = relative(repoRoot, path)
@@ -262,26 +272,33 @@ export async function updateCoreBeforeCycle(
 
   const oldHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   const needsImportBridge = recordedImport !== imported
+  let importBridgeHead: string | undefined
   try {
     if (needsImportBridge) {
       runtime.git(paths.repoRoot, [
         'commit', '--allow-empty', '-m', 'chore: record core subtree import',
         '-m', `git-subtree-dir: ${prefix}\ngit-subtree-split: ${imported}`,
       ])
+      importBridgeHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
     }
     runtime.git(paths.repoRoot, [
       'subtree', 'pull', `--prefix=${prefix}`, remote, config.upstreamBranch, '--squash',
     ])
   } catch (error) {
-    try {
-      runtime.git(paths.repoRoot, ['merge', '--abort'])
-    } catch (abortError) {
-      throw new Error(
-        `core update pull failed and merge abort failed: ${summary(abortError)}; `
-        + `pull failure: ${summary(error)}`,
-      )
+    let abortError: unknown
+    if (mergeInProgress(paths.repoRoot, runtime)) {
+      try {
+        runtime.git(paths.repoRoot, ['merge', '--abort'])
+      } catch (caught) {
+        abortError = caught
+      }
     }
-    if (needsImportBridge) runtime.git(paths.repoRoot, ['reset', '--soft', oldHead])
+    if (!mergeInProgress(paths.repoRoot, runtime) && importBridgeHead !== undefined) {
+      const currentHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+      if (currentHead === importBridgeHead) {
+        runtime.git(paths.repoRoot, ['reset', '--soft', oldHead])
+      }
+    }
     let recoveredHead: string
     let recoveredStatus: string
     try {
@@ -295,9 +312,16 @@ export async function updateCoreBeforeCycle(
     }
     if (recoveredHead !== oldHead || recoveredStatus !== '') {
       throw new Error(
-        `core update pull failed and merge abort did not restore the repository: expected HEAD `
+        `core update pull failed and recovery did not restore the repository: expected HEAD `
         + `${oldHead.slice(0, 8)}, found ${recoveredHead.slice(0, 8)}; `
         + `working tree ${recoveredStatus === '' ? 'clean' : `dirty (${recoveredStatus.replaceAll(/\r?\n/g, ', ')})`}`,
+        { cause: abortError },
+      )
+    }
+    if (abortError !== undefined) {
+      throw new Error(
+        `core update pull failed and merge abort failed: ${summary(abortError)}; `
+        + `pull failure: ${summary(error)}`,
       )
     }
     warn(event, `core update pull conflicted; continuing on old code: ${summary(error)}`)
