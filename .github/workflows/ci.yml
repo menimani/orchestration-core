@@ -41,4 +41,4 @@ jobs:
 
       # Single-threaded: the suite drives real git repositories in temporary
       # directories, and parallel workers made their fixtures race on a shared runner.
-      - run: npm test -- --pool=threads --poolOptions.threads.singleThread
+      - run: npm test -- --pool=threads --no-file-parallelism

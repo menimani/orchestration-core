@@ -56,7 +56,7 @@ worse than reporting it unfinished.
 
 The suite drives real git repositories in temporary directories, so CI runs it
 single-threaded. Reproduce a stubborn failure with
-`npm test -- --pool=threads --poolOptions.threads.singleThread` before calling it a
+`npm test -- --pool=threads --no-file-parallelism` before calling it a
 flake. Do not run builds or installs while a loop is running — they lock files its
 workers need.
 
