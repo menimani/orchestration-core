@@ -1,10 +1,11 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import { ForgeIssueNotFoundError } from './adapters/forge.ts'
+import { withBacklogLock } from './backlog.ts'
 import {
   descSlug, existingTaskIdForDesc, forgetTaskId, newTaskId, recordTaskIdForDesc, taskIdForDesc,
 } from './ids.ts'
@@ -329,30 +330,58 @@ function fingerprintLedgerFile(paths: OrchPaths): string {
 function fingerprintLedger(paths: OrchPaths): Array<{ fingerprint: string; issueNumber: number }> {
   const file = fingerprintLedgerFile(paths)
   if (!existsSync(file)) return []
-  return readFileSync(file, 'utf8').split(/\r?\n/).flatMap((line) => {
-    const match = /^(\S+) (\d+)$/.exec(line)
-    return match === null ? [] : [{ fingerprint: match[1]!, issueNumber: Number(match[2]) }]
+  const text = readFileSync(file, 'utf8')
+  if (text === '') return []
+  const lines = text.split(/\r?\n/)
+  if (lines.at(-1) === '') lines.pop()
+  return lines.map((line) => {
+    const match = /^(\S+) ([1-9]\d*)$/.exec(line)
+    const issueNumber = Number(match?.[2])
+    if (match === null || !Number.isSafeInteger(issueNumber)) {
+      throw new Error(
+        `Malformed fingerprint ledger ${file}; repair this file before issue reconciliation can continue`,
+      )
+    }
+    return { fingerprint: match[1]!, issueNumber }
   })
 }
 
-function writeFingerprintLedger(
+function updateFingerprintLedger(
   paths: OrchPaths,
-  entries: Array<{ fingerprint: string; issueNumber: number }>,
+  mutation: (
+    entries: Array<{ fingerprint: string; issueNumber: number }>,
+  ) => Array<{ fingerprint: string; issueNumber: number }> | undefined,
 ): void {
-  writeFileSync(fingerprintLedgerFile(paths), entries.map((entry) =>
-    `${entry.fingerprint} ${entry.issueNumber}\n`).join(''))
+  const file = fingerprintLedgerFile(paths)
+  withBacklogLock(file, () => {
+    const entries = mutation(fingerprintLedger(paths))
+    if (entries === undefined) return
+    const temporaryFile = join(
+      dirname(file), `.${process.pid}-${randomUUID()}.issue-fingerprints.tmp`,
+    )
+    try {
+      writeFileSync(temporaryFile, entries.map((entry) =>
+        `${entry.fingerprint} ${entry.issueNumber}\n`).join(''), { flag: 'wx' })
+      renameSync(temporaryFile, file)
+    } finally {
+      rmSync(temporaryFile, { force: true })
+    }
+  })
 }
 
 function recordFingerprint(paths: OrchPaths, fingerprint: string, issueNumber: number): void {
-  const ledger = fingerprintLedger(paths)
   const legacyFingerprint = legacyFingerprintFor(fingerprint)
-  const recorded = ledger.filter((entry) => entry.fingerprint === fingerprint)
-  const hasLegacyEntry = legacyFingerprint !== undefined
-    && ledger.some((entry) => entry.fingerprint === legacyFingerprint)
-  if (recorded.length === 1 && recorded[0]?.issueNumber === issueNumber && !hasLegacyEntry) return
-  const otherFingerprints = ledger.filter((entry) => entry.fingerprint !== fingerprint
-    && entry.fingerprint !== legacyFingerprint)
-  writeFingerprintLedger(paths, [...otherFingerprints, { fingerprint, issueNumber }])
+  updateFingerprintLedger(paths, (ledger) => {
+    const recorded = ledger.filter((entry) => entry.fingerprint === fingerprint)
+    const hasLegacyEntry = legacyFingerprint !== undefined
+      && ledger.some((entry) => entry.fingerprint === legacyFingerprint)
+    if (recorded.length === 1 && recorded[0]?.issueNumber === issueNumber && !hasLegacyEntry) {
+      return undefined
+    }
+    const otherFingerprints = ledger.filter((entry) => entry.fingerprint !== fingerprint
+      && entry.fingerprint !== legacyFingerprint)
+    return [...otherFingerprints, { fingerprint, issueNumber }]
+  })
 }
 
 function issueFingerprints(issue: ForgeIssue): string[] {
@@ -393,16 +422,18 @@ function migrateFingerprintLedgerForIssue(paths: OrchPaths, issue: ForgeIssue): 
       : []
   })
   if (replacements.length === 0) return
-  let ledger = fingerprintLedger(paths)
-  let changed = false
-  for (const { fingerprint, replacement } of replacements) {
-    if (!ledger.some((entry) => entry.fingerprint === fingerprint)) continue
-    ledger = ledger.filter((entry) => entry.fingerprint !== fingerprint
-      && entry.fingerprint !== replacement)
-    ledger.push({ fingerprint: replacement, issueNumber: issue.number })
-    changed = true
-  }
-  if (changed) writeFingerprintLedger(paths, ledger)
+  updateFingerprintLedger(paths, (current) => {
+    let ledger = current
+    let changed = false
+    for (const { fingerprint, replacement } of replacements) {
+      if (!ledger.some((entry) => entry.fingerprint === fingerprint)) continue
+      ledger = ledger.filter((entry) => entry.fingerprint !== fingerprint
+        && entry.fingerprint !== replacement)
+      ledger.push({ fingerprint: replacement, issueNumber: issue.number })
+      changed = true
+    }
+    return changed ? ledger : undefined
+  })
 }
 
 function hasIssueFingerprint(issue: ForgeIssue, fingerprint: string): boolean {
@@ -549,9 +580,10 @@ export async function reconcileFindingFingerprints(
     .filter((issue) => !isTrustedFingerprintOwner(issue))
     .map((issue) => issue.number))
   if (excludedIssueNumbers.size > 0) {
-    const ledger = fingerprintLedger(paths)
-    const retained = ledger.filter((entry) => !excludedIssueNumbers.has(entry.issueNumber))
-    if (retained.length !== ledger.length) writeFingerprintLedger(paths, retained)
+    updateFingerprintLedger(paths, (ledger) => {
+      const retained = ledger.filter((entry) => !excludedIssueNumbers.has(entry.issueNumber))
+      return retained.length === ledger.length ? undefined : retained
+    })
   }
   openFindings = openFindings.filter(isTrustedFingerprintOwner)
   const closedIssueNumbers = new Set<number>()
@@ -630,7 +662,11 @@ async function findExistingFinding(
       recordedIssue = await forge.getIssue(recorded.issueNumber)
     } catch (error) {
       if (!(error instanceof ForgeIssueNotFoundError)) throw error
-      writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
+      updateFingerprintLedger(paths, (current) => {
+        const retained = current.filter((entry) => entry.fingerprint !== recorded.fingerprint
+          || entry.issueNumber !== recorded.issueNumber)
+        return retained.length === current.length ? undefined : retained
+      })
     }
     const durableClosedAdvisory = recordedIssue?.state === 'closed'
       && isAdvisoryFingerprint(fingerprint)
@@ -653,7 +689,11 @@ async function findExistingFinding(
       return survivor
     }
     if (recordedIssue !== undefined) {
-      writeFingerprintLedger(paths, ledger.filter((entry) => entry !== recorded))
+      updateFingerprintLedger(paths, (current) => {
+        const retained = current.filter((entry) => entry.fingerprint !== recorded.fingerprint
+          || entry.issueNumber !== recorded.issueNumber)
+        return retained.length === current.length ? undefined : retained
+      })
     }
   }
   const matching = (await forge.listOpenIssues(LABEL_FINDING))
@@ -1156,15 +1196,22 @@ export function issueCompletionForIssue(
 ): IssueCompletion | undefined {
   const file = completionFile(paths, issueNumber)
   if (!existsSync(file)) return undefined
+  const malformed = (cause?: unknown): Error => new Error(
+    `Malformed issue completion record ${file}; repair this file before issue reconciliation can continue`,
+    cause === undefined ? undefined : { cause },
+  )
+  let parsed: unknown
   try {
-    const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<IssueCompletion>
-    if (typeof value.taskId !== 'string' || value.taskId === ''
-      || value.issueNumber !== issueNumber
-      || (value.outcome !== 'merged' && value.outcome !== 'no-change')) return undefined
-    return value as IssueCompletion
-  } catch {
-    return undefined
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    throw malformed(error)
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw malformed()
+  const value = parsed as Partial<IssueCompletion>
+  if (typeof value.taskId !== 'string' || value.taskId === ''
+    || value.issueNumber !== issueNumber
+    || (value.outcome !== 'merged' && value.outcome !== 'no-change')) throw malformed()
+  return value as IssueCompletion
 }
 
 /** Persist task completion after transient promotion and task-to-issue metadata is gone. */
