@@ -6,13 +6,15 @@ export default defineConfig({
     // A running loop keeps whole checkouts of this repository under
     // orchestration/worktrees, tests included. Without excluding them the suite collects
     // its own copies out of every task in flight and fails on their unfinished state —
-    // which is what happened the first time the core improved itself.
+    // which is what happened the first time the core improved itself. A Claude Code
+    // session started in a worktree leaves the same kind of checkout under
+    // .claude/worktrees.
     // A suite another platform cannot attempt is left uncollected rather than collected
     // and reported as a skip, which reads as a test somebody disabled. What it is and why
     // it did not run is stated by globalSetup instead, so leaving it out stays visible.
     // Both sides read tests/platformCoverage.ts, so neither can drift from the other.
     exclude: [
-      '**/node_modules/**', '**/dist/**', 'orchestration/worktrees/**',
+      '**/node_modules/**', '**/dist/**', 'orchestration/worktrees/**', '.claude/worktrees/**',
       ...uncollectedSuites(),
     ],
     globalSetup: ['tests/globalSetup.ts'],
