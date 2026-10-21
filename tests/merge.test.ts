@@ -5,7 +5,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
@@ -24,6 +24,7 @@ import { specFile } from '../src/tasks.ts'
 import {
   removeWorktreeWithFallback, type WorktreeRemovalRuntime,
 } from '../src/worktree.ts'
+import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject } from './stubProject.ts'
 import { PROCESS_TEST_TIMEOUT_MS, TestProcessRegistry } from './testProcess.ts'
 
@@ -143,15 +144,27 @@ async function makeCompletedTask(taskId: string, options: { commit?: boolean; di
   return worktree
 }
 
+let initialRepository: RepositoryTemplate<void> | undefined
+
+beforeAll(() => {
+  initialRepository = buildRepositoryTemplate((root) => {
+    git(root, ['init', '-q', '-b', 'main'])
+    git(root, ['config', 'user.email', 'test@example.com'])
+    git(root, ['config', 'user.name', 'Test'])
+    writeFileSync(join(root, 'README.md'), '# repo\n')
+    git(root, ['add', '-A'])
+    git(root, ['commit', '-qm', 'chore: initial commit'])
+  })
+})
+
+afterAll(() => {
+  initialRepository?.dispose()
+})
+
 beforeEach(async () => {
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-merge-'))
+  initialRepository!.copyTo(repoRoot)
   paths = orchPaths(repoRoot)
-  git(repoRoot, ['init', '-q', '-b', 'main'])
-  git(repoRoot, ['config', 'user.email', 'test@example.com'])
-  git(repoRoot, ['config', 'user.name', 'Test'])
-  writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
-  git(repoRoot, ['add', '-A'])
-  git(repoRoot, ['commit', '-qm', 'chore: initial commit'])
 })
 
 afterEach(async () => {
