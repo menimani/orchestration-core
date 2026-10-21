@@ -34,7 +34,11 @@ const GENERATED_DIRECTORY_PATTERNS: readonly RegExp[] = [
   /^\.node_modules\.previous-.+/,
   /^\.orchestration-npm-ci-.+/,
 ]
+// Whole checkouts of this repository live under the loop's worktrees and Claude Code's
+// session worktrees. Their files are other branches' copies, not this tree's sources,
+// and their paths never match the escaped-fixture allowlist keyed by repository path.
 const RUNTIME_DIRECTORIES: ReadonlySet<string> = new Set([
+  '.claude/worktrees',
   'orchestration/logs',
   'orchestration/queue',
   'orchestration/status',
