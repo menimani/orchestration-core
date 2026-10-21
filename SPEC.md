@@ -234,8 +234,19 @@ are not parsed by `loadConfig` and are not operator-file settings.
    branch tip. This refresh is retained when a check fails, so the next attempt does not
    test the same stale branch again. A conflicting rebase is aborted and keeps both the
    task worktree and run branch clean. The task is abandoned after that first counted
-   merge failure: its worktree and branch are removed, and linked issues return to ready
-   before another poll can select it again. Pre-merge tests are chosen from the paths the
+   merge failure, but its commits are not: before its worktree and task branch are
+   removed, the task tip is kept on `conflict/<task-id>` with a record of the run-branch
+   tip, the fork point, the conflicted paths, and the run-branch commits after the fork
+   point that touched them. If keeping the branch fails, the task branch and worktree
+   are left in place instead. A local task is queued again under a new id, at its own
+   depth and effort, as a retry whose specification names that branch, those paths, and
+   those commit hashes ahead of the earlier specification; commit subjects are left out
+   because they are repository-controlled text. A chain of conflicts is retried at most
+   twice, after which the commits stay kept for a person. Linked issues return to ready
+   before another poll can select the task again, and when this checkout claims such an
+   issue again its new specification carries the same section. When a retry merges or
+   completes without changes, every branch kept for its chain is deleted and its records
+   are removed. Pre-merge tests are chosen from the paths the
    rebased worktree touched. `TASK_GATE=full` asks the project adapter for its full merge
    checks; `TASK_GATE=light` asks it for reduced merge checks. At each cycle-gate entry,
    light mode runs every step in the adapter's cycle suite, while full mode runs only
@@ -271,7 +282,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     requests that merge instead of silently treating the task as already processed. When
     the project adapter classifies an infrastructure failure, or the merge log names an
     unreachable registry, say which — "tests failed" misattributes an environment failure
-    to the task's diff.
+    to the task's diff. Each gate command that fails is followed in the merge log by how it
+    ended: its exit status, also in hexadecimal when outside 0-255 as Windows reports a
+    crashed process, or the signal that terminated it, so a runtime crash reads differently
+    from a failing test.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
 11a. After a local or remote task merge, a first-parent change to this package's

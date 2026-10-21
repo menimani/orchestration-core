@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
@@ -16,14 +16,18 @@ import {
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
-import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
+import { existingTaskIdForDesc, recordTaskIdForDesc, shortTaskId } from '../src/ids.ts'
+import {
+  issueConflictKey, readConflictedAttempts, writeConflictedAttempts,
+} from '../src/conflictRetry.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
   pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup,
   type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
 import {
-  branchName, finalMessageFile, orchPaths, PACKAGE_ROOT, statusFile, worktreeDir,
+  branchName, conflictBranchName, finalMessageFile, orchPaths, PACKAGE_ROOT, statusFile,
+  worktreeDir,
   type OrchPaths,
 } from '../src/paths.ts'
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
@@ -31,11 +35,12 @@ import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { StartupProcessRetainedError, startTask } from '../src/start.ts'
-import { enqueueTask } from '../src/tasks.ts'
+import { enqueueTask, specFile } from '../src/tasks.ts'
 import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
+import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
 
 let repoRoot: string
@@ -137,35 +142,68 @@ function logText(): string {
   return logged.join('\n')
 }
 
-function git(args: string[]): string {
+function git(args: string[], cwd = repoRoot): string {
   return execFileSync('git', args, {
-    cwd: repoRoot,
+    cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   }).trim()
 }
 
-function initializeGitRepo(): string {
-  git(['init', '--initial-branch=main'])
-  git(['config', 'user.email', 'loop-test@example.test'])
-  git(['config', 'user.name', 'Loop Test'])
-  writeFileSync(join(repoRoot, 'tracked.txt'), 'initial\n')
-  git(['add', 'tracked.txt'])
-  git(['commit', '-m', 'initial'])
-  return git(['rev-parse', 'HEAD'])
+function commitInitialFile(root: string): string {
+  git(['init', '--initial-branch=main'], root)
+  git(['config', 'user.email', 'loop-test@example.test'], root)
+  git(['config', 'user.name', 'Loop Test'], root)
+  writeFileSync(join(root, 'tracked.txt'), 'initial\n')
+  git(['add', 'tracked.txt'], root)
+  git(['commit', '-m', 'initial'], root)
+  return git(['rev-parse', 'HEAD'], root)
 }
 
-function configureRemoteDefaultBranch(branch = 'main', remoteName = 'origin'): void {
-  const remote = join(repoRoot, `${remoteName}.git`)
+let initialRepository: RepositoryTemplate<string> | undefined
+let initialRepositoryWithRemote: RepositoryTemplate<string> | undefined
+
+afterAll(() => {
+  initialRepository?.dispose()
+  initialRepositoryWithRemote?.dispose()
+})
+
+function initializeGitRepo(): string {
+  initialRepository ??= buildRepositoryTemplate(commitInitialFile)
+  initialRepository.copyTo(repoRoot)
+  return initialRepository.value
+}
+
+/** The state initializeGitRepo then configureRemoteDefaultBranch() leave. */
+function initializeGitRepoWithRemote(): string {
+  initialRepositoryWithRemote ??= buildRepositoryTemplate((root) => {
+    const head = commitInitialFile(root)
+    configureRemoteDefaultBranch('main', 'origin', root)
+    return head
+  })
+  initialRepositoryWithRemote.copyTo(repoRoot)
+  git(['remote', 'set-url', 'origin', join(repoRoot, 'origin.git')])
+  return initialRepositoryWithRemote.value
+}
+
+function backlogEntries(): string[] {
+  const backlog = join(paths.queueDir, 'backlog.txt')
+  return existsSync(backlog)
+    ? readFileSync(backlog, 'utf8').split(/\r?\n/).filter((line) => line !== '')
+    : []
+}
+
+function configureRemoteDefaultBranch(branch = 'main', remoteName = 'origin', root = repoRoot): void {
+  const remote = join(root, `${remoteName}.git`)
   execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-  git(['remote', 'add', remoteName, remote])
-  git(['push', '-u', remoteName, branch])
+  git(['remote', 'add', remoteName, remote], root)
+  git(['push', '-u', remoteName, branch], root)
   execFileSync('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], {
     cwd: remote, windowsHide: true,
   })
   git(['symbolic-ref', `refs/remotes/${remoteName}/HEAD`,
-    `refs/remotes/${remoteName}/${branch}`])
+    `refs/remotes/${remoteName}/${branch}`], root)
 }
 
 function makeCompletedTask(taskId: string, writeCompletedStatus = true): void {
@@ -1189,8 +1227,7 @@ describe('scan yield', () => {
 
 describe('runAutoReview', () => {
   beforeEach(() => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
       '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
@@ -1850,8 +1887,7 @@ describe('cycle gate', () => {
   })
 
   it('completes and promotes when no source can produce more work', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     forgeStatus = {
       ...forgeStatus,
@@ -1879,8 +1915,7 @@ describe('cycle gate', () => {
   })
 
   it('reports the OS-adapter environment only after promotion is confirmed', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const environmentLabel = vi.spyOn(operatingSystem, 'verificationEnvironmentLabel')
       .mockReturnValue('adapter-provided environment')
@@ -1904,8 +1939,7 @@ describe('cycle gate', () => {
   })
 
   it('retains integration markers on stop and removes them only after LOOP_DONE', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const markerNames = [
       'daemon-branch.txt',
       'daemon-head.txt',
@@ -1937,8 +1971,7 @@ describe('cycle gate', () => {
   })
 
   it('names an available cross-platform check that was not run for the branch', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const project: ProjectAdapter = {
       ...stubProject,
@@ -1963,8 +1996,7 @@ describe('cycle gate', () => {
   })
 
   it('concludes an empty run without retrying pull request creation', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/stale\n')
     forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
@@ -1989,8 +2021,7 @@ describe('cycle gate', () => {
   })
 
   it('retries and stops when the branch comparison fails instead of reporting an empty run', async () => {
-    const head = initializeGitRepo()
-    configureRemoteDefaultBranch()
+    const head = initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
     const loop = makeLoop({
@@ -2038,8 +2069,7 @@ describe('cycle gate', () => {
   })
 
   it('retains empty-cap session state when promotion fails, then retries', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const loop = makeLoop({
       autoPr: true,
       reviewEnabled: false,
@@ -2070,8 +2100,7 @@ describe('cycle gate', () => {
   })
 
   it('promotes and cleans the session when the empty-scan cap is complete', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const loop = makeLoop({
       autoPr: true,
       reviewEnabled: false,
@@ -2326,8 +2355,7 @@ describe('remote issue queue idle detection', () => {
   })
 
   beforeEach(() => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
       '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
@@ -3414,8 +3442,7 @@ describe('completion marker output', () => {
   })
 
   it('pushes a fresh topic branch through its only remote and establishes the upstream', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     git(['switch', '-c', 'feature/fresh-topic'])
     writeFileSync(join(repoRoot, 'fresh.txt'), 'fresh\n')
     git(['add', 'fresh.txt'])
@@ -3488,8 +3515,7 @@ describe('completion marker output', () => {
   })
 
   it('treats a PR merged while it is being promoted as complete', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const loop = makeLoop()
     fakeForge.markPrReady = async () => {
       forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false }
@@ -3503,8 +3529,7 @@ describe('completion marker output', () => {
   })
 
   it('reports a PR closed while it is being promoted and stops after repetition', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const loop = makeLoop()
     const markPrReady = vi.fn(async () => {
       forgeStatus = { ...forgeStatus, state: 'closed', isDraft: false }
@@ -3734,7 +3759,7 @@ describe('completed task merge recovery', () => {
     expect(logged).toContain('Installed orchestration deps  after 033_auto')
   })
 
-  it('abandons a task after its first conflicting rebase and never retries it', async () => {
+  it('releases an issue task after its first conflicting rebase and keeps its commits', async () => {
     const taskId = '20260815_181908_194_auto-rebase-conflict'
     const initialHead = initializeGitRepo()
     makeCompletedTask(taskId)
@@ -3742,6 +3767,7 @@ describe('completed task merge recovery', () => {
     writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
     execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
     execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    const taskTip = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim()
     writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
     git(['add', 'tracked.txt'])
     git(['commit', '-m', 'fix: advance run branch'])
@@ -3770,13 +3796,195 @@ describe('completed task merge recovery', () => {
     })
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
     expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
-    expect(logged).toContain('Released 194_auto    rebase conflict abandoned')
+    expect(logged).toContain(
+      `Released 194_auto    rebase conflict abandoned; commits kept on ${conflictBranchName(taskId)}`,
+    )
+    expect(git(['rev-parse', conflictBranchName(taskId)])).toBe(taskTip)
+    expect(readConflictedAttempts(paths, issueConflictKey(issueNumber))).toEqual([{
+      taskId,
+      branch: conflictBranchName(taskId),
+      runBranch: 'main',
+      runTip: runHead,
+      base: initialHead,
+      taskTip,
+      conflictedFiles: ['tracked.txt'],
+      conflictingCommits: [runHead],
+    }])
+    expect(backlogEntries()).toEqual([])
 
     expect(await loop.poll()).toBe('continue')
 
     expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
     expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
+  })
+
+  /** A completed local task whose only commit conflicts with a later run-branch commit. */
+  function makeConflictingLocalTask(taskId: string): {
+    initialHead: string
+    runHead: string
+    taskTip: string
+  } {
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    writeFileSync(specFile(paths, taskId), [
+      `# ${taskId}: delegated task`,
+      '',
+      '## Requirement',
+      '',
+      'Change the tracked line.',
+      '',
+      'TASK_COMPLETE',
+      '',
+    ].join('\n'))
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    const taskTip = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim()
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+    return { initialHead, runHead: git(['rev-parse', 'HEAD']), taskTip }
+  }
+
+  it('requeues a conflicted local task as a retry that starts from its kept commits', async () => {
+    const taskId = '20260815_181908_195_user-rebase-conflict'
+    const { initialHead, runHead, taskTip } = makeConflictingLocalTask(taskId)
+    mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+    writeFileSync(join(paths.queueDir, 'effort', taskId), 'high\n')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    const kept = conflictBranchName(taskId)
+    expect(git(['rev-parse', kept])).toBe(taskTip)
+    expect(git(['branch', '--list', branchName(taskId)])).toBe('')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    const entries = backlogEntries()
+    expect(entries).toHaveLength(1)
+    const retryId = entries[0]!.split(':')[0]!
+    expect(retryId).not.toBe(taskId)
+    expect(retryId).toMatch(/^\d{8}_\d{6}_\d{3}_user-rebase-conflict$/)
+    const spec = readFileSync(specFile(paths, retryId), 'utf8')
+    expect(spec).toContain(`# ${retryId}: retry of ${taskId} after a rebase conflict`)
+    expect(spec).toContain(`git cherry-pick ${initialHead}..${kept}`)
+    expect(spec).toContain('- `tracked.txt`')
+    expect(spec).toContain(`- \`${runHead}\``)
+    expect(spec).not.toContain('fix: advance run branch')
+    expect(spec).toContain('Change the tracked line.')
+    expect(spec.trimEnd().endsWith('TASK_COMPLETE')).toBe(true)
+    expect(readFileSync(join(paths.queueDir, 'effort', retryId), 'utf8')).toBe('high\n')
+    expect(readConflictedAttempts(paths, retryId)).toMatchObject([{ taskId, branch: kept, taskTip }])
+    expect(readConflictedAttempts(paths, taskId)).toEqual([])
+    expect(logged).toContain(
+      `Requeued 195_user    rebase conflict; ${shortTaskId(retryId)} starts from ${kept}`,
+    )
+  })
+
+  it('keeps the commits but stops retrying once a conflict chain uses its retries', async () => {
+    const taskId = '20260815_181908_197_user-rebase-conflict'
+    const { initialHead, runHead, taskTip } = makeConflictingLocalTask(taskId)
+    const earlier = ['20260815_150000_101_user-rebase-conflict', '20260815_160000_102_user-rebase-conflict']
+      .map((earlierId) => {
+        git(['branch', conflictBranchName(earlierId), initialHead])
+        return {
+          taskId: earlierId,
+          branch: conflictBranchName(earlierId),
+          runBranch: 'main',
+          runTip: initialHead,
+          base: initialHead,
+          taskTip: initialHead,
+          conflictedFiles: ['tracked.txt'],
+          conflictingCommits: [],
+        }
+      })
+    writeConflictedAttempts(paths, taskId, earlier)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(git(['rev-parse', conflictBranchName(taskId)])).toBe(taskTip)
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(backlogEntries()).toEqual([])
+    expect(logged).toContain(
+      `Abandoned 197_user    rebase conflict; commits kept on ${conflictBranchName(taskId)}`,
+    )
+    for (const { branch } of earlier) expect(git(['branch', '--list', branch])).not.toBe('')
+  })
+
+  it('removes every branch kept for a retry once the retry merges', async () => {
+    const head = initializeGitRepo()
+    const retryId = '20260815_191000_196_user-rebase-conflict'
+    makeCompletedTask(retryId)
+    const kept = ['20260815_150000_101_user-rebase-conflict', '20260815_181908_195_user-rebase-conflict']
+      .map((earlierId) => conflictBranchName(earlierId))
+    for (const branch of kept) git(['branch', branch, head])
+    writeConflictedAttempts(paths, retryId, kept.map((branch) => ({
+      taskId: branch.replace(/^conflict\//, ''),
+      branch,
+      runBranch: 'main',
+      runTip: head,
+      base: head,
+      taskTip: head,
+      conflictedFiles: ['tracked.txt'],
+      conflictingCommits: [],
+    })))
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, retryId)?.status).toBe('merged')
+    for (const branch of kept) expect(git(['branch', '--list', branch])).toBe('')
+    expect(readConflictedAttempts(paths, retryId)).toEqual([])
+  })
+
+  it('hands a reclaimed issue the attempt that conflicted before it was released', async () => {
+    const head = initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const requirement = '[BUG] `src/shared.ts` keeps the stale value'
+    const issueNumber = await fakeForge.createIssue({
+      title: requirement,
+      body: buildIssueBody(requirement, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const earlierId = '20260815_181908_194_auto-rebase-conflict'
+    git(['branch', conflictBranchName(earlierId), head])
+    const attempt = {
+      taskId: earlierId,
+      branch: conflictBranchName(earlierId),
+      runBranch: 'main',
+      runTip: head,
+      base: head,
+      taskTip: head,
+      conflictedFiles: ['src/shared.ts'],
+      conflictingCommits: [head],
+    }
+    writeConflictedAttempts(paths, issueConflictKey(issueNumber), [attempt])
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(1)
+    const taskId = runnerStarts[0]!.replace(/^.*[\\/]/, '').replace(/\.md$/, '')
+    const spec = readFileSync(specFile(paths, taskId), 'utf8')
+    expect(spec).toContain(requirement)
+    expect(spec).toContain(`git cherry-pick ${head}..${conflictBranchName(earlierId)}`)
+    expect(spec).toContain('- `src/shared.ts`')
+    expect(readConflictedAttempts(paths, taskId)).toEqual([attempt])
+    expect(readConflictedAttempts(paths, issueConflictKey(issueNumber))).toEqual([attempt])
   })
 
   it('skips a task whose merge is already active without counting a failure', async () => {
@@ -4031,8 +4239,7 @@ describe('completed task merge recovery', () => {
 
   it('retries post-merge reconciliation on a later poll without stopping or advancing the gate', async () => {
     const taskId = '20260811_120000_066_auto-unconfirmed-merge'
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     makeCompletedTask(taskId)
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
@@ -4084,8 +4291,7 @@ describe('completed task merge recovery', () => {
 
   it('keeps promotion unconfirmed while a published merge marker is absent from read-back', async () => {
     const taskId = '20260811_120000_068_auto-listing-lag'
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     makeCompletedTask(taskId)
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),

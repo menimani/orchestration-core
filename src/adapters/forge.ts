@@ -140,6 +140,12 @@ export interface Forge {
   getWorkflowRun(runId: number): Promise<WorkflowRun>
 
   // Issue-queue operations. Labels passed anywhere here must already exist.
+  /**
+   * Waits, in milliseconds, before each re-read that reconciles a just-created finding
+   * with a racing creation, for a forge whose issue listing lags behind its writes.
+   * Omitted, the issue queue uses its default window.
+   */
+  readonly postCreateReconcileDelaysMs?: readonly number[]
   currentUser(): Promise<string>
   listLabels(): Promise<string[]>
   createLabel(name: string, description: string): Promise<void>

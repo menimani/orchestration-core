@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Forge } from '../src/adapters/forge.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadMonitoredProject } from '../src/adapters/project.ts'
@@ -15,6 +15,7 @@ import { createLoop } from '../src/loop.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
+import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject } from './stubProject.ts'
 
 let fixtureRoot: string
@@ -106,10 +107,16 @@ function makeLoop(
   return loop
 }
 
-beforeEach(() => {
-  fixtureRoot = mkdtempSync(join(tmpdir(), 'orch-core-update-'))
-  repoRoot = join(fixtureRoot, 'consumer')
-  upstreamRoot = join(fixtureRoot, 'upstream')
+function useFixtureRoot(root: string): void {
+  fixtureRoot = root
+  repoRoot = join(root, 'consumer')
+  upstreamRoot = join(root, 'upstream')
+  packageRoot = join(repoRoot, 'orchestration', 'ts')
+}
+
+/** The consumer with the core imported as a squashed subtree and its skills installed. */
+function buildFixture(root: string): void {
+  useFixtureRoot(root)
   mkdirSync(repoRoot)
   mkdirSync(upstreamRoot)
   configureRepository(upstreamRoot)
@@ -145,11 +152,27 @@ beforeEach(() => {
     'subtree', 'add', '--prefix=orchestration/ts', upstreamRoot, 'main', '--squash',
   ])
 
-  packageRoot = join(repoRoot, 'orchestration', 'ts')
   syncSharedSkills(repoRoot, packageRoot, [
     fakeRunnerSharedSkills, ...(stubProject.sharedSkills ?? []),
   ])
   commit(repoRoot, 'chore: install shared skills')
+}
+
+// The subtree import alone takes over a second on Windows, so the fixture is built once
+// and every test receives its own copy.
+let fixtureTemplate: RepositoryTemplate<void> | undefined
+
+beforeAll(() => {
+  fixtureTemplate = buildRepositoryTemplate(buildFixture, ['consumer', 'upstream'])
+})
+
+afterAll(() => {
+  fixtureTemplate?.dispose()
+})
+
+beforeEach(() => {
+  useFixtureRoot(mkdtempSync(join(tmpdir(), 'orch-core-update-')))
+  fixtureTemplate!.copyTo(fixtureRoot)
   paths = orchPaths(repoRoot)
   events = []
   runnerStarts = []
