@@ -16,14 +16,18 @@ import {
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
-import { existingTaskIdForDesc, recordTaskIdForDesc } from '../src/ids.ts'
+import { existingTaskIdForDesc, recordTaskIdForDesc, shortTaskId } from '../src/ids.ts'
+import {
+  issueConflictKey, readConflictedAttempts, writeConflictedAttempts,
+} from '../src/conflictRetry.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
   pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup,
   type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
 import {
-  branchName, finalMessageFile, orchPaths, PACKAGE_ROOT, statusFile, worktreeDir,
+  branchName, conflictBranchName, finalMessageFile, orchPaths, PACKAGE_ROOT, statusFile,
+  worktreeDir,
   type OrchPaths,
 } from '../src/paths.ts'
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
@@ -31,7 +35,7 @@ import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { readStatus } from '../src/status.ts'
 import { StartupProcessRetainedError, startTask } from '../src/start.ts'
-import { enqueueTask } from '../src/tasks.ts'
+import { enqueueTask, specFile } from '../src/tasks.ts'
 import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
@@ -154,6 +158,13 @@ function initializeGitRepo(): string {
   git(['add', 'tracked.txt'])
   git(['commit', '-m', 'initial'])
   return git(['rev-parse', 'HEAD'])
+}
+
+function backlogEntries(): string[] {
+  const backlog = join(paths.queueDir, 'backlog.txt')
+  return existsSync(backlog)
+    ? readFileSync(backlog, 'utf8').split(/\r?\n/).filter((line) => line !== '')
+    : []
 }
 
 function configureRemoteDefaultBranch(branch = 'main', remoteName = 'origin'): void {
@@ -3734,7 +3745,7 @@ describe('completed task merge recovery', () => {
     expect(logged).toContain('Installed orchestration deps  after 033_auto')
   })
 
-  it('abandons a task after its first conflicting rebase and never retries it', async () => {
+  it('releases an issue task after its first conflicting rebase and keeps its commits', async () => {
     const taskId = '20260815_181908_194_auto-rebase-conflict'
     const initialHead = initializeGitRepo()
     makeCompletedTask(taskId)
@@ -3742,6 +3753,7 @@ describe('completed task merge recovery', () => {
     writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
     execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
     execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    const taskTip = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim()
     writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
     git(['add', 'tracked.txt'])
     git(['commit', '-m', 'fix: advance run branch'])
@@ -3770,13 +3782,195 @@ describe('completed task merge recovery', () => {
     })
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
     expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
-    expect(logged).toContain('Released 194_auto    rebase conflict abandoned')
+    expect(logged).toContain(
+      `Released 194_auto    rebase conflict abandoned; commits kept on ${conflictBranchName(taskId)}`,
+    )
+    expect(git(['rev-parse', conflictBranchName(taskId)])).toBe(taskTip)
+    expect(readConflictedAttempts(paths, issueConflictKey(issueNumber))).toEqual([{
+      taskId,
+      branch: conflictBranchName(taskId),
+      runBranch: 'main',
+      runTip: runHead,
+      base: initialHead,
+      taskTip,
+      conflictedFiles: ['tracked.txt'],
+      conflictingCommits: [runHead],
+    }])
+    expect(backlogEntries()).toEqual([])
 
     expect(await loop.poll()).toBe('continue')
 
     expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
     expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
+  })
+
+  /** A completed local task whose only commit conflicts with a later run-branch commit. */
+  function makeConflictingLocalTask(taskId: string): {
+    initialHead: string
+    runHead: string
+    taskTip: string
+  } {
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    writeFileSync(specFile(paths, taskId), [
+      `# ${taskId}: delegated task`,
+      '',
+      '## Requirement',
+      '',
+      'Change the tracked line.',
+      '',
+      'TASK_COMPLETE',
+      '',
+    ].join('\n'))
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    const taskTip = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim()
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+    return { initialHead, runHead: git(['rev-parse', 'HEAD']), taskTip }
+  }
+
+  it('requeues a conflicted local task as a retry that starts from its kept commits', async () => {
+    const taskId = '20260815_181908_195_user-rebase-conflict'
+    const { initialHead, runHead, taskTip } = makeConflictingLocalTask(taskId)
+    mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+    writeFileSync(join(paths.queueDir, 'effort', taskId), 'high\n')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    const kept = conflictBranchName(taskId)
+    expect(git(['rev-parse', kept])).toBe(taskTip)
+    expect(git(['branch', '--list', branchName(taskId)])).toBe('')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    const entries = backlogEntries()
+    expect(entries).toHaveLength(1)
+    const retryId = entries[0]!.split(':')[0]!
+    expect(retryId).not.toBe(taskId)
+    expect(retryId).toMatch(/^\d{8}_\d{6}_\d{3}_user-rebase-conflict$/)
+    const spec = readFileSync(specFile(paths, retryId), 'utf8')
+    expect(spec).toContain(`# ${retryId}: retry of ${taskId} after a rebase conflict`)
+    expect(spec).toContain(`git cherry-pick ${initialHead}..${kept}`)
+    expect(spec).toContain('- `tracked.txt`')
+    expect(spec).toContain(`- \`${runHead}\``)
+    expect(spec).not.toContain('fix: advance run branch')
+    expect(spec).toContain('Change the tracked line.')
+    expect(spec.trimEnd().endsWith('TASK_COMPLETE')).toBe(true)
+    expect(readFileSync(join(paths.queueDir, 'effort', retryId), 'utf8')).toBe('high\n')
+    expect(readConflictedAttempts(paths, retryId)).toMatchObject([{ taskId, branch: kept, taskTip }])
+    expect(readConflictedAttempts(paths, taskId)).toEqual([])
+    expect(logged).toContain(
+      `Requeued 195_user    rebase conflict; ${shortTaskId(retryId)} starts from ${kept}`,
+    )
+  })
+
+  it('keeps the commits but stops retrying once a conflict chain uses its retries', async () => {
+    const taskId = '20260815_181908_197_user-rebase-conflict'
+    const { initialHead, runHead, taskTip } = makeConflictingLocalTask(taskId)
+    const earlier = ['20260815_150000_101_user-rebase-conflict', '20260815_160000_102_user-rebase-conflict']
+      .map((earlierId) => {
+        git(['branch', conflictBranchName(earlierId), initialHead])
+        return {
+          taskId: earlierId,
+          branch: conflictBranchName(earlierId),
+          runBranch: 'main',
+          runTip: initialHead,
+          base: initialHead,
+          taskTip: initialHead,
+          conflictedFiles: ['tracked.txt'],
+          conflictingCommits: [],
+        }
+      })
+    writeConflictedAttempts(paths, taskId, earlier)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(git(['rev-parse', conflictBranchName(taskId)])).toBe(taskTip)
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(backlogEntries()).toEqual([])
+    expect(logged).toContain(
+      `Abandoned 197_user    rebase conflict; commits kept on ${conflictBranchName(taskId)}`,
+    )
+    for (const { branch } of earlier) expect(git(['branch', '--list', branch])).not.toBe('')
+  })
+
+  it('removes every branch kept for a retry once the retry merges', async () => {
+    const head = initializeGitRepo()
+    const retryId = '20260815_191000_196_user-rebase-conflict'
+    makeCompletedTask(retryId)
+    const kept = ['20260815_150000_101_user-rebase-conflict', '20260815_181908_195_user-rebase-conflict']
+      .map((earlierId) => conflictBranchName(earlierId))
+    for (const branch of kept) git(['branch', branch, head])
+    writeConflictedAttempts(paths, retryId, kept.map((branch) => ({
+      taskId: branch.replace(/^conflict\//, ''),
+      branch,
+      runBranch: 'main',
+      runTip: head,
+      base: head,
+      taskTip: head,
+      conflictedFiles: ['tracked.txt'],
+      conflictingCommits: [],
+    })))
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, retryId)?.status).toBe('merged')
+    for (const branch of kept) expect(git(['branch', '--list', branch])).toBe('')
+    expect(readConflictedAttempts(paths, retryId)).toEqual([])
+  })
+
+  it('hands a reclaimed issue the attempt that conflicted before it was released', async () => {
+    const head = initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const requirement = '[BUG] `src/shared.ts` keeps the stale value'
+    const issueNumber = await fakeForge.createIssue({
+      title: requirement,
+      body: buildIssueBody(requirement, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const earlierId = '20260815_181908_194_auto-rebase-conflict'
+    git(['branch', conflictBranchName(earlierId), head])
+    const attempt = {
+      taskId: earlierId,
+      branch: conflictBranchName(earlierId),
+      runBranch: 'main',
+      runTip: head,
+      base: head,
+      taskTip: head,
+      conflictedFiles: ['src/shared.ts'],
+      conflictingCommits: [head],
+    }
+    writeConflictedAttempts(paths, issueConflictKey(issueNumber), [attempt])
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(1)
+    const taskId = runnerStarts[0]!.replace(/^.*[\\/]/, '').replace(/\.md$/, '')
+    const spec = readFileSync(specFile(paths, taskId), 'utf8')
+    expect(spec).toContain(requirement)
+    expect(spec).toContain(`git cherry-pick ${head}..${conflictBranchName(earlierId)}`)
+    expect(spec).toContain('- `src/shared.ts`')
+    expect(readConflictedAttempts(paths, taskId)).toEqual([attempt])
+    expect(readConflictedAttempts(paths, issueConflictKey(issueNumber))).toEqual([attempt])
   })
 
   it('skips a task whose merge is already active without counting a failure', async () => {
