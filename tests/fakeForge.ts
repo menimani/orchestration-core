@@ -42,6 +42,9 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     listIssueCommentsCalls: [],
     user,
     clock: () => new Date(),
+    // The fake's listings never lag on their own; a test that needs lag scripts it per
+    // call. The reconcile passes still run, only without GitHub's waits between them.
+    postCreateReconcileDelaysMs: [0, 0, 0, 0],
 
     resolveGitRemote(remote: string): string {
       return remote

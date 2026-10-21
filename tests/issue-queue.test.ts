@@ -5,7 +5,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ForgeIssue } from '../src/adapters/forge.ts'
 import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels,
@@ -336,6 +336,32 @@ describe('publishFinding', () => {
     const second = await publishFinding(forge, paths, secondDescription, 'scan-2')
     expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
     expect(forge.issues.size).toBe(1)
+  })
+
+  it('waits out the default listing window when the forge sets no reconcile delays', async () => {
+    const { postCreateReconcileDelaysMs: _fakeDelays, ...defaultWindowForge } = forge
+    vi.useFakeTimers()
+    try {
+      const publication = publishFinding(
+        defaultWindowForge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1',
+      )
+      await vi.advanceTimersByTimeAsync(0)
+      const readsBeforeWaiting = forge.listOpenIssuesCalls.length
+      const readsAfter = async (milliseconds: number): Promise<number> => {
+        await vi.advanceTimersByTimeAsync(milliseconds)
+        return forge.listOpenIssuesCalls.length - readsBeforeWaiting
+      }
+
+      expect(await readsAfter(99)).toBe(0)
+      expect(await readsAfter(1)).toBe(1)
+      expect(await readsAfter(249)).toBe(1)
+      expect(await readsAfter(1)).toBe(2)
+      expect(await readsAfter(499)).toBe(2)
+      expect(await readsAfter(1)).toBe(3)
+      await expect(publication).resolves.toEqual({ outcome: 'created', issueNumber: 1 })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('preserves the fingerprint ledger and propagates a transient issue lookup failure', async () => {
