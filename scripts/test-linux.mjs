@@ -26,8 +26,11 @@ console.log(`Exporting HEAD and running verification in ${image}...`)
 const archive = spawn('git', ['archive', '--format=tar', 'HEAD'], {
   stdio: ['ignore', 'pipe', 'inherit'],
 })
+// A tag already present locally is never refreshed by `docker run`, so without the pull
+// the check keeps running whichever Node 24 patch was current when the image was first
+// fetched, security releases included.
 const docker = spawn('docker', [
-  'run', '--rm', '-i', image, 'sh', '-lc', containerCommand,
+  'run', '--rm', '--pull=always', '-i', image, 'sh', '-lc', containerCommand,
 ], {
   stdio: ['pipe', 'inherit', 'inherit'],
 })
