@@ -35,6 +35,14 @@ const docker = spawn('docker', [
 archive.stdout.pipe(docker.stdin)
 archive.on('error', (error) => docker.stdin.destroy(error))
 docker.on('error', (error) => archive.stdout.destroy(error))
+// Docker can exit before it reads the archive, as it does when its engine is not
+// running. The write then fails with a broken pipe, and docker's own exit code is the
+// failure worth reporting, so the rest of the archive is drained to let git finish.
+const brokenPipeCodes = new Set(['EPIPE', 'ECONNRESET'])
+docker.stdin.on('error', (error) => {
+  if (!brokenPipeCodes.has(error.code)) throw error
+  archive.stdout.resume()
+})
 
 const archiveExit = new Promise((resolve) => archive.on('close', resolve))
 const dockerExit = new Promise((resolve) => docker.on('close', resolve))
