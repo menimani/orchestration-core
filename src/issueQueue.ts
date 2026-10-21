@@ -561,7 +561,7 @@ async function reconcileCreatedFinding(
   fingerprints: string[],
   createdIssueNumber: number,
 ): Promise<number> {
-  for (const delayMs of POST_CREATE_RECONCILE_DELAYS_MS) {
+  for (const delayMs of forge.postCreateReconcileDelaysMs ?? POST_CREATE_RECONCILE_DELAYS_MS) {
     if (delayMs > 0) await sleep(delayMs)
     const survivor = await reconcileOpenFindings(forge, paths, fingerprints, createdIssueNumber)
     if (survivor !== undefined && survivor !== createdIssueNumber) return survivor

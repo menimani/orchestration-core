@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   absorbDefaultBranch, prepareBranchTopology, prepareIntegrationWorktree,
 } from '../src/branchTopology.ts'
@@ -18,6 +18,7 @@ import { writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { makeFakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
+import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject } from './stubProject.ts'
 
 let repoRoot: string
@@ -54,13 +55,13 @@ function pushRemoteDefaultChange(file: string, content: string): string {
   }
 }
 
-beforeEach(() => {
-  repoRoot = mkdtempSync(join(tmpdir(), 'orch-topology-'))
-  remoteRoot = join(repoRoot, 'origin.git')
-  git(repoRoot, ['init', '-q', '-b', 'main'])
-  git(repoRoot, ['config', 'user.email', 'daemon@example.test'])
-  git(repoRoot, ['config', 'user.name', 'Daemon Test'])
-  writeFileSync(join(repoRoot, '.gitignore'), [
+/** A daemon checkout on its own run branch, with main pushed to a bare origin inside it. */
+function buildDaemonCheckout(root: string): void {
+  const origin = join(root, 'origin.git')
+  git(root, ['init', '-q', '-b', 'main'])
+  git(root, ['config', 'user.email', 'daemon@example.test'])
+  git(root, ['config', 'user.name', 'Daemon Test'])
+  writeFileSync(join(root, '.gitignore'), [
     'orchestration/queue/',
     'orchestration/logs/',
     'orchestration/status/',
@@ -68,15 +69,32 @@ beforeEach(() => {
     'orchestration/worktrees/',
     'origin.git/',
   ].join('\n'))
-  writeFileSync(join(repoRoot, 'tracked.txt'), 'initial\n')
-  git(repoRoot, ['add', '-A'])
-  git(repoRoot, ['commit', '-qm', 'chore: initial commit'])
-  git(repoRoot, ['init', '--bare', '-q', remoteRoot])
-  git(repoRoot, ['remote', 'add', 'origin', remoteRoot])
-  git(repoRoot, ['push', '-q', '-u', 'origin', 'main'])
-  git(remoteRoot, ['symbolic-ref', 'HEAD', 'refs/heads/main'])
-  git(repoRoot, ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
-  git(repoRoot, ['switch', '-q', '-c', 'daemon/run'])
+  writeFileSync(join(root, 'tracked.txt'), 'initial\n')
+  git(root, ['add', '-A'])
+  git(root, ['commit', '-qm', 'chore: initial commit'])
+  git(root, ['init', '--bare', '-q', origin])
+  git(root, ['remote', 'add', 'origin', origin])
+  git(root, ['push', '-q', '-u', 'origin', 'main'])
+  git(origin, ['symbolic-ref', 'HEAD', 'refs/heads/main'])
+  git(root, ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+  git(root, ['switch', '-q', '-c', 'daemon/run'])
+}
+
+let daemonCheckout: RepositoryTemplate<void> | undefined
+
+beforeAll(() => {
+  daemonCheckout = buildRepositoryTemplate(buildDaemonCheckout)
+})
+
+afterAll(() => {
+  daemonCheckout?.dispose()
+})
+
+beforeEach(() => {
+  repoRoot = mkdtempSync(join(tmpdir(), 'orch-topology-'))
+  remoteRoot = join(repoRoot, 'origin.git')
+  daemonCheckout!.copyTo(repoRoot)
+  git(repoRoot, ['remote', 'set-url', 'origin', remoteRoot])
   paths = orchPaths(repoRoot)
 })
 

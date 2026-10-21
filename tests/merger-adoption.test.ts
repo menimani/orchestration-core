@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
@@ -16,6 +16,7 @@ import type { OrchestrationDepsRuntime } from '../src/merge.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
+import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject } from './stubProject.ts'
 
 let tempRoot: string
@@ -71,23 +72,43 @@ function pushWorkerBranch(taskId: string): { branch: string; head: string } {
   return { branch, head: git(workerRoot, ['rev-parse', 'HEAD']).trim() }
 }
 
+/** A merger and a worker checkout sharing one bare origin, all beside each other. */
+function buildCheckouts(root: string): void {
+  const merger = join(root, 'merger')
+  const worker = join(root, 'worker')
+  const bareOrigin = join(root, 'origin.git')
+  git(root, ['init', '-q', '-b', 'main', merger])
+  git(root, ['init', '-q', '--bare', bareOrigin])
+  git(merger, ['config', 'user.email', 'test@example.com'])
+  git(merger, ['config', 'user.name', 'Test'])
+  writeFileSync(join(merger, 'README.md'), '# repo\n')
+  git(merger, ['add', 'README.md'])
+  git(merger, ['commit', '-qm', 'chore: initial commit'])
+  git(merger, ['remote', 'add', 'origin', bareOrigin])
+  git(merger, ['push', '-q', '-u', 'origin', 'main'])
+  git(root, ['clone', '-q', '-b', 'main', bareOrigin, worker])
+  git(worker, ['config', 'user.email', 'worker@example.com'])
+  git(worker, ['config', 'user.name', 'Worker'])
+}
+
+let checkouts: RepositoryTemplate<void> | undefined
+
+beforeAll(() => {
+  checkouts = buildRepositoryTemplate(buildCheckouts, ['merger', 'worker'])
+})
+
+afterAll(() => {
+  checkouts?.dispose()
+})
+
 beforeEach(() => {
   tempRoot = mkdtempSync(join(tmpdir(), 'orch-adopt-'))
   repoRoot = join(tempRoot, 'merger')
   workerRoot = join(tempRoot, 'worker')
   origin = join(tempRoot, 'origin.git')
-  git(tempRoot, ['init', '-q', '-b', 'main', repoRoot])
-  git(tempRoot, ['init', '-q', '--bare', origin])
-  git(repoRoot, ['config', 'user.email', 'test@example.com'])
-  git(repoRoot, ['config', 'user.name', 'Test'])
-  writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
-  git(repoRoot, ['add', 'README.md'])
-  git(repoRoot, ['commit', '-qm', 'chore: initial commit'])
-  git(repoRoot, ['remote', 'add', 'origin', origin])
-  git(repoRoot, ['push', '-q', '-u', 'origin', 'main'])
-  git(tempRoot, ['clone', '-q', '-b', 'main', origin, workerRoot])
-  git(workerRoot, ['config', 'user.email', 'worker@example.com'])
-  git(workerRoot, ['config', 'user.name', 'Worker'])
+  checkouts!.copyTo(tempRoot)
+  git(repoRoot, ['remote', 'set-url', 'origin', origin])
+  git(workerRoot, ['remote', 'set-url', 'origin', origin])
   paths = orchPaths(repoRoot)
   forge = makeFakeForge()
   logged = []

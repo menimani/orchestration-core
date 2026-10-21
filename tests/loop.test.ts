@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
@@ -40,6 +40,7 @@ import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
+import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
 
 let repoRoot: string
@@ -141,23 +142,49 @@ function logText(): string {
   return logged.join('\n')
 }
 
-function git(args: string[]): string {
+function git(args: string[], cwd = repoRoot): string {
   return execFileSync('git', args, {
-    cwd: repoRoot,
+    cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   }).trim()
 }
 
+function commitInitialFile(root: string): string {
+  git(['init', '--initial-branch=main'], root)
+  git(['config', 'user.email', 'loop-test@example.test'], root)
+  git(['config', 'user.name', 'Loop Test'], root)
+  writeFileSync(join(root, 'tracked.txt'), 'initial\n')
+  git(['add', 'tracked.txt'], root)
+  git(['commit', '-m', 'initial'], root)
+  return git(['rev-parse', 'HEAD'], root)
+}
+
+let initialRepository: RepositoryTemplate<string> | undefined
+let initialRepositoryWithRemote: RepositoryTemplate<string> | undefined
+
+afterAll(() => {
+  initialRepository?.dispose()
+  initialRepositoryWithRemote?.dispose()
+})
+
 function initializeGitRepo(): string {
-  git(['init', '--initial-branch=main'])
-  git(['config', 'user.email', 'loop-test@example.test'])
-  git(['config', 'user.name', 'Loop Test'])
-  writeFileSync(join(repoRoot, 'tracked.txt'), 'initial\n')
-  git(['add', 'tracked.txt'])
-  git(['commit', '-m', 'initial'])
-  return git(['rev-parse', 'HEAD'])
+  initialRepository ??= buildRepositoryTemplate(commitInitialFile)
+  initialRepository.copyTo(repoRoot)
+  return initialRepository.value
+}
+
+/** The state initializeGitRepo then configureRemoteDefaultBranch() leave. */
+function initializeGitRepoWithRemote(): string {
+  initialRepositoryWithRemote ??= buildRepositoryTemplate((root) => {
+    const head = commitInitialFile(root)
+    configureRemoteDefaultBranch('main', 'origin', root)
+    return head
+  })
+  initialRepositoryWithRemote.copyTo(repoRoot)
+  git(['remote', 'set-url', 'origin', join(repoRoot, 'origin.git')])
+  return initialRepositoryWithRemote.value
 }
 
 function backlogEntries(): string[] {
@@ -167,16 +194,16 @@ function backlogEntries(): string[] {
     : []
 }
 
-function configureRemoteDefaultBranch(branch = 'main', remoteName = 'origin'): void {
-  const remote = join(repoRoot, `${remoteName}.git`)
+function configureRemoteDefaultBranch(branch = 'main', remoteName = 'origin', root = repoRoot): void {
+  const remote = join(root, `${remoteName}.git`)
   execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-  git(['remote', 'add', remoteName, remote])
-  git(['push', '-u', remoteName, branch])
+  git(['remote', 'add', remoteName, remote], root)
+  git(['push', '-u', remoteName, branch], root)
   execFileSync('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], {
     cwd: remote, windowsHide: true,
   })
   git(['symbolic-ref', `refs/remotes/${remoteName}/HEAD`,
-    `refs/remotes/${remoteName}/${branch}`])
+    `refs/remotes/${remoteName}/${branch}`], root)
 }
 
 function makeCompletedTask(taskId: string, writeCompletedStatus = true): void {
@@ -1200,8 +1227,7 @@ describe('scan yield', () => {
 
 describe('runAutoReview', () => {
   beforeEach(() => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
       '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
@@ -1861,8 +1887,7 @@ describe('cycle gate', () => {
   })
 
   it('completes and promotes when no source can produce more work', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     forgeStatus = {
       ...forgeStatus,
@@ -1890,8 +1915,7 @@ describe('cycle gate', () => {
   })
 
   it('reports the OS-adapter environment only after promotion is confirmed', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const environmentLabel = vi.spyOn(operatingSystem, 'verificationEnvironmentLabel')
       .mockReturnValue('adapter-provided environment')
@@ -1915,8 +1939,7 @@ describe('cycle gate', () => {
   })
 
   it('retains integration markers on stop and removes them only after LOOP_DONE', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const markerNames = [
       'daemon-branch.txt',
       'daemon-head.txt',
@@ -1948,8 +1971,7 @@ describe('cycle gate', () => {
   })
 
   it('names an available cross-platform check that was not run for the branch', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const project: ProjectAdapter = {
       ...stubProject,
@@ -1974,8 +1996,7 @@ describe('cycle gate', () => {
   })
 
   it('concludes an empty run without retrying pull request creation', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/stale\n')
     forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
@@ -2000,8 +2021,7 @@ describe('cycle gate', () => {
   })
 
   it('retries and stops when the branch comparison fails instead of reporting an empty run', async () => {
-    const head = initializeGitRepo()
-    configureRemoteDefaultBranch()
+    const head = initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     forgeStatus = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
     const loop = makeLoop({
@@ -2049,8 +2069,7 @@ describe('cycle gate', () => {
   })
 
   it('retains empty-cap session state when promotion fails, then retries', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const loop = makeLoop({
       autoPr: true,
       reviewEnabled: false,
@@ -2081,8 +2100,7 @@ describe('cycle gate', () => {
   })
 
   it('promotes and cleans the session when the empty-scan cap is complete', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const loop = makeLoop({
       autoPr: true,
       reviewEnabled: false,
@@ -2337,8 +2355,7 @@ describe('remote issue queue idle detection', () => {
   })
 
   beforeEach(() => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
       '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
@@ -3425,8 +3442,7 @@ describe('completion marker output', () => {
   })
 
   it('pushes a fresh topic branch through its only remote and establishes the upstream', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     git(['switch', '-c', 'feature/fresh-topic'])
     writeFileSync(join(repoRoot, 'fresh.txt'), 'fresh\n')
     git(['add', 'fresh.txt'])
@@ -3499,8 +3515,7 @@ describe('completion marker output', () => {
   })
 
   it('treats a PR merged while it is being promoted as complete', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const loop = makeLoop()
     fakeForge.markPrReady = async () => {
       forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false }
@@ -3514,8 +3529,7 @@ describe('completion marker output', () => {
   })
 
   it('reports a PR closed while it is being promoted and stops after repetition', async () => {
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     const loop = makeLoop()
     const markPrReady = vi.fn(async () => {
       forgeStatus = { ...forgeStatus, state: 'closed', isDraft: false }
@@ -4225,8 +4239,7 @@ describe('completed task merge recovery', () => {
 
   it('retries post-merge reconciliation on a later poll without stopping or advancing the gate', async () => {
     const taskId = '20260811_120000_066_auto-unconfirmed-merge'
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     makeCompletedTask(taskId)
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
@@ -4278,8 +4291,7 @@ describe('completed task merge recovery', () => {
 
   it('keeps promotion unconfirmed while a published merge marker is absent from read-back', async () => {
     const taskId = '20260811_120000_068_auto-listing-lag'
-    initializeGitRepo()
-    configureRemoteDefaultBranch()
+    initializeGitRepoWithRemote()
     makeCompletedTask(taskId)
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
