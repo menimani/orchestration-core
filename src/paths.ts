@@ -114,6 +114,11 @@ export function branchName(taskId: string): string {
   return `task/${taskId}`
 }
 
+// A completed task whose rebase conflicted keeps its commits here until a retry merges.
+export function conflictBranchName(taskId: string): string {
+  return `conflict/${taskId}`
+}
+
 // Scan ids have carried two shapes: the old scan-<timestamp> prefix and the current
 // <timestamp>_<seq>_scan. Both must keep matching, because status files and worktrees
 // left by older runs still use the first.

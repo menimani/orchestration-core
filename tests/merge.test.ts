@@ -12,7 +12,8 @@ import { createOperatingSystem as createPosixOperatingSystem } from '../src/adap
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
   completeTaskWithoutChanges, describeCommandFailure, MergeError, MergeRecoveryError,
-  mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
+  mergeRemoteTask, mergeTask, RebaseConflictError, removeMergedWorktree,
+  removeTemporaryWorktree,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
@@ -883,12 +884,23 @@ describe('mergeTask', () => {
     git(repoRoot, ['commit', '-qm', 'feat: change README on run branch'])
     const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
     const runStatus = git(repoRoot, ['status', '--porcelain'])
+    const forkPoint = git(repoRoot, ['merge-base', 'HEAD', taskHead]).trim()
 
-    await expect(mergeTask(paths, taskId, {
+    const failure = await mergeTask(paths, taskId, {
       taskGate: 'light', project: noCheckProject,
-    })).rejects.toThrow(
+    }).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(RebaseConflictError)
+    expect((failure as RebaseConflictError).message).toBe(
       'A conflict occurred while rebasing the task onto main; the rebase was aborted.',
     )
+    expect((failure as RebaseConflictError).conflict).toEqual({
+      runBranch: 'main',
+      runTip: runHead,
+      base: forkPoint,
+      taskTip: taskHead,
+      conflictedFiles: ['README.md'],
+      conflictingCommits: [runHead],
+    })
 
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe(runStatus)

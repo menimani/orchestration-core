@@ -34,7 +34,33 @@ export class MergeError extends Error {
 }
 
 /** A stale local task cannot be refreshed and must not be selected for merge again. */
-export class RebaseConflictError extends MergeError {}
+/**
+ * What a conflicting pre-merge rebase was trying to do, recorded before the rebase is
+ * aborted so the loop can keep the task's commits and tell a retry where they collided.
+ * Commit subjects are deliberately absent: they are repository-controlled text.
+ */
+export interface RebaseConflict {
+  runBranch: string
+  /** The run-branch commit the task was being rebased onto. */
+  runTip: string
+  /** Where the task branch forked from the run branch. */
+  base: string
+  /** The task branch tip whose commits could not be replayed. */
+  taskTip: string
+  /** Paths left unmerged when the rebase stopped. */
+  conflictedFiles: string[]
+  /** Run-branch commits after `base` that touched those paths, oldest first. */
+  conflictingCommits: string[]
+}
+
+export class RebaseConflictError extends MergeError {
+  readonly conflict: RebaseConflict | undefined
+
+  constructor(message: string, conflict?: RebaseConflict) {
+    super(message)
+    this.conflict = conflict
+  }
+}
 
 /** Remote bookkeeping for a valid no-change verdict failed and should be retried. */
 export class NoChangeReconciliationError extends MergeError {}
@@ -460,11 +486,13 @@ function rebaseTaskOntoRunTip(
   }
 
   io.out(`=== Rebasing task onto ${currentBranch} ===`)
+  const taskTip = git(worktree, ['rev-parse', 'HEAD']).trim()
   try {
     git(worktree, [
       'rebase', '--quiet', '--reapply-cherry-picks', '--empty=keep', currentBranch,
     ])
   } catch {
+    const conflict = describeRebaseConflict(worktree, currentBranch, taskTip)
     try {
       git(worktree, ['rebase', '--abort'])
     } catch {
@@ -472,7 +500,35 @@ function rebaseTaskOntoRunTip(
     }
     throw new RebaseConflictError(
       `A conflict occurred while rebasing the task onto ${currentBranch}; the rebase was aborted.`,
+      conflict,
     )
+  }
+}
+
+/**
+ * Read the stopped rebase before it is aborted. Nothing here may mask the conflict
+ * itself, so a failed lookup leaves the description out rather than throwing.
+ */
+function describeRebaseConflict(
+  worktree: string,
+  currentBranch: string,
+  taskTip: string,
+): RebaseConflict | undefined {
+  try {
+    const runTip = git(worktree, ['rev-parse', currentBranch]).trim()
+    const base = git(worktree, ['merge-base', currentBranch, taskTip]).trim()
+    const conflictedFiles = git(worktree, ['diff', '--name-only', '--diff-filter=U'])
+      .split(/\r?\n/).filter((line) => line !== '')
+    const conflictingCommits = conflictedFiles.length === 0
+      ? []
+      : git(worktree, [
+        'log', '--reverse', '--format=%H', `${base}..${runTip}`, '--', ...conflictedFiles,
+      ]).split(/\r?\n/).filter((line) => line !== '')
+    return {
+      runBranch: currentBranch, runTip, base, taskTip, conflictedFiles, conflictingCommits,
+    }
+  } catch {
+    return undefined
   }
 }
 

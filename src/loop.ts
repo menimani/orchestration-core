@@ -23,8 +23,12 @@ import {
 } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
-  branchName, PACKAGE_ROOT, worktreeDir, type OrchPaths,
+  branchName, conflictBranchName, PACKAGE_ROOT, worktreeDir, type OrchPaths,
 } from './paths.ts'
+import {
+  conflictRetrySection, issueConflictKey, readConflictedAttempts, removeConflictedAttempts,
+  writeConflictedAttempts, type ConflictedAttempt,
+} from './conflictRetry.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, transitionStatus } from './status.ts'
@@ -102,6 +106,9 @@ interface FindingDispatch {
 
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
 const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
+// A local task whose rebase conflicts is retried from its kept commits at most this many
+// times. Each retry races the same sibling merges, so a third conflict is left for a person.
+const MAX_CONFLICT_RETRIES = 2
 
 class InvalidPersistedCounterError extends Error {}
 
@@ -821,6 +828,94 @@ export function createLoop(deps: LoopDeps) {
       if (existsSync(file)) parts.push(`\n${readFileSync(file, 'utf8')}`)
     }
     appendFileSync(specFile(paths, taskId), parts.join(''))
+  }
+
+  /**
+   * An issue whose earlier task conflicted while rebasing hands that attempt to the task
+   * claimed for it now, so the retry starts from the kept commits. The issue record stays
+   * until the new task merges, which keeps the hand-over safe if this claim is rolled back.
+   */
+  function attachIssueConflictedAttempts(taskId: string, issueNumbers: number[]): void {
+    const attempts = new Map<string, ConflictedAttempt>()
+    for (const issueNumber of issueNumbers) {
+      for (const attempt of readConflictedAttempts(paths, issueConflictKey(issueNumber))) {
+        attempts.set(attempt.taskId, attempt)
+      }
+    }
+    if (attempts.size === 0) return
+    const chain = [...attempts.values()]
+    appendFileSync(specFile(paths, taskId), conflictRetrySection(chain))
+    writeConflictedAttempts(paths, taskId, chain)
+  }
+
+  function appendClaimedRequirementsWithConflicts(
+    taskId: string,
+    requirements: ClaimedRequirement[],
+  ): void {
+    appendClaimedRequirements(taskId, requirements)
+    attachIssueConflictedAttempts(taskId, requirements.map(({ issueNumber }) => issueNumber))
+  }
+
+  /**
+   * Keep a conflicted task's commits on their own branch before cleanup deletes the task
+   * branch. Attempts this task was itself retrying travel with it, so the merge that
+   * finally lands removes every branch kept along the way.
+   */
+  function keepConflictedAttempt(taskId: string, error: RebaseConflictError): {
+    branch: string
+    attempts: ConflictedAttempt[] | undefined
+  } {
+    const branch = conflictBranchName(taskId)
+    git(['branch', '--force', branch, error.conflict?.taskTip ?? branchName(taskId)])
+    if (error.conflict === undefined) return { branch, attempts: undefined }
+    return {
+      branch,
+      attempts: [...readConflictedAttempts(paths, taskId), { ...error.conflict, taskId, branch }],
+    }
+  }
+
+  /**
+   * Queue a local task again after its rebase conflicted, carrying its whole specification
+   * behind a section that names the kept commits and what they collided with. Returns
+   * undefined once the chain has used its retries.
+   */
+  function requeueConflictedTask(
+    taskId: string,
+    attempts: ConflictedAttempt[],
+    specification: string,
+    effort: string | undefined,
+    depth: number,
+  ): string | undefined {
+    if (attempts.length > MAX_CONFLICT_RETRIES) return undefined
+    const retryId = newTaskId(paths, taskId.replace(/^\d{8}_\d{6}_\d{3}_/, ''))
+    writeFileSync(specFile(paths, retryId), [
+      `# ${retryId}: retry of ${taskId} after a rebase conflict\n`,
+      conflictRetrySection(attempts),
+      '\n## Specification of the earlier attempt\n\n',
+      specification.replace(/^# [^\n]*\n/, ''),
+    ].join(''))
+    if (effort !== undefined) {
+      mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+      writeFileSync(join(paths.queueDir, 'effort', retryId), effort)
+    }
+    writeConflictedAttempts(paths, retryId, attempts)
+    enqueueTaskImpl(paths, retryId, depth)
+    return retryId
+  }
+
+  /** Once a retry lands, the commits kept for it are history: drop their branches. */
+  function retireConflictedAttempts(taskId: string, linkedIssues: number[]): void {
+    try {
+      const keys = [taskId, ...linkedIssues.map(issueConflictKey)]
+      const branches = new Set(keys.flatMap((key) =>
+        readConflictedAttempts(paths, key).map(({ branch }) => branch)))
+      for (const branch of branches) {
+        if (optionalGit(['branch', '--list', branch]).trim() !== '') git(['branch', '-D', branch])
+      }
+      for (const key of keys) removeConflictedAttempts(paths, key)
+    } catch (error) {
+      event('WARN', `could not remove commits kept for ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+    }
   }
 
   /**
@@ -2243,6 +2338,7 @@ export function createLoop(deps: LoopDeps) {
         })
         if (mergeResult.outcome === 'no-change') {
           event('No-change', shortTaskId(taskId), 'no change warranted')
+          retireConflictedAttempts(taskId, linkedIssues)
           if (!isInspectionTaskId(paths, taskId)) {
             const cycle = readCount(scanCountFile)
             if (cycle > 0) {
@@ -2255,6 +2351,7 @@ export function createLoop(deps: LoopDeps) {
         const mergeCommit = mergeResult.mergeCommit
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
         writeFileSync(mergeFailureFile, '0\n')
+        retireConflictedAttempts(taskId, linkedIssues)
         if (linkedIssues.length > 0) {
           const runBranch = optionalGit(['branch', '--show-current']).trim()
           await reconcileMergedIssues(taskId, linkedIssues, mergeCommit, runBranch)
@@ -2284,7 +2381,22 @@ export function createLoop(deps: LoopDeps) {
             if (!terminalized) {
               throw new Error('task status changed before rebase-conflict abandonment')
             }
+            // The task passed its own work; only the run branch moved under it. Keep its
+            // commits before cleanup deletes the task branch, and read what a retry needs
+            // before cleanup and dematerialization remove it. A failure here throws before
+            // cleanup, so the task branch and worktree survive for a person instead.
+            const kept = keepConflictedAttempt(taskId, error)
+            const specification = readFileSync(specFile(paths, taskId), 'utf8')
+            const effortFile = join(paths.queueDir, 'effort', taskId)
+            const effort = existsSync(effortFile) ? readFileSync(effortFile, 'utf8') : undefined
+            const depthFile = join(scannedDir, `${taskId}.depth`)
+            const depth = existsSync(depthFile) ? readCount(depthFile) : 0
             if (linkedIssues.length > 0) {
+              if (kept.attempts !== undefined) {
+                for (const issueNumber of linkedIssues) {
+                  writeConflictedAttempts(paths, issueConflictKey(issueNumber), kept.attempts)
+                }
+              }
               prepareIssueReleaseIntent(paths, taskId, linkedIssues)
             }
             cleanupTask(paths, taskId, undefined, false)
@@ -2293,21 +2405,30 @@ export function createLoop(deps: LoopDeps) {
             } else {
               completeIssueReleaseIntent(paths, taskId)
               dropClaimedTaskMaterialization(paths, taskId, true)
-              if (remoteOperationsAvailable) {
-                const failures = await reconcileIssueReleaseIntent(
-                  forge, paths, taskId, issueReleaseOptions,
-                )
-                if (failures.length > 0) {
-                  throw new IssueReleaseReconciliationError(failures)
-                }
+            }
+            const retryId = linkedIssues.length > 0 || kept.attempts === undefined
+              ? undefined
+              : requeueConflictedTask(taskId, kept.attempts, specification, effort, depth)
+            removeConflictedAttempts(paths, taskId)
+            if (linkedIssues.length > 0 && remoteOperationsAvailable) {
+              const failures = await reconcileIssueReleaseIntent(
+                forge, paths, taskId, issueReleaseOptions,
+              )
+              if (failures.length > 0) {
+                throw new IssueReleaseReconciliationError(failures)
               }
             }
-            if (linkedIssues.length === 0) {
-              event('Abandoned', shortTaskId(taskId), 'rebase conflict')
+            if (retryId !== undefined) {
+              event('Requeued', shortTaskId(taskId),
+                `rebase conflict; ${shortTaskId(retryId)} starts from ${kept.branch}`)
+            } else if (linkedIssues.length === 0) {
+              event('Abandoned', shortTaskId(taskId), `rebase conflict; commits kept on ${kept.branch}`)
             } else if (remoteOperationsAvailable) {
-              event('Released', shortTaskId(taskId), 'rebase conflict abandoned')
+              event('Released', shortTaskId(taskId),
+                `rebase conflict abandoned; commits kept on ${kept.branch}`)
             } else {
-              event('Abandoned', shortTaskId(taskId), 'rebase conflict; issue release pending')
+              event('Abandoned', shortTaskId(taskId),
+                `rebase conflict; issue release pending; commits kept on ${kept.branch}`)
             }
           } catch (abandonmentError) {
             if (!(abandonmentError instanceof ForgeRateLimitError)) {
@@ -2519,7 +2640,7 @@ export function createLoop(deps: LoopDeps) {
             for (const issues of groupReadyFindings(readyIssues)) {
               if (capacity <= 0) break
               const result = await claimIssueGroup(
-                forge, paths, issues, cachedUser, appendClaimedRequirements,
+                forge, paths, issues, cachedUser, appendClaimedRequirementsWithConflicts,
               )
               if (result.outcome === 'claimed') {
                 event('Claimed', shortTaskId(result.taskId),
