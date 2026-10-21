@@ -40,9 +40,10 @@ npm test -- --pool=threads --no-file-parallelism
 
 Use that form when a failure will not reproduce, before concluding it is a flake.
 
-A running loop keeps repository checkouts under `orchestration/worktrees/`. Those hold
-their own copies of this suite; `vitest.config.ts` excludes them so a live loop does not
-turn into thousands of extra tests. Do not run builds or installs while a loop is
+A running loop keeps repository checkouts under `orchestration/worktrees/`, and a Claude
+Code session started in a worktree keeps one under `.claude/worktrees/`. Those hold their
+own copies of this suite; `vitest.config.ts` and the English-only check exclude them so a
+live loop or a parallel session does not turn into thousands of extra tests. Do not run builds or installs while a loop is
 running — they lock files the loop's own workers need.
 
 ## Report

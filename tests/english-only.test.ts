@@ -79,6 +79,35 @@ describe('English-only source check', () => {
     expect(main(root)).toBe(0)
   })
 
+  it('ignores checkouts kept by the loop and by Claude Code session worktrees', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-english-only-'))
+    fixtures.push(root)
+    writeFileSync(join(root, 'source.ts'), 'export const value = 1\n')
+    for (const checkout of [
+      join('orchestration', 'worktrees', '20260808_000000_001_auto-fixture'),
+      join('.claude', 'worktrees', 'session-fixture'),
+    ]) {
+      const source = join(root, checkout, 'tests')
+      mkdirSync(source, { recursive: true })
+      writeFileSync(join(source, 'fixture.test.ts'), `export const greeting = "${characters(0x65e5, 0x672c, 0x8a9e)}"\n`)
+    }
+
+    expect(main(root)).toBe(0)
+  })
+
+  it('checks a worktrees directory that is not a runtime checkout location', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-english-only-'))
+    fixtures.push(root)
+    const source = join(root, 'src', 'worktrees')
+    mkdirSync(source, { recursive: true })
+    writeFileSync(join(source, 'fixture.ts'), `export const greeting = "${characters(0x65e5, 0x672c, 0x8a9e)}"\n`)
+    const output = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+
+    expect(main(root)).toBe(1)
+    expect(output).toHaveBeenCalledWith('1 lines')
+    output.mockRestore()
+  })
+
   it('checks retained dependency directory names below the package root', () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-english-only-'))
     fixtures.push(root)
