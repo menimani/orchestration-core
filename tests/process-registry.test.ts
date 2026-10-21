@@ -137,8 +137,12 @@ describe('task process registry', () => {
 
     expect(taskProcessPid(paths, taskId, undefined, () => undefined, () => true)).toBe(4321)
     expect(existsSync(registryFile())).toBe(true)
-    expect(taskProcessPid(paths, taskId, undefined, () => 'started:replacement'))
-      .toBeUndefined()
+    // A mismatch alone keeps the entry while the recorded tree is alive, so the tree probe
+    // must be injected too: the real one asks the operating system about 4321, and Windows
+    // answers for 4320 because it ignores a PID's low two bits.
+    expect(taskProcessPid(
+      paths, taskId, undefined, () => 'started:replacement', () => false,
+    )).toBeUndefined()
     expect(existsSync(registryFile())).toBe(false)
   })
 
