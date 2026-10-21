@@ -79,6 +79,7 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
   fixtureRoots.push(root)
   const probeFile = join(root, 'spawn-probe.jsonl')
   const preload = join(root, 'spawn-probe.cjs')
+  const loopLog = join(root, 'orchestration', 'logs', 'loop.log')
   const stopFile = join(root, 'orchestration', 'queue', 'stop')
   let daemonPid = 0
   testProcesses.trackPid(() => daemonPid, { tree: true })
@@ -108,9 +109,21 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
     'syncBuiltinESMExports()',
     '',
   ].join('\n'))
+  // With no work, no scans, and no promotion, a daemon ends its session on its first
+  // poll, a few milliseconds after its launcher returns, so survival could not be told
+  // apart from a daemon killed along with the launcher. An unreachable forge leaves the
+  // issue queue without a finding status, which the daemon idles waiting for.
+  writeFileSync(join(root, 'unavailable-forge.mjs'), [
+    "const unavailable = () => { throw new Error('forge unavailable') }",
+    'export default new Proxy({}, {',
+    '  // The loader returns the forge from an async function, which would adopt a then.',
+    "  get: (_target, property) => property === 'then' ? undefined : unavailable,",
+    '})',
+    '',
+  ].join('\n'))
 
   const launcher = spawnSync(process.execPath, [
-    CLI, 'loop', '--approve-mode', 'local', '--daemon',
+    CLI, 'loop', '--approve-mode', 'issue', '--daemon',
   ], {
     cwd: root,
     encoding: 'utf8',
@@ -118,7 +131,8 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
       ...environmentWithoutRestartHandover(),
       AUTO_PR: 'false',
       CORE_AUTO_UPDATE: 'false',
-      ISSUE_QUEUE_ENABLED: 'false',
+      FORGE: './unavailable-forge.mjs',
+      ISSUE_QUEUE_ENABLED: 'true',
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require="${preload.replaceAll('\\', '\\\\')}"`.trim(),
       ORCH_TEST_SPAWN_PROBE: probeFile,
       POLL_INTERVAL: '1',
@@ -135,7 +149,11 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
   expect(match).not.toBeNull()
   daemonPid = Number(match?.[1])
 
-  await waitUntil(() => processIsAlive(daemonPid), 'CLI daemon did not survive its launcher')
+  await waitUntil(
+    () => existsSync(loopLog) && readFileSync(loopLog, 'utf8').includes('Waiting=finding status'),
+    'CLI daemon did not reach its idle poll',
+  )
+  expect(processIsAlive(daemonPid), 'CLI daemon did not survive its launcher').toBe(true)
   const probes = readFileSync(probeFile, 'utf8').trim().split(/\r?\n/)
     .map((line) => JSON.parse(line) as SpawnProbe)
   const daemonSpawn = probes.find((probe) => probe.args.includes('--marker-output'))
