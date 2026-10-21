@@ -271,7 +271,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     requests that merge instead of silently treating the task as already processed. When
     the project adapter classifies an infrastructure failure, or the merge log names an
     unreachable registry, say which — "tests failed" misattributes an environment failure
-    to the task's diff.
+    to the task's diff. Each gate command that fails is followed in the merge log by how it
+    ended: its exit status, also in hexadecimal when outside 0-255 as Windows reports a
+    crashed process, or the signal that terminated it, so a runtime crash reads differently
+    from a failing test.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
 11a. After a local or remote task merge, a first-parent change to this package's

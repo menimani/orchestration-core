@@ -11,8 +11,8 @@ import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  completeTaskWithoutChanges, MergeError, MergeRecoveryError, mergeRemoteTask, mergeTask,
-  removeMergedWorktree, removeTemporaryWorktree,
+  completeTaskWithoutChanges, describeCommandFailure, MergeError, MergeRecoveryError,
+  mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
@@ -771,6 +771,50 @@ describe('mergeTask', () => {
     expect(output).toContain('the worktree: passed on dependencies it does not have')
     expect(output).toContain('fixture-dependency')
     expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('names the failing check and its exit status before aborting the merge', async () => {
+    const taskId = '20260808_000000_032_user-reports-check-status'
+    await makeCompletedTask(taskId, { commit: true })
+    const outputFile = join(repoRoot, 'failing-check.log')
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'failing-check',
+      mergeChecks: () => [
+        { label: 'Passing check', cwd: '', command: 'node -e "process.exit(0)"' },
+        { label: 'Crashing check', cwd: '', command: 'node -e "process.exit(3)"' },
+      ],
+    }
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project, outputFile }))
+      .rejects.toThrow('Tests failed. Aborting merge.')
+
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain('=== Crashing check failed: exit status 3 ===')
+    expect(output).not.toContain('Passing check failed')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('reports an explicit test command exit status before aborting the merge', async () => {
+    const taskId = '20260808_000000_033_user-reports-test-command-status'
+    await makeCompletedTask(taskId, { commit: true })
+    const outputFile = join(repoRoot, 'failing-test-command.log')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, outputFile, testCmd: 'node -e "process.exit(2)"',
+    })).rejects.toThrow('Tests failed. Aborting merge.')
+
+    expect(readFileSync(outputFile, 'utf8')).toContain('=== Tests failed: exit status 2 ===')
+  })
+
+  it.each([
+    [{ status: 1, signal: null }, 'exit status 1'],
+    [{ status: 3221226505, signal: null }, 'exit status 3221226505 (0xC0000409)'],
+    [{ status: -1073740791, signal: null }, 'exit status -1073740791 (0xC0000409)'],
+    [{ status: null, signal: 'SIGABRT' }, 'terminated by signal SIGABRT'],
+    [new Error('spawn ENOENT'), 'did not run: spawn ENOENT'],
+  ])('describes a gate command that ended as %j', (error, description) => {
+    expect(describeCommandFailure(error)).toBe(description)
   })
 
   it('bypasses automatic checks when they are disabled', async () => {

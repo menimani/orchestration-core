@@ -529,10 +529,28 @@ function mergeIo(outputFile?: string): MergeIo {
       if (outputFile !== undefined) {
         appendFileSync(outputFile, `${failed.stdout ?? ''}${failed.stderr ?? ''}`)
       }
+      out(`=== ${label} failed: ${describeCommandFailure(error)} ===`)
       return false
     }
   }
   return { out, run, tryRun }
+}
+
+/**
+ * How a gate command ended. A runtime crash and a failing test both stop the merge, but
+ * only the exit status tells them apart: Windows reports a crashed process as an NTSTATUS
+ * code such as 0xC0000409 (abort), where a failing suite exits 1.
+ */
+export function describeCommandFailure(error: unknown): string {
+  const failed = error as { status?: unknown; signal?: unknown }
+  if (typeof failed.signal === 'string') return `terminated by signal ${failed.signal}`
+  if (typeof failed.status === 'number') {
+    const status = failed.status
+    return status >= 0 && status <= 255
+      ? `exit status ${status}`
+      : `exit status ${status} (0x${(status >>> 0).toString(16).toUpperCase().padStart(8, '0')})`
+  }
+  return `did not run: ${error instanceof Error ? error.message : String(error)}`
 }
 
 function runMergeChecks(
@@ -545,7 +563,8 @@ function runMergeChecks(
     io.out(`=== Running tests in worktree: ${options.testCmd} ===`)
     try {
       io.run(worktree, options.testCmd)
-    } catch {
+    } catch (error) {
+      io.out(`=== Tests failed: ${describeCommandFailure(error)} ===`)
       throw new MergeError('Tests failed. Aborting merge.')
     }
     if (options.project.verifyDependencyIsolation === true
