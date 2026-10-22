@@ -8,6 +8,12 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # TypeScript 7: src/adapters/project.ts reads adapters through the JavaScript
+      # compiler API (ts.isIdentifier and friends), which the native compiler drops.
+      # Lift once that code no longer needs it.
+      - dependency-name: "typescript"
+        versions: [">=7"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
