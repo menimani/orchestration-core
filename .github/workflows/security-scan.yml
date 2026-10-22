@@ -28,4 +28,16 @@ jobs:
           check-latest: true
 
       # npm audit reads the lockfile, so nothing needs installing first.
-      - run: npm audit --audit-level=high
+      # The registry's advisory endpoint answers 503 or times out at times. Only that error
+      # is retried; a run that reports vulnerabilities fails at once.
+      - run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high > "$RUNNER_TEMP/audit.log" 2>&1; then
+              cat "$RUNNER_TEMP/audit.log"
+              exit 0
+            fi
+            cat "$RUNNER_TEMP/audit.log"
+            grep -q 'audit endpoint returned an error' "$RUNNER_TEMP/audit.log" || exit 1
+            sleep 30
+          done
+          exit 1
