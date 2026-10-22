@@ -28,12 +28,12 @@ jobs:
     # Absent on a push, the expression is null and the job runs.
     if: github.event.pull_request.draft != true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Without check-latest, setup-node takes whatever Node 24 the runner image cached:
       # on 2026-09-23 that was 24.20.0 on Windows and 24.21.0 on Ubuntu, so a security
       # release reached CI only when the images were rebuilt.
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           check-latest: true
