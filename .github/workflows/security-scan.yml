@@ -1,0 +1,43 @@
+name: Security Scan
+
+# Weekly, because an advisory published after the last dependency change lands on main
+# with no pull request to catch it. A change to this file runs the scan on its own pull
+# request, so a broken scan is found before the schedule does.
+on:
+  schedule:
+    - cron: '0 3 * * 1'  # Every Monday at 03:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/security-scan.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  npm-audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          check-latest: true
+
+      # npm audit reads the lockfile, so nothing needs installing first.
+      # The registry's advisory endpoint answers 503 or times out at times. Only that error
+      # is retried; a run that reports vulnerabilities fails at once.
+      - run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high > "$RUNNER_TEMP/audit.log" 2>&1; then
+              cat "$RUNNER_TEMP/audit.log"
+              exit 0
+            fi
+            cat "$RUNNER_TEMP/audit.log"
+            grep -q 'audit endpoint returned an error' "$RUNNER_TEMP/audit.log" || exit 1
+            sleep 30
+          done
+          exit 1
