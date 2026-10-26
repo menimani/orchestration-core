@@ -4,7 +4,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { safeNpmCi, type SafeNpmCiRuntime } from '../orchestration/project/safe-npm-ci.ts'
+import { safeNpmCi, type SafeNpmCiRuntime } from '../scripts/safe-npm-ci.ts'
 
 let root: string
 

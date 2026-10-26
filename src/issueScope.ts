@@ -1,4 +1,4 @@
-import type { Forge, ForgeIssue } from './adapters/forge.ts'
+import type { CreateIssueOptions, Forge, ForgeIssue } from './adapters/forge.ts'
 
 // A fleet's issue queue is one repository shared by every project the fleet runs, so a
 // project's loop must neither claim, deduplicate against, nor reap another project's
@@ -23,9 +23,11 @@ export function scopeForgeToProject(forge: Forge, label: string): Forge {
   // An issue cannot be filed with a label the repository lacks, and the first issue a
   // project files may come long after setup, so the label is ensured on demand.
   let labelReady: Promise<boolean> | undefined
-  return {
-    ...forge,
-    async createIssue(options) {
+  // Everything else is inherited rather than copied: a forge implemented as a class keeps
+  // its methods on the prototype, where a copy of the object's own properties misses them.
+  const scoped: Forge = Object.create(forge)
+  return Object.assign(scoped, {
+    async createIssue(options: CreateIssueOptions) {
       labelReady ??= ensureScopeLabel(forge, label).catch((error: unknown) => {
         labelReady = undefined
         throw error
@@ -33,11 +35,11 @@ export function scopeForgeToProject(forge: Forge, label: string): Forge {
       await labelReady
       return forge.createIssue({ ...options, labels: [...options.labels, label] })
     },
-    async listOpenIssues(queueLabel) {
+    async listOpenIssues(queueLabel: string) {
       return (await forge.listOpenIssues(queueLabel)).filter(inScope)
     },
-    async listClosedIssues(queueLabel) {
+    async listClosedIssues(queueLabel: string) {
       return (await forge.listClosedIssues(queueLabel)).filter(inScope)
     },
-  }
+  })
 }
