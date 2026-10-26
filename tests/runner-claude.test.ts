@@ -267,8 +267,8 @@ describe('Claude process wrapper', () => {
     child.emit('close', 7)
 
     await expect(completed).resolves.toBe(7)
-    expect(mocks.spawn).toHaveBeenCalledWith('bash', [
-      '-c', 'exec claude "$@"', 'claude', '-p',
+    expect(mocks.spawn).toHaveBeenCalledWith('cmd.exe', [
+      '/d', '/c', 'claude', '-p',
     ], expect.any(Object))
   })
 })

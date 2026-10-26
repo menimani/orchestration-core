@@ -251,13 +251,13 @@ describe('createCodexRunner', () => {
     await expect(started).resolves.toBe(4321)
   })
 
-  it('routes through Bash on Windows without adding an empty model argument', async () => {
+  it('routes through cmd.exe on Windows without adding an empty model argument', async () => {
     setPlatform('win32')
     const started = createCodexRunner().start({ ...options, model: '' })
 
     expect(mocks.startWindowsProcess).toHaveBeenCalledWith({
       args: [
-        '-c', 'exec codex "$@"', 'codex',
+        '/d', '/c', 'codex',
         'exec',
         '--dangerously-bypass-approvals-and-sandbox',
         '--disable', 'multi_agent',
@@ -265,7 +265,7 @@ describe('createCodexRunner', () => {
         '--config', 'model_reasoning_effort=high',
         '-',
       ],
-      command: 'bash',
+      command: 'cmd.exe',
       cwd: 'worktree',
       inputFile: 'task.md',
       outputFile: 'task.log',
