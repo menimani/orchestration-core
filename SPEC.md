@@ -756,7 +756,15 @@ so authorship and verified ancestry must both hold.
     rather than a long-running task.
 35. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
     the forge closes all of them when the promotion PR lands the commit on the default
-    branch. Immediately after merging, the worker comments on every linked issue with the
+    branch. A queue kept in a fleet's `issueRepository` is the exception: its issue
+    numbers mean nothing in the project's repository, so the merge commit names none of
+    them. Instead, each poll of the merger checks the pull request of every run branch
+    that still has promotion records. Once that pull request has merged and its head
+    contains a record's merge commit, the merger closes that issue with a
+    `PROMOTED: <task-id>` comment naming the merge commit, run branch, and pull request,
+    and logs a `Promoted` event; a merge commit the head does not contain stays open for
+    a later run. A failure to close is warned about and retried on the next poll without
+    holding back that poll's claims. Workers never close promoted issues. Immediately after merging, the worker comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
@@ -807,7 +815,8 @@ so authorship and verified ancestry must both hold.
     from the configured push remote, verifies the head and that it adds commits to the
     current branch, runs
     the project adapter's path-selected checks in a detached worktree, and merges with
-    `--no-ff` and `closes #N` for every issue named by a grouped worker report. It persists
+    `--no-ff` and `closes #N` for every issue named by a grouped worker report, unless the
+    queue is kept in a fleet's `issueRepository` (item 35). It persists
     a successful adoption for every member before updating the issues, so a later poll
     retries failed metadata updates without merging again. These per-issue promotion
     records use the schema and fail-closed repair behavior in item 35; malformed persisted

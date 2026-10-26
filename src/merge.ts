@@ -11,7 +11,8 @@ import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
 import { verifyModuleIsolation } from './moduleIsolation.ts'
 import {
-  branchName, isInspectionTaskId, logFile, packageFile, worktreeDir, PACKAGE_ROOT,
+  branchName, isInspectionTaskId, issueQueueIsSeparate, logFile, packageFile, worktreeDir,
+  PACKAGE_ROOT,
   type OrchPaths,
 } from './paths.ts'
 import {
@@ -1091,9 +1092,11 @@ async function mergeTaskWithGuardHeld(
   }
 
   const baseMergeMessage = `Merge ${taskId} via orchestration`
-  const closingIssues = options.closesIssues ?? (options.closesIssue === undefined
+  // A fleet queue's issue numbers would close unrelated issues in the project's
+  // repository; those issues are closed once the run's pull request merges instead.
+  const closingIssues = issueQueueIsSeparate(paths)
     ? []
-    : [options.closesIssue])
+    : options.closesIssues ?? (options.closesIssue === undefined ? [] : [options.closesIssue])
   if (closingIssues.length > 0 && options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
@@ -1255,7 +1258,7 @@ export async function mergeRemoteTask(
   if (options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
-  const closingIssues = options.closesIssues ?? [issueNumber]
+  const closingIssues = issueQueueIsSeparate(paths) ? [] : options.closesIssues ?? [issueNumber]
   const mergeMessage = closingIssues.reduce(
     (message, closingIssue) => options.forge!.issueClosingCommitMessage(message, closingIssue),
     baseMergeMessage,

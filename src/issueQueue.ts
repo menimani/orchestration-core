@@ -1347,6 +1347,43 @@ async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Pro
   }
 }
 
+/**
+ * Close queue issues whose merged work has been promoted, for a queue kept apart from
+ * the project's repository where no merge commit can close them. A run branch's pull
+ * request that has merged carries every task merged into it up to its head, whichever
+ * way the forge merged it, so that is the evidence; a merge commit the head does not
+ * contain stays open for a later run.
+ */
+export async function closePromotedIssues(
+  forge: Forge,
+  paths: OrchPaths,
+  contains: (ancestor: string, descendant: string) => boolean,
+): Promise<number[]> {
+  const dir = promotionDir(paths)
+  if (!existsSync(dir)) return []
+  const promotions: IssuePromotion[] = []
+  for (const name of readdirSync(dir)) {
+    const match = /^(\d+)\.json$/.exec(name)
+    if (match === null) continue
+    const promotion = issuePromotionForIssue(paths, Number(match[1]))
+    if (promotion !== undefined) promotions.push(promotion)
+  }
+  const closed: number[] = []
+  for (const runBranch of new Set(promotions.map((promotion) => promotion.runBranch))) {
+    const pr = await forge.prStatus({ kind: 'branch', value: runBranch })
+    if (pr.state !== 'merged' || pr.headSha === '') continue
+    for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
+      if (!contains(promotion.mergeCommit, pr.headSha)) continue
+      await closeIssueAndRemoveLifecycleLabels(forge, promotion.issueNumber, [
+        `PROMOTED: ${promotion.taskId}`,
+        `Merged as ${promotion.mergeCommit} into run branch ${runBranch}, whose pull request ${pr.url} has merged.`,
+      ].join('\n'))
+      closed.push(promotion.issueNumber)
+    }
+  }
+  return closed
+}
+
 function heartbeatFile(paths: OrchPaths, taskId: string): string {
   return join(paths.queueDir, 'heartbeat', taskId)
 }

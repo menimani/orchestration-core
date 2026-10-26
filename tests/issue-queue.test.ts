@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ForgeIssue } from '../src/adapters/forge.ts'
 import {
-  buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels,
+  buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels, closePromotedIssues,
   commentOnIssueMerge, fingerprintOf, groupReadyFindings, heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   issueFailureCount, issueReleaseIntentForTask, issueReleasePreparationForTask,
@@ -2501,4 +2501,35 @@ describe('loop integration in issue mode', () => {
     expect(issue.labels).not.toContain(LABEL_READY)
   })
 
+})
+
+describe('closePromotedIssues', () => {
+  async function promotedIssue(taskId: string, mergeCommit: string, runBranch: string): Promise<number> {
+    const issueNumber = await forge.createIssue({
+      title: taskId, body: buildIssueBody(`[BUG] ${taskId}`, 'scan-1'), labels: [LABEL_FINDING],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
+    return issueNumber
+  }
+
+  it('keeps every issue open while the run pull request has not merged', async () => {
+    const issueNumber = await promotedIssue('task-open', 'a'.repeat(40), 'run/open')
+    forge.prStatusValue = { state: 'open', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual([])
+    expect((await forge.getIssue(issueNumber)).state).toBe('open')
+  })
+
+  it('closes only issues whose merge commit the merged head contains', async () => {
+    const contained = await promotedIssue('task-in', 'a'.repeat(40), 'run/merged')
+    const later = await promotedIssue('task-after', 'c'.repeat(40), 'run/merged')
+    forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
+    const contains = (ancestor: string) => ancestor === 'a'.repeat(40)
+
+    expect(await closePromotedIssues(forge, paths, contains)).toEqual([contained])
+    expect((await forge.getIssue(contained)).state).toBe('closed')
+    expect((await forge.getIssue(later)).state).toBe('open')
+    expect(forge.prStatusRefs).toEqual([{ kind: 'branch', value: 'run/merged' }])
+  })
 })

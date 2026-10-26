@@ -118,6 +118,51 @@ afterEach(() => {
   rmSync(tempRoot, { recursive: true, force: true })
 })
 
+describe('remote task adoption into a fleet queue', () => {
+  it('names no queue issue in the merge and closes the issues once the run PR merges', async () => {
+    paths = {
+      ...paths,
+      fleet: {
+        dir: tempRoot, project: 'example', repository: 'owner/example', issueRepository: 'owner/fleet',
+      },
+    }
+    const task = pushWorkerBranch('20260809_000000_003_auto-fleet-remote-fix')
+    const issueNumbers = await Promise.all([1, 2].map(() => forge.createIssue({
+      title: 'grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })))
+    const issueList = issueNumbers.map((number) => `#${number}`).join(' ')
+    await Promise.all(issueNumbers.map((issueNumber) => forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${task.branch}\nHead commit: ${task.head}\nIssues: ${issueList}`)))
+    forge.issueClosingCommitMessage = (message, issueNumber) => `${message} (closes #${issueNumber})`
+
+    expect(await makeLoop(stubProject).poll()).toBe('continue')
+
+    const mergeCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim())
+      .toBe('Merge 20260809_000000_003_auto-fleet-remote-fix via orchestration')
+    for (const issueNumber of issueNumbers) {
+      expect((await forge.getIssue(issueNumber)).state).toBe('open')
+      expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({ mergeCommit })
+    }
+
+    forge.prStatusValue = {
+      state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha: mergeCommit, checks: [],
+    }
+    expect(await makeLoop(stubProject).poll()).toBe('continue')
+
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.state).toBe('closed')
+      expect(forge.issueComments.get(issueNumber)?.at(-1))
+        .toContain('PROMOTED: 20260809_000000_003_auto-fleet-remote-fix')
+    }
+    expect(logged.some((line) => line.includes('Promoted') && line.includes(`#${issueNumbers[0]}`)))
+      .toBe(true)
+  })
+})
+
 describe('remote task adoption', () => {
   it('adopts one grouped branch and links the merge to every reported issue', async () => {
     const task = pushWorkerBranch('20260809_000000_002_auto-grouped-remote-fix')

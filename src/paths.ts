@@ -137,6 +137,14 @@ export function fleetPaths(
   return paths
 }
 
+/**
+ * Whether queue issues live in a repository other than the project's. Their numbers then
+ * mean nothing in the project's repository, so no commit there may reference them.
+ */
+export function issueQueueIsSeparate(paths: OrchPaths): boolean {
+  return paths.fleet?.issueRepository !== undefined
+}
+
 /** The CLI arguments that select the same repository again from any working directory. */
 export function locationArgs(paths: OrchPaths): string[] {
   return paths.fleet === undefined

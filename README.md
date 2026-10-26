@@ -302,7 +302,9 @@ Add `"issueRepository": "owner/fleet"` at the top of `fleet.json` to keep the is
 in the fleet's own repository instead of the project's. Every project shares that queue:
 each issue it files carries `project:<name>`, and a project's loop reads, claims, and
 reaps only issues carrying its own label. Pull requests and workflow runs still go to the
-project's declared `repository`.
+project's declared `repository`. Because a fleet issue's number means nothing in the
+project's repository, merge commits name no fleet issue; the merger closes each one with a
+`PROMOTED:` comment once the run's pull request has merged with its work.
 
 If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
