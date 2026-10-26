@@ -59,7 +59,8 @@ import {
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
-  missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
+  issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
+  reapStaleLeases, sourceIssueNumbers,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
@@ -611,6 +612,16 @@ export function createLoop(deps: LoopDeps) {
               onOrchestrationDepsEvent: orchestrationDepsEvent,
               beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
               closesIssues: adoptionIssues.map((candidate) => candidate.number),
+              closesSourceIssues: paths.fleet === undefined
+                ? undefined
+                : sourceIssueNumbers(adoptionIssues.flatMap((candidate) =>
+                  parseIssueBody(candidate.body, candidate.number)?.fingerprints ?? []),
+                paths.fleet.repository),
+              // The worker's spec stays on the worker; the issues hold the same requirements.
+              reasons: adoptionIssues.flatMap((candidate) => {
+                const requirement = parseIssueBody(candidate.body, candidate.number)?.requirement
+                return requirement === undefined ? [] : [requirement]
+              }),
               onMerged: persistPromotion,
             },
           )
@@ -2317,6 +2328,9 @@ export function createLoop(deps: LoopDeps) {
           skipAutoTest: config.skipAutoTest,
           project,
           closesIssues: linkedIssues,
+          closesSourceIssues: paths.fleet === undefined
+            ? undefined
+            : sourceIssueNumbers(issueSourcesForTask(paths, taskId), paths.fleet.repository),
           forge: rawForge,
           outputFile: mergeLog,
           orchestrationDepsRuntime,

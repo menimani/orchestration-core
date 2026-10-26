@@ -150,6 +150,8 @@ export interface Forge {
   listLabels(): Promise<string[]>
   createLabel(name: string, description: string): Promise<void>
   createIssue(options: CreateIssueOptions): Promise<number>
+  /** Replace the title of an existing issue. */
+  updateIssueTitle(issueNumber: number, title: string): Promise<void>
   /** Create an issue outside the current repository and return its URL. */
   createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string>
   getIssue(issueNumber: number): Promise<ForgeIssue>
@@ -161,6 +163,12 @@ export interface Forge {
   listOpenIssues(label: string): Promise<ForgeIssue[]>
   /** Closed issues carrying the label, newest first. */
   listClosedIssues(label: string): Promise<ForgeIssue[]>
+  /**
+   * Open issues of the code repository itself, newest first, with write access judged on
+   * that repository. A fleet imports them into its own queue; an adapter without the
+   * capability leaves the command unavailable.
+   */
+  listSourceIssues?(): Promise<ForgeIssue[]>
   assignIssue(issueNumber: number, user: string): Promise<void>
   unassignIssue(issueNumber: number, user: string): Promise<void>
   addLabel(issueNumber: number, label: string): Promise<void>

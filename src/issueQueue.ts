@@ -29,6 +29,8 @@ export const LABEL_MERGE_FAILED = 'loop:merge-failed'
 export const LABEL_RETRY_EXHAUSTED = 'loop:retry-exhausted'
 export const LABEL_UNTRUSTED_AUTHOR = 'loop:untrusted-author'
 export const LABEL_GROUP_SINGLETON = 'loop:group-singleton'
+export const LABEL_IMPORTED = 'loop:imported'
+export const LABEL_TRIAGE = 'loop:triage'
 export const QUEUE_LABELS = [
   { name: LABEL_FINDING, description: 'Filed by the improvement loop from a scan or review finding' },
   { name: LABEL_READY, description: 'Unclaimed loop work: a worker may claim it by self-assigning' },
@@ -46,6 +48,14 @@ export const QUEUE_LABELS = [
   {
     name: LABEL_GROUP_SINGLETON,
     description: 'Finding released from a failed group; claim it as an individual task',
+  },
+] as const
+/** Labels only a fleet queue that imports project issues needs; import-issues ensures them. */
+export const IMPORT_LABELS = [
+  { name: LABEL_IMPORTED, description: 'Imported from an issue in a fleet project repository' },
+  {
+    name: LABEL_TRIAGE,
+    description: 'Imported issue awaiting an operator; relabel loop:ready to let the loop take it',
   },
 ] as const
 const LIFECYCLE_LABELS = [
@@ -769,6 +779,119 @@ export async function publishFinding(
     : { outcome: 'duplicate', issueNumber: survivor }
 }
 
+const SOURCE_FINGERPRINT_PREFIX = 'source:'
+
+/** The fingerprint that ties a queue issue to the project issue it was imported from. */
+export function sourceFingerprint(repository: string, issueNumber: number): string {
+  return `${SOURCE_FINGERPRINT_PREFIX}${repository.toLowerCase()}#${issueNumber}`
+}
+
+/** Numbers of the issues in `repository` that these fingerprints were imported from. */
+export function sourceIssueNumbers(fingerprints: readonly string[], repository: string): number[] {
+  const prefix = `${SOURCE_FINGERPRINT_PREFIX}${repository.toLowerCase()}#`
+  return [...new Set(fingerprints
+    .filter((fingerprint) => fingerprint.startsWith(prefix))
+    .map((fingerprint) => Number(fingerprint.slice(prefix.length)))
+    .filter((issueNumber) => Number.isSafeInteger(issueNumber) && issueNumber > 0))]
+}
+
+export type ImportResult
+  = { outcome: 'imported'; issueNumber: number; ready: boolean }
+    | { outcome: 'existing'; issueNumber: number }
+
+/**
+ * Every source fingerprint the queue already holds, open or closed. Unlike an ordinary
+ * finding, a closed import stays closed: the project issue it came from is closed by the
+ * merge that resolves it, and anything else is for a person to decide.
+ */
+export async function importedIssues(forge: Forge): Promise<Map<string, number>> {
+  const imported = new Map<string, number>()
+  for (const issue of [
+    ...await forge.listOpenIssues(LABEL_IMPORTED),
+    ...await forge.listClosedIssues(LABEL_IMPORTED),
+  ]) {
+    if (!isTrustedFingerprintOwner(issue)) continue
+    for (const fingerprint of issueFingerprints(issue)) {
+      if (fingerprint.startsWith(SOURCE_FINGERPRINT_PREFIX) && !imported.has(fingerprint)) {
+        imported.set(fingerprint, issue.number)
+      }
+    }
+  }
+  return imported
+}
+
+/**
+ * File a project issue into the fleet's queue once. The queue issue's author is whoever
+ * runs the import, so the import is the trust boundary: only an issue written by an
+ * account with write access to the project may become claimable on its own, and every
+ * other one waits under loop:triage until an operator relabels it ready.
+ */
+export async function publishImportedIssue(
+  forge: Forge,
+  paths: OrchPaths,
+  repository: string,
+  source: ForgeIssue,
+  readyWhenTrusted: boolean,
+  imported?: ReadonlyMap<string, number>,
+): Promise<ImportResult> {
+  const fingerprint = sourceFingerprint(repository, source.number)
+  const recorded = fingerprintLedger(paths).find((entry) => entry.fingerprint === fingerprint)
+  if (recorded !== undefined) return { outcome: 'existing', issueNumber: recorded.issueNumber }
+  const existing = (imported ?? await importedIssues(forge)).get(fingerprint)
+  if (existing !== undefined) {
+    recordFingerprint(paths, fingerprint, existing)
+    return { outcome: 'existing', issueNumber: existing }
+  }
+
+  // Quoting every imported line keeps the project's text from posing as this body's
+  // metadata lines or ending its requirement with a heading of its own.
+  const quoted = source.body.trim() === ''
+    ? '> (no description)'
+    : source.body.split(/\r?\n/).map((line) => `> ${line}`.trimEnd()).join('\n')
+  const requirement = [
+    source.title,
+    `Imported from ${repository}#${source.number}, opened by @${source.author.login}.`,
+    quoted,
+  ].join('\n\n')
+  const ready = readyWhenTrusted && source.author.hasWriteAccess
+  const title = source.title.length > 90 ? `${source.title.slice(0, 87)}...` : source.title
+  const issueNumber = await forge.createIssue({
+    title,
+    body: buildIssueBody(requirement, `import:${repository}#${source.number}`, undefined, [fingerprint]),
+    labels: [LABEL_FINDING, LABEL_IMPORTED, ready ? LABEL_READY : LABEL_TRIAGE],
+  })
+  recordFingerprint(paths, fingerprint, issueNumber)
+  return { outcome: 'imported', issueNumber, ready }
+}
+
+function issueSourceFile(paths: OrchPaths, taskId: string): string {
+  return join(paths.queueDir, 'issue-source', taskId)
+}
+
+/** Remember which project issues a claimed task resolves, for its merge to close. */
+export function recordIssueSourcesForTask(
+  paths: OrchPaths,
+  taskId: string,
+  fingerprints: readonly string[],
+): void {
+  const sources = [...new Set(fingerprints
+    .filter((fingerprint) => fingerprint.startsWith(SOURCE_FINGERPRINT_PREFIX)))]
+  const file = issueSourceFile(paths, taskId)
+  if (sources.length === 0) {
+    rmSync(file, { force: true })
+    return
+  }
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, `${sources.join('\n')}\n`)
+}
+
+/** The fingerprints of the project issues a task was claimed for. */
+export function issueSourcesForTask(paths: OrchPaths, taskId: string): string[] {
+  const file = issueSourceFile(paths, taskId)
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8').split(/\r?\n/).filter((line) => line !== '')
+}
+
 /** Publish delegated work for the daemon to claim and materialize. */
 export async function publishDelegatedTask(
   forge: Forge,
@@ -1015,7 +1138,7 @@ export function dropClaimedTaskMaterialization(
   const errors: unknown[] = []
   for (const file of [
     specFile(paths, taskId),
-    ...(preserveIssueMapping ? [] : [issueMapFile(paths, taskId)]),
+    ...(preserveIssueMapping ? [] : [issueMapFile(paths, taskId), issueSourceFile(paths, taskId)]),
     join(paths.queueDir, 'effort', taskId),
     join(paths.queueDir, 'inspect', taskId),
     join(paths.queueDir, 'heartbeat', taskId),
@@ -1713,6 +1836,9 @@ export async function claimIssueGroup(
       }
       const issueNumbers = requirements.map(({ issueNumber }) => issueNumber)
       recordIssuesForTask(paths, taskId, issueNumbers)
+      recordIssueSourcesForTask(
+        paths, taskId, claimedIssues.flatMap(({ parsed }) => parsed.fingerprints),
+      )
       const depth = Math.max(...claimedIssues.map(({ parsed }) => parsed.depth ?? 1))
       const enqueue = enqueueTask(paths, taskId, depth)
       return {
@@ -1851,10 +1977,13 @@ export async function reapStaleLeases(
 }
 
 /** Create only missing queue labels; existing repository-owned metadata is untouched. */
-export async function ensureQueueLabels(forge: Forge): Promise<string[]> {
+export async function ensureQueueLabels(
+  forge: Forge,
+  labels: ReadonlyArray<{ name: string; description: string }> = QUEUE_LABELS,
+): Promise<string[]> {
   const existing = new Set(await forge.listLabels())
   const created: string[] = []
-  for (const label of QUEUE_LABELS) {
+  for (const label of labels) {
     if (existing.has(label.name)) continue
     await forge.createLabel(label.name, label.description)
     existing.add(label.name)

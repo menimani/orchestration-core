@@ -15,8 +15,8 @@ Changed paths:
 | Touched | Run | From |
 |---------|-----|------|
 | Any source or documentation | `node checks/english-only.ts` | repository root |
-| `src/`, `tests/`, `checks/`, `orchestration/` | `npm run typecheck`, `npm test` | repository root |
-| `templates/`, `orchestration/templates/` | `npm test` | repository root |
+| `src/`, `tests/`, `checks/`, `scripts/` | `npm run typecheck`, `npm test` | repository root |
+| `templates/` | `npm test` | repository root |
 | `SPEC.md` | `npm test` | repository root |
 | `.github/workflows/` | nothing local — the run itself is the check | — |
 
