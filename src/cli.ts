@@ -228,13 +228,7 @@ async function approveLoopStart(
   approvedMode: string | undefined,
 ): Promise<boolean> {
   const resolvedMode = queueMode(config)
-  if (process.stdin.isTTY !== true) {
-    if (approvedMode === undefined) {
-      console.error(
-        `Refusing non-interactive start: pass --approve-mode ${resolvedMode} to approve the resolved queue mode.`,
-      )
-      return false
-    }
+  if (approvedMode !== undefined) {
     if (approvedMode !== resolvedMode) {
       console.error(
         `Refusing start: approved queue mode '${approvedMode}' does not match resolved queue mode '${resolvedMode}'.`,
@@ -242,6 +236,12 @@ async function approveLoopStart(
       return false
     }
     return true
+  }
+  if (process.stdin.isTTY !== true) {
+    console.error(
+      `Refusing non-interactive start: pass --approve-mode ${resolvedMode} to approve the resolved queue mode.`,
+    )
+    return false
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
