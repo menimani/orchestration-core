@@ -31,6 +31,21 @@ function fixture(): { repository: string; installedPackage: string } {
   return { repository, installedPackage }
 }
 
+/**
+ * A fleet beside the repository it improves, with the package inside the fleet as the
+ * fleet's own checkout of it. The adapter's type import is relative, so the package must
+ * share the fleet's volume, which a CI runner's checkout drive need not.
+ */
+function fleetFixture(): { repository: string; fleet: string; installedPackage: string } {
+  const repository = mkdtempSync(join(tmpdir(), 'orchestration-init-target-'))
+  const fleet = mkdtempSync(join(tmpdir(), 'orchestration-init-fleet-'))
+  repositories.push(repository, fleet)
+  git(repository, ['init', '--initial-branch=main'])
+  const installedPackage = join(fleet, 'core')
+  cpSync(join(packageRoot, 'scaffold'), join(installedPackage, 'scaffold'), { recursive: true })
+  return { repository, fleet, installedPackage }
+}
+
 afterEach(() => {
   for (const repository of repositories.splice(0)) {
     rmSync(repository, { recursive: true, force: true })
@@ -65,10 +80,7 @@ describe('repository initialization', () => {
   })
 
   it('writes a fleet project into the fleet and leaves its repository untouched', async () => {
-    const repository = mkdtempSync(join(tmpdir(), 'orchestration-init-target-'))
-    const fleet = mkdtempSync(join(tmpdir(), 'orchestration-init-fleet-'))
-    repositories.push(repository, fleet)
-    git(repository, ['init', '--initial-branch=main'])
+    const { repository, fleet, installedPackage } = fleetFixture()
     const forge = makeFakeForge()
     const reports: string[] = []
     const paths = fleetPaths(
@@ -76,7 +88,7 @@ describe('repository initialization', () => {
     )
 
     const result = await initializeRepository(paths, forge, 'example', {
-      packageRoot,
+      packageRoot: installedPackage,
       report: (line) => reports.push(line),
     })
 
@@ -93,10 +105,7 @@ describe('repository initialization', () => {
   })
 
   it('creates a fleet queue\'s labels and the project scope label in the queue repository', async () => {
-    const repository = mkdtempSync(join(tmpdir(), 'orchestration-init-target-'))
-    const fleet = mkdtempSync(join(tmpdir(), 'orchestration-init-fleet-'))
-    repositories.push(repository, fleet)
-    git(repository, ['init', '--initial-branch=main'])
+    const { repository, fleet, installedPackage } = fleetFixture()
     const queue = makeFakeForge()
     const reports: string[] = []
     const paths = fleetPaths({
@@ -104,7 +113,7 @@ describe('repository initialization', () => {
     }, repository, false)
 
     const result = await initializeRepository(paths, queue, 'example', {
-      packageRoot,
+      packageRoot: installedPackage,
       report: (line) => reports.push(line),
     })
 
