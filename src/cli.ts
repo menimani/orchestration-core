@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync,
+  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync,
   statSync, writeFileSync,
 } from 'node:fs'
 import { join, relative, resolve, toNamespacedPath } from 'node:path'
@@ -474,6 +474,17 @@ const cmdPreCommit: Command = async (paths, args) => {
   if (args.length !== 0) {
     console.error('Usage: pre-commit')
     return 1
+  }
+  // A repository a fleet improves from another checkout holds no adapter of its own, and
+  // neither does this one; the branch guard still applies, and the skip is said aloud.
+  const adapterDirectory = join(paths.projectRoot, 'project')
+  const hasAdapter = (process.env['PROJECT_ADAPTER'] ?? '') !== ''
+    || (existsSync(adapterDirectory)
+      && readdirSync(adapterDirectory).some((name) => /^project-.+\.ts$/.test(name)))
+  if (!hasAdapter) {
+    const accepted = branchAcceptsCommits(paths.repoRoot)
+    if (accepted) console.log('SKIP: staged-path checks; this repository has no project adapter')
+    return accepted ? 0 : 1
   }
   const project = await loadProject(paths.projectRoot)
   const ok = branchAcceptsCommits(paths.repoRoot)

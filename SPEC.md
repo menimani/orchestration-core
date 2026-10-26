@@ -666,7 +666,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     adapter and nothing else. The core owns the commit-message hook and resolves the
     default-branch guard from the tracking remote's advertised HEAD, failing closed when
     it cannot; its pre-commit hook loads the adapter's `preCommitChecks` instead of
-    embedding repository branch names or a repository gate in shell.
+    embedding repository branch names or a repository gate in shell. A repository with no
+    project adapter of its own, such as one a fleet improves from another checkout, keeps
+    the branch guard and prints `SKIP: staged-path checks; this repository has no project
+    adapter` instead of failing on the missing adapter.
 
     A consumer imports the core with one deliberate `git subtree add`, then uses `init`
     as the single setup and repair command. Init generates its adapter from the same
