@@ -1308,7 +1308,7 @@ export function createLoop(deps: LoopDeps) {
       event('WARN', `could not resolve a valid default branch for ${remote}`)
       return false
     }
-    const acceptedLimitsFile = join(paths.root, 'accepted-limits.md')
+    const acceptedLimitsFile = join(paths.projectRoot, 'accepted-limits.md')
     const acceptedLimits = existsSync(acceptedLimitsFile)
       ? readFileSync(acceptedLimitsFile, 'utf8').trim() || '(none)'
       : '(none)'
@@ -1320,7 +1320,7 @@ export function createLoop(deps: LoopDeps) {
       ACCEPTED_LIMITS: frameUntrustedText(acceptedLimits),
       ...reviewScopeTemplateValues(
         paths.repoRoot,
-        config.integrationBranch === ''
+        config.integrationBranch === '' || paths.fleet !== undefined
           ? PACKAGE_ROOT
           : join(paths.repoRoot, relative(dirname(paths.root), PACKAGE_ROOT)),
       ),

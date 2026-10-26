@@ -190,7 +190,8 @@ export async function updateCoreBeforeCycle(
   if (!config.coreAutoUpdate) return 'continue'
 
   const stateRepoRoot = dirname(paths.root)
-  const packageRoot = runtime.packageRoot ?? (config.integrationBranch === ''
+  // A fleet runs the package from its own checkout, never from inside the target's.
+  const packageRoot = runtime.packageRoot ?? (config.integrationBranch === '' || paths.fleet !== undefined
     ? PACKAGE_ROOT
     : join(paths.repoRoot, relative(stateRepoRoot, PACKAGE_ROOT)))
   const prefix = packageSubtreePrefix(paths.repoRoot, packageRoot)

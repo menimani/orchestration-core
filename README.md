@@ -278,6 +278,26 @@ running state, run branch, queued count, and in-flight count. With zero or one e
 repository, it retains the existing detailed single-repository output. Repository paths
 are supplied per invocation; the core keeps no repository registry or checkout inventory.
 
+### Running from a fleet
+
+A fleet is a separate checkout that carries what each target repository would otherwise
+hold under `orchestration/`, so the repositories being improved hold no orchestration
+files at all:
+
+```
+fleet/
+  fleet.json              ← tracked: { "projects": { "<name>": { "repository": "owner/repo" } } }
+  fleet.local.json        ← untracked: { "projects": { "<name>": { "path": "../<checkout>" } } }
+  projects/<name>/        ← the adapter, templates, accepted-limits.md, config.json,
+                            in the same layout orchestration/ uses
+  state/<name>/           ← untracked: tasks, worktrees, status, logs, queue
+```
+
+Select a project with `--project <name>`; `--fleet <dir>` names the fleet when the
+working directory is not inside it. `loop-status --fleet <dir>` without a project prints
+one line per declared project. `init` and `verify-setup` for a fleet project write and
+check only the fleet: the target repository's hooks and labels are left alone.
+
 If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
 subtree installation). The command requires exactly one positive PR number, optionally

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { loadProject, renderProjectAdapter } from '../src/adapters/project.ts'
 import { initializeRepository } from '../src/initialize.ts'
 import { QUEUE_LABELS } from '../src/issueQueue.ts'
-import { orchPaths } from '../src/paths.ts'
+import { fleetPaths, orchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
 const packageRoot = resolve(import.meta.dirname, '..')
@@ -62,6 +62,32 @@ describe('repository initialization', () => {
     expect(reports).toContain('EXISTS: label loop:finding')
     expect(reports).toContain('CREATED: label loop:ready')
     expect(reports).toContain('PASS: core.hooksPath is orchestration/ts/.githooks')
+  })
+
+  it('writes a fleet project into the fleet and leaves its repository untouched', async () => {
+    const repository = mkdtempSync(join(tmpdir(), 'orchestration-init-target-'))
+    const fleet = mkdtempSync(join(tmpdir(), 'orchestration-init-fleet-'))
+    repositories.push(repository, fleet)
+    git(repository, ['init', '--initial-branch=main'])
+    const forge = makeFakeForge()
+    const reports: string[] = []
+    const paths = fleetPaths({ dir: fleet, project: 'example' }, repository, false)
+
+    const result = await initializeRepository(paths, forge, 'example', {
+      packageRoot,
+      report: (line) => reports.push(line),
+    })
+
+    expect(result.ok).toBe(true)
+    await expect(loadProject(join(fleet, 'projects', 'example'), {})).resolves.toMatchObject({
+      name: 'example',
+    })
+    expect(existsSync(join(fleet, 'projects', 'example', 'templates', 'scan-template.md'))).toBe(true)
+    expect(existsSync(join(repository, 'orchestration'))).toBe(false)
+    expect(() => git(repository, ['config', '--local', '--get', 'core.hooksPath'])).toThrow()
+    expect(forge.labels).toEqual(new Set())
+    expect(reports).toContain('SKIP: core.hooksPath; a fleet project leaves its repository\'s hooks unchanged')
+    expect(reports).toContain('SKIP: loop labels; a fleet project files no issues in its repository')
   })
 
   it('leaves contract-complete project files unchanged when repaired', async () => {

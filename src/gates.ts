@@ -13,5 +13,5 @@ export function pitfallsFileForDesc(paths: OrchPaths, description: string): stri
   const name = description.startsWith('[TEST]') ? 'tests'
     : description.startsWith('[DOCS]') ? 'docs'
       : 'code'
-  return join(paths.root, 'templates', 'pitfalls', `${name}.md`)
+  return join(paths.projectRoot, 'templates', 'pitfalls', `${name}.md`)
 }
