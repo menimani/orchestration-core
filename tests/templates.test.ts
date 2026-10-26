@@ -13,7 +13,7 @@ let paths: OrchPaths
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'orch-templates-'))
-  paths = { root: join(root, 'orchestration') } as OrchPaths
+  paths = { root: join(root, 'orchestration'), projectRoot: join(root, 'orchestration') } as OrchPaths
 })
 
 afterEach(() => {

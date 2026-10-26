@@ -52,41 +52,92 @@ function shellPathArgument(path: string): string {
 
 /** Render a package command that can be copied and run from any working directory. */
 export function absolutePackageScriptCommand(
-  repoRoot: string,
+  location: string | readonly string[],
   script: string,
   packageRoot = PACKAGE_ROOT,
 ): string {
   const command = `npm run -C ${shellPathArgument(packageRoot)} ${script}`
-  return `${command} -- --repo ${shellPathArgument(repoRoot)}`
+  const args = typeof location === 'string' ? ['--repo', location] : location
+  const rendered = args.map((arg) => arg.startsWith('--') ? arg : shellPathArgument(arg))
+  return `${command} -- ${rendered.join(' ')}`
+}
+
+/** A project selected from a fleet checkout rather than from inside its repository. */
+export interface FleetLocation {
+  /** Absolute path of the fleet checkout holding fleet.json. */
+  dir: string
+  /** The project name keyed in fleet.json. */
+  project: string
 }
 
 export interface OrchPaths {
+  /** Runtime state: tasks, worktrees, status, logs and queue live under it. */
   root: string
+  /** Project assets: the adapter, templates, accepted limits and config.json. */
+  projectRoot: string
   repoRoot: string
   tasksDir: string
   worktreesDir: string
   statusDir: string
   logsDir: string
   queueDir: string
+  /** Set when the project was selected from a fleet; absent in the in-repository layout. */
+  fleet?: FleetLocation
 }
 
-export function orchPaths(repoRoot: string, createDirectories = true): OrchPaths {
-  const root = join(repoRoot, 'orchestration')
-  const paths: OrchPaths = {
-    root,
-    repoRoot,
+function stateLayout(root: string): Pick<
+  OrchPaths, 'tasksDir' | 'worktreesDir' | 'statusDir' | 'logsDir' | 'queueDir'
+> {
+  return {
     tasksDir: join(root, 'tasks'),
     worktreesDir: join(root, 'worktrees'),
     statusDir: join(root, 'status'),
     logsDir: join(root, 'logs'),
     queueDir: join(root, 'queue'),
   }
-  if (createDirectories) {
-    for (const dir of [
-      paths.tasksDir, paths.worktreesDir, paths.statusDir, paths.logsDir, paths.queueDir,
-    ]) mkdirSync(dir, { recursive: true })
-  }
+}
+
+export function createOrchDirectories(paths: OrchPaths): void {
+  for (const dir of [
+    paths.tasksDir, paths.worktreesDir, paths.statusDir, paths.logsDir, paths.queueDir,
+  ]) mkdirSync(dir, { recursive: true })
+}
+
+/** The in-repository layout: state and project assets share <repo>/orchestration. */
+export function orchPaths(repoRoot: string, createDirectories = true): OrchPaths {
+  const root = join(repoRoot, 'orchestration')
+  const paths: OrchPaths = { root, projectRoot: root, repoRoot, ...stateLayout(root) }
+  if (createDirectories) createOrchDirectories(paths)
   return paths
+}
+
+/**
+ * The fleet layout: the target repository holds no orchestration files. Project assets
+ * live in <fleet>/projects/<name> and runtime state in <fleet>/state/<name>, so nothing
+ * the loop writes lands in the checkout it improves.
+ */
+export function fleetPaths(
+  location: FleetLocation,
+  repoRoot: string,
+  createDirectories = true,
+): OrchPaths {
+  const root = join(location.dir, 'state', location.project)
+  const paths: OrchPaths = {
+    root,
+    projectRoot: join(location.dir, 'projects', location.project),
+    repoRoot,
+    ...stateLayout(root),
+    fleet: { ...location },
+  }
+  if (createDirectories) createOrchDirectories(paths)
+  return paths
+}
+
+/** The CLI arguments that select the same repository again from any working directory. */
+export function locationArgs(paths: OrchPaths): string[] {
+  return paths.fleet === undefined
+    ? ['--repo', paths.repoRoot]
+    : ['--fleet', paths.fleet.dir, '--project', paths.fleet.project]
 }
 
 export function statusFile(paths: OrchPaths, taskId: string): string {

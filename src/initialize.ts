@@ -73,25 +73,16 @@ export async function initializeRepository(
   const projectName = projectSlug(requestedName ?? basename(paths.repoRoot))
   let ok = true
 
-  const projectDirectory = join(paths.root, 'project')
+  const projectDirectory = join(paths.projectRoot, 'project')
   const typeImport = relativeImport(
     projectDirectory,
     join(packageRoot, 'src', 'adapters', 'project.ts'),
   )
-  const hooksDirectory = join(packageRoot, '.githooks')
-  const hooksPath = relative(paths.repoRoot, hooksDirectory).replaceAll('\\', '/') || '.'
-  if (isAbsolute(hooksPath)) {
-    throw new Error('The orchestration package and repository must be on the same filesystem volume.')
-  }
-  if (hooksPath === '..' || hooksPath.startsWith('../')) {
-    throw new Error('The orchestration package must be inside the repository before init runs.')
-  }
-  if (!existsSync(join(hooksDirectory, 'commit-msg'))
-    || !existsSync(join(hooksDirectory, 'pre-commit'))) {
-    throw new Error(`Core-owned hooks are missing from ${hooksDirectory}.`)
-  }
+  // A fleet project's repository knows nothing of the orchestration, so its hooks stay
+  // its own and nothing here is configured in it.
+  const hooksPath = paths.fleet === undefined ? coreHooksPath(paths, packageRoot) : undefined
 
-  mkdirSync(paths.root, { recursive: true })
+  mkdirSync(paths.projectRoot, { recursive: true })
   mkdirSync(projectDirectory, { recursive: true })
   const existingAdapters = readdirSync(projectDirectory, { withFileTypes: true })
     .filter((entry) => entry.isFile() && /^project-.+\.ts$/.test(entry.name))
@@ -128,7 +119,7 @@ export async function initializeRepository(
   const scaffoldRoot = join(packageRoot, 'scaffold')
   for (const relativePath of SCAFFOLD_FILES) {
     const source = join(scaffoldRoot, relativePath)
-    const destination = join(paths.root, relativePath)
+    const destination = join(paths.projectRoot, relativePath)
     if (existsSync(destination)) {
       report(`EXISTS: ${destination} (left unchanged)`)
       continue
@@ -138,6 +129,46 @@ export async function initializeRepository(
     report(`CREATED: ${destination}`)
   }
 
+  if (hooksPath === undefined) {
+    report('SKIP: core.hooksPath; a fleet project leaves its repository\'s hooks unchanged')
+  } else if (!configureCoreHooks(git, hooksPath, report)) {
+    ok = false
+  }
+
+  if (paths.fleet !== undefined) {
+    report('SKIP: loop labels; a fleet project files no issues in its repository')
+  } else {
+    const createdLabels = new Set(await ensureQueueLabels(forge))
+    for (const label of QUEUE_LABELS) {
+      report(`${createdLabels.has(label.name) ? 'CREATED' : 'EXISTS'}: label ${label.name}`)
+    }
+  }
+
+  return { ok, projectName, adapterPath }
+}
+
+function coreHooksPath(paths: OrchPaths, packageRoot: string): string {
+  const hooksDirectory = join(packageRoot, '.githooks')
+  const hooksPath = relative(paths.repoRoot, hooksDirectory).replaceAll('\\', '/') || '.'
+  if (isAbsolute(hooksPath)) {
+    throw new Error('The orchestration package and repository must be on the same filesystem volume.')
+  }
+  if (hooksPath === '..' || hooksPath.startsWith('../')) {
+    throw new Error('The orchestration package must be inside the repository before init runs.')
+  }
+  if (!existsSync(join(hooksDirectory, 'commit-msg'))
+    || !existsSync(join(hooksDirectory, 'pre-commit'))) {
+    throw new Error(`Core-owned hooks are missing from ${hooksDirectory}.`)
+  }
+  return hooksPath
+}
+
+function configureCoreHooks(
+  git: (args: string[]) => string,
+  hooksPath: string,
+  report: (line: string) => void,
+): boolean {
+  let ok = true
   const configuredHooksPath = currentGitConfig(git, 'core.hooksPath')
   if (configuredHooksPath === '') {
     git(['config', '--local', 'core.hooksPath', hooksPath])
@@ -155,11 +186,5 @@ export async function initializeRepository(
     report(`FAIL: core.hooksPath is ${verifiedHooksPath || '(unset)'}; expected ${hooksPath}`)
     ok = false
   }
-
-  const createdLabels = new Set(await ensureQueueLabels(forge))
-  for (const label of QUEUE_LABELS) {
-    report(`${createdLabels.has(label.name) ? 'CREATED' : 'EXISTS'}: label ${label.name}`)
-  }
-
-  return { ok, projectName, adapterPath }
+  return ok
 }

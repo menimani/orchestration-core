@@ -110,14 +110,14 @@ export async function verifyRepositorySetup(
   try {
     const env = options.env ?? process.env
     if (env['PROJECT_ADAPTER'] !== undefined && env['PROJECT_ADAPTER'] !== '') {
-      project = await loadProject(paths.root, env)
+      project = await loadProject(paths.projectRoot, env)
       report(`PASS: loadProject selected adapter '${project.name}' with PROJECT_ADAPTER`)
     } else if (env['PROJECT'] !== undefined && env['PROJECT'] !== '') {
-      project = await loadProject(paths.root, env)
+      project = await loadProject(paths.projectRoot, env)
       report(`PASS: loadProject selected adapter '${project.name}' with PROJECT`)
     } else {
-      const discovered = await loadProject(paths.root, {})
-      project = await loadProject(paths.root, { PROJECT: discovered.name })
+      const discovered = await loadProject(paths.projectRoot, {})
+      project = await loadProject(paths.projectRoot, { PROJECT: discovered.name })
       report(`PASS: loadProject discovered adapter '${project.name}' by name`)
     }
   } catch (error) {
@@ -165,6 +165,12 @@ export async function verifyRepositorySetup(
   } catch (error) {
     report(`FAIL: current branch has no pushable upstream; ${(error as Error).message.split(/\r?\n/, 1)[0]}`)
     ok = false
+  }
+
+  if (paths.fleet !== undefined) {
+    report('SKIP: core.hooksPath; a fleet project leaves its repository\'s hooks unchanged')
+    report('SKIP: loop labels; a fleet project files no issues in its repository')
+    return ok
   }
 
   const expectedHooks = relative(paths.repoRoot, join(packageRoot, '.githooks')).replaceAll('\\', '/') || '.'

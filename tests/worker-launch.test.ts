@@ -57,6 +57,7 @@ interface LaunchOutcome {
 function runProductionLaunchProbe(
   daemonStatus: number,
   spawnError = false,
+  fleet?: string,
 ): { probe: LaunchProbe, outcome: LaunchOutcome } {
   const preload = join(tempRoot, `worker-spawn-probe-${daemonStatus}-${spawnError}.cjs`)
   const harness = join(tempRoot, `worker-launch-harness-${daemonStatus}-${spawnError}.ts`)
@@ -92,9 +93,11 @@ function runProductionLaunchProbe(
   ].join('\n'))
   writeFileSync(harness, [
     `import { runWorkerCommand } from ${JSON.stringify(WORKER_MODULE)}`,
-    `import { orchPaths } from ${JSON.stringify(PATHS_MODULE)}`,
+    `import { fleetPaths, orchPaths } from ${JSON.stringify(PATHS_MODULE)}`,
     "import { writeFileSync } from 'node:fs'",
-    `const paths = orchPaths(${JSON.stringify(worker)})`,
+    fleet === undefined
+      ? `const paths = orchPaths(${JSON.stringify(worker)})`
+      : `const paths = fleetPaths({ dir: ${JSON.stringify(fleet)}, project: 'example' }, ${JSON.stringify(worker)})`,
     'try {',
     "  const status = await runWorkerCommand(paths, 'origin/main')",
     '  writeFileSync(process.env.ORCH_WORKER_OUTCOME, JSON.stringify({ status }))',
@@ -253,6 +256,20 @@ describe('worker daemon subprocess boundary', () => {
       workerMode: 'true',
       parentSentinel: 'preserved',
     })
+  })
+
+  it('launches a fleet project from the fleet package and names the project again', () => {
+    const fleet = join(tempRoot, 'fleet')
+
+    const { probe, outcome } = runProductionLaunchProbe(0, false, fleet)
+
+    expect(outcome).toEqual({ status: 0 })
+    expect(resolvedPath(probe.args[0] ?? ''))
+      .toBe(resolvedPath(join(import.meta.dirname, '..', 'src', 'cli.ts')))
+    expect(probe.args.slice(1)).toEqual([
+      'loop', '--approve-mode', 'issue', '--daemon', '--fleet', fleet, '--project', 'example',
+    ])
+    expect(resolvedPath(probe.cwd)).toBe(resolvedPath(worker))
   })
 
   it('surfaces a daemon spawn error from the production handoff', () => {

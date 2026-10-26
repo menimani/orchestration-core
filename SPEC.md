@@ -67,6 +67,25 @@ from or equivalent to `orchestration/tests/*.sh`.
   running state, recorded run branch, queued count, and in-flight count. Its existing
   detailed output is unchanged for a single repository. Paths are supplied per command;
   the core stores no repository registry, configuration inventory, or checkout list.
+- A fleet is a separate checkout that holds what a target repository would otherwise
+  carry under `orchestration/`, so the target repository holds no orchestration files.
+  Its tracked `fleet.json` declares each project as a lowercase slug with the forge
+  `owner/repository` its branches go to, and its untracked `fleet.local.json` maps each
+  project to this machine's checkout; a relative path resolves from the fleet. Every
+  command accepts `--fleet <dir>` and `--project <name>`; without `--fleet`, the nearest
+  directory at or above the working directory that holds `fleet.json` is the fleet. A
+  fleet project keeps its adapter, templates, `accepted-limits.md`, and `config.json`
+  under `projects/<name>/`, in the layout `orchestration/` uses, and its tasks,
+  worktrees, status, logs, and queue under `state/<name>/`. Combining `--repo` with
+  either fleet option is an error, as is an undeclared project, a missing local mapping,
+  or a mapped path that is not a Git repository. `loop-status` with a fleet and no
+  project prints one line per declared project in the multi-repository format; a project
+  this machine cannot resolve prints the reason instead and makes the command exit
+  non-zero. Every other command requires `--project`. Commands the CLI prints for a fleet
+  project, and the daemon and worker launches it makes, name the fleet and project again
+  instead of the repository. `init` and `verify-setup` for a fleet project write and
+  check only the fleet: they configure no hooks and create no labels in the target
+  repository, and report both as skipped.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same

@@ -4,7 +4,7 @@ import {
   appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync,
   statSync, writeFileSync,
 } from 'node:fs'
-import { join, relative, toNamespacedPath } from 'node:path'
+import { join, relative, resolve, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge } from './adapters/forge.ts'
 import { loadRunner, type ReasoningEffort, type Runner } from './adapters/runner.ts'
@@ -34,9 +34,10 @@ import {
 } from './merge.ts'
 import { deploy } from './deploy.ts'
 import {
-  absolutePackageScriptCommand, isScanTaskId, logFile, orchPaths, packageFile,
-  type OrchPaths,
+  absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isScanTaskId, locationArgs,
+  logFile, orchPaths, packageFile, type OrchPaths,
 } from './paths.ts'
+import { findFleetDir, FLEET_FILE, readFleet, resolveFleetProject } from './fleet.ts'
 import { pruneTasks } from './prune.ts'
 import { branchAcceptsCommits, runPreCommitChecks } from './preCommit.ts'
 import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
@@ -78,6 +79,21 @@ async function loadProject(pathsRoot: string) {
   return projectModule.loadProject(pathsRoot)
 }
 
+/** A fleet project's paths, rooted at this machine's checkout of its repository. */
+function fleetProjectPaths(fleetDir: string, project: string, createDirectories: boolean): OrchPaths {
+  const resolved = resolveFleetProject(fleetDir, project)
+  let root: string
+  try {
+    root = execFileSync('git', ['-C', resolved.checkout, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim()
+  } catch {
+    throw new Error(`Project '${project}' checkout '${resolved.checkout}' is not a git repository.`)
+  }
+  return fleetPaths(resolved.location, root, createDirectories)
+}
+
 function repoRoot(repository?: string): string {
   const args = repository === undefined
     ? ['rev-parse', '--show-toplevel']
@@ -112,7 +128,7 @@ function repoRoot(repository?: string): string {
 }
 
 function loadRepositoryConfig(paths: OrchPaths, env: NodeJS.ProcessEnv = process.env): LoopConfig {
-  return loadConfig(env, { filePath: join(paths.root, 'config.json') })
+  return loadConfig(env, { filePath: join(paths.projectRoot, 'config.json') })
 }
 
 interface RecoveryLockOwner {
@@ -433,7 +449,7 @@ const cmdPreCommit: Command = async (paths, args) => {
     console.error('Usage: pre-commit')
     return 1
   }
-  const project = await loadProject(paths.root)
+  const project = await loadProject(paths.projectRoot)
   const ok = branchAcceptsCommits(paths.repoRoot)
     && runPreCommitChecks(paths.repoRoot, project)
   return ok ? 0 : 1
@@ -592,7 +608,7 @@ const cmdStart: Command = async (paths, args) => {
     }
   }
   const runner = await loadRunner(config.runner, { env: process.env, repoRoot: paths.repoRoot })
-  const project = await loadProject(paths.root)
+  const project = await loadProject(paths.projectRoot)
   const result = await startTask(paths, runner, taskId, {
     effort,
     model: model === '' ? undefined : model,
@@ -650,7 +666,7 @@ const cmdDeploy: Command = async (paths, args) => {
     return 1
   }
   const config = loadRepositoryConfig(paths)
-  const project = await loadProject(paths.root)
+  const project = await loadProject(paths.projectRoot)
   if (project.deployment === undefined) {
     console.error(`Project '${project.name}' does not define a deployment.`)
     return 1
@@ -706,7 +722,7 @@ const cmdMerge: Command = async (paths, args) => {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
       skipAutoTest: config.skipAutoTest,
-      project: await loadProject(paths.root),
+      project: await loadProject(paths.projectRoot),
       closesIssues: linkedIssues,
       forge,
       onMergeStart: () => console.log(`Merging ${taskId}`),
@@ -875,16 +891,31 @@ const cmdLoopStatus: Command = async (paths) => {
   return 0
 }
 
+function printLoopStatusLine(label: string, paths: OrchPaths): void {
+  const summary = loopStatusSummary(paths)
+  console.log(
+    `${label}: loop=${summary.running ? 'running' : 'not running'}; `
+    + `run branch=${summary.runBranch}; queued=${summary.queued}; in flight=${summary.inFlight}`,
+  )
+}
+
 async function cmdMultiLoopStatus(repositoryRoots: string[]): Promise<number> {
-  for (const root of repositoryRoots) {
-    const paths = orchPaths(root)
-    const summary = loopStatusSummary(paths)
-    console.log(
-      `${root}: loop=${summary.running ? 'running' : 'not running'}; `
-      + `run branch=${summary.runBranch}; queued=${summary.queued}; in flight=${summary.inFlight}`,
-    )
-  }
+  for (const root of repositoryRoots) printLoopStatusLine(root, orchPaths(root))
   return 0
+}
+
+/** One line per fleet project; a project this machine cannot resolve says why instead. */
+async function cmdFleetLoopStatus(fleetDir: string): Promise<number> {
+  let exitCode = 0
+  for (const project of Object.keys(readFleet(fleetDir).projects)) {
+    try {
+      printLoopStatusLine(project, fleetProjectPaths(fleetDir, project, true))
+    } catch (error) {
+      console.log(`${project}: unavailable; ${(error as Error).message}`)
+      exitCode = 1
+    }
+  }
+  return exitCode
 }
 
 const cmdStop: Command = async (paths) => {
@@ -927,7 +958,7 @@ function commandConfigValue(name: string, raw: string): unknown {
 }
 
 const cmdConfig: Command = async (paths, args) => {
-  const filePath = join(paths.root, 'config.json')
+  const filePath = join(paths.projectRoot, 'config.json')
   const action = args[0] ?? 'list'
   const values = readConfigFileForCommand(filePath)
   if (action === 'list' && args.length <= 1) {
@@ -999,7 +1030,7 @@ const cmdLoop: Command = async (paths, args) => {
   let config: LoopConfig
   try {
     config = loadConfig(process.env, {
-      filePath: join(paths.root, 'config.json'),
+      filePath: join(paths.projectRoot, 'config.json'),
       onEvent: (event) => handleConfigEvent(event),
     })
     if (markerOutput === undefined) {
@@ -1018,7 +1049,7 @@ const cmdLoop: Command = async (paths, args) => {
   }
   // The command registry resolves paths without creating them so a refused start is
   // side-effect free. Approval is the boundary after which the loop may prepare state.
-  orchPaths(paths.repoRoot)
+  createOrchDirectories(paths)
 
   if (daemonMode) {
     // run-branch.txt is updated by the child after this descriptor is opened. Use the
@@ -1039,7 +1070,7 @@ const cmdLoop: Command = async (paths, args) => {
     )
     const daemonArgs = [
       packageFile('src', 'cli.ts'), 'loop', '--marker-output', markerLog,
-      '--approve-mode', queueMode(config), '--repo', paths.repoRoot,
+      '--approve-mode', queueMode(config), ...locationArgs(paths),
     ]
     // The daemon must work on the repository this launcher was pointed at. Starting it
     // in the package directory instead made it resolve its own checkout as the
@@ -1064,8 +1095,8 @@ const cmdLoop: Command = async (paths, args) => {
     daemon.release()
     console.log(`Started the loop in the background (PID=${daemonPid})`)
     console.log(`Log: ${loopLog}`)
-    console.log(`Check: ${absolutePackageScriptCommand(paths.repoRoot, 'loop-status')}`)
-    console.log(`Stop: ${absolutePackageScriptCommand(paths.repoRoot, 'stop')}`)
+    console.log(`Check: ${absolutePackageScriptCommand(locationArgs(paths), 'loop-status')}`)
+    console.log(`Stop: ${absolutePackageScriptCommand(locationArgs(paths), 'stop')}`)
     return 0
   }
   const startupResultFile = process.env[LOOP_STARTUP_RESULT_FILE_ENV]
@@ -1317,9 +1348,11 @@ async function runLoopDaemon(
     )
     const runner = await loadRunner(config.runner, { env: process.env, repoRoot: loopPaths.repoRoot })
     const projectModule = await import('./adapters/project.ts')
-    const projectRoot = topology.integrationBranch === undefined
-      ? paths.root
-      : join(loopPaths.repoRoot, relative(paths.repoRoot, paths.root))
+    // A fleet keeps project assets outside every checkout, so the integration worktree
+    // has no copy of them to read instead.
+    const projectRoot = topology.integrationBranch === undefined || paths.fleet !== undefined
+      ? paths.projectRoot
+      : join(loopPaths.repoRoot, relative(paths.repoRoot, paths.projectRoot))
     const monitoredProject = await projectModule.loadMonitoredProject(projectRoot)
     if (topology.integrationBranch !== undefined) {
       prepareIntegrationWorktree(
@@ -1500,9 +1533,19 @@ async function main(): Promise<number> {
   const rawArgs = process.argv.slice(2)
   const repositories: string[] = []
   const positional: string[] = []
+  let fleetOption: string | undefined
+  let projectOption: string | undefined
   for (let i = 0; i < rawArgs.length; i++) {
     const arg = rawArgs[i] as string
-    if (arg === '--repo') {
+    if (arg === '--fleet' || arg === '--project') {
+      const value = rawArgs[++i]
+      if (value === undefined || value === '') {
+        console.error(`ERROR: ${arg} requires a value`)
+        return 1
+      }
+      if (arg === '--fleet') fleetOption = value
+      else projectOption = value
+    } else if (arg === '--repo') {
       const value = rawArgs[++i]
       if (value === undefined || value === '') {
         console.error('ERROR: --repo requires a repository path')
@@ -1532,6 +1575,27 @@ async function main(): Promise<number> {
     return 1
   }
   try {
+    if (fleetOption !== undefined || projectOption !== undefined) {
+      if (repositories.length > 0) {
+        console.error('ERROR: --repo cannot be combined with --fleet or --project')
+        return 1
+      }
+      const fleetDir = fleetOption === undefined
+        ? findFleetDir(process.cwd())
+        : resolve(fleetOption)
+      if (fleetDir === undefined) {
+        console.error(`ERROR: no ${FLEET_FILE} found at or above ${process.cwd()}; pass --fleet <dir>`)
+        return 1
+      }
+      if (projectOption === undefined) {
+        if (commandName !== 'loop-status') {
+          console.error('ERROR: --fleet requires --project <name> for this command')
+          return 1
+        }
+        return await cmdFleetLoopStatus(fleetDir)
+      }
+      return await command(fleetProjectPaths(fleetDir, projectOption, commandName !== 'loop'), args)
+    }
     if (repositories.length > 1 && commandName !== 'loop-status') {
       console.error('ERROR: only loop-status accepts more than one --repo option')
       return 1

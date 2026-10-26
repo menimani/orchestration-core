@@ -4,15 +4,17 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { capturedSpawnOptions } from './childProcess.ts'
 import { currentBranchTrackingRemote, remoteForBaseRef } from './gitRemote.ts'
-import type { OrchPaths } from './paths.ts'
+import { locationArgs, packageFile, type OrchPaths } from './paths.ts'
 
 /**
  * Where this package sits inside the checkout being launched. Both of these read the
  * checkout's own code rather than the code doing the checking: the point of the
  * self-check is to judge what the worker is about to run. A consumer keeps the package
- * under orchestration/ts; the repository that owns it keeps it at the root.
+ * under orchestration/ts; the repository that owns it keeps it at the root. A fleet
+ * project's checkout holds no package at all, so the fleet's own copy is what runs.
  */
 function checkoutPackageFile(paths: OrchPaths, ...segments: string[]): string {
+  if (paths.fleet !== undefined) return packageFile(...segments)
   const nested = join(paths.root, 'ts', ...segments)
   return existsSync(nested) ? nested : join(paths.repoRoot, ...segments)
 }
@@ -129,6 +131,7 @@ function launchDaemon(paths: OrchPaths, env: NodeJS.ProcessEnv): number {
     [
       checkoutPackageFile(paths, 'src', 'cli.ts'), 'loop',
       '--approve-mode', 'issue', '--daemon',
+      ...(paths.fleet === undefined ? [] : locationArgs(paths)),
     ],
     {
       cwd: paths.repoRoot,

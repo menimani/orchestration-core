@@ -315,6 +315,83 @@ describe('repository selection', () => {
   })
 })
 
+describe('fleet project selection', () => {
+  function fleetFixture(): string {
+    const fleet = realpathSync.native(mkdtempSync(join(tmpdir(), 'orch-cli-fleet-')))
+    extraRoots.push(fleet)
+    writeFileSync(join(fleet, 'fleet.json'), JSON.stringify({
+      projects: {
+        first: { repository: 'owner/first' },
+        second: { repository: 'owner/second' },
+      },
+    }))
+    writeFileSync(join(fleet, 'fleet.local.json'), JSON.stringify({
+      projects: {
+        first: { path: repoRoot },
+        second: { path: join(fleet, 'missing-checkout') },
+      },
+    }))
+    return fleet
+  }
+
+  function runCli(args: string[]) {
+    return spawnSync(process.execPath, [CLI, ...args], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+  }
+
+  it('reports every fleet project and keeps state out of the checkout', () => {
+    const fleet = fleetFixture()
+
+    const result = runCli(['loop-status', '--fleet', fleet])
+
+    expect(result.status).toBe(1)
+    const lines = result.stdout.trim().split(/\r?\n/)
+    expect(lines[0]).toBe('first: loop=not running; run branch=none; queued=0; in flight=0')
+    expect(lines[1]).toMatch(/^second: unavailable; Project 'second' checkout '.*' is not a git repository\.$/)
+    expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
+  })
+
+  it('runs a command for one named project', () => {
+    const fleet = fleetFixture()
+
+    const result = runCli(['queue', '--fleet', fleet, '--project', 'first'])
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
+  })
+
+  it('refuses to mix a repository path with a fleet project', () => {
+    const fleet = fleetFixture()
+
+    const result = runCli(['loop-status', '--repo', repoRoot, '--fleet', fleet, '--project', 'first'])
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('--repo cannot be combined with --fleet or --project')
+  })
+
+  it('requires a project for commands other than loop-status', () => {
+    const fleet = fleetFixture()
+
+    const result = runCli(['queue', '--fleet', fleet])
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('--fleet requires --project <name> for this command')
+  })
+
+  it('names the search start when no fleet manifest is found', () => {
+    const result = runCli(['loop-status', '--project', 'first'])
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('no fleet.json found at or above')
+  })
+})
+
 describe('report-upstream arguments', () => {
   it('prints command usage for --help without loading the forge', () => {
     const result = spawnSync(process.execPath, [CLI, 'report-upstream', '--help'], {

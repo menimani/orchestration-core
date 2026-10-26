@@ -64,7 +64,7 @@ export function reviewScopeTemplateValues(
 
 /** Resolve a consumer override first, then the default shipped with the core. */
 export function templateFile(paths: OrchPaths, templateName: string): string {
-  const projectTemplate = join(paths.root, 'templates', templateName)
+  const projectTemplate = join(paths.projectRoot, 'templates', templateName)
   if (existsSync(projectTemplate)) return projectTemplate
 
   const coreTemplate = join(CORE_TEMPLATES_DIR, templateName)
