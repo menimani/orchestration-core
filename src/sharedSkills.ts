@@ -3,9 +3,11 @@ import {
   existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
   writeFileSync,
 } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import type { SharedSkillRenderOptions, SharedSkillsAdapter } from './adapters/shared-skills.ts'
+import { fleetCommandPrefix } from './paths.ts'
 
 const STATE_FILE = '.orchestration-core-sync.json'
 
@@ -389,6 +391,52 @@ function syncTarget(
     managedPaths,
     failures: [],
   }
+}
+
+/**
+ * Install the declared shared skills once per user, for every agent that reads skills
+ * from the user's home, rendered to run against the fleet. A fleet project's repository
+ * holds no orchestration files, so this is where an interactive agent finds them. The
+ * per-destination state still records what the core owns: a skill the user wrote under
+ * the same name is reported as a conflict, never overwritten.
+ */
+export function installUserSkills(
+  fleetDir: string,
+  packageRoot: string,
+  adapters: readonly SharedSkillsAdapter[],
+  home: string = homedir(),
+  os: OperatingSystem = operatingSystem,
+): SharedSkillsSyncResult {
+  const combined: SharedSkillsSyncResult = {
+    installed: [], updated: [], conflicts: [], migrationConflicts: [],
+    removedPaths: [], changedPaths: [], managedPaths: [], failures: [],
+  }
+  const commandPrefix = fleetCommandPrefix(fleetDir, packageRoot)
+  const packagePrefix = `${packageRoot.replaceAll('\\', '/')}/`
+  const destinations: string[] = []
+  for (const adapter of adapters) {
+    const destinationRoot = adapter.userDestinationRoot?.(home)
+    if (destinationRoot === undefined
+      || destinations.some((existing) => relative(existing, destinationRoot) === '')) continue
+    destinations.push(destinationRoot)
+    let result: SharedSkillsSyncResult
+    try {
+      result = syncTarget(home, packageRoot, {
+        destinationRoot,
+        legacyRoots: [],
+        renderFile: (contents, options) => adapter.renderFile(contents, {
+          ...options, commandPrefix, packagePathPrefix: packagePrefix,
+        }),
+      }, os)
+    } catch (error) {
+      combined.failures.push(error instanceof Error ? error.message : String(error))
+      continue
+    }
+    for (const key of Object.keys(combined) as (keyof SharedSkillsSyncResult)[]) {
+      combined[key].push(...result[key])
+    }
+  }
+  return combined
 }
 
 /**

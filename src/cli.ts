@@ -40,7 +40,10 @@ import {
   absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isScanTaskId,
   issueQueueIsSeparate, locationArgs, logFile, orchPaths, packageFile, type OrchPaths,
 } from './paths.ts'
-import { findFleetDir, FLEET_FILE, readFleet, resolveFleetProject } from './fleet.ts'
+import {
+  findFleetDir, FLEET_FILE, projectForDirectory, readFleet, resolveFleetProject,
+} from './fleet.ts'
+import { installUserSkills } from './sharedSkills.ts'
 import { pruneTasks } from './prune.ts'
 import { branchAcceptsCommits, runPreCommitChecks } from './preCommit.ts'
 import { runReportUpstreamCommand } from './reportUpstreamCommand.ts'
@@ -984,6 +987,39 @@ function commandConfigValue(name: string, raw: string): unknown {
 }
 
 /**
+ * Install the shared skills once per user, for Claude and Codex, rendered to run against
+ * this fleet from any of its projects' checkouts.
+ */
+async function installSkillsForFleet(fleetDir: string, args: string[]): Promise<number> {
+  if (args.length > 0) {
+    console.error(`Usage: install-skills [--fleet <dir>]; unknown: ${args.join(' ')}`)
+    return 1
+  }
+  readFleet(fleetDir)
+  const { createClaudeSharedSkills } = await import('./adapters/shared-skills-claude.ts')
+  const { createCodexRunner } = await import('./adapters/runner-codex.ts')
+  const result = installUserSkills(
+    fleetDir, packageFile(), [createClaudeSharedSkills(), createCodexRunner().sharedSkills],
+  )
+  for (const skill of result.installed) console.log(`Installed: ${skill}`)
+  for (const skill of result.updated) console.log(`Updated: ${skill}`)
+  for (const skill of result.conflicts) {
+    console.log(`Conflict: ${skill} is not managed by this package (left unchanged)`)
+  }
+  for (const failure of result.failures) console.error(`FAIL: ${failure}`)
+  return result.conflicts.length === 0 && result.failures.length === 0 ? 0 : 1
+}
+
+/** The registry entry for a project-selected call; install-skills needs only the fleet. */
+const cmdInstallSkills: Command = async (paths, args) => {
+  if (paths.fleet === undefined) {
+    console.error('ERROR: install-skills needs a fleet; pass --fleet <dir>')
+    return 1
+  }
+  return installSkillsForFleet(paths.fleet.dir, args)
+}
+
+/**
  * File a fleet project's open issues into the fleet's queue, oldest first, each once.
  * Imported issues wait under loop:triage unless --ready-trusted lets those written by
  * accounts with write access to the project become claimable at once.
@@ -1602,6 +1638,7 @@ const commands: Record<string, Command> = {
   'stop': cmdStop,
   'config': cmdConfig,
   'import-issues': cmdImportIssues,
+  'install-skills': cmdInstallSkills,
 }
 
 async function main(): Promise<number> {
@@ -1649,15 +1686,43 @@ async function main(): Promise<number> {
     console.error(`Available commands: ${Object.keys(commands).join(', ')}`)
     return 1
   }
+  // A skill installed per user names its fleet in ORCHESTRATION_FLEET and runs through
+  // `npm run -C`, which moves the working directory to the package. npm keeps the
+  // caller's directory in INIT_CWD, and that is where the project is found.
+  const environmentFleet = process.env['ORCHESTRATION_FLEET'] || undefined
+  const callerDirectory = process.env['INIT_CWD'] || process.cwd()
   try {
+    if (commandName === 'install-skills') {
+      if (repositories.length > 0 || projectOption !== undefined) {
+        console.error('ERROR: install-skills takes only --fleet <dir>')
+        return 1
+      }
+      const fleetDir = fleetOption !== undefined
+        ? resolve(fleetOption)
+        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory)
+      if (fleetDir === undefined) {
+        console.error(`ERROR: no ${FLEET_FILE} found at or above ${callerDirectory}; pass --fleet <dir>`)
+        return 1
+      }
+      return await installSkillsForFleet(fleetDir, args)
+    }
+    if (fleetOption === undefined && projectOption === undefined && repositories.length === 0
+      && environmentFleet !== undefined) {
+      const fleetDir = resolve(environmentFleet)
+      const project = projectForDirectory(fleetDir, callerDirectory)
+      // Outside every project of that fleet, the command keeps its ordinary discovery.
+      if (project !== undefined) {
+        return await command(fleetProjectPaths(fleetDir, project, commandName !== 'loop'), args)
+      }
+    }
     if (fleetOption !== undefined || projectOption !== undefined) {
       if (repositories.length > 0) {
         console.error('ERROR: --repo cannot be combined with --fleet or --project')
         return 1
       }
-      const fleetDir = fleetOption === undefined
-        ? findFleetDir(process.cwd())
-        : resolve(fleetOption)
+      const fleetDir = fleetOption !== undefined
+        ? resolve(fleetOption)
+        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(process.cwd())
       if (fleetDir === undefined) {
         console.error(`ERROR: no ${FLEET_FILE} found at or above ${process.cwd()}; pass --fleet <dir>`)
         return 1

@@ -312,6 +312,12 @@ queue, each once. Imports wait under `loop:triage` until you relabel them `loop:
 at once, and `--dry-run` shows what would be filed. When imported work merges, its merge
 commit closes the original issue in the project's repository.
 
+Shared skills such as `git-commit` and `loop-start` are installed once per user rather
+than into each repository: `install-skills --fleet <dir>` writes them to
+`~/.claude/skills` and `~/.agents/skills`. Their commands set `ORCHESTRATION_FLEET`, and
+the CLI then picks the project whose checkout you run them from, so they work in every
+project of the fleet without `--project`.
+
 If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
 subtree installation). The command requires exactly one positive PR number, optionally

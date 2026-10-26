@@ -398,6 +398,44 @@ describe('fleet project selection', () => {
     }
   })
 
+  it('finds the project from the caller\'s directory when the environment names the fleet', () => {
+    const fleet = fleetFixture()
+    const caller = join(repoRoot, 'src')
+    mkdirSync(caller)
+
+    const result = spawnSync(process.execPath, [CLI, 'queue'], {
+      cwd: fleet,
+      env: { ...CORE_ENV, ORCHESTRATION_FLEET: fleet, INIT_CWD: caller },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
+  })
+
+  it('installs the shared skills once per user for the fleet', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+
+    const result = spawnSync(process.execPath, [CLI, 'install-skills', '--fleet', fleet], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, HOME: home, USERPROFILE: home },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
+    expect(result.stdout).toContain('Installed: .agents/skills/git-commit')
+    expect(readFileSync(join(home, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toContain(`ORCHESTRATION_FLEET='${fleet.replaceAll('\\', '/')}' npm run -C `)
+  })
+
   it('names the search start when no fleet manifest is found', () => {
     const result = runCli(['loop-status', '--project', 'first'])
 

@@ -32,7 +32,8 @@
     "prune": "node src/cli.ts prune",
     "new": "node src/cli.ts new",
     "enqueue": "node src/cli.ts enqueue",
-    "import-issues": "node src/cli.ts import-issues"
+    "import-issues": "node src/cli.ts import-issues",
+    "install-skills": "node src/cli.ts install-skills"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
