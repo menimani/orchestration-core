@@ -453,6 +453,55 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
   })
 
+  it('records why the merged work exists in the merge commit body', async () => {
+    const taskId = '20260808_000000_027_user-merge-reason'
+    await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(specFile(paths, taskId), [
+      '# spec',
+      '## Requirement',
+      'Drop the duplicate retry in `src/fetch.ts`; it doubles every timeout.\n\nDetails follow.',
+      '## Commit',
+    ].join('\n\n'))
+
+    await mergeTask(paths, taskId, { taskGate: 'light', project: noCheckProject })
+
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim())
+      .toBe(`Merge ${taskId} via orchestration`)
+    expect(git(repoRoot, ['log', '-1', '--format=%b']).trim())
+      .toBe('Why: Drop the duplicate retry in `src/fetch.ts`; it doubles every timeout.')
+  })
+
+  it('withholds the details of a security requirement', async () => {
+    const taskId = '20260808_000000_028_user-security-reason'
+    await makeCompletedTask(taskId, { commit: true })
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light',
+      project: noCheckProject,
+      reasons: [
+        '[SECURITY] The token check in `src/auth.ts` accepts an empty signature',
+        '[DEPS] Bump the parser past GHSA-qwww-vcr4-c8h2',
+      ],
+    })
+
+    expect(git(repoRoot, ['log', '-1', '--format=%b']).trim())
+      .toBe('Why: security fix; details withheld.')
+  })
+
+  it('recognizes an applied merge whose reasons have changed since', async () => {
+    const taskId = '20260808_000000_029_user-edited-reason'
+    await makeCompletedTask(taskId, { commit: true })
+    git(repoRoot, [
+      'merge', '--quiet', '--no-ff', branchName(taskId),
+      '-m', `Merge ${taskId} via orchestration\n\nWhy: the requirement as it first read.`,
+    ])
+    const appliedCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, reasons: ['The requirement as edited later.'],
+    })).resolves.toEqual({ outcome: 'merged', mergeCommit: appliedCommit })
+  })
+
   it('reports manual cleanup when a merged worktree could not be removed', async () => {
     const taskId = '20260808_000000_026_user-retained-merged-worktree'
     const worktree = await makeCompletedTask(taskId, { commit: true })

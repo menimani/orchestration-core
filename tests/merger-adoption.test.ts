@@ -8,7 +8,7 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
 import {
-  issuePromotionForIssue, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_MERGE_FAILED,
+  buildIssueBody, issuePromotionForIssue, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { createLoop } from '../src/loop.ts'
@@ -160,6 +160,24 @@ describe('remote task adoption into a fleet queue', () => {
     }
     expect(logged.some((line) => line.includes('Promoted') && line.includes(`#${issueNumbers[0]}`)))
       .toBe(true)
+  })
+})
+
+describe('remote task adoption reasons', () => {
+  it('records the adopted issue\'s requirement in the merge commit body', async () => {
+    const task = pushWorkerBranch('20260809_000000_004_auto-reasoned-remote-fix')
+    const issueNumber = await forge.createIssue({
+      title: 'reasoned worker task',
+      body: buildIssueBody('[BUG] `src/list.ts` drops the last page of results', 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })
+    await forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${task.branch}\nHead commit: ${task.head}\nIssues: #${issueNumber}`)
+
+    expect(await makeLoop(stubProject).poll()).toBe('continue')
+
+    expect(git(repoRoot, ['log', '-1', '--format=%b']).trim())
+      .toBe('Why: [BUG] `src/list.ts` drops the last page of results')
   })
 })
 

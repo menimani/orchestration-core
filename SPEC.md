@@ -250,6 +250,19 @@ are not parsed by `loadConfig` and are not operator-file settings.
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
    requiring the worker to have predicted that outcome.
+8a. A task's merge commit has the subject `Merge <task-id> via orchestration`, followed by
+    the forge's closing text for each linked issue the merge may name. Its body records why
+    the work exists, as one `Why:` line per distinct requirement: the first paragraph,
+    whitespace collapsed, cut at 300 characters. A local merge reads the requirements from
+    the task's specification, framed requirements in order or else its `## Requirement`
+    section; an adopted worker branch reads them from its issues. A requirement tagged
+    `[SECURITY]` or naming a GHSA or CVE identifier contributes only
+    `Why: security fix; details withheld.`, because its text describes a weakness that
+    stays exploitable wherever the fix has not landed. A retry recognizes a merge it
+    already applied by the exact task head and the subject alone, since the requirement
+    text may have been edited in between. Task specifications ask each commit's body to
+    state the problem, why the change addresses it, and how it was verified, naming no
+    task id, issue number, or the orchestration.
 9. Before its merge gate, a completed local task branch is rebased onto the current run
    branch tip. This refresh is retained when a check fails, so the next attempt does not
    test the same stale branch again. A conflicting rebase is aborted and keeps both the

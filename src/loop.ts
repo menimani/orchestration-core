@@ -59,7 +59,7 @@ import {
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
-  missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
+  missingRequirementCompletionMarkers, parseIssueBody, publishFinding, reapStaleLeases,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
@@ -611,6 +611,11 @@ export function createLoop(deps: LoopDeps) {
               onOrchestrationDepsEvent: orchestrationDepsEvent,
               beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
               closesIssues: adoptionIssues.map((candidate) => candidate.number),
+              // The worker's spec stays on the worker; the issues hold the same requirements.
+              reasons: adoptionIssues.flatMap((candidate) => {
+                const requirement = parseIssueBody(candidate.body, candidate.number)?.requirement
+                return requirement === undefined ? [] : [requirement]
+              }),
               onMerged: persistPromotion,
             },
           )
