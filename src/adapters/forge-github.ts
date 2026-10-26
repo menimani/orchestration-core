@@ -532,6 +532,13 @@ export function createGithubForge(
       return Number(match[1])
     },
 
+    async updateIssueTitle(issueNumber: number, title: string): Promise<void> {
+      const repository = await issueQueueRepository()
+      await checkedGh(repoRoot, [
+        'issue', 'edit', String(issueNumber), '--repo', repository, '--title', title,
+      ])
+    },
+
     async createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string> {
       // One listing, filtered here: gh's --search takes search syntax, and a label whose
       // name carries a colon — which every label this loop uses does — makes it fail

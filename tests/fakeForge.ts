@@ -99,6 +99,12 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
       })
       return issueNumber
     },
+    async updateIssueTitle(issueNumber: number, title: string): Promise<void> {
+      const issue = fake.issues.get(issueNumber)
+      if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
+      issue.title = title
+      issue.updatedAt = fake.clock().toISOString()
+    },
     async createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string> {
       const labels = options.optionalLabels.filter(
         (label) => fake.repositoryLabels.get(options.repository)?.has(label) === true,
