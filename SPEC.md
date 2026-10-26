@@ -18,11 +18,12 @@ from or equivalent to `orchestration/tests/*.sh`.
 - Before a foreground loop enters its first cycle, or a background launcher spawns its
   daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
   runner models and reasoning efforts, and every setting whose resolved value differs
-  from its default. A terminal start requires an explicit `y` or `yes`; every other
-  answer refuses the start. A non-terminal start requires `--approve-mode local` or
-  `--approve-mode issue`, and the named mode must match `ISSUE_QUEUE_ENABLED`. Missing
-  or mismatched approval exits non-zero before queue, worktree, or forge access, with a
-  mismatch naming both the approved and resolved modes.
+  from its default. `--approve-mode local` or `--approve-mode issue` approves the start,
+  in a terminal or not, when the named mode matches `ISSUE_QUEUE_ENABLED`. Without it, a
+  terminal start requires an explicit `y` or `yes`, every other answer refusing the
+  start, and a non-terminal start is refused. Missing or mismatched approval exits
+  non-zero before queue, worktree, or forge access, with a mismatch naming both the
+  approved and resolved modes.
 - No `jq` dependency anywhere (this deletes the Windows-jq-CRLF bug class; the invariant
   it protected — values read from status files compare clean — still holds and is tested).
 - Core subtree updates default on. The daemon logs whether `CORE_AUTO_UPDATE` is on or

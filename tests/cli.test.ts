@@ -951,6 +951,73 @@ describe('loop daemon ownership', () => {
     }
   })
 
+  it.each([
+    ['agrees', 'local', 0],
+    ['differs', 'issue', 1],
+  ])('applies a TTY start\'s approved mode without prompting when it %s', async (_case, mode, exitCode) => {
+    const question = vi.fn(async () => 'n')
+    vi.doMock('node:readline/promises', () => ({
+      createInterface: () => ({ close: vi.fn(), question }),
+    }))
+    vi.doMock('../src/adapters/runner.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/adapters/runner.ts')>(),
+      loadRunner: async () => ({ sharedSkills: fakeRunnerSharedSkills, start: vi.fn() }),
+    }))
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true })
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV, {
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_SCAN_CYCLES: '0',
+      })
+      process.exitCode = undefined
+      process.argv = [process.execPath, CLI, 'loop', '--approve-mode', mode]
+
+      await import('../src/cli.ts')
+
+      expect(process.exitCode ?? 0).toBe(exitCode)
+      expect(question).not.toHaveBeenCalled()
+      if (exitCode === 1) {
+        expect(errors).toHaveBeenCalledWith(
+          "Refusing start: approved queue mode 'issue' does not match resolved queue mode 'local'.",
+        )
+      }
+    } finally {
+      errors.mockRestore()
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      if (stdinIsTTY === undefined) delete (process.stdin as { isTTY?: boolean }).isTTY
+      else Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY)
+      vi.doUnmock('node:readline/promises')
+      vi.doUnmock('../src/adapters/runner.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
+  })
+
   it('accepts a non-interactive start when the approved mode agrees', () => {
     const result = spawnSync(
       process.execPath,

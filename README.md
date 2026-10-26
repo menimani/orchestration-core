@@ -220,11 +220,11 @@ INTEGRATION_BRANCH=feature/current-run node src/cli.ts loop --approve-mode local
 ```
 
 Every start prints the resolved queue mode, run branch, runner models and efforts, and
-settings that differ from their defaults. In a terminal, the loop starts only after an
-explicit `y` or `yes`. A non-interactive caller must pass `--approve-mode local` for the
-default local backlog or `--approve-mode issue` when `ISSUE_QUEUE_ENABLED=true`. A
-missing flag or a flag that does not match the resolved mode exits non-zero before the
-loop touches the queue, worktrees, or forge.
+settings that differ from their defaults. `--approve-mode local` for the default local
+backlog, or `--approve-mode issue` when `ISSUE_QUEUE_ENABLED=true`, approves the start
+without a prompt. Without the flag, a terminal start asks for an explicit `y` or `yes`,
+and a non-interactive caller is refused. A missing flag or a flag that does not match the
+resolved mode exits non-zero before the loop touches the queue, worktrees, or forge.
 
 With `INTEGRATION_BRANCH` set, the original repository checkout is the daemon worktree
 and stays on its exact starting commit until the run ends. The loop creates or resumes
