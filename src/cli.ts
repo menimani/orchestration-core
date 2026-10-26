@@ -26,8 +26,10 @@ import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
 import {
-  closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, issueNumbersForTask,
-  missingRequirementCompletionMarkers, recordIssueCompletions, recordIssuePromotions,
+  closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge, ensureQueueLabels, IMPORT_LABELS,
+  importedIssues, issueNumbersForTask,
+  issueSourcesForTask, missingRequirementCompletionMarkers, publishImportedIssue,
+  recordIssueCompletions, recordIssuePromotions, sourceFingerprint, sourceIssueNumbers,
 } from './issueQueue.ts'
 import {
   mergeTask, MergeError, orchestrationDepsRuntimeForPackage,
@@ -35,8 +37,8 @@ import {
 } from './merge.ts'
 import { deploy } from './deploy.ts'
 import {
-  absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isScanTaskId, locationArgs,
-  logFile, orchPaths, packageFile, type OrchPaths,
+  absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isScanTaskId,
+  issueQueueIsSeparate, locationArgs, logFile, orchPaths, packageFile, type OrchPaths,
 } from './paths.ts'
 import { findFleetDir, FLEET_FILE, readFleet, resolveFleetProject } from './fleet.ts'
 import { pruneTasks } from './prune.ts'
@@ -745,6 +747,9 @@ const cmdMerge: Command = async (paths, args) => {
       skipAutoTest: config.skipAutoTest,
       project: await loadProject(paths.projectRoot),
       closesIssues: linkedIssues,
+      closesSourceIssues: paths.fleet === undefined
+        ? undefined
+        : sourceIssueNumbers(issueSourcesForTask(paths, taskId), paths.fleet.repository),
       forge,
       onMergeStart: () => console.log(`Merging ${taskId}`),
       onMergeSkipped: (reason) => console.log(
@@ -976,6 +981,54 @@ function commandConfigValue(name: string, raw: string): unknown {
     return value
   }
   return raw
+}
+
+/**
+ * File a fleet project's open issues into the fleet's queue, oldest first, each once.
+ * Imported issues wait under loop:triage unless --ready-trusted lets those written by
+ * accounts with write access to the project become claimable at once.
+ */
+const cmdImportIssues: Command = async (paths, args) => {
+  const unknown = args.filter((arg) => arg !== '--dry-run' && arg !== '--ready-trusted')
+  if (unknown.length > 0) {
+    console.error(`Usage: import-issues [--dry-run] [--ready-trusted]; unknown: ${unknown.join(' ')}`)
+    return 1
+  }
+  const fleet = paths.fleet
+  if (fleet === undefined || !issueQueueIsSeparate(paths)) {
+    console.error('ERROR: import-issues needs a fleet project whose fleet.json names an issueRepository')
+    return 1
+  }
+  const dryRun = args.includes('--dry-run')
+  const readyWhenTrusted = args.includes('--ready-trusted')
+  const forge = await loadPathsForge(loadRepositoryConfig(paths).forge, paths)
+  if (forge.listSourceIssues === undefined) {
+    console.error('ERROR: the selected forge cannot list a project repository\'s issues')
+    return 1
+  }
+  const sources = (await forge.listSourceIssues()).sort((left, right) => left.number - right.number)
+  if (!dryRun) await ensureQueueLabels(forge, IMPORT_LABELS)
+  const imported = await importedIssues(forge)
+  for (const source of sources) {
+    const label = `${fleet.repository}#${source.number}`
+    const existing = imported.get(sourceFingerprint(fleet.repository, source.number))
+    if (existing !== undefined) {
+      console.log(`Skipped: ${label} already imported as #${existing}`)
+      continue
+    }
+    const destination = readyWhenTrusted && source.author.hasWriteAccess ? 'ready' : 'triage'
+    if (dryRun) {
+      console.log(`Would import: ${label} as ${destination}: ${source.title}`)
+      continue
+    }
+    const result = await publishImportedIssue(
+      forge, paths, fleet.repository, source, readyWhenTrusted, imported,
+    )
+    console.log(result.outcome === 'imported'
+      ? `Imported: ${label} as #${result.issueNumber} (${result.ready ? 'ready' : 'triage'})`
+      : `Skipped: ${label} already imported as #${result.issueNumber}`)
+  }
+  return 0
 }
 
 const cmdConfig: Command = async (paths, args) => {
@@ -1548,6 +1601,7 @@ const commands: Record<string, Command> = {
   'shipped': cmdShipped,
   'stop': cmdStop,
   'config': cmdConfig,
+  'import-issues': cmdImportIssues,
 }
 
 async function main(): Promise<number> {

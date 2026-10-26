@@ -705,6 +705,12 @@ it and re-file genuine work. An issue whose author lacks write access, or which 
 carries that label, never suppresses or closes a trusted finding and is never recorded in
 the local fingerprint ledger.
 
+An issue imported into a fleet's queue (item 38) is authored by whoever ran the import,
+so the claim gate alone would trust any project issue. The import is therefore the trust
+boundary: only an issue whose author has write access to the project may be filed ready,
+and only when the operator asks for it; every other import waits under `loop:triage`,
+and relabelling it ready is the operator vouching for its text.
+
 A task materialized from a trusted issue frames the requirement as the specification it
 is, because the claim gate has already established that its author may change this
 repository. That framing still withholds authority the claim cannot confer: an
@@ -847,6 +853,28 @@ so authorship and verified ancestry must both hold.
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
     `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and
     accepted no-change verdicts take the intentional `loop:in-progress` → closed shortcut.
+38. `import-issues [--dry-run] [--ready-trusted]` files a fleet project's open issues into
+    the fleet's queue and requires a fleet whose `fleet.json` names an `issueRepository`;
+    anywhere else it exits non-zero. It reads the project repository's open issues,
+    excluding pull requests, judging each author's write access on the project repository,
+    and files them oldest first. Each import has the fingerprint
+    `source:<owner/repository>#<number>` (repository lowercased) and is filed once: an
+    import already in the queue, open or closed, is reported as `Skipped:` and not filed
+    again, because the merge that resolves it closes the project issue and anything else
+    is for a person. A new import is labelled `loop:finding` and `loop:imported`, and
+    `loop:ready` only when `--ready-trusted` is given and its author has write access to
+    the project; every other import is labelled `loop:triage`, which no daemon claims,
+    until an operator relabels it ready. Only a fleet queue that imports needs those two
+    labels, so a real run creates them in the queue repository itself and the shared set
+    that `init` and `verify-setup` manage is unchanged. Its requirement is the issue title, a line naming
+    the source issue and its author, and the issue body with every line quoted, so the
+    project's text can neither pose as the queue issue's metadata lines nor end its
+    requirement with a heading. `--dry-run` prints `Would import:` lines and files
+    nothing; a real run prints `Imported:` lines naming the queue issue and whether it is
+    ready. A claim records the source fingerprints of the issues it took, and the task's
+    merge commit, local or adopted, carries the forge's closing text for those source
+    issues of the project's own repository, the only issue numbers a merge in a fleet with
+    a separate queue may name.
 
 ## Test parity
 

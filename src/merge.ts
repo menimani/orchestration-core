@@ -92,6 +92,11 @@ export interface MergeOptions {
   closesIssue?: number | undefined
   /** All issues resolved by a grouped task; takes precedence over closesIssue. */
   closesIssues?: readonly number[] | undefined
+  /**
+   * Issues in the project's own repository that the merged work was imported from. When
+   * the queue is kept in another repository these are the only issues a merge may close.
+   */
+  closesSourceIssues?: readonly number[] | undefined
   /** Required for a linked issue; the core does not know forge-specific closing syntax. */
   forge?: Pick<Forge, 'issueClosingCommitMessage'> | undefined
   /**
@@ -1137,9 +1142,10 @@ async function mergeTaskWithGuardHeld(
 
   const baseMergeMessage = `Merge ${taskId} via orchestration`
   // A fleet queue's issue numbers would close unrelated issues in the project's
-  // repository; those issues are closed once the run's pull request merges instead.
+  // repository; those issues are closed once the run's pull request merges instead, and
+  // only the project issues the work was imported from are named here.
   const closingIssues = issueQueueIsSeparate(paths)
-    ? []
+    ? options.closesSourceIssues ?? []
     : options.closesIssues ?? (options.closesIssue === undefined ? [] : [options.closesIssue])
   if (closingIssues.length > 0 && options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
@@ -1302,7 +1308,9 @@ export async function mergeRemoteTask(
   if (options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
-  const closingIssues = issueQueueIsSeparate(paths) ? [] : options.closesIssues ?? [issueNumber]
+  const closingIssues = issueQueueIsSeparate(paths)
+    ? options.closesSourceIssues ?? []
+    : options.closesIssues ?? [issueNumber]
   const mergeMessage = withMergeReasons(closingIssues.reduce(
     (message, closingIssue) => options.forge!.issueClosingCommitMessage(message, closingIssue),
     baseMergeMessage,

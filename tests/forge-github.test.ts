@@ -428,6 +428,28 @@ describe('GitHub issue queue repository targeting', () => {
     expect(calls[0]).toEqual(expect.arrayContaining(['--head', 'run/1']))
   })
 
+  it('lists the code repository\'s own issues and judges authors there', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args.includes('--paginate')) {
+        return restPages([openIssueFixture, { ...openIssueFixture, number: 9, pull_request: {} }])
+      }
+      if (args[0] === 'api') return JSON.stringify({ permission: 'read' })
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command, () => {}, {
+      codeRepository: 'owner/app', issueRepository: 'owner/fleet',
+    })
+
+    const issues = await forge.listSourceIssues!()
+
+    expect(issues.map((issue) => issue.number)).toEqual([357])
+    expect(issues[0]?.author).toEqual({ login: 'maintainer-one', hasWriteAccess: false })
+    expect(calls[0]?.at(-1)).toBe('repos/owner/app/issues?state=open&per_page=100')
+    expect(calls[1]).toEqual(['api', 'repos/owner/app/collaborators/maintainer-one/permission'])
+  })
+
   it('leaves the pull request head to the checkout when no code repository is named', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {

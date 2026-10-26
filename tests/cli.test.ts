@@ -384,6 +384,20 @@ describe('fleet project selection', () => {
     expect(result.stderr).toContain('--fleet requires --project <name> for this command')
   })
 
+  it('refuses to import issues without a fleet issue repository', () => {
+    const fleet = fleetFixture()
+
+    const fleetResult = runCli(['import-issues', '--fleet', fleet, '--project', 'first'])
+    mkdirSync(join(repoRoot, 'orchestration'))
+    const repositoryResult = runCli(['import-issues', '--repo', repoRoot])
+
+    for (const result of [fleetResult, repositoryResult]) {
+      expect(result.status).toBe(1)
+      expect(result.stderr)
+        .toContain('import-issues needs a fleet project whose fleet.json names an issueRepository')
+    }
+  })
+
   it('names the search start when no fleet manifest is found', () => {
     const result = runCli(['loop-status', '--project', 'first'])
 

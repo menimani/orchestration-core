@@ -161,6 +161,12 @@ export interface Forge {
   listOpenIssues(label: string): Promise<ForgeIssue[]>
   /** Closed issues carrying the label, newest first. */
   listClosedIssues(label: string): Promise<ForgeIssue[]>
+  /**
+   * Open issues of the code repository itself, newest first, with write access judged on
+   * that repository. A fleet imports them into its own queue; an adapter without the
+   * capability leaves the command unavailable.
+   */
+  listSourceIssues?(): Promise<ForgeIssue[]>
   assignIssue(issueNumber: number, user: string): Promise<void>
   unassignIssue(issueNumber: number, user: string): Promise<void>
   addLabel(issueNumber: number, label: string): Promise<void>
