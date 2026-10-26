@@ -150,6 +150,8 @@ export interface Forge {
   listLabels(): Promise<string[]>
   createLabel(name: string, description: string): Promise<void>
   createIssue(options: CreateIssueOptions): Promise<number>
+  /** Replace the title of an existing issue. */
+  updateIssueTitle(issueNumber: number, title: string): Promise<void>
   /** Create an issue outside the current repository and return its URL. */
   createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string>
   getIssue(issueNumber: number): Promise<ForgeIssue>

@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -105,5 +105,38 @@ describe('project pre-commit checks', () => {
     expect(error).toHaveBeenCalledWith(
       expect.stringContaining('NG: could not resolve the repository default branch:'),
     )
+  })
+})
+
+describe('pre-commit without a project adapter', () => {
+  const CLI = join(import.meta.dirname, '..', 'src', 'cli.ts')
+
+  function preCommit(root: string) {
+    mkdirSync(join(root, 'orchestration'), { recursive: true })
+    const env = Object.fromEntries(Object.entries(process.env)
+      .filter(([name]) => name !== 'PROJECT' && name !== 'PROJECT_ADAPTER'
+        && !name.startsWith('ORCHESTRATION_')))
+    return spawnSync(process.execPath, [CLI, 'pre-commit', '--repo', root], {
+      cwd: root, env, encoding: 'utf8', windowsHide: true,
+    })
+  }
+
+  it('keeps the branch guard and says the staged-path checks were skipped', () => {
+    const { root } = repository()
+
+    const result = preCommit(root)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('SKIP: staged-path checks; this repository has no project adapter')
+  })
+
+  it('still refuses a commit to the default branch', () => {
+    const { root } = repository()
+    git(root, ['switch', '--quiet', '-c', 'trunk'])
+
+    const result = preCommit(root)
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).not.toContain('SKIP: staged-path checks')
   })
 })

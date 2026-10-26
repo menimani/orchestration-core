@@ -87,6 +87,22 @@ from or equivalent to `orchestration/tests/*.sh`.
   hooks in the target repository and report them as skipped. When `fleet.json` names an
   `issueRepository`, they create and check the loop labels and the project's
   `project:<name>` label there; without one, labels are reported as skipped.
+  When neither fleet option nor `--repo` is given and `ORCHESTRATION_FLEET` names a fleet,
+  the project is the one whose checkout on this machine contains the caller's directory:
+  npm's `INIT_CWD` when present, since `npm run -C` moves the working directory, and
+  otherwise the working directory. The deepest such checkout wins; outside every one,
+  repository discovery is unchanged. `ORCHESTRATION_FLEET` also names the fleet for
+  `--project` when `--fleet` is absent.
+- `install-skills [--fleet <dir>]` installs the shared skills once per user instead of
+  into a repository a fleet keeps clean: into `~/.claude/skills` for Claude and
+  `~/.agents/skills` for Codex. Their commands are rendered as
+  `ORCHESTRATION_FLEET='<fleet>' npm run -C '<package>'`, and package paths as the
+  package's absolute path, so they work from any of the fleet's project checkouts. Each
+  destination keeps its own record of the skills the core owns, as a repository sync
+  does; a skill there under the same name that the record does not list is reported as
+  `Conflict:` and left unchanged, and any conflict or failure exits non-zero. Installed
+  skills carry no project guidance fragment. Without `--fleet`, the fleet is
+  `ORCHESTRATION_FLEET` or the nearest `fleet.json` at or above the caller's directory.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
@@ -650,7 +666,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     adapter and nothing else. The core owns the commit-message hook and resolves the
     default-branch guard from the tracking remote's advertised HEAD, failing closed when
     it cannot; its pre-commit hook loads the adapter's `preCommitChecks` instead of
-    embedding repository branch names or a repository gate in shell.
+    embedding repository branch names or a repository gate in shell. A repository with no
+    project adapter of its own, such as one a fleet improves from another checkout, keeps
+    the branch guard and prints `SKIP: staged-path checks; this repository has no project
+    adapter` instead of failing on the missing adapter.
 
     A consumer imports the core with one deliberate `git subtree add`, then uses `init`
     as the single setup and repair command. Init generates its adapter from the same

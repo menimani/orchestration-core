@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createClaudeRunner } from '../src/adapters/runner-claude.ts'
+import { createCodexRunner } from '../src/adapters/runner-codex.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { createClaudeSharedSkills } from '../src/adapters/shared-skills-claude.ts'
-import { sharedSkillManagedTargets, syncSharedSkills } from '../src/sharedSkills.ts'
+import { installUserSkills, sharedSkillManagedTargets, syncSharedSkills } from '../src/sharedSkills.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 
 let fixtureRoot: string
@@ -401,5 +402,42 @@ describe('shared skill sync', () => {
       '.claude/skills/git-commit', '.claude/skills/loop-start',
     ])
     expect(readFileSync(localSkill, 'utf8')).toBe('repository gates\n')
+  })
+})
+
+describe('user skill install', () => {
+  it('renders the skills once per user to run against the fleet', () => {
+    const home = join(fixtureRoot, 'home')
+    const fleet = join(fixtureRoot, 'fleet')
+
+    const result = installUserSkills(
+      fleet, packageRoot, [interactiveSharedSkills, createCodexRunner().sharedSkills], home,
+    )
+
+    expect(result.failures).toEqual([])
+    expect(result.installed.sort()).toEqual([
+      '.agents/skills/git-commit', '.agents/skills/loop-start',
+      '.claude/skills/git-commit', '.claude/skills/loop-start',
+    ])
+    const slashes = (path: string): string => path.replaceAll('\\', '/')
+    const prefix = `ORCHESTRATION_FLEET='${slashes(fleet)}' npm run -C '${slashes(packageRoot)}'`
+    for (const agentRoot of ['.claude', '.agents']) {
+      expect(readFileSync(join(home, agentRoot, 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+        .toBe(`${prefix} loop -- --daemon\n`)
+      expect(existsSync(join(home, agentRoot, 'skills', '.orchestration-core-sync.json'))).toBe(true)
+    }
+  })
+
+  it('leaves a skill the user wrote under the same name alone', () => {
+    const home = join(fixtureRoot, 'home')
+    mkdirSync(join(home, '.claude', 'skills', 'git-commit'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'skills', 'git-commit', 'SKILL.md'), 'My own commit skill.\n')
+
+    const result = installUserSkills(join(fixtureRoot, 'fleet'), packageRoot, [interactiveSharedSkills], home)
+
+    expect(result.conflicts).toEqual(['.claude/skills/git-commit'])
+    expect(result.installed).toEqual(['.claude/skills/loop-start'])
+    expect(readFileSync(join(home, '.claude', 'skills', 'git-commit', 'SKILL.md'), 'utf8'))
+      .toBe('My own commit skill.\n')
   })
 })

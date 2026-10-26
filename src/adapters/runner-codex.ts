@@ -37,7 +37,8 @@ function renderSharedSkillFile(
   contents: Buffer,
   options: RunnerSharedSkillRenderOptions,
 ): Buffer {
-  const commandPrefix = packageCommandPrefix(options.repoRoot, options.packageRoot)
+  const commandPrefix = options.commandPrefix
+    ?? packageCommandPrefix(options.repoRoot, options.packageRoot)
   let text = contents.toString('utf8')
   const argumentHint = /^argument-hint:\s*["']?(.+?)["']?\s*$/m.exec(text)?.[1]
     ?? '<arguments from the request>'
@@ -65,7 +66,7 @@ function renderSharedSkillFile(
     .replaceAll(options.commandPrefixPlaceholder, commandPrefix)
     .replaceAll(
       options.packagePathPrefixPlaceholder,
-      packagePathPrefix(options.repoRoot, options.packageRoot),
+      options.packagePathPrefix ?? packagePathPrefix(options.repoRoot, options.packageRoot),
     )
     .replaceAll('CLAUDE.md', guidanceFile)
     .replace(
@@ -104,6 +105,7 @@ export function createCodexRunner(): Runner {
       // root: a consumer may still select that interactive-agent target independently.
       // Claiming it here would empty it whenever Codex was the selected runner.
       destinationRoot: (repoRoot) => join(repoRoot, '.agents', 'skills'),
+      userDestinationRoot: (home) => join(home, '.agents', 'skills'),
       renderFile: renderSharedSkillFile,
     },
     resolveModel,
