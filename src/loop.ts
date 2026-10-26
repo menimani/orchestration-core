@@ -22,7 +22,7 @@ import {
   type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
-  finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, logFile,
+  finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, issueQueueIsSeparate, logFile,
   branchName, conflictBranchName, PACKAGE_ROOT, worktreeDir, type OrchPaths,
 } from './paths.ts'
 import {
@@ -55,11 +55,12 @@ import {
 } from './coreUpdate.ts'
 import { absorbDefaultBranch } from './branchTopology.ts'
 import {
-  claimIssueGroup, closeIssueAndRemoveLifecycleLabels, commentOnIssueMerge,
+  claimIssueGroup, closeIssueAndRemoveLifecycleLabels, closePromotedIssues, commentOnIssueMerge,
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
-  missingRequirementCompletionMarkers, publishFinding, reapStaleLeases,
+  issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
+  reapStaleLeases, sourceIssueNumbers,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
@@ -611,6 +612,16 @@ export function createLoop(deps: LoopDeps) {
               onOrchestrationDepsEvent: orchestrationDepsEvent,
               beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
               closesIssues: adoptionIssues.map((candidate) => candidate.number),
+              closesSourceIssues: paths.fleet === undefined
+                ? undefined
+                : sourceIssueNumbers(adoptionIssues.flatMap((candidate) =>
+                  parseIssueBody(candidate.body, candidate.number)?.fingerprints ?? []),
+                paths.fleet.repository),
+              // The worker's spec stays on the worker; the issues hold the same requirements.
+              reasons: adoptionIssues.flatMap((candidate) => {
+                const requirement = parseIssueBody(candidate.body, candidate.number)?.requirement
+                return requirement === undefined ? [] : [requirement]
+              }),
               onMerged: persistPromotion,
             },
           )
@@ -2317,6 +2328,9 @@ export function createLoop(deps: LoopDeps) {
           skipAutoTest: config.skipAutoTest,
           project,
           closesIssues: linkedIssues,
+          closesSourceIssues: paths.fleet === undefined
+            ? undefined
+            : sourceIssueNumbers(issueSourcesForTask(paths, taskId), paths.fleet.repository),
           forge: rawForge,
           outputFile: mergeLog,
           orchestrationDepsRuntime,
@@ -2625,6 +2639,21 @@ export function createLoop(deps: LoopDeps) {
             issueHasMergeMarker,
             issueReleaseOptions,
           )
+          if (!config.workerMode && issueQueueIsSeparate(paths)) {
+            // Closing promoted issues is bookkeeping a later poll can finish; it must not
+            // cost this poll its claims.
+            try {
+              const closed = await closePromotedIssues(forge, paths, (ancestor, descendant) =>
+                optionalGit(['merge-base', '--is-ancestor', ancestor, descendant], 'yes') === 'yes')
+              for (const issueNumber of closed) {
+                event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
+              }
+            } catch (error) {
+              if (error instanceof ForgeRateLimitError) throw error
+              warning('promoted-issues', 'closing promoted issues',
+                `could not close promoted issues: ${errorSummary(error)}`)
+            }
+          }
           if (readCount(issueReleaseFailureFile) > 0) {
             writeFileSync(issueReleaseFailureFile, '0\n')
             warningLog.recovered('issue-release-reconciliation')

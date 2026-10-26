@@ -11,13 +11,16 @@ import type { ProjectAdapter } from './adapters/project.ts'
 import { shortTaskId } from './ids.ts'
 import { verifyModuleIsolation } from './moduleIsolation.ts'
 import {
-  branchName, isInspectionTaskId, logFile, packageFile, worktreeDir, PACKAGE_ROOT,
+  branchName, isInspectionTaskId, issueQueueIsSeparate, logFile, packageFile, worktreeDir,
+  PACKAGE_ROOT,
   type OrchPaths,
 } from './paths.ts'
 import {
   forgetTaskProcess, taskProcessPid, terminableTaskProcessPid,
 } from './processRegistry.ts'
 import { execShellSync } from './shell.ts'
+import { specFile } from './tasks.ts'
+import { specRequirements } from './templates.ts'
 import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
@@ -89,6 +92,11 @@ export interface MergeOptions {
   closesIssue?: number | undefined
   /** All issues resolved by a grouped task; takes precedence over closesIssue. */
   closesIssues?: readonly number[] | undefined
+  /**
+   * Issues in the project's own repository that the merged work was imported from. When
+   * the queue is kept in another repository these are the only issues a merge may close.
+   */
+  closesSourceIssues?: readonly number[] | undefined
   /** Required for a linked issue; the core does not know forge-specific closing syntax. */
   forge?: Pick<Forge, 'issueClosingCommitMessage'> | undefined
   /**
@@ -110,6 +118,11 @@ export interface MergeOptions {
   onMergeSkipped?: ((reason: 'active' | 'succeeded') => void) | undefined
   /** Merge command implementation; tests replace it to exercise recovery failures. */
   mergeRuntime?: MergeRuntime | undefined
+  /**
+   * The requirements the merged work fulfils, recorded in the merge commit's body. A local
+   * merge reads them from the task's specification when they are not given.
+   */
+  reasons?: readonly string[] | undefined
 }
 
 export interface RemoteMergeOptions extends MergeOptions {
@@ -712,9 +725,44 @@ function stopCompletedRunner(paths: OrchPaths, taskId: string, pid: number): voi
   }
 }
 
+const MAX_REASON_LENGTH = 300
+
+function mergeSubject(message: string): string {
+  return message.split('\n', 1)[0] ?? message
+}
+
+// A requirement naming an advisory or tagged as security work describes a weakness that
+// stays exploitable wherever the fix has not landed yet, so its text stays out of history.
+function isSecurityRequirement(requirement: string): boolean {
+  return /^\s*\[SECURITY\]/i.test(requirement)
+    || /\b(?:GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}|CVE-\d{4}-\d{4,})\b/i.test(requirement)
+}
+
+function mergeReason(requirement: string): string {
+  if (isSecurityRequirement(requirement)) return 'Why: security fix; details withheld.'
+  const firstParagraph = requirement.trim().split(/\r?\n\s*\r?\n/, 1)[0] ?? ''
+  const text = firstParagraph.replace(/\s+/g, ' ').trim()
+  return `Why: ${text.length > MAX_REASON_LENGTH ? `${text.slice(0, MAX_REASON_LENGTH - 3)}...` : text}`
+}
+
+/**
+ * Give the merge commit one Why line per distinct requirement. The task's own commits
+ * explain how; this records what the merged work was asked to achieve, in the history of
+ * a repository that may hold nothing else about the loop.
+ */
+function withMergeReasons(subject: string, requirements: readonly string[]): string {
+  const reasons = [...new Set(requirements.filter((text) => text.trim() !== '').map(mergeReason))]
+  return reasons.length === 0 ? subject : `${subject}\n\n${reasons.join('\n')}`
+}
+
+function localSpecRequirements(paths: OrchPaths, taskId: string): string[] {
+  const file = specFile(paths, taskId)
+  return existsSync(file) ? specRequirements(readFileSync(file, 'utf8')) : []
+}
+
 /**
  * Find a merge this code already applied before its durable state callback failed.
- * The second parent identifies the exact task head, while the message distinguishes
+ * The second parent identifies the exact task head, while the subject distinguishes
  * orchestration's checked merge from an unrelated merge of the same commit.
  */
 function appliedMergeCommit(
@@ -730,7 +778,9 @@ function appliedMergeCommit(
     const [commit, firstParent, secondParent, ...otherParents] = merge.trim().split(/\s+/)
     if (commit === undefined || firstParent === undefined || secondParent !== mergedHead
       || otherParents.length > 0) continue
-    if (git(repoRoot, ['show', '-s', '--format=%B', commit]).trim() === mergeMessage) {
+    // The subject names the task. The body's reasons come from text that may be edited
+    // between attempts, so they cannot be part of the merge's identity.
+    if (git(repoRoot, ['show', '-s', '--format=%s', commit]).trim() === mergeSubject(mergeMessage)) {
       return commit
     }
   }
@@ -1091,16 +1141,19 @@ async function mergeTaskWithGuardHeld(
   }
 
   const baseMergeMessage = `Merge ${taskId} via orchestration`
-  const closingIssues = options.closesIssues ?? (options.closesIssue === undefined
-    ? []
-    : [options.closesIssue])
+  // A fleet queue's issue numbers would close unrelated issues in the project's
+  // repository; those issues are closed once the run's pull request merges instead, and
+  // only the project issues the work was imported from are named here.
+  const closingIssues = issueQueueIsSeparate(paths)
+    ? options.closesSourceIssues ?? []
+    : options.closesIssues ?? (options.closesIssue === undefined ? [] : [options.closesIssue])
   if (closingIssues.length > 0 && options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
-  const mergeMessage = closingIssues.reduce(
+  const mergeMessage = withMergeReasons(closingIssues.reduce(
     (message, issueNumber) => options.forge!.issueClosingCommitMessage(message, issueNumber),
     baseMergeMessage,
-  )
+  ), options.reasons ?? localSpecRequirements(paths, taskId))
   const newCommits = git(worktree, ['log', `${currentBranch}..HEAD`, '--oneline']).trim()
   if (newCommits === '') {
     const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
@@ -1255,11 +1308,13 @@ export async function mergeRemoteTask(
   if (options.forge === undefined) {
     throw new MergeError('A forge adapter is required to close the linked issue on promotion.')
   }
-  const closingIssues = options.closesIssues ?? [issueNumber]
-  const mergeMessage = closingIssues.reduce(
+  const closingIssues = issueQueueIsSeparate(paths)
+    ? options.closesSourceIssues ?? []
+    : options.closesIssues ?? [issueNumber]
+  const mergeMessage = withMergeReasons(closingIssues.reduce(
     (message, closingIssue) => options.forge!.issueClosingCommitMessage(message, closingIssue),
     baseMergeMessage,
-  )
+  ), options.reasons ?? [])
   const currentBranch = git(paths.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
   const commitCount = Number(git(paths.repoRoot, [
     'rev-list', '--count', `${currentBranch}..${remoteRef}`,

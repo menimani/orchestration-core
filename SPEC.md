@@ -87,6 +87,22 @@ from or equivalent to `orchestration/tests/*.sh`.
   hooks in the target repository and report them as skipped. When `fleet.json` names an
   `issueRepository`, they create and check the loop labels and the project's
   `project:<name>` label there; without one, labels are reported as skipped.
+  When neither fleet option nor `--repo` is given and `ORCHESTRATION_FLEET` names a fleet,
+  the project is the one whose checkout on this machine contains the caller's directory:
+  npm's `INIT_CWD` when present, since `npm run -C` moves the working directory, and
+  otherwise the working directory. The deepest such checkout wins; outside every one,
+  repository discovery is unchanged. `ORCHESTRATION_FLEET` also names the fleet for
+  `--project` when `--fleet` is absent.
+- `install-skills [--fleet <dir>]` installs the shared skills once per user instead of
+  into a repository a fleet keeps clean: into `~/.claude/skills` for Claude and
+  `~/.agents/skills` for Codex. Their commands are rendered as
+  `ORCHESTRATION_FLEET='<fleet>' npm run -C '<package>'`, and package paths as the
+  package's absolute path, so they work from any of the fleet's project checkouts. Each
+  destination keeps its own record of the skills the core owns, as a repository sync
+  does; a skill there under the same name that the record does not list is reported as
+  `Conflict:` and left unchanged, and any conflict or failure exits non-zero. Installed
+  skills carry no project guidance fragment. Without `--fleet`, the fleet is
+  `ORCHESTRATION_FLEET` or the nearest `fleet.json` at or above the caller's directory.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
@@ -250,6 +266,19 @@ are not parsed by `loadConfig` and are not operator-file settings.
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
    requiring the worker to have predicted that outcome.
+8a. A task's merge commit has the subject `Merge <task-id> via orchestration`, followed by
+    the forge's closing text for each linked issue the merge may name. Its body records why
+    the work exists, as one `Why:` line per distinct requirement: the first paragraph,
+    whitespace collapsed, cut at 300 characters. A local merge reads the requirements from
+    the task's specification, framed requirements in order or else its `## Requirement`
+    section; an adopted worker branch reads them from its issues. A requirement tagged
+    `[SECURITY]` or naming a GHSA or CVE identifier contributes only
+    `Why: security fix; details withheld.`, because its text describes a weakness that
+    stays exploitable wherever the fix has not landed. A retry recognizes a merge it
+    already applied by the exact task head and the subject alone, since the requirement
+    text may have been edited in between. Task specifications ask each commit's body to
+    state the problem, why the change addresses it, and how it was verified, naming no
+    task id, issue number, or the orchestration.
 9. Before its merge gate, a completed local task branch is rebased onto the current run
    branch tip. This refresh is retained when a check fails, so the next attempt does not
    test the same stale branch again. A conflicting rebase is aborted and keeps both the
@@ -530,8 +559,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
 21. The title reports `cycle <n>/<max>` while running and category counts when finished.
     The body is rebuilt each cycle from commit classification into the sections defined
     by `ProjectAdapter.pullRequest.categories` (generated adapters default to `Changes`),
-    followed by the core-owned Risks section; every empty section says `- None`. Title
-    and body come from the same classification, so they cannot disagree.
+    followed by the core-owned Reasons and Risks sections; every empty section says
+    `- None`. Reasons lists the `Why:` lines of the run's task merge commits (item 8a),
+    each once, in merge order. Title and body come from the same classification, so they
+    cannot disagree.
 22. An HTML comment on the first body line marks the text as generated; a hand-edited
     body (marker gone) is never overwritten again. Body ownership does not freeze the
     generated title, which is still updated through the adapter's title-only field.
@@ -635,7 +666,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     adapter and nothing else. The core owns the commit-message hook and resolves the
     default-branch guard from the tracking remote's advertised HEAD, failing closed when
     it cannot; its pre-commit hook loads the adapter's `preCommitChecks` instead of
-    embedding repository branch names or a repository gate in shell.
+    embedding repository branch names or a repository gate in shell. A repository with no
+    project adapter of its own, such as one a fleet improves from another checkout, keeps
+    the branch guard and prints `SKIP: staged-path checks; this repository has no project
+    adapter` instead of failing on the missing adapter.
 
     A consumer imports the core with one deliberate `git subtree add`, then uses `init`
     as the single setup and repair command. Init generates its adapter from the same
@@ -689,6 +723,12 @@ is reconciled. An untrusted issue remains unassigned and ready, receives
 it and re-file genuine work. An issue whose author lacks write access, or which already
 carries that label, never suppresses or closes a trusted finding and is never recorded in
 the local fingerprint ledger.
+
+An issue imported into a fleet's queue (item 38) is authored by whoever ran the import,
+so the claim gate alone would trust any project issue. The import is therefore the trust
+boundary: only an issue whose author has write access to the project may be filed ready,
+and only when the operator asks for it; every other import waits under `loop:triage`,
+and relabelling it ready is the operator vouching for its text.
 
 A task materialized from a trusted issue frames the requirement as the specification it
 is, because the claim gate has already established that its author may change this
@@ -756,7 +796,15 @@ so authorship and verified ancestry must both hold.
     rather than a long-running task.
 35. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
     the forge closes all of them when the promotion PR lands the commit on the default
-    branch. Immediately after merging, the worker comments on every linked issue with the
+    branch. A queue kept in a fleet's `issueRepository` is the exception: its issue
+    numbers mean nothing in the project's repository, so the merge commit names none of
+    them. Instead, each poll of the merger checks the pull request of every run branch
+    that still has promotion records. Once that pull request has merged and its head
+    contains a record's merge commit, the merger closes that issue with a
+    `PROMOTED: <task-id>` comment naming the merge commit, run branch, and pull request,
+    and logs a `Promoted` event; a merge commit the head does not contain stays open for
+    a later run. A failure to close is warned about and retried on the next poll without
+    holding back that poll's claims. Workers never close promoted issues. Immediately after merging, the worker comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
@@ -807,7 +855,8 @@ so authorship and verified ancestry must both hold.
     from the configured push remote, verifies the head and that it adds commits to the
     current branch, runs
     the project adapter's path-selected checks in a detached worktree, and merges with
-    `--no-ff` and `closes #N` for every issue named by a grouped worker report. It persists
+    `--no-ff` and `closes #N` for every issue named by a grouped worker report, unless the
+    queue is kept in a fleet's `issueRepository` (item 35). It persists
     a successful adoption for every member before updating the issues, so a later poll
     retries failed metadata updates without merging again. These per-issue promotion
     records use the schema and fail-closed repair behavior in item 35; malformed persisted
@@ -823,6 +872,28 @@ so authorship and verified ancestry must both hold.
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
     `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and
     accepted no-change verdicts take the intentional `loop:in-progress` → closed shortcut.
+38. `import-issues [--dry-run] [--ready-trusted]` files a fleet project's open issues into
+    the fleet's queue and requires a fleet whose `fleet.json` names an `issueRepository`;
+    anywhere else it exits non-zero. It reads the project repository's open issues,
+    excluding pull requests, judging each author's write access on the project repository,
+    and files them oldest first. Each import has the fingerprint
+    `source:<owner/repository>#<number>` (repository lowercased) and is filed once: an
+    import already in the queue, open or closed, is reported as `Skipped:` and not filed
+    again, because the merge that resolves it closes the project issue and anything else
+    is for a person. A new import is labelled `loop:finding` and `loop:imported`, and
+    `loop:ready` only when `--ready-trusted` is given and its author has write access to
+    the project; every other import is labelled `loop:triage`, which no daemon claims,
+    until an operator relabels it ready. Only a fleet queue that imports needs those two
+    labels, so a real run creates them in the queue repository itself and the shared set
+    that `init` and `verify-setup` manage is unchanged. Its requirement is the issue title, a line naming
+    the source issue and its author, and the issue body with every line quoted, so the
+    project's text can neither pose as the queue issue's metadata lines nor end its
+    requirement with a heading. `--dry-run` prints `Would import:` lines and files
+    nothing; a real run prints `Imported:` lines naming the queue issue and whether it is
+    ready. A claim records the source fingerprints of the issues it took, and the task's
+    merge commit, local or adopted, carries the forge's closing text for those source
+    issues of the project's own repository, the only issue numbers a merge in a fleet with
+    a separate queue may name.
 
 ## Test parity
 

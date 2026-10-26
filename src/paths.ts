@@ -62,6 +62,15 @@ export function absolutePackageScriptCommand(
   return `${command} -- ${rendered.join(' ')}`
 }
 
+/**
+ * The command prefix for skills installed once per user and run from any fleet project's
+ * checkout: it names the fleet in the environment, and the CLI finds the project from the
+ * directory the command was started in.
+ */
+export function fleetCommandPrefix(fleetDir: string, packageRoot = PACKAGE_ROOT): string {
+  return `ORCHESTRATION_FLEET=${shellPathArgument(fleetDir)} npm run -C ${shellPathArgument(packageRoot)}`
+}
+
 /** A project selected from a fleet checkout rather than from inside its repository. */
 export interface FleetLocation {
   /** Absolute path of the fleet checkout holding fleet.json. */
@@ -135,6 +144,14 @@ export function fleetPaths(
   }
   if (createDirectories) createOrchDirectories(paths)
   return paths
+}
+
+/**
+ * Whether queue issues live in a repository other than the project's. Their numbers then
+ * mean nothing in the project's repository, so no commit there may reference them.
+ */
+export function issueQueueIsSeparate(paths: OrchPaths): boolean {
+  return paths.fleet?.issueRepository !== undefined
 }
 
 /** The CLI arguments that select the same repository again from any working directory. */

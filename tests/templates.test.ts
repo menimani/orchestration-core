@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { OrchPaths } from '../src/paths.ts'
 import {
   frameUntrustedText, frameVerifiedRequirement, readTemplate, repositoryInspectionPreamble,
-  reviewScopeTemplateValues, templateFile,
+  reviewScopeTemplateValues, specRequirements, templateFile,
 } from '../src/templates.ts'
 
 let root: string
@@ -152,5 +152,31 @@ describe('trust framing', () => {
     expect(frameVerifiedRequirement(REQUIREMENT)).not.toContain('<<<UNTRUSTED_REQUEST_TEXT>>>')
     expect(frameUntrustedText(REQUIREMENT)).toContain('<<<UNTRUSTED_REQUEST_TEXT>>>')
     expect(frameUntrustedText(REQUIREMENT)).not.toContain('<<<REQUESTED_CHANGE>>>')
+  })
+})
+
+describe('spec requirements', () => {
+  it('reads framed requirements in the order the spec asks for them', () => {
+    const spec = [
+      '# task',
+      '## Auto-generated task (findings: #1, #2)',
+      '### Requirement 1 (issue #1)',
+      frameVerifiedRequirement('Fix the first thing.'),
+      '### Requirement 2 (issue #2)',
+      frameUntrustedText('Fix the second thing.'),
+      '## Commit',
+    ].join('\n\n')
+
+    expect(specRequirements(spec)).toEqual(['Fix the first thing.', 'Fix the second thing.'])
+  })
+
+  it('falls back to a plain requirement section', () => {
+    const spec = '# task: delegated task\n\n## Requirement\n\nRename the flag.\nKeep the alias.\n\n## Commit\n'
+
+    expect(specRequirements(spec)).toEqual(['Rename the flag.\nKeep the alias.'])
+  })
+
+  it('finds nothing in an unfilled template', () => {
+    expect(specRequirements('# task\n\n## Requirements\n-\n\n## Commit\n')).toEqual([])
   })
 })

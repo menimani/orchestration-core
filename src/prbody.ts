@@ -68,6 +68,26 @@ function branchCommits(repoRoot: string, baseRef: string): Array<{ sha: string; 
     })
 }
 
+/**
+ * The reasons the run's task merges recorded, oldest first. The commit list says what
+ * changed; these say what each merged task was asked to achieve.
+ */
+function mergeReasons(repoRoot: string, baseRef: string): string[] {
+  const log = git(repoRoot, [
+    'log', `${baseRef}..HEAD`, '--merges', '--first-parent', '--reverse', '--format=%s%x1f%b%x1e',
+  ])
+  const reasons: string[] = []
+  for (const record of log.split('\x1e')) {
+    const [subject = '', body = ''] = record.trim().split('\x1f')
+    if (!/^Merge \S+ via orchestration\b/.test(subject)) continue
+    for (const line of body.split(/\r?\n/)) {
+      const reason = /^Why: (.+)$/.exec(line.trim())?.[1]
+      if (reason !== undefined && !reasons.includes(reason)) reasons.push(reason)
+    }
+  }
+  return reasons
+}
+
 interface TitleContext {
   cycle: number
   maxCycles: number
@@ -132,6 +152,8 @@ export function buildPrBody(
     const entries = sections.get(label)
     body += `\n## ${label}\n\n${entries === undefined ? '- None\n' : `${entries.join('\n')}\n`}`
   }
+  const reasons = mergeReasons(repoRoot, baseRef)
+  body += `\n## Reasons\n\n${reasons.length === 0 ? '- None\n' : `${reasons.map((reason) => `- ${reason}`).join('\n')}\n`}`
   body += `\n## Risks\n\n${prRisks(project, repoRoot, baseRef, decisions)}`
   return body
 }
