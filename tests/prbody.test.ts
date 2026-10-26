@@ -114,11 +114,13 @@ describe('buildPrBody', () => {
   it('marks an empty branch with the marker, all sections and - None', () => {
     const body = buildPrBody(project, repoRoot, baseRef, [])
     expect(body.split('\n')[0]).toBe(GENERATED_BODY_MARKER)
-    for (const section of ['Features', 'Bug Fixes', 'Security', 'Project Operations']) {
+    for (const section of ['Features', 'Bug Fixes', 'Security', 'Project Operations', 'Reasons']) {
       expect(sectionOf(body, section)).toContain('- None')
     }
     expect(body.split('\n').filter((line) => line.startsWith('## ')))
-      .toEqual(['## Features', '## Bug Fixes', '## Security', '## Project Operations', '## Risks'])
+      .toEqual([
+        '## Features', '## Bug Fixes', '## Security', '## Project Operations', '## Reasons', '## Risks',
+      ])
   })
 
   it('classifies commits into sections with area labels and drops merge commits', () => {
@@ -136,6 +138,26 @@ describe('buildPrBody', () => {
     expect(sectionOf(body, 'Security')).toContain('validate session')
     expect(sectionOf(body, 'Project Operations')).toContain('update automation')
     expect(body).not.toContain('Merge fixture branch')
+  })
+
+  it('lists the reasons recorded by task merges, once each, in merge order', () => {
+    for (const [task, reasons] of [
+      ['first', 'Why: Stop dropping the last page.'],
+      ['second', 'Why: Keep sessions after a restart.\nWhy: Stop dropping the last page.'],
+    ] as const) {
+      git(['switch', '-q', '-c', `task/${task}`])
+      commitFile(`docs/${task}.txt`, 'fix: task work')
+      git(['switch', '-q', 'trunk'])
+      git(['merge', '--no-ff', '-q', `task/${task}`, '-m', `Merge ${task} via orchestration\n\n${reasons}`])
+    }
+    git(['switch', '-q', '-c', 'unrelated'])
+    commitFile('docs/unrelated.txt', 'docs: unrelated')
+    git(['switch', '-q', 'trunk'])
+    git(['merge', '--no-ff', '-q', 'unrelated', '-m', 'Merge unrelated\n\nWhy: not a task merge'])
+
+    expect(sectionOf(buildPrBody(project, repoRoot, baseRef, []), 'Reasons').trim()).toBe(
+      '- Stop dropping the last page.\n- Keep sessions after a restart.',
+    )
   })
 })
 
