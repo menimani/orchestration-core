@@ -22,6 +22,12 @@ const SPEC_TAIL = `
 After implementation is complete, git add and git commit the changed files.
 Commit prefixes: feat: / fix: / refactor: / test: / docs: / chore:
 
+The commit body is all a reader of this repository's history will have to go on. State
+the problem the change addresses, why this change addresses it, and how it was verified;
+do not restate the diff. Do not mention task ids, issue numbers, or the orchestration
+that produced the change. For a security fix, say what was hardened without describing
+how the weakness could be exploited.
+
 ## Completion Marker
 
 If investigation proves that no change is warranted, do not create an empty commit.

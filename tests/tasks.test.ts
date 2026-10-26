@@ -344,4 +344,11 @@ describe('newTaskSpec', () => {
     expect(spec.trimEnd().endsWith('TASK_COMPLETE')).toBe(true)
     expect(() => newTaskSpec(paths, 'manual-task')).toThrow(/already exists/)
   })
+
+  it('asks for a commit body that explains the change to the repository\'s readers', () => {
+    const spec = readFileSync(newTaskSpec(paths, 'manual-task'), 'utf8')
+
+    expect(spec).toContain('State\nthe problem the change addresses, why this change addresses it, and how it was verified')
+    expect(spec).toContain('Do not mention task ids, issue numbers, or the orchestration')
+  })
 })
