@@ -68,6 +68,10 @@ export interface FleetLocation {
   dir: string
   /** The project name keyed in fleet.json. */
   project: string
+  /** The forge repository, as owner/name, that the project's branches and PRs go to. */
+  repository: string
+  /** The forge repository holding the fleet's shared issue queue, when it has one. */
+  issueRepository?: string | undefined
 }
 
 export interface OrchPaths {

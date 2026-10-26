@@ -97,7 +97,7 @@ function runProductionLaunchProbe(
     "import { writeFileSync } from 'node:fs'",
     fleet === undefined
       ? `const paths = orchPaths(${JSON.stringify(worker)})`
-      : `const paths = fleetPaths({ dir: ${JSON.stringify(fleet)}, project: 'example' }, ${JSON.stringify(worker)})`,
+      : `const paths = fleetPaths({ dir: ${JSON.stringify(fleet)}, project: 'example', repository: 'owner/example' }, ${JSON.stringify(worker)})`,
     'try {',
     "  const status = await runWorkerCommand(paths, 'origin/main')",
     '  writeFileSync(process.env.ORCH_WORKER_OUTCOME, JSON.stringify({ status }))',

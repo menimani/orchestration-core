@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { Forge } from './adapters/forge.ts'
 import { renderProjectAdapter, repairProjectAdapterSource } from './adapters/project.ts'
 import { ensureQueueLabels, QUEUE_LABELS } from './issueQueue.ts'
+import { ensureScopeLabel, projectScopeLabel } from './issueScope.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 
 export interface InitResult {
@@ -135,12 +136,16 @@ export async function initializeRepository(
     ok = false
   }
 
-  if (paths.fleet !== undefined) {
-    report('SKIP: loop labels; a fleet project files no issues in its repository')
+  if (paths.fleet !== undefined && paths.fleet.issueRepository === undefined) {
+    report('SKIP: loop labels; a fleet project without an issue repository files no issues')
   } else {
     const createdLabels = new Set(await ensureQueueLabels(forge))
     for (const label of QUEUE_LABELS) {
       report(`${createdLabels.has(label.name) ? 'CREATED' : 'EXISTS'}: label ${label.name}`)
+    }
+    if (paths.fleet !== undefined) {
+      const scope = projectScopeLabel(paths.fleet.project)
+      report(`${await ensureScopeLabel(forge, scope) ? 'CREATED' : 'EXISTS'}: label ${scope}`)
     }
   }
 

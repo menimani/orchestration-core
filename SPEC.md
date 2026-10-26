@@ -83,9 +83,10 @@ from or equivalent to `orchestration/tests/*.sh`.
   this machine cannot resolve prints the reason instead and makes the command exit
   non-zero. Every other command requires `--project`. Commands the CLI prints for a fleet
   project, and the daemon and worker launches it makes, name the fleet and project again
-  instead of the repository. `init` and `verify-setup` for a fleet project write and
-  check only the fleet: they configure no hooks and create no labels in the target
-  repository, and report both as skipped.
+  instead of the repository. `init` and `verify-setup` for a fleet project configure no
+  hooks in the target repository and report them as skipped. When `fleet.json` names an
+  `issueRepository`, they create and check the loop labels and the project's
+  `project:<name>` label there; without one, labels are reported as skipped.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
@@ -584,8 +585,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     path, or consumer-repository-relative module). A consumer-repository-relative
     selector must begin with `./` or `../`; an unprefixed value such as
     `custom/forge.mjs` remains a package specifier. External modules export a `Forge`
-    as default or `forge`, or a `createForge(repoRoot, report)` factory, so gitea/gitlab
-    implementations can be added without touching the core. The interface returns
+    as default or `forge`, or a `createForge(repoRoot, report, target)` factory, so gitea/gitlab
+    implementations can be added without touching the core. The target names the
+    repository for branches, pull requests, and workflow runs and the repository for the
+    issue queue when they are not the checkout's own; a fleet project names both, and an
+    omitted name keeps the adapter's inference from the checkout. The bundled GitHub
+    adapter sends pull-request and workflow calls to a named code repository, naming the
+    head branch explicitly, and every queue call and write-access lookup to a named issue
+    repository without asking the checkout. The interface returns
     normalized values only: PR state plus check records with
     `name`, `conclusion`, and `startedAt`, which is an ISO timestamp when the forge reports
     one and otherwise an empty string. For each check name, CI waiting discards only
@@ -670,7 +677,7 @@ Write access is the authorship boundary because repository administrators have a
 authorized those accounts to change the code the loop will eventually merge. Public issue
 bodies, comments, repository files, diffs, and commit messages are otherwise untrusted;
 being visible in the repository or carrying a loop-shaped marker does not grant authority.
-For GitHub, the adapter asks the forge for the author's repository permission and treats
+For GitHub, the adapter asks the forge for the author's permission on the queue repository and treats
 `write`, `maintain`, and `admin` as the forge-neutral write-access verdict. A permission
 lookup that fails for any reason other than a rate limit answers "no write access", so a
 missing collaborator and an unreachable forge both resolve to untrusted rather than to a
@@ -699,8 +706,12 @@ so authorship and verified ancestry must both hold.
 
 33. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
-    same growth bounds. A finding is filed in the repository the loop is running
-    against, never anywhere else. An issue is filed once per fingerprint: the advisory
+    same growth bounds. A finding is filed in the queue repository, never anywhere else:
+    the repository the loop is running against, or the `issueRepository` a fleet names.
+    A fleet's queue is shared by its projects, so each issue a project files also carries
+    `project:<name>`, created on first use, and every issue listing the queue reads is
+    narrowed to that label; one project never claims, deduplicates against, or reaps
+    another project's issues. An issue is filed once per fingerprint: the advisory
     identifier when one is named, else the finding's tag plus the first path it
     names and a digest of normalized finding terms, else that normalized digest alone.
     Normalization ignores case, punctuation, whitespace, word order, grammatical filler,
@@ -728,8 +739,8 @@ so authorship and verified ancestry must both hold.
     finding.
 
     Worker daemons claim a ready issue or group by self-assignment. The forge login is the
-    worker identity, and every daemon that may claim concurrently must authenticate as a
-    distinct forge account. Under that invariant, a simultaneous claim is settled
+    worker identity, and every daemon that may claim the same project's issues concurrently
+    must authenticate as a distinct forge account. Under that invariant, a simultaneous claim is settled
     deterministically — the lexicographically first login wins, losers unassign
     themselves — and the winner relabels to `loop:in-progress` and materializes the
     issue as a local task through the standard template (completion marker included),

@@ -6,7 +6,8 @@ import {
 } from 'node:fs'
 import { join, relative, resolve, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
-import { loadForge } from './adapters/forge.ts'
+import { loadForge, type Forge } from './adapters/forge.ts'
+import { projectScopeLabel, scopeForgeToProject } from './issueScope.ts'
 import { loadRunner, type ReasoningEffort, type Runner } from './adapters/runner.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
@@ -92,6 +93,26 @@ function fleetProjectPaths(fleetDir: string, project: string, createDirectories:
     throw new Error(`Project '${project}' checkout '${resolved.checkout}' is not a git repository.`)
   }
   return fleetPaths(resolved.location, root, createDirectories)
+}
+
+/**
+ * The forge for the selected project. A fleet project names its repositories instead of
+ * leaving them to the checkout, and a fleet queue shared by several projects is narrowed
+ * to this project's issues.
+ */
+async function loadPathsForge(
+  name: string,
+  paths: OrchPaths,
+  report?: (message: string) => void,
+): Promise<Forge> {
+  const fleet = paths.fleet
+  const forge = await loadForge(name, paths.repoRoot, report, fleet === undefined ? {} : {
+    codeRepository: fleet.repository,
+    issueRepository: fleet.issueRepository,
+  })
+  return fleet?.issueRepository === undefined
+    ? forge
+    : scopeForgeToProject(forge, projectScopeLabel(fleet.project))
 }
 
 function repoRoot(repository?: string): string {
@@ -438,7 +459,7 @@ const cmdInit: Command = async (paths, args) => {
     return 1
   }
   const config = loadRepositoryConfig(paths)
-  const forge = await loadForge(config.forge, paths.repoRoot)
+  const forge = await loadPathsForge(config.forge, paths)
   const { initializeRepository } = await import('./initialize.ts')
   const result = await initializeRepository(paths, forge, args[0])
   return result.ok ? 0 : 1
@@ -461,7 +482,7 @@ const cmdVerifySetup: Command = async (paths, args) => {
     return 1
   }
   const config = loadRepositoryConfig(paths)
-  const forge = await loadForge(config.forge, paths.repoRoot)
+  const forge = await loadPathsForge(config.forge, paths)
   const { verifyRepositorySetup } = await import('./setup.ts')
   return await verifyRepositorySetup(paths, forge, { env: process.env }) ? 0 : 1
 }
@@ -533,7 +554,7 @@ const cmdDelegate: Command = async (paths, args) => {
   const result = await delegateTaskVisible(paths, description, { effort, inspect }, {
     loadForge: async () => {
       const config = loadRepositoryConfig(paths)
-      return loadForge(config.forge, paths.repoRoot)
+      return loadPathsForge(config.forge, paths)
     },
     warn: (message) => console.warn(message),
   })
@@ -578,7 +599,7 @@ const cmdReportUpstream: Command = async (paths, args) => {
     },
     loadForge: async () => {
       const config = loadRepositoryConfig(paths)
-      return loadForge(config.forge, paths.repoRoot)
+      return loadPathsForge(config.forge, paths)
     },
   })
 }
@@ -676,7 +697,7 @@ const cmdDeploy: Command = async (paths, args) => {
     encoding: 'utf8',
     windowsHide: true,
   }).trim()
-  const forge = await loadForge(config.forge, paths.repoRoot)
+  const forge = await loadPathsForge(config.forge, paths)
   const result = await deploy(project.deployment, ref, forge)
   console.log(`Workflow run ${result.run.id} completed successfully.`)
   console.log(`${result.verified ? 'PASS' : 'FAIL'}: deployed revision verification; expected=${result.expectedRevision} actual=${result.deployedRevision || '(missing)'}`)
@@ -717,7 +738,7 @@ const cmdMerge: Command = async (paths, args) => {
     }
     const forge = linkedIssues.length === 0
       ? undefined
-      : await loadForge(config.forge, paths.repoRoot)
+      : await loadPathsForge(config.forge, paths)
     const mergeResult = await mergeTask(paths, taskId, {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
@@ -778,7 +799,7 @@ const cmdCleanup: Command = async (paths, args) => {
   const cleanupConfig = (): LoopConfig => config ??= loadRepositoryConfig(paths)
   return runCleanupCommand(paths, args, {
     issueQueueEnabled: () => cleanupConfig().issueQueueEnabled,
-    loadForge: () => loadForge(cleanupConfig().forge, paths.repoRoot),
+    loadForge: () => loadPathsForge(cleanupConfig().forge, paths),
     cleanup: cleanupTask,
     error: (message) => console.error(message),
   })
@@ -1183,7 +1204,7 @@ const cmdCiWait: Command = async (paths, args) => {
   }
 
   const config = loadRepositoryConfig(paths)
-  const forge = await loadForge(config.forge, paths.repoRoot)
+  const forge = await loadPathsForge(config.forge, paths)
   return waitForCi(forge, Number(prNumber), { timeoutSeconds })
 }
 
@@ -1341,9 +1362,9 @@ async function runLoopDaemon(
         : formatEventLine(name, subject)),
       orchestrationDepsRuntimeForPackage(topology.packageRoot),
     )
-    const forge = await loadForge(
+    const forge = await loadPathsForge(
       config.forge,
-      loopPaths.repoRoot,
+      loopPaths,
       (message) => log(formatEventLine('WARN', 'forge', message)),
     )
     const runner = await loadRunner(config.runner, { env: process.env, repoRoot: loopPaths.repoRoot })

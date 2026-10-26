@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
   CheckConclusion, CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge,
-  ForgeAuthor, ForgeIssue, ForgeIssueComment, PrReference, PrStatus, WorkflowRun,
+  ForgeAuthor, ForgeIssue, ForgeIssueComment, ForgeTarget, PrReference, PrStatus, WorkflowRun,
 } from './forge.ts'
 import { ForgeIssueNotFoundError, ForgeRateLimitError } from './forge.ts'
 
@@ -230,6 +230,7 @@ export function createGithubForge(
   repoRoot: string = process.cwd(),
   runGh: GithubCommand = gh,
   report: GithubForgeReport = () => {},
+  target: ForgeTarget = {},
 ): Forge {
   const checkedGh: GithubCommand = async (root, args) => {
     try {
@@ -252,6 +253,11 @@ export function createGithubForge(
     }
   }
 
+  // Without a named code repository gh infers it from the checkout, as it always has.
+  const codeRepository = target.codeRepository === undefined
+    ? []
+    : ['--repo', target.codeRepository]
+
   const parseWorkflowRun = (data: GithubWorkflowRun): WorkflowRun => ({
     id: data.databaseId,
     createdAt: data.createdAt,
@@ -265,6 +271,7 @@ export function createGithubForge(
   // from a checkout whose remote may belong to a consumer or the upstream package.
   let issueQueueRepositoryPromise: Promise<string> | undefined
   const issueQueueRepository = (): Promise<string> => {
+    if (target.issueRepository !== undefined) return Promise.resolve(target.issueRepository)
     issueQueueRepositoryPromise ??= (async () => {
       const args = ['repo', 'view', '--json', 'nameWithOwner']
       try {
@@ -376,7 +383,7 @@ export function createGithubForge(
     async prStatus(ref: PrReference): Promise<PrStatus> {
       let stdout: string
       const args = [
-        'pr', 'view', String(ref.value),
+        'pr', 'view', String(ref.value), ...codeRepository,
         '--json', 'url,state,isDraft,headRefOid,statusCheckRollup',
       ]
       try {
@@ -407,14 +414,17 @@ export function createGithubForge(
     },
 
     async prBody(ref: string): Promise<string> {
-      const args = ['pr', 'view', ref, '--json', 'body']
+      const args = ['pr', 'view', ref, ...codeRepository, '--json', 'body']
       const stdout = await checkedGh(repoRoot, args)
       return `${parseGhJson(args, stdout, prBodySchema).body}\n`
     },
 
     async createPr(options: CreatePrOptions): Promise<string> {
       const args = [
-        'pr', 'create',
+        'pr', 'create', ...codeRepository,
+        // A named repository is not necessarily the checkout's, so gh cannot infer the
+        // head from the current branch.
+        ...(target.codeRepository === undefined ? [] : ['--head', options.branch]),
         '--base', options.base,
         '--title', options.title,
         '--body', githubPrBody(options.body),
@@ -430,20 +440,21 @@ export function createGithubForge(
     },
 
     async updatePr(ref: string, fields: { title?: string; body?: string }): Promise<void> {
-      const args = ['pr', 'edit', ref]
+      const args = ['pr', 'edit', ref, ...codeRepository]
+      const fixedArgs = args.length
       if (fields.title !== undefined) args.push('--title', fields.title)
       if (fields.body !== undefined) args.push('--body', githubPrBody(fields.body))
-      if (args.length === 3) return
+      if (args.length === fixedArgs) return
       await checkedGh(repoRoot, args)
     },
 
     async markPrReady(ref: string): Promise<void> {
-      await checkedGh(repoRoot, ['pr', 'ready', ref])
+      await checkedGh(repoRoot, ['pr', 'ready', ref, ...codeRepository])
     },
 
     async dispatchWorkflow(workflow: string, ref: string, dispatchToken: string): Promise<void> {
       await checkedGh(repoRoot, [
-        'workflow', 'run', workflow, '--ref', ref,
+        'workflow', 'run', workflow, ...codeRepository, '--ref', ref,
         '--field', `dispatch_token=${dispatchToken}`,
       ])
     },
@@ -454,7 +465,8 @@ export function createGithubForge(
       dispatchToken: string,
     ): Promise<WorkflowRun | undefined> {
       const args = [
-        'run', 'list', '--workflow', workflow, '--event', 'workflow_dispatch', '--limit', '100',
+        'run', 'list', ...codeRepository,
+        '--workflow', workflow, '--event', 'workflow_dispatch', '--limit', '100',
         '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
       ]
       const stdout = await checkedGh(repoRoot, args)
@@ -466,7 +478,7 @@ export function createGithubForge(
 
     async getWorkflowRun(runId: number): Promise<WorkflowRun> {
       const args = [
-        'run', 'view', String(runId),
+        'run', 'view', String(runId), ...codeRepository,
         '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
       ]
       const stdout = await checkedGh(repoRoot, args)

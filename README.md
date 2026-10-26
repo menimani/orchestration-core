@@ -295,8 +295,14 @@ fleet/
 
 Select a project with `--project <name>`; `--fleet <dir>` names the fleet when the
 working directory is not inside it. `loop-status --fleet <dir>` without a project prints
-one line per declared project. `init` and `verify-setup` for a fleet project write and
-check only the fleet: the target repository's hooks and labels are left alone.
+one line per declared project. `init` and `verify-setup` for a fleet project leave the
+target repository's hooks alone.
+
+Add `"issueRepository": "owner/fleet"` at the top of `fleet.json` to keep the issue queue
+in the fleet's own repository instead of the project's. Every project shares that queue:
+each issue it files carries `project:<name>`, and a project's loop reads, claims, and
+reaps only issues carrying its own label. Pull requests and workflow runs still go to the
+project's declared `repository`.
 
 If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
