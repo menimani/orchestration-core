@@ -34,6 +34,20 @@ export function createForge(repoRoot, report) {
     expect(report).toHaveBeenCalledWith('external forge loaded')
   })
 
+  it('passes the named repositories to a forge factory', async () => {
+    const root = fixtureRoot()
+    writeFileSync(join(root, 'forge.mjs'), `
+export function createForge(repoRoot, report, target) {
+  return { target }
+}
+`)
+    const target = { codeRepository: 'owner/app', issueRepository: 'owner/fleet' }
+
+    const forge = await loadForge(`.${sep}forge.mjs`, root, () => {}, target)
+
+    expect(forge).toMatchObject({ target })
+  })
+
   it('loads a runner implementation from an absolute path', async () => {
     const root = fixtureRoot()
     const adapterPath = join(root, 'runner.mjs')

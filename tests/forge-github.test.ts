@@ -368,6 +368,80 @@ describe('GitHub issue queue repository targeting', () => {
     }
   })
 
+  it('uses a named issue repository without asking the checkout', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'api' && args[1]?.includes('/permission')) {
+        return JSON.stringify({ permission: 'write' })
+      }
+      if (args[0] === 'issue' && args[1] === 'create') {
+        return 'https://github.com/owner/fleet/issues/7\n'
+      }
+      if (args[0] === 'issue' && args[1] === 'view') return JSON.stringify(openIssueFixture)
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command, () => {}, {
+      issueRepository: 'owner/fleet',
+    })
+
+    await forge.createIssue({ title: 'Finding', body: 'Body', labels: ['loop:finding'] })
+    await forge.getIssue(42)
+
+    expect(calls.some((args) => args[0] === 'repo')).toBe(false)
+    expect(calls.find((args) => args[0] === 'issue' && args[1] === 'create'))
+      .toEqual(expect.arrayContaining(['--repo', 'owner/fleet']))
+    expect(calls.find((args) => args[0] === 'api'))
+      .toEqual(['api', 'repos/owner/fleet/collaborators/maintainer-one/permission'])
+  })
+
+  it('sends pull request and workflow calls to a named code repository', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'pr' && args[1] === 'create') return 'https://github.com/owner/app/pull/3\n'
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return JSON.stringify(args.includes('body')
+          ? { body: 'Body' }
+          : { url: 'u', state: 'OPEN', isDraft: true, headRefOid: 'abc', statusCheckRollup: [] })
+      }
+      if (args[0] === 'run' && args[1] === 'list') return '[]'
+      if (args[0] === 'run' && args[1] === 'view') return JSON.stringify(workflowRunFixture)
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command, () => {}, {
+      codeRepository: 'owner/app',
+    })
+
+    await forge.createPr({ branch: 'run/1', base: 'main', title: 'T', body: 'B', draft: true })
+    await forge.prStatus({ kind: 'branch', value: 'run/1' })
+    await forge.prBody('run/1')
+    await forge.updatePr('run/1', { title: 'T2' })
+    await forge.markPrReady('run/1')
+    await forge.dispatchWorkflow('deploy.yml', 'main', 'token')
+    await forge.findWorkflowRun('deploy.yml', 'main', 'token')
+    await forge.getWorkflowRun(1)
+
+    for (const args of calls) {
+      expect(args, `gh ${args.join(' ')}`).toEqual(expect.arrayContaining(['--repo', 'owner/app']))
+    }
+    expect(calls[0]).toEqual(expect.arrayContaining(['--head', 'run/1']))
+  })
+
+  it('leaves the pull request head to the checkout when no code repository is named', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      return 'https://github.com/owner/app/pull/3\n'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.createPr({ branch: 'run/1', base: 'main', title: 'T', body: 'B', draft: true })
+
+    expect(calls[0]).not.toContain('--repo')
+    expect(calls[0]).not.toContain('--head')
+  })
+
   it('fails closed when the current repository cannot be resolved', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {

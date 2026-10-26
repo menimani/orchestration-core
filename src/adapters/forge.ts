@@ -168,6 +168,19 @@ export interface Forge {
   closeIssue(issueNumber: number, comment: string): Promise<void>
 }
 
+/**
+ * The repositories a forge acts on when they are not the checkout's own. A fleet names
+ * them explicitly: its working directory may be the fleet rather than the project, and
+ * its issue queue lives in a repository of its own. Omitted fields keep the adapter's
+ * inference from the checkout.
+ */
+export interface ForgeTarget {
+  /** owner/name for branches, pull requests and workflow runs. */
+  codeRepository?: string | undefined
+  /** owner/name for the issue queue. */
+  issueRepository?: string | undefined
+}
+
 export interface ExternalForgeModule {
   /** A ready-to-use adapter. */
   default?: Forge
@@ -177,6 +190,7 @@ export interface ExternalForgeModule {
   createForge?: (
     repoRoot: string,
     report: (message: string) => void,
+    target: ForgeTarget,
   ) => Forge | Promise<Forge>
 }
 
@@ -184,11 +198,12 @@ export async function loadForge(
   name: string,
   repoRoot: string,
   report: (message: string) => void = () => {},
+  target: ForgeTarget = {},
 ): Promise<Forge> {
   switch (name) {
     case 'github': {
       const mod = await import('./forge-github.ts')
-      return mod.createGithubForge(repoRoot, undefined, report)
+      return mod.createGithubForge(repoRoot, undefined, report, target)
     }
     default: {
       let mod: ExternalForgeModule
@@ -202,7 +217,7 @@ export async function loadForge(
       }
       const forge = mod.default ?? mod.forge
       if (forge !== undefined) return forge
-      if (mod.createForge !== undefined) return mod.createForge(repoRoot, report)
+      if (mod.createForge !== undefined) return mod.createForge(repoRoot, report, target)
       throw new Error(
         `External FORGE '${name}' must export default, forge, or createForge`,
       )

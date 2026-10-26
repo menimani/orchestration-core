@@ -71,7 +71,9 @@ describe('repository initialization', () => {
     git(repository, ['init', '--initial-branch=main'])
     const forge = makeFakeForge()
     const reports: string[] = []
-    const paths = fleetPaths({ dir: fleet, project: 'example' }, repository, false)
+    const paths = fleetPaths(
+      { dir: fleet, project: 'example', repository: 'owner/example' }, repository, false,
+    )
 
     const result = await initializeRepository(paths, forge, 'example', {
       packageRoot,
@@ -87,7 +89,31 @@ describe('repository initialization', () => {
     expect(() => git(repository, ['config', '--local', '--get', 'core.hooksPath'])).toThrow()
     expect(forge.labels).toEqual(new Set())
     expect(reports).toContain('SKIP: core.hooksPath; a fleet project leaves its repository\'s hooks unchanged')
-    expect(reports).toContain('SKIP: loop labels; a fleet project files no issues in its repository')
+    expect(reports).toContain('SKIP: loop labels; a fleet project without an issue repository files no issues')
+  })
+
+  it('creates a fleet queue\'s labels and the project scope label in the queue repository', async () => {
+    const repository = mkdtempSync(join(tmpdir(), 'orchestration-init-target-'))
+    const fleet = mkdtempSync(join(tmpdir(), 'orchestration-init-fleet-'))
+    repositories.push(repository, fleet)
+    git(repository, ['init', '--initial-branch=main'])
+    const queue = makeFakeForge()
+    const reports: string[] = []
+    const paths = fleetPaths({
+      dir: fleet, project: 'example', repository: 'owner/example', issueRepository: 'owner/fleet',
+    }, repository, false)
+
+    const result = await initializeRepository(paths, queue, 'example', {
+      packageRoot,
+      report: (line) => reports.push(line),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(queue.labels).toEqual(new Set([
+      ...QUEUE_LABELS.map((label) => label.name), 'project:example',
+    ]))
+    expect(reports).toContain('CREATED: label project:example')
+    expect(() => git(repository, ['config', '--local', '--get', 'core.hooksPath'])).toThrow()
   })
 
   it('leaves contract-complete project files unchanged when repaired', async () => {

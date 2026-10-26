@@ -61,9 +61,6 @@ export interface ResolvedFleetProject {
   location: FleetLocation
   /** Where this machine keeps the target repository's checkout. */
   checkout: string
-  /** The forge repository the project's branches and pull requests go to. */
-  repository: string
-  issueRepository: string | undefined
 }
 
 /** Resolve a project named in fleet.json to this machine's checkout of it. */
@@ -84,9 +81,12 @@ export function resolveFleetProject(fleetDir: string, project: string): Resolved
     throw new Error(`${localFile} has no path for project '${project}'`)
   }
   return {
-    location: { dir, project },
+    location: {
+      dir,
+      project,
+      repository: declared.repository,
+      issueRepository: fleet.issueRepository,
+    },
     checkout: isAbsolute(checkout) ? checkout : resolve(dir, checkout),
-    repository: declared.repository,
-    issueRepository: fleet.issueRepository,
   }
 }

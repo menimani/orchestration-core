@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import { loadProject, type ProjectAdapter, type SuiteStep } from './adapters/project.ts'
 import { QUEUE_LABELS } from './issueQueue.ts'
+import { projectScopeLabel } from './issueScope.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
 
@@ -169,25 +170,32 @@ export async function verifyRepositorySetup(
 
   if (paths.fleet !== undefined) {
     report('SKIP: core.hooksPath; a fleet project leaves its repository\'s hooks unchanged')
-    report('SKIP: loop labels; a fleet project files no issues in its repository')
+  } else {
+    const expectedHooks = relative(paths.repoRoot, join(packageRoot, '.githooks')).replaceAll('\\', '/') || '.'
+    try {
+      const configuredHooks = git(['config', '--local', '--get', 'core.hooksPath'])
+      if (configuredHooks !== expectedHooks) throw new Error(`${configuredHooks || '(unset)'} != ${expectedHooks}`)
+      report(`PASS: core.hooksPath is ${expectedHooks}`)
+    } catch (error) {
+      report(`FAIL: core.hooksPath is not ${expectedHooks}; ${(error as Error).message.split(/\r?\n/, 1)[0]}`)
+      ok = false
+    }
+  }
+
+  if (paths.fleet !== undefined && paths.fleet.issueRepository === undefined) {
+    report('SKIP: loop labels; a fleet project without an issue repository files no issues')
     return ok
   }
-
-  const expectedHooks = relative(paths.repoRoot, join(packageRoot, '.githooks')).replaceAll('\\', '/') || '.'
-  try {
-    const configuredHooks = git(['config', '--local', '--get', 'core.hooksPath'])
-    if (configuredHooks !== expectedHooks) throw new Error(`${configuredHooks || '(unset)'} != ${expectedHooks}`)
-    report(`PASS: core.hooksPath is ${expectedHooks}`)
-  } catch (error) {
-    report(`FAIL: core.hooksPath is not ${expectedHooks}; ${(error as Error).message.split(/\r?\n/, 1)[0]}`)
-    ok = false
-  }
-
+  // A fleet queue also needs the label that keeps this project's issues apart.
+  const expectedLabels = [
+    ...QUEUE_LABELS.map((label) => label.name),
+    ...(paths.fleet === undefined ? [] : [projectScopeLabel(paths.fleet.project)]),
+  ]
   try {
     const labels = new Set(await forge.listLabels())
-    const missing = QUEUE_LABELS.filter((label) => !labels.has(label.name)).map((label) => label.name)
+    const missing = expectedLabels.filter((label) => !labels.has(label))
     if (missing.length > 0) throw new Error(`missing ${missing.join(', ')}`)
-    report(`PASS: all ${QUEUE_LABELS.length} loop labels exist`)
+    report(`PASS: all ${expectedLabels.length} loop labels exist`)
   } catch (error) {
     report(`FAIL: loop labels; ${(error as Error).message}`)
     ok = false

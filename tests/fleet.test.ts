@@ -58,10 +58,10 @@ describe('fleet project resolution', () => {
     writeJson(join(dir, 'fleet.local.json'), { projects: { example: { path: '../example' } } })
 
     expect(resolveFleetProject(dir, 'example')).toEqual({
-      location: { dir, project: 'example' },
+      location: {
+        dir, project: 'example', repository: 'owner/example', issueRepository: 'owner/fleet',
+      },
       checkout: join(dir, '..', 'example'),
-      repository: 'owner/example',
-      issueRepository: 'owner/fleet',
     })
   })
 
@@ -92,7 +92,7 @@ describe('fleet paths', () => {
   it('keeps runtime state and project assets in the fleet, not the checkout', () => {
     const dir = fleetDir()
     const checkout = join(dir, 'checkout')
-    const paths = fleetPaths({ dir, project: 'example' }, checkout, false)
+    const paths = fleetPaths({ dir, project: 'example', repository: 'owner/example' }, checkout, false)
 
     expect(paths).toEqual({
       root: join(dir, 'state', 'example'),
@@ -103,7 +103,7 @@ describe('fleet paths', () => {
       statusDir: join(dir, 'state', 'example', 'status'),
       logsDir: join(dir, 'state', 'example', 'logs'),
       queueDir: join(dir, 'state', 'example', 'queue'),
-      fleet: { dir, project: 'example' },
+      fleet: { dir, project: 'example', repository: 'owner/example' },
     })
   })
 
@@ -117,7 +117,7 @@ describe('fleet paths', () => {
 
   it('selects the same project again from any working directory', () => {
     const dir = fleetDir()
-    const fleet = fleetPaths({ dir, project: 'example' }, join(dir, 'checkout'), false)
+    const fleet = fleetPaths({ dir, project: 'example', repository: 'owner/example' }, join(dir, 'checkout'), false)
     const repository = orchPaths(join(dir, 'repository'), false)
 
     expect(locationArgs(fleet)).toEqual(['--fleet', dir, '--project', 'example'])
