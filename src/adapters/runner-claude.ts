@@ -48,10 +48,12 @@ export function runClaudeProcess(
   finalMessageFile: string,
   args: readonly string[],
 ): Promise<number> {
-  const viaBash = process.platform === 'win32'
-  const command = viaBash ? 'bash' : 'claude'
-  const commandArgs = viaBash
-    ? ['-c', 'exec claude "$@"', 'claude', ...args]
+  // Claude may be a native executable or an npm .cmd shim; cmd.exe launches either
+  // through PATHEXT, whichever shell started the loop.
+  const viaCmd = process.platform === 'win32'
+  const command = viaCmd ? 'cmd.exe' : 'claude'
+  const commandArgs = viaCmd
+    ? ['/d', '/c', 'claude', ...args]
     : [...args]
 
   return new Promise((resolve, reject) => {

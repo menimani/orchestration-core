@@ -112,15 +112,16 @@ export function createCodexRunner(): Runner {
     start(options: RunnerStartOptions): Promise<number> {
       const args = buildArgs(options)
       // On Windows the `codex` on PATH is an npm .cmd shim, which Node cannot spawn
-      // without a shell. Git Bash is already a hard requirement of this repository,
-      // so route through `bash -c` with positional arguments.
-      const viaBash = process.platform === 'win32'
-      const command = viaBash ? 'bash' : 'codex'
-      const commandArgs = viaBash
-        ? ['-c', 'exec codex "$@"', 'codex', ...args]
+      // without a shell. cmd.exe resolves it through PATHEXT from any calling shell;
+      // a bare `bash` resolved to WSL instead of Git Bash when started from PowerShell.
+      // The arguments are paths and settings the loop composed, never forge text.
+      const viaCmd = process.platform === 'win32'
+      const command = viaCmd ? 'cmd.exe' : 'codex'
+      const commandArgs = viaCmd
+        ? ['/d', '/c', 'codex', ...args]
         : args
 
-      if (viaBash) {
+      if (viaCmd) {
         // Measured on Windows: detached launches gave every console descendant its own
         // visible window. The hidden launcher gives the task one non-visible console,
         // inherited by all of its tools, while still surviving the daemon that starts it.
