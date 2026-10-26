@@ -348,6 +348,7 @@ describe('GitHub issue queue repository targeting', () => {
     await forge.listLabels()
     await forge.createLabel('loop:finding', 'Finding')
     await forge.createIssue({ title: 'Finding', body: 'Body', labels: ['loop:finding'] })
+    await forge.updateIssueTitle(42, '[FR-7] Import recurring events')
     await forge.getIssue(42)
     await forge.commentIssue(42, 'Comment')
     await forge.listIssueComments(42)
@@ -428,6 +429,28 @@ describe('GitHub issue queue repository targeting', () => {
     expect(calls[0]).toEqual(expect.arrayContaining(['--head', 'run/1']))
   })
 
+  it('lists the code repository\'s own issues and judges authors there', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args.includes('--paginate')) {
+        return restPages([openIssueFixture, { ...openIssueFixture, number: 9, pull_request: {} }])
+      }
+      if (args[0] === 'api') return JSON.stringify({ permission: 'read' })
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command, () => {}, {
+      codeRepository: 'owner/app', issueRepository: 'owner/fleet',
+    })
+
+    const issues = await forge.listSourceIssues!()
+
+    expect(issues.map((issue) => issue.number)).toEqual([357])
+    expect(issues[0]?.author).toEqual({ login: 'maintainer-one', hasWriteAccess: false })
+    expect(calls[0]?.at(-1)).toBe('repos/owner/app/issues?state=open&per_page=100')
+    expect(calls[1]).toEqual(['api', 'repos/owner/app/collaborators/maintainer-one/permission'])
+  })
+
   it('leaves the pull request head to the checkout when no code repository is named', async () => {
     const calls: string[][] = []
     const command: GithubCommand = async (_root, args) => {
@@ -440,6 +463,23 @@ describe('GitHub issue queue repository targeting', () => {
 
     expect(calls[0]).not.toContain('--repo')
     expect(calls[0]).not.toContain('--head')
+  })
+
+  it('updates an issue title through gh issue edit', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'consumer/project' })
+      return ''
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.updateIssueTitle(1171, '[FR-31] Import recurring events')
+
+    expect(calls.at(-1)).toEqual([
+      'issue', 'edit', '1171', '--repo', 'consumer/project',
+      '--title', '[FR-31] Import recurring events',
+    ])
   })
 
   it('fails closed when the current repository cannot be resolved', async () => {

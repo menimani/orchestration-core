@@ -270,8 +270,7 @@ export function createGithubForge(
   // identity once and carry it on every queue call instead of letting gh infer a target
   // from a checkout whose remote may belong to a consumer or the upstream package.
   let issueQueueRepositoryPromise: Promise<string> | undefined
-  const issueQueueRepository = (): Promise<string> => {
-    if (target.issueRepository !== undefined) return Promise.resolve(target.issueRepository)
+  const checkoutRepository = (): Promise<string> => {
     issueQueueRepositoryPromise ??= (async () => {
       const args = ['repo', 'view', '--json', 'nameWithOwner']
       try {
@@ -290,13 +289,22 @@ export function createGithubForge(
     })()
     return issueQueueRepositoryPromise
   }
+  const issueQueueRepository = (): Promise<string> => target.issueRepository === undefined
+    ? checkoutRepository()
+    : Promise.resolve(target.issueRepository)
+  const codeRepositoryName = (): Promise<string> => target.codeRepository === undefined
+    ? checkoutRepository()
+    : Promise.resolve(target.codeRepository)
 
+  // Write access is judged on the repository the issue lives in: the queue's for queue
+  // issues, the project's own for issues imported from it.
   const normalizeAuthor = async (
     author: { login: string } | null,
     permissionCache = new Map<string, Promise<boolean>>(),
+    repositoryOf: () => Promise<string> = issueQueueRepository,
   ): Promise<ForgeAuthor> => {
     if (author === null) return { login: '(unknown)', hasWriteAccess: false }
-    const repository = await issueQueueRepository()
+    const repository = await repositoryOf()
     const cacheKey = author.login.toLowerCase()
     let permissionPromise = permissionCache.get(cacheKey)
     if (permissionPromise === undefined) {
@@ -332,12 +340,13 @@ export function createGithubForge(
   const normalizeIssue = async (
     issue: GithubIssue,
     permissionCache?: Map<string, Promise<boolean>>,
+    repositoryOf?: () => Promise<string>,
   ): Promise<ForgeIssue> => ({
     number: issue.number,
     state: issue.state === 'OPEN' ? 'open' : 'closed',
     title: issue.title,
     body: issue.body,
-    author: await normalizeAuthor(issue.author, permissionCache),
+    author: await normalizeAuthor(issue.author, permissionCache, repositoryOf),
     labels: issue.labels.map((label) => label.name),
     assignees: issue.assignees.map((assignee) => assignee.login),
     updatedAt: issue.updatedAt,
@@ -345,12 +354,13 @@ export function createGithubForge(
 
   const listGithubIssues = async (
     state: 'open' | 'closed',
-    label: string,
+    label: string | undefined,
+    repositoryOf: () => Promise<string> = issueQueueRepository,
   ): Promise<GithubIssue[]> => {
-    const repository = await issueQueueRepository()
+    const repository = await repositoryOf()
     const encodedRepository = repository.split('/').map(encodeURIComponent).join('/')
     const endpoint = `repos/${encodedRepository}/issues?state=${state}`
-      + `&labels=${encodeURIComponent(label)}&per_page=100`
+      + `${label === undefined ? '' : `&labels=${encodeURIComponent(label)}`}&per_page=100`
     const args = ['api', '--paginate', '--slurp', endpoint]
     const pages = parseGhJson(args, await checkedGh(repoRoot, args), restGithubIssuePagesSchema)
     const issues = pages.flat()
@@ -522,6 +532,13 @@ export function createGithubForge(
       return Number(match[1])
     },
 
+    async updateIssueTitle(issueNumber: number, title: string): Promise<void> {
+      const repository = await issueQueueRepository()
+      await checkedGh(repoRoot, [
+        'issue', 'edit', String(issueNumber), '--repo', repository, '--title', title,
+      ])
+    },
+
     async createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string> {
       // One listing, filtered here: gh's --search takes search syntax, and a label whose
       // name carries a colon — which every label this loop uses does — makes it fail
@@ -598,6 +615,14 @@ export function createGithubForge(
           return false
         })
       return Promise.all(issues.map((issue) => normalizeIssue(issue, permissionCache)))
+    },
+
+    async listSourceIssues(): Promise<ForgeIssue[]> {
+      const listedIssues = await listGithubIssues('open', undefined, codeRepositoryName)
+      const permissionCache = new Map<string, Promise<boolean>>()
+      return Promise.all(githubIssueListSchema.parse(listedIssues)
+        .filter((issue: GithubIssue) => issue.state === 'OPEN')
+        .map((issue) => normalizeIssue(issue, permissionCache, codeRepositoryName)))
     },
 
     async listClosedIssues(label: string): Promise<ForgeIssue[]> {

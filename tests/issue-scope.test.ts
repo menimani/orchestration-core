@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   buildIssueBody, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY, publishFinding, reapStaleLeases,
 } from '../src/issueQueue.ts'
+import type { Forge } from '../src/adapters/forge.ts'
 import { projectScopeLabel, scopeForgeToProject } from '../src/issueScope.ts'
 import { fleetPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
@@ -41,6 +42,30 @@ describe('project-scoped issue queue', () => {
     expect((await queue.getIssue(firstIssue)).labels).toEqual([LABEL_READY, 'project:first'])
     expect((await queue.getIssue(secondIssue)).labels).toEqual([LABEL_READY, 'project:first'])
     expect(queue.labels).toEqual(new Set(['project:first']))
+  })
+
+  it('keeps the methods of a forge implemented as a class', async () => {
+    class ClassForge {
+      readonly inner: FakeForge
+      constructor(inner: FakeForge) { this.inner = inner }
+      currentUser(): Promise<string> { return this.inner.currentUser() }
+      listLabels(): Promise<string[]> { return this.inner.listLabels() }
+      createLabel(name: string, description: string): Promise<void> {
+        return this.inner.createLabel(name, description)
+      }
+      createIssue(options: Parameters<FakeForge['createIssue']>[0]): Promise<number> {
+        return this.inner.createIssue(options)
+      }
+      getIssue(issueNumber: number) { return this.inner.getIssue(issueNumber) }
+      listOpenIssues(queueLabel: string) { return this.inner.listOpenIssues(queueLabel) }
+      listClosedIssues(queueLabel: string) { return this.inner.listClosedIssues(queueLabel) }
+    }
+    const scoped = scopeForgeToProject(new ClassForge(queue) as unknown as Forge, 'project:first')
+
+    const issueNumber = await scoped.createIssue({ title: 'one', body: 'one', labels: [LABEL_READY] })
+
+    expect(await scoped.currentUser()).toBe(queue.user)
+    expect((await scoped.getIssue(issueNumber)).labels).toEqual([LABEL_READY, 'project:first'])
   })
 
   it('lists only the issues filed by its own project', async () => {

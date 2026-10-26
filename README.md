@@ -306,6 +306,18 @@ project's declared `repository`. Because a fleet issue's number means nothing in
 project's repository, merge commits name no fleet issue; the merger closes each one with a
 `PROMOTED:` comment once the run's pull request has merged with its work.
 
+`import-issues --project <name>` files the project repository's open issues into that
+queue, each once. Imports wait under `loop:triage` until you relabel them `loop:ready`;
+`--ready-trusted` makes those written by accounts with write access to the project ready
+at once, and `--dry-run` shows what would be filed. When imported work merges, its merge
+commit closes the original issue in the project's repository.
+
+Shared skills such as `git-commit` and `loop-start` are installed once per user rather
+than into each repository: `install-skills --fleet <dir>` writes them to
+`~/.claude/skills` and `~/.agents/skills`. Their commands set `ORCHESTRATION_FLEET`, and
+the CLI then picks the project whose checkout you run them from, so they work in every
+project of the fleet without `--project`.
+
 If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
 subtree installation). The command requires exactly one positive PR number, optionally

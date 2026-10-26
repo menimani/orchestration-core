@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { findFleetDir, readFleet, resolveFleetProject } from '../src/fleet.ts'
+import { findFleetDir, projectForDirectory, readFleet, resolveFleetProject } from '../src/fleet.ts'
 import {
   absolutePackageScriptCommand, fleetPaths, locationArgs, orchPaths,
 } from '../src/paths.ts'
@@ -132,5 +132,45 @@ describe('fleet paths', () => {
     )
 
     expect(command).toBe("npm run -C 'C:/pkg' stop -- --fleet 'C:/fleet dir' --project 'example'")
+  })
+})
+
+describe('project for a directory', () => {
+  function fleetWithCheckouts(): string {
+    const dir = fleetDir()
+    writeJson(join(dir, 'fleet.json'), {
+      projects: {
+        outer: { repository: 'owner/outer' },
+        inner: { repository: 'owner/inner' },
+        unmapped: { repository: 'owner/unmapped' },
+      },
+    })
+    writeJson(join(dir, 'fleet.local.json'), {
+      projects: {
+        outer: { path: 'checkouts/outer' },
+        inner: { path: 'checkouts/outer/vendor/inner' },
+        stale: { path: 'checkouts/stale' },
+      },
+    })
+    mkdirSync(join(dir, 'checkouts', 'outer', 'vendor', 'inner', 'src'), { recursive: true })
+    mkdirSync(join(dir, 'checkouts', 'stale'), { recursive: true })
+    return dir
+  }
+
+  it('finds the deepest checkout that contains the directory', () => {
+    const dir = fleetWithCheckouts()
+
+    expect(projectForDirectory(dir, join(dir, 'checkouts', 'outer'))).toBe('outer')
+    expect(projectForDirectory(dir, join(dir, 'checkouts', 'outer', 'vendor'))).toBe('outer')
+    expect(projectForDirectory(dir, join(dir, 'checkouts', 'outer', 'vendor', 'inner', 'src')))
+      .toBe('inner')
+  })
+
+  it('finds nothing outside the checkouts or for a project the manifest dropped', () => {
+    const dir = fleetWithCheckouts()
+
+    expect(projectForDirectory(dir, join(dir, 'checkouts'))).toBeUndefined()
+    expect(projectForDirectory(dir, join(dir, 'checkouts', 'outer-sibling'))).toBeUndefined()
+    expect(projectForDirectory(dir, join(dir, 'checkouts', 'stale'))).toBeUndefined()
   })
 })

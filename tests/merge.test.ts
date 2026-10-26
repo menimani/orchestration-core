@@ -696,6 +696,31 @@ describe('mergeTask', () => {
     )
   })
 
+  it('closes the project issues imported work came from when the queue is elsewhere', async () => {
+    const taskId = '20260808_000000_017_user-imported-issue'
+    await makeCompletedTask(taskId, { commit: true })
+    const fleetQueuePaths = {
+      ...paths,
+      fleet: {
+        dir: repoRoot, project: 'example', repository: 'owner/example', issueRepository: 'owner/fleet',
+      },
+    }
+
+    await mergeTask(fleetQueuePaths, taskId, {
+      taskGate: 'light',
+      project: stubProject,
+      closesIssues: [317],
+      closesSourceIssues: [42],
+      forge: {
+        issueClosingCommitMessage: (message, issueNumber) => `${message} (closes #${issueNumber})`,
+      },
+    })
+
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe(
+      `Merge ${taskId} via orchestration (closes #42)`,
+    )
+  })
+
   it('stops on uncommitted changes and keeps the worktree', async () => {
     const taskId = '20260808_000000_002_user-forgot-commit'
     const worktree = await makeCompletedTask(taskId, { commit: true, dirty: true })

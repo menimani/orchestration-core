@@ -6,10 +6,11 @@ TypeScript with no build step.
 
 `README.md` describes what it is and how to run it. `SPEC.md` states the behaviour the
 suite pins — the two must agree, and tests enforce that. Canonical shared workflows live
-under `skills/`. They are rendered into every discovery path selected by an adapter:
-`.agents/skills/` by the Codex runner, and `.claude/skills/` by this repository's project
-adapter for the interactive agent a person drives. The latter also holds `verify-changes`,
-a repository skill absent from the manifest and never touched by the sync.
+under `skills/`. `install-skills` renders them once per user, into `~/.claude/skills` and
+`~/.agents/skills`, for every project of a fleet. This repository's `.claude/skills/` keeps
+an earlier rendered copy that nothing refreshes any more, plus `verify-changes`, a
+repository skill absent from the manifest; once the user-level skills are installed, the
+rendered copy can go.
 
 Merges, reviews, pull requests, and commits go through those workflows rather than
 hand-composed `gh` and `git` invocations: `git-merge` will not merge a self-PR that has
@@ -19,10 +20,16 @@ This file holds only what the source cannot tell you.
 
 ## This code runs in other people's repositories
 
-The core is consumed as a `git subtree` under `orchestration/` in the projects that use
-it. A change here reaches them on their next pull, so a break here breaks their loops,
-not only this repository's. Anything project-specific belongs in a project adapter
-(`orchestration/project/project-<name>.ts`), never in `src/`.
+The core runs every project of a fleet from its own checkout, with the fleet repository
+(`menimani/orchestration-fleet`) as configuration, and a repository not yet moved may
+still consume it as a `git subtree` under `orchestration/`. A change here reaches those
+projects the next time a loop starts or a subtree is pulled, so a break here breaks their
+loops, not only this repository's. Anything project-specific belongs in that project's
+adapter, never in `src/`: `projects/<name>/project/project-<name>.ts` in the fleet, or
+`orchestration/project/project-<name>.ts` in a subtree consumer.
+
+This repository is one of the fleet's projects. A loop improving it works in a separate
+checkout (`orchestration-core-loop`), never in the checkout it runs from.
 
 The adapters are the seams: `forge` for the hosting service, `runner` for the agent,
 `project` for the repository being improved, and the automatically detected `os` for
