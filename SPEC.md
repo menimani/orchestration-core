@@ -263,7 +263,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
    tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
-   verified gone before the merge can discard that PID or remove the worktree. When all
+   verified gone before the merge can discard that PID or remove the worktree. A runner
+   recorded without the start identity that makes stopping it safe cannot be verified at
+   all, so that merge is deferred rather than failed: the task stays `completed`, one WARN
+   per task names the PID, and a later poll merges once the registry entry clears. When all
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
    requiring the worker to have predicted that outcome.
@@ -326,8 +329,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. A durable per-task guard skips an attempt while that task's merge is
     active or after it succeeded, without changing the failure count; a failed attempt
-    releases the guard so a later poll can retry. A conflicting pre-merge rebase is
-    terminal for that task and contributes at most one failure to this count; ordinary
+    releases the guard so a later poll can retry. A merge deferred because a completed
+    task's runner cannot be verified yet (item 8) is no failure of the work: it leaves
+    this count and the task's own failure count alone, so a runner tree that lingers for
+    a few minutes cannot stop the loop and terminate the tasks still running under it.
+    A conflicting pre-merge rebase is terminal for that task and contributes at most one
+    failure to this count; ordinary
     gate failures remain retryable. Re-claiming completed-but-unmerged work
     requests that merge instead of silently treating the task as already processed. When
     the project adapter classifies an infrastructure failure, or the merge log names an

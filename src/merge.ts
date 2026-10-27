@@ -74,6 +74,22 @@ export class OrchestrationDepsInstallError extends MergeError {}
 /** A failed merge left repository state that is not proven safe for another attempt. */
 export class MergeRecoveryError extends MergeError {}
 
+/**
+ * The completed task's runner is still recorded without the identity that makes stopping
+ * it safe. Nothing about the work failed and nothing here needs repair: the registry
+ * entry clears once that process tree is gone, and the same merge then succeeds. It is a
+ * deferral rather than a failure so a few minutes of a lingering tree cannot trip the
+ * consecutive-merge-failure guard and stop the loop.
+ */
+export class UnverifiedRunnerError extends MergeError {
+  readonly pid: number
+
+  constructor(message: string, pid: number) {
+    super(message)
+    this.pid = pid
+  }
+}
+
 export interface MergeRuntime {
   git: (cwd: string, args: string[]) => string
 }
@@ -703,8 +719,9 @@ function stopCompletedRunner(paths: OrchPaths, taskId: string, pid: number): voi
     // A dead or replaced owner is already gone. An owner that remains visible only in
     // the blocking view lacks the identity needed to make termination safe.
     if (taskProcessPid(paths, taskId) !== undefined) {
-      throw new MergeError(
+      throw new UnverifiedRunnerError(
         `Could not verify completed runner ${pid}; task state was retained.`,
+        pid,
       )
     }
     return

@@ -13,7 +13,7 @@ import { createOperatingSystem as createWindowsOperatingSystem } from '../src/ad
 import {
   completeTaskWithoutChanges, describeCommandFailure, MergeError, MergeRecoveryError,
   mergeRemoteTask, mergeTask, RebaseConflictError, removeMergedWorktree,
-  removeTemporaryWorktree,
+  removeTemporaryWorktree, UnverifiedRunnerError,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
@@ -578,8 +578,15 @@ describe('mergeTask', () => {
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
     vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
 
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
-      .rejects.toThrow(`Could not stop completed runner ${runnerPid}; task state was retained.`)
+    // A tree that resisted termination is a counted failure: unlike an unverifiable
+    // runner, nothing here clears on its own.
+    const failure = await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
+      .then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(MergeError)
+    expect(failure).not.toBeInstanceOf(UnverifiedRunnerError)
+    expect((failure as MergeError).message).toBe(
+      `Could not stop completed runner ${runnerPid}; task state was retained.`,
+    )
 
     expect(terminate).toHaveBeenCalledWith(runnerPid)
     expect(existsSync(worktree)).toBe(true)
@@ -598,8 +605,15 @@ describe('mergeTask', () => {
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
     await writeStatus(paths, taskId, 'completed', runnerPid)
 
-    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
-      .rejects.toThrow(`Could not verify completed runner ${runnerPid}; task state was retained.`)
+    // A deferral, not a failure: the caller must be able to tell this from a gate that
+    // judged the work, so it carries its own type and the PID it could not verify.
+    const failure = await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
+      .then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(UnverifiedRunnerError)
+    expect((failure as UnverifiedRunnerError).pid).toBe(runnerPid)
+    expect((failure as UnverifiedRunnerError).message).toBe(
+      `Could not verify completed runner ${runnerPid}; task state was retained.`,
+    )
 
     expect(terminate).not.toHaveBeenCalled()
     expect(existsSync(worktree)).toBe(true)
@@ -618,9 +632,12 @@ describe('mergeTask', () => {
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
     await writeStatus(paths, taskId, 'completed', runnerPid)
 
-    await expect(completeTaskWithoutChanges(
+    const failure = await completeTaskWithoutChanges(
       paths, taskId, git(repoRoot, ['rev-parse', 'HEAD']).trim(),
-    )).rejects.toThrow(
+    ).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(UnverifiedRunnerError)
+    expect((failure as UnverifiedRunnerError).pid).toBe(runnerPid)
+    expect((failure as UnverifiedRunnerError).message).toBe(
       `Could not verify completed runner ${runnerPid}; task state was retained.`,
     )
 
