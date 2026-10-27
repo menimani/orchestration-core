@@ -369,6 +369,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     counter once, at the gate, only when every expected scan completed successfully. A
     scan launch failure stops the loop without advancing the cycle number, and a cycle
     missing any expected yield stops rather than advancing to another cycle or completion.
+    A scan the cycle recorded as failed counts towards the expected total as a delivered
+    but silent yield: the cycle closes, its id still reaches the decisions and the pull
+    request through the cycle's loss note, and the empty counter is neither reset nor
+    advanced, because a failed scan is no evidence that its sections are clean.
     A scan interrupted by the operator `stop` command is the exception: the command
     records the live scan before terminating it, and the next daemon discards that scan's
     task state, rewinds the incomplete cycle, and dispatches the cycle's full scan set

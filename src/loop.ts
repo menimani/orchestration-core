@@ -1203,23 +1203,41 @@ export function createLoop(deps: LoopDeps) {
     appendFileSync(yieldFile, `${taskId}\t${value}\n`)
   }
 
+  /**
+   * The failed scans of a cycle. Their ids come from the cycle's failure record, which
+   * the status sweep appends to and operator-stop recovery prunes, so a scan the
+   * operator interrupted is never read back here as one that failed.
+   */
+  function failedScanIds(cycle: number): string[] {
+    const failedFile = join(paths.queueDir, `failed-${cycle}`)
+    if (!existsSync(failedFile)) return []
+    return [...new Set(readFileSync(failedFile, 'utf8').split(/\r?\n/)
+      .filter((taskId) => taskId !== '' && isScanTaskId(taskId)))]
+  }
+
   function completeScanYields(cycle: number): string[] | undefined {
     const expectedFile = join(paths.queueDir, `scan-expected-${cycle}`)
     const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
-    if (!existsSync(expectedFile) || !existsSync(yieldFile)) return undefined
+    if (!existsSync(expectedFile)) return undefined
     const expected = readCount(expectedFile)
     const keyedYields = new Map<string, string>()
     const legacyYields: string[] = []
-    for (const line of readFileSync(yieldFile, 'utf8').split(/\r?\n/).filter(Boolean)) {
-      if (line === 'found' || line === 'empty') {
-        legacyYields.push(line)
-        continue
+    if (existsSync(yieldFile)) {
+      for (const line of readFileSync(yieldFile, 'utf8').split(/\r?\n/).filter(Boolean)) {
+        if (line === 'found' || line === 'empty') {
+          legacyYields.push(line)
+          continue
+        }
+        const match = /^(\S+)\t(found|empty)$/.exec(line)
+        if (match === null) return undefined
+        keyedYields.set(match[1]!, match[2]!)
       }
-      const match = /^(\S+)\t(found|empty)$/.exec(line)
-      if (match === null) return undefined
-      keyedYields.set(match[1]!, match[2]!)
     }
-    const yields = [...legacyYields, ...keyedYields.values()]
+    // A failed scan never wrote a yield and never will, so waiting for one holds a
+    // cycle whose every other task is done. Count it as delivered but silent: it lets
+    // the cycle close without saying anything about the sections it was given.
+    const failed = failedScanIds(cycle).filter((taskId) => !keyedYields.has(taskId))
+    const yields = [...legacyYields, ...keyedYields.values(), ...failed.map(() => 'failed')]
     if (expected === 0 || yields.length !== expected) {
       return undefined
     }
@@ -1229,7 +1247,8 @@ export function createLoop(deps: LoopDeps) {
   /**
    * Fold the finished cycle's scan records into the empty-scan counter: reset on any
    * finding, increment exactly once when every expected scan came back empty, and leave
-   * it untouched when any scan failed or did not finish.
+   * it untouched when a scan did not finish or failed. A failed scan is no evidence
+   * that its sections are clean, so it closes the cycle without making it an empty one.
    */
   function foldScanYields(cycle: number): void {
     const yields = completeScanYields(cycle)
@@ -1238,7 +1257,7 @@ export function createLoop(deps: LoopDeps) {
     const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
     if (yields.includes('found')) {
       writeFileSync(emptyScanFile, '0\n')
-    } else {
+    } else if (!yields.includes('failed')) {
       const total = readCount(emptyScanFile) + 1
       writeFileSync(emptyScanFile, `${total}\n`)
     }
@@ -1358,7 +1377,7 @@ export function createLoop(deps: LoopDeps) {
   function cycleIsFinal(cycle: number): boolean {
     if (cycle >= config.maxScanCycles) return true
     const yields = completeScanYields(cycle)
-    if (yields !== undefined && !yields.includes('found')) {
+    if (yields !== undefined && !yields.includes('found') && !yields.includes('failed')) {
       return readCount(emptyScanFile) + 1 >= config.maxEmptyScans
     }
     return false
