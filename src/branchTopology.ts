@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import type { WorktreeSetupStep } from './adapters/project.ts'
+import { commandFailureSummary } from './errorText.ts'
 import { currentBranchTrackingRemote } from './gitRemote.ts'
 import { integrationWorktreeDir, PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
@@ -174,15 +175,6 @@ export function prepareIntegrationWorktree(
   }
 }
 
-function errorSummary(error: unknown): string {
-  const failure = error as { stderr?: string | Buffer }
-  const stderr = Buffer.isBuffer(failure.stderr)
-    ? failure.stderr.toString('utf8')
-    : failure.stderr
-  return (stderr?.trim() || (error instanceof Error ? error.message : String(error)))
-    .replaceAll(/\s+/g, ' ')
-}
-
 /** Merge the advertised default branch into the integration branch at an idle boundary. */
 export function absorbDefaultBranch(
   paths: OrchPaths,
@@ -203,7 +195,7 @@ export function absorbDefaultBranch(
     baseCommit = gitCommand(paths.repoRoot, ['rev-parse', 'FETCH_HEAD']).trim()
     baseRef = `${remote}/${branch}`
   } catch (error) {
-    event('WARN', `default branch update failed; continuing: ${errorSummary(error)}`)
+    event('WARN', `default branch update failed; continuing: ${commandFailureSummary(error)}`)
     return
   }
 
@@ -219,7 +211,7 @@ export function absorbDefaultBranch(
       return
     }
   } catch (error) {
-    event('WARN', `default branch status check failed; continuing: ${errorSummary(error)}`)
+    event('WARN', `default branch status check failed; continuing: ${commandFailureSummary(error)}`)
     return
   }
   const oldHead = gitCommand(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
@@ -232,8 +224,8 @@ export function absorbDefaultBranch(
       gitCommand(paths.repoRoot, ['merge', '--abort'])
     } catch (abortError) {
       throw new Error(
-        `default branch merge failed and merge abort failed: ${errorSummary(abortError)}; `
-        + `merge failure: ${errorSummary(error)}`,
+        `default branch merge failed and merge abort failed: ${commandFailureSummary(abortError)}; `
+        + `merge failure: ${commandFailureSummary(error)}`,
       )
     }
     let recoveredHead: string
@@ -244,7 +236,7 @@ export function absorbDefaultBranch(
     } catch (verificationError) {
       throw new Error(
         `default branch merge failed and recovery could not be verified: `
-        + `${errorSummary(verificationError)}; merge failure: ${errorSummary(error)}`,
+        + `${commandFailureSummary(verificationError)}; merge failure: ${commandFailureSummary(error)}`,
       )
     }
     if (recoveredHead !== oldHead || recoveredStatus !== '') {
@@ -254,6 +246,6 @@ export function absorbDefaultBranch(
         + `working tree ${recoveredStatus === '' ? 'clean' : `dirty (${recoveredStatus.replaceAll(/\r?\n/g, ', ')})`}`,
       )
     }
-    event('WARN', `default branch merge conflicted; continuing: ${errorSummary(error)}`)
+    event('WARN', `default branch merge conflicted; continuing: ${commandFailureSummary(error)}`)
   }
 }

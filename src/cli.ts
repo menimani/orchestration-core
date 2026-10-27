@@ -10,6 +10,7 @@ import { loadForge, type Forge } from './adapters/forge.ts'
 import { projectScopeLabel, scopeForgeToProject } from './issueScope.ts'
 import { loadRunner, type ReasoningEffort, type Runner } from './adapters/runner.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
+import { errorHeadline } from './errorText.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
   currentProcessMarkerPid, processMarker, processMarkerText,
@@ -260,11 +261,6 @@ interface LoopStartupResult {
   error?: string
 }
 
-function errorSummary(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return (message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'
-}
-
 function publishLoopStartupResult(
   resultFile: string | undefined,
   result: LoopStartupResult,
@@ -279,7 +275,7 @@ async function waitForLoopStartup(
 ): Promise<LoopStartupResult> {
   const deadline = Date.now() + LOOP_STARTUP_TIMEOUT_MS
   let spawnError: string | undefined
-  const onError = (error: Error): void => { spawnError = errorSummary(error) }
+  const onError = (error: Error): void => { spawnError = errorHeadline(error) }
   daemon.onError(onError)
   try {
     for (;;) {
@@ -294,7 +290,7 @@ async function waitForLoopStartup(
                 status: 'error',
                 pid: daemon.pid,
                 error: `daemon published an unexpected PID (${result.pid}); `
-                  + `cleanup failed: ${errorSummary(error)}`,
+                  + `cleanup failed: ${errorHeadline(error)}`,
               }
             }
             return {
@@ -313,7 +309,7 @@ async function waitForLoopStartup(
                 return {
                   ...result,
                   error: `${result.error ?? 'daemon initialization failed'}; `
-                    + `cleanup failed: ${errorSummary(error)}`,
+                    + `cleanup failed: ${errorHeadline(error)}`,
                 }
               }
             }
@@ -341,7 +337,7 @@ async function waitForLoopStartup(
             status: 'error',
             pid: daemon.pid,
             error: 'daemon did not initialize before the startup timeout; '
-              + `cleanup failed: ${errorSummary(error)}`,
+              + `cleanup failed: ${errorHeadline(error)}`,
           }
         }
         return {
@@ -1165,7 +1161,7 @@ const cmdLoop: Command = async (paths, args) => {
     }
     if (!await approveLoopStart(config, approvedMode)) return 1
   } catch (error) {
-    console.error(`ERROR: ${errorSummary(error)}`)
+    console.error(`ERROR: ${errorHeadline(error)}`)
     return 1
   }
   // The command registry resolves paths without creating them so a refused start is
@@ -1265,7 +1261,7 @@ const cmdLoop: Command = async (paths, args) => {
     }
     return result
   } catch (error) {
-    const message = errorSummary(error)
+    const message = errorHeadline(error)
     log(`ERROR: ${message}`, true)
     reportStartup({
       status: 'error',

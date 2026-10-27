@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import {
   operatingSystem, type DaemonProcess, type OperatingSystem,
 } from './adapters/os.ts'
+import { errorHeadline } from './errorText.ts'
 import { PACKAGE_ROOT } from './paths.ts'
 import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
@@ -98,11 +99,6 @@ export function signalLoopRestartReady(
   }
 }
 
-function errorSummary(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return (message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'
-}
-
 /** Start the replacement and wait for its explicit ready signal before reporting success. */
 export async function startLoopReplacement(
   readyFile: string,
@@ -128,7 +124,7 @@ export async function startLoopReplacement(
       outputFile: runtime.outputFile,
     })
   } catch (error) {
-    return { ok: false, error: errorSummary(error) }
+    return { ok: false, error: errorHeadline(error) }
   }
 
   const pid = replacement.pid
@@ -159,14 +155,14 @@ export async function startLoopReplacement(
       try {
         os.terminateProcessTree(pid)
       } catch (error) {
-        terminationError = errorSummary(error)
+        terminationError = errorHeadline(error)
       }
       try {
         if (os.processTreeIsAlive(pid)) {
           cleanupError = terminationError ?? `Could not stop process tree ${pid}.`
         }
       } catch (error) {
-        cleanupError = errorSummary(error)
+        cleanupError = errorHeadline(error)
       }
       finish(cleanupError === undefined ? result : {
         ...result,
@@ -174,7 +170,7 @@ export async function startLoopReplacement(
       })
     }
     const onError = (error: Error): void => {
-      spawnError = errorSummary(error)
+      spawnError = errorHeadline(error)
       fail({ ok: false, pid, error: spawnError })
     }
     const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
@@ -219,7 +215,7 @@ export async function startLoopReplacement(
       try {
         runtime.onReady?.(pid)
       } catch (error) {
-        fail({ ok: false, pid, error: errorSummary(error) })
+        fail({ ok: false, pid, error: errorHeadline(error) })
         return
       }
       finish({ ok: true, pid })

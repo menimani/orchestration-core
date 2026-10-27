@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import { operatingSystem } from './adapters/os.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
+import { commandFailureSummary } from './errorText.ts'
 import { shortTaskId } from './ids.ts'
 import { verifyModuleIsolation } from './moduleIsolation.ts'
 import {
@@ -25,7 +26,7 @@ import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
-  removalFailureDetail, removeWorktreeWithFallback, type WorktreeRemovalRuntime,
+  removeWorktreeWithFallback, type WorktreeRemovalRuntime,
 } from './worktree.ts'
 
 export class MergeError extends Error {
@@ -214,15 +215,6 @@ export function pendingOrchestrationDepsFile(paths: OrchPaths, root: string): st
   return join(paths.queueDir, `orchestration-deps-pending-${packageKey}.json`)
 }
 
-function installFailureSummary(error: unknown): string {
-  const failure = error as { stderr?: string | Buffer }
-  const stderr = Buffer.isBuffer(failure.stderr)
-    ? failure.stderr.toString('utf8')
-    : failure.stderr
-  return (stderr?.trim() || (error instanceof Error ? error.message : String(error)))
-    .replaceAll(/\s+/g, ' ')
-}
-
 function installOrchestrationDeps(
   subject: string,
   event: OrchestrationDepsEvent,
@@ -237,7 +229,7 @@ function installOrchestrationDeps(
   } catch (error) {
     throw new OrchestrationDepsInstallError(
       `Could not persist pending orchestration dependency installation ${subject}: `
-      + installFailureSummary(error),
+      + commandFailureSummary(error),
     )
   }
   if (beforeInstall?.() === false) {
@@ -260,7 +252,7 @@ function installOrchestrationDeps(
   } catch (error) {
     throw new OrchestrationDepsInstallError(
       `Orchestration dependency installation ${subject} failed in ${root}: `
-      + `${installFailureSummary(error)}. The checkout may now be missing dependencies. `
+      + `${commandFailureSummary(error)}. The checkout may now be missing dependencies. `
       + `Run "npm ci --no-audit --no-fund" in ${root}, `
       + 'then restart the loop.',
     )
@@ -382,7 +374,7 @@ function removeFinishedWorktree(
       })
     if (!registered) return true
   } catch (error) {
-    log(`WARN: could not verify worktree metadata removal for ${worktree}: ${removalFailureDetail(error)}`)
+    log(`WARN: could not verify worktree metadata removal for ${worktree}: ${commandFailureSummary(error)}`)
     return false
   }
   log(`WARN: the removed worktree is still registered and has to be pruned by hand: ${worktree}`)
@@ -479,9 +471,9 @@ function mergeWithVerifiedRecovery(
       recovered = mergeRepositoryState(cwd, runtime)
     } catch (verificationError) {
       throw new MergeRecoveryError(
-        `${conflictMessage} Recovery could not be verified: ${installFailureSummary(verificationError)}; `
-        + `merge abort ${abortError === undefined ? 'reported success' : `failed: ${installFailureSummary(abortError)}`}. `
-        + `Merge failure: ${installFailureSummary(mergeError)}. `
+        `${conflictMessage} Recovery could not be verified: ${commandFailureSummary(verificationError)}; `
+        + `merge abort ${abortError === undefined ? 'reported success' : `failed: ${commandFailureSummary(abortError)}`}. `
+        + `Merge failure: ${commandFailureSummary(mergeError)}. `
         + 'Inspect and restore the integration worktree before restarting orchestration.',
       )
     }
@@ -492,8 +484,8 @@ function mergeWithVerifiedRecovery(
         + `${before.head.slice(0, 8)}, found ${recovered.head.slice(0, 8)}; `
         + `working tree ${recovered.status === before.status ? 'matches its prior state' : 'changed'}; `
         + `merge ${recovered.mergeInProgress ? 'is still in progress' : 'is not in progress'}; `
-        + `merge abort ${abortError === undefined ? 'reported success' : `failed: ${installFailureSummary(abortError)}`}. `
-        + `Merge failure: ${installFailureSummary(mergeError)}. `
+        + `merge abort ${abortError === undefined ? 'reported success' : `failed: ${commandFailureSummary(abortError)}`}. `
+        + `Merge failure: ${commandFailureSummary(mergeError)}. `
         + 'Inspect and restore the integration worktree before restarting orchestration.',
       )
     }
@@ -847,7 +839,7 @@ async function finalizeNoChange(
     await options.onNoChange?.()
   } catch (error) {
     throw new NoChangeReconciliationError(
-      `Could not reconcile the no-change verdict: ${installFailureSummary(error)}`,
+      `Could not reconcile the no-change verdict: ${commandFailureSummary(error)}`,
     )
   }
   await writeStatus(paths, taskId, 'no-change')
