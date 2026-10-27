@@ -469,9 +469,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     current idle stretch as an `Idle` event whose `Status` subject is followed by
     `Task=<n>`, `Queue=<n>`, and the duration; repeated idle statuses back off from the
     early milestones to a five-minute maximum interval, and any active work resets the
-    stretch. A status with a non-zero scan, running, or queue counter omits `Waiting=`
-    because the counters already explain why the poll continues and remains visible on
-    every poll.
+    stretch. In a non-worker loop over the shared issue queue, `Queue=<n>` counts the
+    local backlog plus the findings of that poll's snapshot that are ready to claim, so a
+    finding waiting for a free slot is visible and keeps the loop out of idle, and
+    `Waiting=open finding` names only a snapshot whose findings are all unready.
+    A status with a non-zero scan, running, or queue counter omits `Waiting=` because the
+    counters already explain why the poll continues and remains visible on every poll.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to

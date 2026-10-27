@@ -2538,6 +2538,26 @@ describe('remote issue queue idle detection', () => {
     expect(logged).toContain('Idle Status      Task=0  Queue=0  0s  Waiting=open finding')
   })
 
+  it('counts a ready shared finding no free slot could claim in the queue counter', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    writeRawStatus('20260808_120000_001_auto-busy', 'running', process.pid)
+    await fakeForge.createIssue({
+      title: 'waiting for a slot', body: '', labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim()).toBe('')
+    expect(logged).toContain('Running Status      Task=1  Queue=1')
+  })
+
   it('defers the cycle gate and review while a merge-failed issue is open', async () => {
     const loop = makeReviewLoop(true)
     await fakeForge.createIssue({

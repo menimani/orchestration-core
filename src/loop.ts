@@ -59,6 +59,7 @@ import {
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  isReadyToClaim,
   issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
   reapStaleLeases, sourceIssueNumbers,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
@@ -2811,7 +2812,12 @@ export function createLoop(deps: LoopDeps) {
       .filter((taskId) => isScanTaskId(taskId) && readStatus(paths, taskId)?.status === 'running')
       .length
     const runningTasks = Math.max(0, running - scans)
-    const queue = queueLength()
+    // A finding left ready because every slot was taken is queued work too. Counting
+    // only the local file printed Queue=0 beside a backlog the loop could already see.
+    const readyFindings = !config.workerMode && config.issueQueueEnabled && openFindings !== null
+      ? openFindings.filter(isReadyToClaim).length
+      : 0
+    const queue = queueLength() + readyFindings
     const counters = [
       ...(scans > 0 ? [`Scan=${scans}`] : []),
       `Task=${runningTasks}`,
