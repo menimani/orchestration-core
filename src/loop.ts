@@ -59,6 +59,7 @@ import {
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
+  isReadyToClaim,
   issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
   reapStaleLeases, sourceIssueNumbers,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
@@ -685,6 +686,15 @@ export function createLoop(deps: LoopDeps) {
   function countRunning(): number {
     return listTaskIds(paths)
       .filter((taskId) => readStatus(paths, taskId)?.status === 'running').length
+  }
+
+  // MAX_PARALLEL caps ordinary task processes and shared-issue claims; scan fan-out is
+  // governed by SCAN_PARALLEL alone. Counting scans here let a full scan fleet hold back
+  // a ready finding that no task was working on.
+  function countRunningTasks(): number {
+    return listTaskIds(paths)
+      .filter((taskId) => !isScanTaskId(taskId)
+        && readStatus(paths, taskId)?.status === 'running').length
   }
 
   function queueLength(): number {
@@ -2618,7 +2628,7 @@ export function createLoop(deps: LoopDeps) {
       await adoptRemoteTasks(openFindings)
     }
 
-    let running = countRunning()
+    let running = countRunningTasks()
 
     // Nothing new starts while a stop is pending: without this the burst detector above
     // would fill the parallel slots with the very outage it just stopped for.
@@ -2810,15 +2820,19 @@ export function createLoop(deps: LoopDeps) {
     const scans = config.workerMode ? 0 : listTaskIds(paths)
       .filter((taskId) => isScanTaskId(taskId) && readStatus(paths, taskId)?.status === 'running')
       .length
-    const runningTasks = Math.max(0, running - scans)
-    const queue = queueLength()
+    // A finding left ready because every slot was taken is queued work too. Counting
+    // only the local file printed Queue=0 beside a backlog the loop could already see.
+    const readyFindings = !config.workerMode && config.issueQueueEnabled && openFindings !== null
+      ? openFindings.filter(isReadyToClaim).length
+      : 0
+    const queue = queueLength() + readyFindings
     const counters = [
       ...(scans > 0 ? [`Scan=${scans}`] : []),
-      `Task=${runningTasks}`,
+      `Task=${running}`,
       `Queue=${queue}`,
     ]
     const waitingFor: string[] = []
-    if (scans === 0 && runningTasks === 0 && queue === 0) {
+    if (scans === 0 && running === 0 && queue === 0) {
       if (gateWaitTarget !== undefined) waitingFor.push(gateWaitTarget)
       else if (config.workerMode) waitingFor.push('open finding')
       else if (config.issueQueueEnabled && openFindings === null) waitingFor.push('finding status')
@@ -2831,7 +2845,7 @@ export function createLoop(deps: LoopDeps) {
       ...counters,
       ...(waitingFor.length > 0 ? [`Waiting=${waitingFor.join(', ')}`] : []),
     ]
-    const idle = scans === 0 && runningTasks === 0 && queue === 0
+    const idle = scans === 0 && running === 0 && queue === 0
     if (!idle) {
       idleLogState = undefined
       event('Running', 'Status', statusParts.join('  '))

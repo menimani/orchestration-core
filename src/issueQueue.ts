@@ -513,7 +513,8 @@ function isReadyToClose(issue: ForgeIssue, fingerprints: string[]): boolean {
     && issueHasExactlyLifecycleLabel(issue, LABEL_READY)
 }
 
-function isReadyToClaim(issue: ForgeIssue): boolean {
+/** Whether a finding can be claimed now: open, unclaimed, ready, and from a trusted author. */
+export function isReadyToClaim(issue: ForgeIssue): boolean {
   return issue.state === 'open'
     && issue.assignees.length === 0
     && issueHasExactlyLifecycleLabel(issue, LABEL_READY)
