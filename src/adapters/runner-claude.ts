@@ -61,6 +61,11 @@ export function runClaudeProcess(
     try {
       child = spawn(command, commandArgs, {
         detached: false,
+        // `claude -p` exits when its turn ends, killing anything it left running in
+        // the background. Tasks that started the suite that way ended with "I'll commit
+        // once it finishes" and lost their work, so the agent may only run in the
+        // foreground.
+        env: { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' },
         stdio: ['inherit', 'pipe', 'inherit'],
         windowsHide: true,
       })

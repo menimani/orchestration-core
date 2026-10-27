@@ -246,6 +246,7 @@ describe('Claude process wrapper', () => {
       '-p', '--permission-mode', 'bypassPermissions', '--model', 'claude-opus-5',
     ], {
       detached: false,
+      env: expect.objectContaining({ CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' }),
       stdio: ['inherit', 'pipe', 'inherit'],
       windowsHide: true,
     })
