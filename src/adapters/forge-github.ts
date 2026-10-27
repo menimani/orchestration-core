@@ -430,17 +430,21 @@ export function createGithubForge(
     },
 
     async createPr(options: CreatePrOptions): Promise<string> {
-      const args = [
-        'pr', 'create', ...codeRepository,
-        // A named repository is not necessarily the checkout's, so gh cannot infer the
-        // head from the current branch.
-        ...(target.codeRepository === undefined ? [] : ['--head', options.branch]),
-        '--base', options.base,
-        '--title', options.title,
-        '--body', githubPrBody(options.body),
-      ]
-      if (options.draft) args.push('--draft')
-      const stdout = await checkedGh(repoRoot, args)
+      // A run's body grows with every cycle; on the command line it outgrew Windows'
+      // 32,767-character limit (spawn ENAMETOOLONG), so it travels in a file.
+      const stdout = await withBodyFile(githubPrBody(options.body), async (bodyFile) => {
+        const args = [
+          'pr', 'create', ...codeRepository,
+          // A named repository is not necessarily the checkout's, so gh cannot infer the
+          // head from the current branch.
+          ...(target.codeRepository === undefined ? [] : ['--head', options.branch]),
+          '--base', options.base,
+          '--title', options.title,
+          '--body-file', bodyFile,
+        ]
+        if (options.draft) args.push('--draft')
+        return checkedGh(repoRoot, args)
+      })
       const url = stdout.split(/\r?\n/).map((line) => line.trim())
         .find((line) => PR_URL_PATTERN.test(line))
       if (url === undefined) {
@@ -453,9 +457,14 @@ export function createGithubForge(
       const args = ['pr', 'edit', ref, ...codeRepository]
       const fixedArgs = args.length
       if (fields.title !== undefined) args.push('--title', fields.title)
-      if (fields.body !== undefined) args.push('--body', githubPrBody(fields.body))
-      if (args.length === fixedArgs) return
-      await checkedGh(repoRoot, args)
+      if (fields.body === undefined) {
+        if (args.length === fixedArgs) return
+        await checkedGh(repoRoot, args)
+        return
+      }
+      await withBodyFile(githubPrBody(fields.body), async (bodyFile) => {
+        await checkedGh(repoRoot, [...args, '--body-file', bodyFile])
+      })
     },
 
     async markPrReady(ref: string): Promise<void> {

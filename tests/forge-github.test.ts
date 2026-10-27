@@ -119,8 +119,10 @@ describe('GitHub Git remotes', () => {
 describe('GitHub pull request bodies', () => {
   it('fences issue-number-like references when creating a pull request', async () => {
     const calls: string[][] = []
+    let submittedBody: string | undefined
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
+      submittedBody = readFileSync(args[args.indexOf('--body-file') + 1]!, 'utf8')
       return 'https://github.com/example/repo/pull/12\n'
     }
     const forge = createGithubForge('repo-root', command)
@@ -133,15 +135,18 @@ describe('GitHub pull request bodies', () => {
       draft: false,
     })
 
-    expect(calls[0]).toContain('Decision `#12` remains open')
+    expect(submittedBody).toBe('Decision `#12` remains open')
+    expect(calls[0]).not.toContain('--body')
     expect(calls[0]).not.toContain('--head')
     expect(calls[0]).not.toContain('task/branch')
   })
 
   it('fences issue-number-like references when updating a pull request', async () => {
     const calls: string[][] = []
+    let submittedBody: string | undefined
     const command: GithubCommand = async (_root, args) => {
       calls.push(args)
+      submittedBody = readFileSync(args[args.indexOf('--body-file') + 1]!, 'utf8')
       return ''
     }
     const forge = createGithubForge('repo-root', command)
@@ -149,8 +154,26 @@ describe('GitHub pull request bodies', () => {
     await forge.updatePr('task/branch', { body: 'Decision #12 remains open' })
 
     expect(calls[0]).toEqual([
-      'pr', 'edit', 'task/branch', '--body', 'Decision `#12` remains open',
+      'pr', 'edit', 'task/branch', '--body-file', expect.any(String),
     ])
+    expect(submittedBody).toBe('Decision `#12` remains open')
+  })
+
+  it('keeps a pull request body longer than a Windows command line off the command line', async () => {
+    const body = 'x'.repeat(40_000)
+    let submittedBody: string | undefined
+    const command: GithubCommand = async (_root, args) => {
+      expect(args.join(' ').length).toBeLessThan(1_000)
+      submittedBody = readFileSync(args[args.indexOf('--body-file') + 1]!, 'utf8')
+      return args[1] === 'create' ? 'https://github.com/example/repo/pull/12\n' : ''
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.createPr({ branch: 'run/1', base: 'main', title: 'T', body, draft: true })
+    expect(submittedBody).toBe(body)
+    submittedBody = undefined
+    await forge.updatePr('run/1', { body })
+    expect(submittedBody).toBe(body)
   })
 })
 
