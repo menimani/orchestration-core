@@ -186,7 +186,18 @@ export async function startLoopReplacement(
       })
     }
     const poll = setInterval(() => {
-      if (!existsSync(readyFile)) return
+      if (!existsSync(readyFile)) {
+        // The exit and error listeners are the richer signal, but an adapter cannot
+        // always offer them: a Windows daemon is launched through a detached wrapper, so
+        // there is no child process to listen on and both are no-ops. Asking the process
+        // itself keeps a replacement that died before signalling readiness from stalling
+        // the restart until the startup timeout, which then reports a timeout rather
+        // than the death that caused it.
+        if (!replacement.isAlive()) {
+          fail({ ok: false, pid, error: 'replacement exited before becoming ready' })
+        }
+        return
+      }
       let owner = ''
       try {
         owner = readFileSync(readyFile, 'utf8').trim()

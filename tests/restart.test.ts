@@ -62,6 +62,28 @@ function fakeOperatingSystem(
 }
 
 /**
+ * The Windows adapter starts the daemon through a detached wrapper and keeps no
+ * ChildProcess, so its daemon handle exposes the exit and error listeners as no-ops.
+ * Readiness detection has to hold without them.
+ */
+function listenerFreeOperatingSystem(
+  child: ChildProcess,
+  onLaunch: (options: DaemonLaunchOptions) => void = () => {},
+): OperatingSystem {
+  const os = fakeOperatingSystem(child, onLaunch)
+  return {
+    ...os,
+    launchDaemon: async (options: DaemonLaunchOptions) => ({
+      ...await os.launchDaemon(options),
+      onError: () => {},
+      offError: () => {},
+      onExit: () => {},
+      offExit: () => {},
+    }),
+  }
+}
+
+/**
  * A daemon started through the hidden-console wrapper identifies itself by the wrapper's
  * PID, and every descendant inherits the variable that says so. The suite runs as one of
  * those descendants at a merge gate, where inheriting it made these tests assert the
@@ -206,6 +228,37 @@ describe('loop replacement startup', () => {
     expect(onReady).not.toHaveBeenCalled()
     expect(readFileSync(pidFile, 'utf8')).toBe(predecessorMarker)
     expect(os.processTreeIsAlive).toHaveBeenCalledWith(43219)
+    expect(child.unref).not.toHaveBeenCalled()
+  })
+
+  it('keeps the predecessor PID when a listener-free replacement dies before readiness', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const pidFile = join(root, 'loop.pid')
+    const predecessorMarker = processMarkerText(processMarker(process.pid))
+    writeFileSync(pidFile, predecessorMarker)
+    const child = fakeChild(43220)
+    const os = listenerFreeOperatingSystem(child, () => {
+      setTimeout(() => { Object.assign(child, { exitCode: 1 }) }, 0)
+    })
+    const onReady = vi.fn((pid: number) => {
+      publishLoopReplacementPid(pidFile, process.pid, pid)
+    })
+
+    await expect(startLoopReplacement(join(root, 'ready'), {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      onReady,
+      startupTimeoutMs: 1_000,
+    })).resolves.toEqual({
+      ok: false,
+      pid: 43220,
+      error: 'replacement exited before becoming ready',
+    })
+    expect(onReady).not.toHaveBeenCalled()
+    expect(readFileSync(pidFile, 'utf8')).toBe(predecessorMarker)
     expect(child.unref).not.toHaveBeenCalled()
   })
 
