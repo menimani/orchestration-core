@@ -2227,12 +2227,14 @@ export function createLoop(deps: LoopDeps) {
     // Round-robin groups cover every discovered section exactly once while keeping
     // group sizes within one, without assuming what any section asks the scan to do.
     let launchFailed = false
+    const attemptedScans: string[] = []
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
       const scope = nScans === 1
         ? 'Perform the full scan described below.'
         : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
       writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
+      attemptedScans.push(scanId)
       try {
         await startTaskImpl(paths, runner, scanId, {
           effort: config.scanEffort as 'high',
@@ -2247,6 +2249,18 @@ export function createLoop(deps: LoopDeps) {
       }
     }
     if (launchFailed) {
+      // The cycle neither consumed its number nor recorded an expectation, so the next
+      // start dispatches it again from the beginning. Discard what this attempt
+      // materialized: left behind, each scan would be swept into the relaunched cycle's
+      // failure list and counted against an expectation it was never part of, and the
+      // gate would then stop every later start over a scan yield that cannot arrive.
+      for (const scanId of attemptedScans) {
+        try {
+          cleanupTask(paths, scanId, undefined, false)
+        } catch (error) {
+          event('WARN', `${shortTaskId(scanId)} scan startup cleanup failed: ${errorSummary(error)}`)
+        }
+      }
       writeFileSync(stopFile, '')
       return 'continue'
     }
