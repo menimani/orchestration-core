@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
@@ -42,6 +42,7 @@ import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
+import { TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -50,6 +51,7 @@ let forgeStatus: PrStatus
 let prStatusCalls: number
 let runnerStarts: string[]
 let fakeForge: FakeForge
+const testProcesses = new TestProcessRegistry()
 
 describe('formatEventLine', () => {
   it('pads subjects to a fixed column and separates longer subjects', () => {
@@ -226,7 +228,8 @@ beforeEach(() => {
   forgeStatus = { state: 'open', isDraft: true, url: 'https://example.test/pull/1', headSha: '', checks: [] }
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await testProcesses.cleanup()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -1752,20 +1755,29 @@ describe('cycle gate', () => {
     )
   })
 
-  it('stops without advancing the cycle when any scan fails to launch', async () => {
+  it('discards the scans it started when any scan fails to launch', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(
       join(paths.root, 'templates', 'scan-template.md'),
       '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n',
     )
-    let starts = 0
+    const attempted: string[] = []
+    let scanPid: number | undefined
     const runner: Runner = {
       sharedSkills: fakeRunnerSharedSkills,
-      start: async () => {
-        starts += 1
-        if (starts === 2) throw new Error('runner unavailable')
-        return process.pid
+      start: async (options) => {
+        attempted.push(basename(options.specFile, '.md'))
+        if (attempted.length === 2) throw new Error('runner unavailable')
+        // A real process, and deliberately not this one: cleanup stops what the scan
+        // owns, which the test cannot prove by handing over the test runner's own pid.
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        scanPid = child.pid
+        return child.pid
       },
     }
     const loop = makeLoop(
@@ -1775,13 +1787,22 @@ describe('cycle gate', () => {
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
-    expect(starts).toBe(2)
+    expect(attempted).toHaveLength(2)
     expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logText()).toContain(
       'ERROR scan startup failed: runner unavailable (log:',
     )
+    // Nothing this attempt materialized may outlive it: the next start dispatches cycle
+    // 1 again, and a retained scan would be counted against its expected yields.
+    for (const scanId of attempted) {
+      expect(existsSync(worktreeDir(paths, scanId))).toBe(false)
+      expect(existsSync(statusFile(paths, scanId))).toBe(false)
+      expect(git(['branch', '--list', branchName(scanId)])).toBe('')
+    }
+    expect(scanPid).toBeDefined()
+    expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
   })
 
   it('stops a cycle gate that is missing an expected scan yield', async () => {
