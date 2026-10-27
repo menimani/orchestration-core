@@ -1223,6 +1223,63 @@ describe('scan yield', () => {
     expect(existsSync(join(paths.queueDir, 'scan-yield-3'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'scan-expected-3'))).toBe(false)
   })
+
+  it('closes a cycle whose only scans failed without counting it as empty', () => {
+    const loop = makeLoop({ maxScanCycles: 6, maxEmptyScans: 2 })
+    const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
+    writeFileSync(join(paths.queueDir, 'scan-expected-3'), '1\n')
+    writeFileSync(join(paths.queueDir, 'failed-3'), '20250101_000000_007_scan\n')
+    writeFileSync(emptyScanFile, '1\n')
+
+    expect(loop.cycleIsFinal(3)).toBe(false)
+    loop.foldScanYields(3)
+
+    expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('1')
+    expect(existsSync(join(paths.queueDir, 'scan-expected-3'))).toBe(false)
+  })
+
+  it('leaves the empty counter alone when a failed scan joins empty yields', () => {
+    const loop = makeLoop({ maxScanCycles: 6, maxEmptyScans: 2 })
+    const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
+    writeFileSync(join(paths.queueDir, 'scan-expected-4'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-4'), '20250101_000000_008_scan\tempty\n')
+    writeFileSync(join(paths.queueDir, 'failed-4'), '20250101_000000_009_scan\n')
+    writeFileSync(emptyScanFile, '1\n')
+
+    expect(loop.cycleIsFinal(4)).toBe(false)
+    loop.foldScanYields(4)
+
+    expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('1')
+    expect(existsSync(join(paths.queueDir, 'scan-yield-4'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-4'))).toBe(false)
+  })
+
+  it('resets the empty counter when a cycle both found and lost a scan', () => {
+    const loop = makeLoop({ maxEmptyScans: 2 })
+    const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
+    writeFileSync(join(paths.queueDir, 'scan-expected-5'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-5'), '20250101_000000_010_scan\tfound\n')
+    writeFileSync(join(paths.queueDir, 'failed-5'), '20250101_000000_011_scan\n')
+    writeFileSync(emptyScanFile, '1\n')
+
+    loop.foldScanYields(5)
+
+    expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('0')
+  })
+
+  it('ignores a failed task that is not a scan', () => {
+    const loop = makeLoop({ maxEmptyScans: 2 })
+    const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
+    writeFileSync(join(paths.queueDir, 'scan-expected-6'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-6'), '20250101_000000_012_scan\tempty\n')
+    writeFileSync(join(paths.queueDir, 'failed-6'), '20250101_000000_013_auto-a-finding\n')
+    writeFileSync(emptyScanFile, '1\n')
+
+    loop.foldScanYields(6)
+
+    expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('1')
+    expect(existsSync(join(paths.queueDir, 'scan-expected-6'))).toBe(true)
+  })
 })
 
 describe('runAutoReview', () => {
@@ -1741,6 +1798,45 @@ describe('cycle gate', () => {
     expect(logText()).toContain(
       'ERROR cycle 1 did not receive every expected scan yield; stopping the loop',
     )
+  })
+
+  it('stops a cycle gate whose missing yield belongs to no failed scan', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-1'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-1'), '20260809_000000_001_scan\tempty\n')
+    writeFileSync(join(paths.queueDir, 'failed-1'), '20260809_000000_002_auto-a-finding\n')
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR cycle 1 did not receive every expected scan yield; stopping the loop',
+    )
+  })
+
+  it('closes a cycle whose scan failed and reports the loss', async () => {
+    const failedScan = '20260809_000000_004_scan'
+    const loop = makeLoop({ autoPr: false, reviewEnabled: true, autoReview: false })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-1'), '4\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-1'), [
+      '20260809_000000_001_scan\tfound',
+      '20260809_000000_002_scan\tfound',
+      '20260809_000000_003_scan\tfound',
+      '',
+    ].join('\n'))
+    writeRawStatus(failedScan, 'failed')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).not.toContain('did not receive every expected scan yield')
+    expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe(`${failedScan}\n`)
+    expect(readFileSync(join(paths.queueDir, 'decisions.txt'), 'utf8')).toBe(
+      `Cycle 1 lost 1 task(s) to failure, so their findings are not in this branch: ${failedScan}\n`,
+    )
+    expect(logged).toContain('CYCLE_COMPLETE: 1/3')
   })
 
   it('discards a scan interrupted by stop and restarts the same cycle', async () => {
