@@ -4083,6 +4083,94 @@ describe('completed task merge recovery', () => {
     expect(logged.some((line) => line.startsWith('Failed 037_auto'))).toBe(false)
   })
 
+  /** Run `body` while a recorded runner looks alive but has no verifiable identity. */
+  function withUnverifiableRunner(
+    body: (runnerPid: number) => Promise<void>,
+  ): Promise<void> {
+    const startIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue(undefined)
+    const processAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const treeAlive = vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
+    return body(36216).finally(() => {
+      treeAlive.mockRestore()
+      processAlive.mockRestore()
+      startIdentity.mockRestore()
+    })
+  }
+
+  // Counting these attempts once stopped a run on its third poll and terminated the four
+  // tasks still in flight with it, while the task itself had completed its work.
+  it('defers every merge whose completed runner cannot be verified yet', async () => {
+    await withUnverifiableRunner(async (runnerPid) => {
+      const taskId = '20260815_125259_038_auto-unverifiable-runner'
+      const initialHead = initializeGitRepo()
+      makeCompletedTask(taskId, false)
+      writeRawStatus(taskId, 'completed', runnerPid)
+      const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
+      const loop = makeLoop({
+        autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+        maxConsecutiveMergeFailures: 3,
+      })
+      loop.initializeSessionStateForBranch()
+      const issueNumber = await fakeForge.createIssue({
+        title: 'lingering runner tree', body: '',
+        labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      })
+      recordIssuesForTask(paths, taskId, [issueNumber])
+
+      expect(await loop.poll()).toBe('continue')
+      expect(await loop.poll()).toBe('continue')
+      expect(await loop.poll()).toBe('continue')
+
+      expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
+      expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+      expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+      expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+      expect(terminate).not.toHaveBeenCalled()
+      expect(logged.filter((line) => line.includes('merge deferred'))).toEqual([
+        `WARN 038_auto merge deferred: completed runner ${runnerPid} cannot be verified yet`,
+      ])
+      expect(logged.some((line) => line.startsWith('Failed 038_auto'))).toBe(false)
+      terminate.mockRestore()
+    })
+  })
+
+  it('merges a deferred task once its runner registry entry is gone', async () => {
+    await withUnverifiableRunner(async (runnerPid) => {
+      const taskId = '20260815_125300_039_auto-runner-registry-clears'
+      const initialHead = initializeGitRepo()
+      makeCompletedTask(taskId, false)
+      writeRawStatus(taskId, 'completed', runnerPid)
+      const loop = makeLoop({
+        autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+      })
+      loop.initializeSessionStateForBranch()
+      const issueNumber = await fakeForge.createIssue({
+        title: 'lingering runner tree', body: '',
+        labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      })
+      recordIssuesForTask(paths, taskId, [issueNumber])
+
+      expect(await loop.poll()).toBe('continue')
+
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+      expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+
+      // What a restart observed: the runner tree had gone and its registry entry with it.
+      forgetTaskProcess(paths, taskId)
+
+      expect(await loop.poll()).toBe('continue')
+
+      expect(readStatus(paths, taskId)?.status).toBe('merged')
+      expect(git(['rev-parse', 'HEAD'])).not.toBe(initialHead)
+      expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+      expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+      expect(logged.some((line) => line.startsWith('Merged 039_auto'))).toBe(true)
+      expect(logged.some((line) => line.startsWith('Failed 039_auto'))).toBe(false)
+      expect(logged.some((line) => line.startsWith('Recovered merging 039_auto'))).toBe(true)
+    })
+  })
+
   it('terminalizes a no-change task while preserving failures and invalidating the cycle', async () => {
     const taskId = '20260814_144959_066_auto-already-resolved'
     const initialHead = initializeGitRepo()

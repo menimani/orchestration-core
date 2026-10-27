@@ -17,7 +17,7 @@ import {
 } from './ids.ts'
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
-  NoChangeReconciliationError, RebaseConflictError,
+  NoChangeReconciliationError, RebaseConflictError, UnverifiedRunnerError,
   OrchestrationDepsInstallError,
   type OrchestrationDepsRuntime,
 } from './merge.ts'
@@ -2360,6 +2360,8 @@ export function createLoop(deps: LoopDeps) {
             recordIssueCompletions(paths, taskId, 'no-change')
           },
         })
+        // Reaching an outcome at all means the runner no longer blocks the merge.
+        warningLog.recovered(`unverified-runner-${taskId}`)
         if (mergeResult.outcome === 'no-change') {
           event('No-change', shortTaskId(taskId), 'no change warranted')
           retireConflictedAttempts(taskId, linkedIssues)
@@ -2391,6 +2393,16 @@ export function createLoop(deps: LoopDeps) {
         if (error instanceof NoChangeReconciliationError) {
           event('WARN', `could not reconcile no-change task ${shortTaskId(taskId)}: ${error.message}`)
           issueReconciliationPending = true
+          return
+        }
+        // Not a failure: the task completed and its runner tree is merely still visible
+        // without the identity that makes stopping it safe. The entry clears on its own
+        // and a later poll merges, so counting these would stop the loop over nothing —
+        // which is how three polls once killed four running tasks.
+        if (error instanceof UnverifiedRunnerError) {
+          warning(`unverified-runner-${taskId}`, `merging ${shortTaskId(taskId)}`,
+            `${shortTaskId(taskId)} merge deferred: completed runner ${error.pid} `
+            + 'cannot be verified yet')
           return
         }
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
