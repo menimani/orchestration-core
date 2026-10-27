@@ -6,6 +6,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { errorHeadline } from '../errorText.ts'
 import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../internalEnvironment.ts'
 
 export { WINDOWS_PROCESS_ROOT_PID_ENV } from '../internalEnvironment.ts'
@@ -90,11 +91,6 @@ export function processTreeRootPid(env: NodeJS.ProcessEnv = process.env): number
     if (Number.isSafeInteger(pid)) return pid
   }
   return process.pid
-}
-
-function errorSummary(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return (message.split(/\r?\n/, 1)[0] ?? '').trim() || 'unknown error'
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -213,7 +209,7 @@ async function terminateLauncherTree(
 
 class WindowsStartupProcessRetainedError extends Error {
   constructor(stateDirectory: string, cause: unknown) {
-    super(`${errorSummary(cause)} Startup state was retained at ${stateDirectory}.`, { cause })
+    super(`${errorHeadline(cause)} Startup state was retained at ${stateDirectory}.`, { cause })
     this.name = 'WindowsStartupProcessRetainedError'
   }
 }
@@ -325,7 +321,7 @@ export async function startWindowsProcess(
       throw new WindowsStartupProcessRetainedError(root, cleanupError)
     }
     const detail = foundAlive ? 'found and terminated a live process tree' : 'found no live process tree'
-    throw new Error(`${errorSummary(error)}; startup cleanup ${detail}`, { cause: error })
+    throw new Error(`${errorHeadline(error)}; startup cleanup ${detail}`, { cause: error })
   } finally {
     if (!launched) launcher.kill()
     if (!retainStartupState) {
@@ -371,7 +367,7 @@ async function runWindowsProcessWrapper(descriptorFile: string): Promise<void> {
     })
     child.once('error', (error) => {
       closeDescriptors()
-      writeFileSync(descriptor.errorFile, errorSummary(error))
+      writeFileSync(descriptor.errorFile, errorHeadline(error))
       process.exitCode = 1
     })
     child.once('spawn', () => {
@@ -383,7 +379,7 @@ async function runWindowsProcessWrapper(descriptorFile: string): Promise<void> {
     })
   } catch (error) {
     closeDescriptors()
-    writeFileSync(descriptor.errorFile, errorSummary(error))
+    writeFileSync(descriptor.errorFile, errorHeadline(error))
     process.exitCode = 1
   }
 }
