@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { loadConfig } from '../src/config.ts'
+import { CONFIG_ENV_NAMES, isConfigName, loadConfig, type ConfigName } from '../src/config.ts'
 
 const temporaryDirectories: string[] = []
 
@@ -210,5 +210,25 @@ describe('loadConfig', () => {
     expect(() => config.maxParallel).toThrow()
     expect(events.join('\n')).toContain(filePath)
     expect(events.join('\n')).toMatch(/setting: file contents.*JSON/)
+  })
+})
+
+describe('isConfigName', () => {
+  it('accepts every environment variable name the loop honors', () => {
+    for (const name of Object.values(CONFIG_ENV_NAMES)) {
+      expect(isConfigName(name)).toBe(true)
+    }
+  })
+
+  it('rejects a name no setting carries', () => {
+    expect(isConfigName('MAX_PARALELL')).toBe(false)
+  })
+
+  it('reports a setting as one of the names, never as any string', () => {
+    // The directive below fails the typecheck if ConfigName ever widens back to string,
+    // which would let ConfigEvent.setting carry a name no setting has.
+    // @ts-expect-error -- 'MAX_PARALELL' is not one of the environment variable names
+    const stray: ConfigName = 'MAX_PARALELL'
+    expect(isConfigName(stray)).toBe(false)
   })
 })
