@@ -391,7 +391,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     override the runner model, and `delegate --effort` overrides effort per task. The
     Claude runner maps effort to `RUNNER_CLAUDE_MODEL_MINIMAL`, `_LOW`, `_MEDIUM`, or
     `_HIGH`, each defaulting to `RUNNER_CLAUDE_MODEL` (`claude-opus-5`), instead of
-    translating runner-neutral effort into a Claude thinking flag.
+    translating runner-neutral effort into a Claude thinking flag. It starts Claude with
+    `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so the agent cannot leave a command
+    running in the background when its turn ends.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
     previous cycle gate has closed and while no task is running, the daemon first compares
     the selected project adapter with the exact source loaded at startup. A changed,
