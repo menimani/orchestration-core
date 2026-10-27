@@ -2558,6 +2558,54 @@ describe('remote issue queue idle detection', () => {
     expect(logged).toContain('Running Status      Task=1  Queue=1')
   })
 
+  it('claims a ready shared finding while a full scan fleet runs', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 2,
+    })
+    loop.initializeSessionStateForBranch()
+    writeRawStatus('20260808_120000_001_scan', 'running', process.pid)
+    writeRawStatus('20260808_120001_002_scan', 'running', process.pid)
+    await fakeForge.createIssue({
+      title: 'ready beside two scans',
+      body: buildIssueBody('[BUG] `src/beside.ts` finding', '20260808_120000_001_scan'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged).toContain('Claimed 001_auto    #1')
+    expect(logged.some((line) => line.startsWith('Running Status      Scan=2  Task=1')))
+      .toBe(true)
+  })
+
+  it('leaves a ready shared finding unclaimed while every task slot is taken', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 2,
+    })
+    loop.initializeSessionStateForBranch()
+    writeRawStatus('20260808_120000_001_auto-first', 'running', process.pid)
+    writeRawStatus('20260808_120001_002_auto-second', 'running', process.pid)
+    await fakeForge.createIssue({
+      title: 'waiting behind two tasks',
+      body: buildIssueBody('[BUG] `src/behind.ts` finding', '20260808_120000_001_scan'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged.filter((line) => line.startsWith('Claimed'))).toEqual([])
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim()).toBe('')
+    expect(logged).toContain('Running Status      Task=2  Queue=1')
+  })
+
   it('defers the cycle gate and review while a merge-failed issue is open', async () => {
     const loop = makeReviewLoop(true)
     await fakeForge.createIssue({
