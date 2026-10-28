@@ -295,6 +295,7 @@ export function createLoop(deps: LoopDeps) {
     if (issueQueueInitialized) return true
     try {
       await ensureQueueLabels(forge)
+      warningLog.recovered('ensure-queue-labels')
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
         warning('ensure-queue-labels', 'ensuring issue queue labels',
@@ -2703,6 +2704,7 @@ export function createLoop(deps: LoopDeps) {
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
               }
+              warningLog.recovered('promoted-issues')
             } catch (error) {
               if (error instanceof ForgeRateLimitError) throw error
               warning('promoted-issues', 'closing promoted issues',
