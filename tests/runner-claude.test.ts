@@ -181,7 +181,9 @@ describe('createClaudeRunner', () => {
   it('uses the hidden process launcher on Windows with the default Opus model', async () => {
     setPlatform('win32')
 
-    const started = createClaudeRunner().start(options)
+    // An empty environment pins the default: the suite also runs as a loop's merge gate,
+    // where RUNNER_CLAUDE_MODEL is set and would otherwise leak into this assertion.
+    const started = createClaudeRunner({ env: {} }).start(options)
 
     expect(mocks.startWindowsProcess).toHaveBeenCalledWith({
       args: [
