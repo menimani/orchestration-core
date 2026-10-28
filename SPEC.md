@@ -263,7 +263,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
    tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
-   verified gone before the merge can discard that PID or remove the worktree. When all
+   verified gone before the merge can discard that PID or remove the worktree. A runner
+   recorded without the start identity that makes stopping it safe cannot be verified at
+   all, so that merge is deferred rather than failed: the task stays `completed`, one WARN
+   per task names the PID, and a later poll merges once the registry entry clears. When all
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
    requiring the worker to have predicted that outcome.
@@ -326,8 +329,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. A durable per-task guard skips an attempt while that task's merge is
     active or after it succeeded, without changing the failure count; a failed attempt
-    releases the guard so a later poll can retry. A conflicting pre-merge rebase is
-    terminal for that task and contributes at most one failure to this count; ordinary
+    releases the guard so a later poll can retry. A merge deferred because a completed
+    task's runner cannot be verified yet (item 8) is no failure of the work: it leaves
+    this count and the task's own failure count alone, so a runner tree that lingers for
+    a few minutes cannot stop the loop and terminate the tasks still running under it.
+    A conflicting pre-merge rebase is terminal for that task and contributes at most one
+    failure to this count; ordinary
     gate failures remain retryable. Re-claiming completed-but-unmerged work
     requests that merge instead of silently treating the task as already processed. When
     the project adapter classifies an infrastructure failure, or the merge log names an
@@ -362,6 +369,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     counter once, at the gate, only when every expected scan completed successfully. A
     scan launch failure stops the loop without advancing the cycle number, and a cycle
     missing any expected yield stops rather than advancing to another cycle or completion.
+    A scan the cycle recorded as failed counts towards the expected total as a delivered
+    but silent yield: the cycle closes, its id still reaches the decisions and the pull
+    request through the cycle's loss note, and the empty counter is neither reset nor
+    advanced, because a failed scan is no evidence that its sections are clean.
     A scan interrupted by the operator `stop` command is the exception: the command
     records the live scan before terminating it, and the next daemon discards that scan's
     task state, rewinds the incomplete cycle, and dispatches the cycle's full scan set
