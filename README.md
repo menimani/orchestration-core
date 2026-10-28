@@ -127,9 +127,16 @@ An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, a
 path, or path relative to the consumer repository root. A repository-relative selector
 must begin with `./` or `../`; for example, use `./custom/runner.mjs`, because
 `custom/runner.mjs` is treated as a package specifier. A forge module exports a `Forge`
-as its default or `forge` export, or exports `createForge(repoRoot, report)`. A runner
-module likewise exports a `Runner` as its default or `runner` export, or exports
+as its default or `forge` export, or exports `createForge(repoRoot, report, target)`. A
+runner module likewise exports a `Runner` as its default or `runner` export, or exports
 `createRunner(options)`. Factories may be asynchronous.
+
+A forge factory's `target` names the repositories to act on when they are not the
+checkout's own: `codeRepository` for branches, pull requests, and workflow runs, and
+`issueRepository` for the issue queue, each `owner/name` or absent. An absent name leaves
+the adapter to infer that repository from the checkout. A fleet names both (see *Running
+from a fleet*), so a factory that drops `target` sends the queue to the checkout's own
+repository instead of the fleet's.
 
 A project adapter answers a few questions: which interactive agents receive shared skills,
 which staged-path checks run before a commit,
