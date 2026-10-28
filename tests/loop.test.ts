@@ -4665,6 +4665,40 @@ describe('completed task merge recovery', () => {
     expect(attempts).toBe(2)
   })
 
+  it('keeps merging later tasks while one merged issue cannot be reconciled, then stops', async () => {
+    const stuckTaskId = '20260811_120000_069_auto-deleted-issue'
+    const laterTaskId = '20260811_120000_070_auto-later-fix'
+    initializeGitRepo()
+    makeCompletedTask(stuckTaskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'deleted issue', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, stuckTaskId, [issueNumber])
+    const listIssueComments = fakeForge.listIssueComments.bind(fakeForge)
+    fakeForge.listIssueComments = async (number) => {
+      if (number === issueNumber) throw new Error('issue not found')
+      return listIssueComments(number)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, stuckTaskId)?.status).toBe('merged')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    makeCompletedTask(laterTaskId)
+    await loop.poll()
+
+    expect(readStatus(paths, laterTaskId)?.status).toBe('merged')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      `ERROR could not reconcile issue #${issueNumber} after merging 069_auto: issue not found (repeated 2 times)`,
+    )
+  })
+
   it('keeps promotion unconfirmed while a published merge marker is absent from read-back', async () => {
     const taskId = '20260811_120000_068_auto-listing-lag'
     initializeGitRepoWithRemote()
