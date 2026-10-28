@@ -48,6 +48,13 @@ export interface OperatingSystem {
    */
   processIsAlive(pid: number): boolean
   processTreeIsAlive(pid: number): boolean
+  /**
+   * Terminate the tree of every live process that names this worktree in its command line
+   * or executable path, before the worktree is removed. A shell whose parent exited first
+   * is outside the tree that stopping a runner reaches, and its open files block removal.
+   * Best effort: a process that survives keeps holding the worktree, so removal fails.
+   */
+  terminateWorktreeProcesses(path: string): void
   removeDirectory(path: string): void
   worktreePathFor(path: string): WorktreePath
 }

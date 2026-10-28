@@ -225,7 +225,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
    current cycle (`queue/failed-<cycle>`, once per task), never retry automatically.
    `cleanup` clears the announce markers so a manual retry is watched, not silent, but
    only after verifying that the task process stopped, the worktree directory and Git
-   registration were removed, and the task branch was deleted; a failed cleanup returns
+   registration were removed (on Windows, after terminating the tree of every live process
+   whose command line or executable path names the worktree, as item 25 describes), and the task branch was deleted; a failed cleanup returns
    non-zero and retains the task state for a safe retry. In issue-queue mode, a successful
    operator cleanup also returns linked issues to `loop:ready` and removes their local
    task mapping. A forge failure is warned about without undoing the local cleanup; the
@@ -263,7 +264,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
    retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
    tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
-   verified gone before the merge can discard that PID or remove the worktree. A runner
+   verified gone before the merge can discard that PID or remove the worktree, and on
+   Windows any process still naming the worktree is terminated before it is removed. A runner
    recorded without the start identity that makes stopping it safe cannot be verified at
    all, so that merge is deferred rather than failed: the task stays `completed`, one WARN
    per task names the PID, and a later poll merges once the registry entry clears. When all
@@ -625,6 +627,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
     /T /F` on Windows and the detached process group on POSIX), retain task state for
     recovery, and report each terminated task or that no live task processes were found.
+    A shell whose runner exited first is outside that tree, so on Windows every removal of
+    a task worktree (stop recovery, merge, and `cleanup`) first terminates the tree of each
+    live process whose command line or executable path contains the worktree's absolute
+    path, compared case-insensitively in either slash direction. A process that survives
+    keeps holding the worktree: its removal fails and the task state is retained. Other
+    platforms stop the runner's detached process group and do nothing further.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
     the intentional termination as a missing scan yield.

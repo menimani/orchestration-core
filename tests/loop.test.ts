@@ -1878,11 +1878,25 @@ describe('cycle gate', () => {
       join(paths.queueDir, 'stop-interrupted-scans'),
       `2\t${interrupted}\n`,
     )
+    const interruptedWorktree = worktreeDir(paths, interrupted)
+    git(['worktree', 'add', '-q', interruptedWorktree, '-b', `task/${interrupted}`])
+    const worktreePresentAtTermination: boolean[] = []
+    const terminateWorktreeProcesses = vi.spyOn(operatingSystem, 'terminateWorktreeProcesses')
+      .mockImplementation((path) => {
+        if (path === interruptedWorktree) worktreePresentAtTermination.push(existsSync(path))
+      })
     const loop = makeLoop({ autoPr: false, reviewEnabled: false })
     loop.initializeSessionStateForBranch()
 
-    expect(await loop.poll()).toBe('continue')
+    try {
+      expect(await loop.poll()).toBe('continue')
+    } finally {
+      terminateWorktreeProcesses.mockRestore()
+    }
 
+    // The scan's leftover shells end before its worktree is removed, not after.
+    expect(worktreePresentAtTermination).toEqual([true])
+    expect(existsSync(interruptedWorktree)).toBe(false)
     expect(runnerStarts).toHaveLength(1)
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
     expect(readFileSync(join(paths.queueDir, 'scan-expected-2'), 'utf8')).toBe('1\n')
