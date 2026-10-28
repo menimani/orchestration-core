@@ -114,6 +114,9 @@ const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
 const MAX_CONFLICT_RETRIES = 2
 
 class InvalidPersistedCounterError extends Error {}
+// A finished worker task whose output can never be published as it stands. Retrying the
+// publication cannot help, because the worker that would change it has already exited.
+class UnpublishableWorkerTaskError extends Error {}
 
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
@@ -423,7 +426,7 @@ export function createLoop(deps: LoopDeps) {
   async function publishWorkerCompletion(taskId: string, issueNumbers: number[]): Promise<void> {
     const missingMarkers = missingRequirementCompletionMarkers(paths, taskId)
     if (missingMarkers.length > 0) {
-      throw new Error(`missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}`)
+      throw new UnpublishableWorkerTaskError(`missing requirement completion markers for ${missingMarkers.map((number) => `#${number}`).join(', ')}`)
     }
     const worktree = worktreeDir(paths, taskId)
     // The comparison base is the checkout's HEAD SHA, not its branch name: a detached
@@ -431,7 +434,7 @@ export function createLoop(deps: LoopDeps) {
     // completed work permanently unpublished.
     const baseSha = optionalGit(['rev-parse', 'HEAD']).trim()
     if (gitIn(worktree, ['status', '--porcelain']).trim() !== '') {
-      throw new Error(`${taskId} has uncommitted changes`)
+      throw new UnpublishableWorkerTaskError(`${taskId} has uncommitted changes`)
     }
     const commits = gitIn(worktree, ['log', `${baseSha}..HEAD`, '--format=%H'])
       .trim().split(/\r?\n/).filter((line) => line !== '')
@@ -454,7 +457,7 @@ export function createLoop(deps: LoopDeps) {
         })
         return
       }
-      throw new Error(`${taskId} has no commits and is not an inspection task`)
+      throw new UnpublishableWorkerTaskError(`${taskId} has no commits and is not an inspection task`)
     }
 
     const branch = branchName(taskId)
@@ -2627,7 +2630,9 @@ export function createLoop(deps: LoopDeps) {
       }
 
       const scannedFlag = join(scannedDir, taskId)
-      if (status === 'completed') clearIssueFailureCounts(paths, taskId)
+      // A worker's completion ends the failure streak only once it is published, or
+      // output that can never be published would reset the count it is meant to raise.
+      if (status === 'completed' && !config.workerMode) clearIssueFailureCounts(paths, taskId)
       if (status === 'completed' && !existsSync(scannedFlag)
         && (!config.issueQueueEnabled || remoteOperationsAvailable)) {
         const depthFile = join(scannedDir, `${taskId}.depth`)
@@ -2650,9 +2655,18 @@ export function createLoop(deps: LoopDeps) {
           }
           try {
             await publishWorkerCompletion(taskId, linkedIssues)
+            clearIssueFailureCounts(paths, taskId)
             writeFileSync(scannedFlag, '')
           } catch (error) {
-            if (!(error instanceof ForgeRateLimitError)) {
+            if (error instanceof UnpublishableWorkerTaskError) {
+              // Left completed, the claim would lapse, be reaped back to ready, and be
+              // claimed into this same task again without ever counting as a failure.
+              // Failed, the next poll counts it and releases or parks its issues.
+              if (await transitionStatus(paths, taskId, 'completed', 'failed')) {
+                appendFileSync(logFile(paths, taskId), `\nWorker publication refused: ${errorSummary(error)}\n`)
+                event('WARN', `${shortTaskId(taskId)} cannot be published: ${errorSummary(error)}`)
+              }
+            } else if (!(error instanceof ForgeRateLimitError)) {
               event('WARN', `could not publish ${shortTaskId(taskId)}: ${errorSummary(error)}`)
             }
           }

@@ -586,7 +586,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
      (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and
      parked under the exclusive `loop:retry-exhausted` lifecycle label, and the loop logs
      a `Parked` event before stopping. A completed task clears the counts for its linked
-     issues.
+     issues; in worker mode, only once its completion has been published (item 36).
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks.
 
@@ -890,6 +890,11 @@ so authorship and verified ancestry must both hold.
     instead. A completed task with no linked issue, such as a delegation that fell back
     to a local task after a forge error, cannot be published, so the worker marks it
     `failed` and appends the reason to its task log, keeping its commits on `task/<id>`.
+    Likewise, a completed task that can never be published as it stands — missing a
+    `REQUIREMENT_COMPLETE` marker, holding uncommitted changes, or with no commits and
+    neither an inspection nor a no-change verdict — becomes failed with the reason in its
+    task log, so its issues take the counted release of item 19a rather than lapsing into
+    a reclaim of the same task.
     Its poll status uses the shared
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
