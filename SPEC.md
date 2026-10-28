@@ -507,9 +507,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
     the pending ID remains while the attempt count and cycle-complete flag remain
-    unchanged; the next poll regenerates and retries the task with that same ID. A
-    successful enqueue records the attempt, clears the cycle-complete flag, and removes
-    the pending-ID file. Session cleanup also removes any remaining pending-ID file.
+    unchanged; the next poll regenerates and retries the task with that same ID. An
+    enqueue failure repeating with no enqueue succeeding in between stops the loop, so a
+    queue that never accepts the fix cannot leave the loop polling a failing PR with
+    nothing queued and the attempt cap out of reach. A successful enqueue records the
+    attempt, clears the cycle-complete flag, and removes the pending-ID file. Session
+    cleanup also removes any remaining pending-ID file.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a

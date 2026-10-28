@@ -2390,6 +2390,33 @@ describe('cycle gate', () => {
     expect(existsSync(join(paths.tasksDir, `${failedFixId}.md`))).toBe(true)
   })
 
+  it('stops when the CI fix enqueue keeps failing', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>(() => {
+      throw new Error('queue unavailable')
+    })
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 3,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+    const stopFile = join(paths.queueDir, 'stop')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(stopFile)).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    // The cap counts dispatched fixes, so a fix that never reached the queue cannot
+    // reach it: the repeated gate failure has to be what stops the loop.
+    expect(existsSync(attemptFile)).toBe(false)
+    expect(existsSync(completeFlag)).toBe(true)
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText())
+      .toContain('ERROR could not enqueue CI fix: queue unavailable (repeated 2 times)')
+  })
+
   it('stops instead of resetting a malformed CI fix attempt count', async () => {
     const enqueue = vi.fn<typeof enqueueTask>()
     const loop = makeLoop({
