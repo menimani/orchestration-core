@@ -44,6 +44,23 @@ import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTe
 import { stubProject as sharedStubProject } from './stubProject.ts'
 import { TestProcessRegistry } from './testProcess.ts'
 
+const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
+
+// Cleanup runs unchanged unless a test names a task whose cleanup must fail once.
+vi.mock('../src/cleanup.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/cleanup.ts')>()
+  return {
+    ...actual,
+    cleanupTask: (...args: Parameters<typeof actual.cleanupTask>) => {
+      if (args[1] === cleanupFailure.taskId) {
+        cleanupFailure.taskId = undefined
+        throw new Error('worktree is locked')
+      }
+      actual.cleanupTask(...args)
+    },
+  }
+})
+
 let repoRoot: string
 let paths: OrchPaths
 let logged: string[]
@@ -4105,6 +4122,40 @@ describe('completed task merge recovery', () => {
     expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
     expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
+  })
+
+  it('cancels the issue release preparation when rebase-conflict cleanup fails', async () => {
+    const taskId = '20260815_181908_198_auto-rebase-conflict'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'conflicting fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    cleanupFailure.taskId = taskId
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(cleanupFailure.taskId).toBeUndefined()
+    expect(logText()).toContain(
+      '198_auto rebase conflict was abandoned but cleanup or issue release failed: worktree is locked',
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
+    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
   })
 
   /** A completed local task whose only commit conflicts with a later run-branch commit. */

@@ -65,6 +65,7 @@ import {
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
+  removeIssueReleasePreparation,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
@@ -2517,6 +2518,16 @@ export function createLoop(deps: LoopDeps) {
                 `rebase conflict; issue release pending; commits kept on ${kept.branch}`)
             }
           } catch (abandonmentError) {
+            // A preparation left behind by a failed cleanup would be published by a later
+            // operator cleanup and release whichever task claims the issue next. After a
+            // completed cleanup it has already become the intent, so this removes nothing.
+            if (linkedIssues.length > 0) {
+              try {
+                removeIssueReleasePreparation(paths, taskId)
+              } catch (rollbackError) {
+                event('WARN', `${shortTaskId(taskId)} issue release preparation rollback failed: ${errorSummary(rollbackError)}`)
+              }
+            }
             if (!(abandonmentError instanceof ForgeRateLimitError)) {
               event('WARN', `${shortTaskId(taskId)} rebase conflict was abandoned but cleanup or issue release failed: ${errorSummary(abandonmentError)}`)
             }
