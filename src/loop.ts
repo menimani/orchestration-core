@@ -2637,7 +2637,15 @@ export function createLoop(deps: LoopDeps) {
           event('Completed', shortTaskId(taskId))
           const linkedIssues = issueNumbersForTask(paths, taskId)
           if (linkedIssues.length === 0) {
-            event('WARN', `worker task ${shortTaskId(taskId)} has no linked issue`)
+            // A worker publishes completions only through an issue, so a local task
+            // (a delegation that fell back after a forge error) can never be merged
+            // here. Fail it with the reason in its log instead of skipping it forever.
+            const reason = `a worker checkout merges only issue-linked tasks; `
+              + `${taskId} has no linked issue, so its commits stay on ${branchName(taskId)}`
+            if (await transitionStatus(paths, taskId, 'completed', 'failed')) {
+              appendFileSync(logFile(paths, taskId), `\nWorker merge refused: ${reason}\n`)
+              event('WARN', `worker task ${shortTaskId(taskId)} has no linked issue; marked failed`)
+            }
             continue
           }
           try {
