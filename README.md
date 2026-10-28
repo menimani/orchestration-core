@@ -206,7 +206,7 @@ MAX_SCAN_CYCLES=12 MAX_PARALLEL=8 AUTO_REVIEW=true \
   node orchestration/ts/src/cli.ts loop --approve-mode local --daemon
 ```
 
-On Windows PowerShell (with `bash` on `PATH` as described above):
+On Windows PowerShell:
 
 ```powershell
 $env:MAX_SCAN_CYCLES = '12'
