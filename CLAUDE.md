@@ -7,10 +7,9 @@ TypeScript with no build step.
 `README.md` describes what it is and how to run it. `SPEC.md` states the behaviour the
 suite pins — the two must agree, and tests enforce that. Canonical shared workflows live
 under `skills/`. `install-skills` renders them once per user, into `~/.claude/skills` and
-`~/.agents/skills`, for every project of a fleet. This repository's `.claude/skills/` keeps
-an earlier rendered copy that nothing refreshes any more, plus `verify-changes`, a
-repository skill absent from the manifest; once the user-level skills are installed, the
-rendered copy can go.
+`~/.agents/skills`, for every project of a fleet; run it before working here, since this
+repository carries no rendered copy. Its `.claude/skills/` holds only `verify-changes`, a
+repository skill absent from the manifest.
 
 Merges, reviews, pull requests, and commits go through those workflows rather than
 hand-composed `gh` and `git` invocations: `git-merge` will not merge a self-PR that has
