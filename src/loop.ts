@@ -2348,13 +2348,20 @@ export function createLoop(deps: LoopDeps) {
           }
           confirmIssuePromotion(paths, linkedIssue)
         }
+        previousGateFailures.delete(`issue-reconciliation-${taskId}`)
         return true
       } catch (error) {
+        // Counted per task, so an issue that can never be reconciled, such as a deleted
+        // one, stops the loop with its reason instead of holding the gate every poll.
         if (!(error instanceof ForgeRateLimitError)) {
           const subject = linkedIssues.length === 1
             ? `issue #${linkedIssues[0]}`
             : `issues ${linkedIssues.map((number) => `#${number}`).join(' ')}`
-          event('WARN', `could not reconcile ${subject} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+          reportGateFailure(
+            `could not reconcile ${subject} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`,
+            true,
+            `issue-reconciliation-${taskId}`,
+          )
         }
         // The promotion record is the retry state. Keep this poll local-only so the
         // cycle gate cannot advance before a later poll confirms the forge marker.
@@ -2551,10 +2558,12 @@ export function createLoop(deps: LoopDeps) {
         if (linkedIssues.length > 0
           && mergedStatus?.merge_commit !== undefined
           && mergedStatus.run_branch !== undefined) {
+          // A failure leaves the promotion record for a later poll; the tasks listed
+          // after this one still need their completions, failures, and runners handled.
           const reconciled = await reconcileMergedIssues(
             taskId, linkedIssues, mergedStatus.merge_commit, mergedStatus.run_branch,
           )
-          if (!reconciled) break
+          if (!reconciled) continue
         }
       }
 
@@ -2653,7 +2662,7 @@ export function createLoop(deps: LoopDeps) {
       // poll retries instead of wedging the cycle gate forever.
       if (status === 'completed' && !config.workerMode) {
         await mergeCompletedTask(taskId)
-        if (issueReconciliationPending || existsSync(stopFile)) break
+        if (existsSync(stopFile)) break
       }
     }
 
