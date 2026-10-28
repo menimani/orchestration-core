@@ -397,6 +397,15 @@ the linked issue directly instead of entering merge retries. A second machine ru
 `worker <base-ref>` — it claims and executes, pushes finished branches, and never scans,
 reviews, or merges. Exactly one ordinary daemon owns the branch and adopts those pushes.
 
+Claims are gated on authorship. An issue is claimed only when its author holds write access
+to the repository the issue lives in — `write`, `maintain`, or `admin` — since those
+accounts may already change the code the loop will eventually merge. Every other issue is
+labelled `loop:untrusted-author` and left ready but unclaimed, with a warning naming its
+author, and a permission lookup that fails for any reason other than a rate limit resolves
+to no write access rather than to a guess. On a repository where anyone may file an issue,
+that gate is what keeps a stranger's text out of a worker's task; the trust model in
+`SPEC.md` states it in full.
+
 A failed task returns its issue to `loop:ready` until that issue reaches
 `MAX_ISSUE_RETRIES` consecutive failures. The bound defaults to 3; at the bound the issue is
 parked as `loop:retry-exhausted` and the loop records a `Parked` event instead of claiming it
