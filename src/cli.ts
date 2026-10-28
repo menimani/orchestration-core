@@ -19,7 +19,7 @@ import { cleanupTask } from './cleanup.ts'
 import { runCleanupCommand } from './cleanupCommand.ts'
 import { waitForCi } from './ciWait.ts'
 import {
-  CONFIG_ENV_NAMES, loadConfig, validateConfigFileValues,
+  CONFIG_ENV_NAMES, isConfigName, loadConfig, validateConfigFileValues,
   type ConfigEvent, type LoopConfig,
 } from './config.ts'
 import { writeConfigFile } from './configFile.ts'
@@ -1100,7 +1100,7 @@ const cmdConfig: Command = async (paths, args) => {
   }
   if (action === 'unset' && args.length === 2) {
     const name = args[1]!
-    if (![...Object.values(CONFIG_ENV_NAMES)].includes(name)) {
+    if (!isConfigName(name)) {
       throw new Error(`Unknown configuration setting '${name}'.`)
     }
     delete values[name]
