@@ -2117,9 +2117,18 @@ export function createLoop(deps: LoopDeps) {
             try {
               pendingIdFile = generateCiFixTask(currentScans, prUrl, failSummary)
             } catch (error) {
-              event('WARN', `could not enqueue CI fix: ${errorSummary(error)}`)
+              // An attempt that never reached the queue must not be charged against the
+              // cap, or a fix the loop never dispatched would exhaust it. The gate counter
+              // carries the repetition instead, so an enqueue that keeps failing stops the
+              // loop rather than leaving it to poll a failing PR with nothing queued.
+              reportGateFailure(
+                `could not enqueue CI fix: ${errorSummary(error)}`,
+                true,
+                'ci-fix-enqueue',
+              )
               return 'continue'
             }
+            previousGateFailures.delete('ci-fix-enqueue')
             writeFileSync(ciFixFlag, `${attempts + 1}\n`)
             rmSync(pendingIdFile, { force: true })
             rmSync(completeFlag, { force: true })
