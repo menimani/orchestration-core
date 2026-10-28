@@ -395,6 +395,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Invalid contents, including an empty file, log the affected repository-relative
     state path, write the stop file, and stop the loop without resetting or overwriting
     the counter, retaining it for operator repair.
+    The cap those cycles count towards is persisted separately, in
+    `queue/cycle-cap.txt`, rewritten from `MAX_SCAN_CYCLES` once a startup holds the PID
+    lock and owns the task lifecycle — a startup refused before that point leaves no cap
+    behind — and left in place at shutdown. The daemon's own `[loop <cycle>/<cap>]` log
+    prefix takes the cap from its loaded configuration, so the file exists for the
+    commands that run after the daemon has gone: it is what lets `shipped` (item 18a)
+    record an ending against the cap the run was actually working to, rather than
+    against whatever `MAX_SCAN_CYCLES` says by then.
 14. Effort defaults: scans, queued tasks, and automatic reviews all run the runner at
     medium reasoning effort. Fixes spawned by an automatic review are the exception: they
     always run at high effort because they repair findings that escaped the original
@@ -557,7 +565,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
      appends a cycle-aware `Completed Loop`
      event to `logs/loop.log`, appends the exact standalone marker
      `LOOP_DONE: <pr-number-or-url>` to `logs/loop-markers.log`, and confirms the record
-     on stdout.
+     on stdout. The event's cycle prefix is read back from the state the stopped daemon
+     left: the cycle number from `queue/scan-count.txt` and the cap from
+     `queue/cycle-cap.txt` (item 13). A missing cycle number reads as zero, and a cap no
+     daemon recorded falls back to the configured `MAX_SCAN_CYCLES`.
 
 ## Failure containment
 
