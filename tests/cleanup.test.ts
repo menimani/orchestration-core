@@ -256,6 +256,34 @@ describe('cleanupTask', () => {
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
   })
 
+  it('retains task state when a process holding the worktree survives termination', () => {
+    seedTask(null)
+    let now = 0
+    const spawn = vi.fn()
+    const runtime = makeRuntime({
+      execFile: () => { throw new Error('git failed') },
+      remove: () => { throw new Error('directory is locked') },
+      os: windowsOperatingSystem({
+        listProcessCommands: () => [{
+          pid: 4242, commandLine: `bash.exe -c "cd '${worktree}' && npm test"`, executablePath: null,
+        }],
+        listProcesses: () => [{ pid: 4242, parentPid: 1 }],
+        probeProcess: () => {},
+        spawn,
+        now: () => now,
+        sleep: (milliseconds) => { now += milliseconds },
+        remove: () => { throw new Error('directory is locked') },
+      }),
+    })
+
+    expect(() => cleanupTask(paths, taskId, runtime))
+      .toThrow(`Could not remove worktree ${worktree}; task state was retained.`)
+
+    expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '4242', '/T', '/F'])
+    expectTaskStateToExist()
+    expect(existsSync(worktree)).toBe(true)
+  })
+
   it('uses the Windows long-path fallback when git cannot remove the worktree', () => {
     seedTask(null)
     const runtime = makeRuntime()
@@ -326,6 +354,42 @@ describe('cleanupTask', () => {
     expectTaskStateToExist()
     expect(existsSync(worktree)).toBe(false)
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
+  })
+
+  it('ends processes left in the worktree after the runner stops and before removal', () => {
+    seedTask(12345)
+    const calls: string[] = []
+    let processAlive = true
+    const os = windowsOperatingSystem({
+      spawn: () => {
+        calls.push('terminate runner')
+        processAlive = false
+      },
+      probeProcess: () => {
+        if (processAlive) return
+        throw gone()
+      },
+    })
+    const runtime = makeRuntime({ os: {
+      ...os,
+      terminateWorktreeProcesses: (path) => {
+        calls.push(`terminate holders of ${path} (present: ${existsSync(path)})`)
+      },
+    } })
+    const execFile = runtime.execFile
+    runtime.execFile = (command, args, options) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') calls.push('remove worktree')
+      return execFile(command, args, options)
+    }
+
+    cleanupTask(paths, taskId, runtime)
+
+    expect(calls).toEqual([
+      'terminate runner',
+      `terminate holders of ${worktree} (present: true)`,
+      'remove worktree',
+    ])
+    expect(existsSync(worktree)).toBe(false)
   })
 
   it('clears task state only after process, worktree and branch removal are verified', () => {

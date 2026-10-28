@@ -316,6 +316,24 @@ describe('removeMergedWorktree', () => {
 })
 
 describe('removeTemporaryWorktree', () => {
+  it('ends processes left in the worktree before Git removes it', () => {
+    const worktree = join(paths.worktreesDir, '.merge-held')
+    const calls: string[] = []
+
+    removeTemporaryWorktree(paths, worktree, {
+      os: {
+        ...posixOperatingSystem(vi.fn()),
+        terminateWorktreeProcesses: (path) => { calls.push(`terminate ${path}`) },
+      },
+      git: (_cwd, args) => {
+        calls.push(args.join(' '))
+        return ''
+      },
+    })
+
+    expect(calls).toEqual([`terminate ${worktree}`, `worktree remove ${worktree} --force`])
+  })
+
   it('uses the Windows long-path fallback and prunes after git removal fails', () => {
     const worktree = join(paths.worktreesDir, '.merge-long-path')
     const remove = vi.fn()
@@ -520,6 +538,28 @@ describe('mergeTask', () => {
     expect(output).not.toContain(`Merged ${taskId} and removed the worktree.`)
     expect(existsSync(worktree)).toBe(true)
     expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('ends processes left in the task worktree before removing it', async () => {
+    const taskId = '20261029_040729_001_user-orphaned-worktree-shell'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const presentAtTermination = new Map<string, boolean>()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+      worktreeRemovalRuntime: {
+        os: {
+          ...operatingSystem,
+          terminateWorktreeProcesses: (path) => {
+            presentAtTermination.set(path, existsSync(path))
+          },
+        },
+        git,
+      },
+    })).resolves.toMatchObject({ outcome: 'merged' })
+
+    expect(presentAtTermination.get(worktree)).toBe(true)
+    expect(existsSync(worktree)).toBe(false)
   })
 
   it('does not report merged cleanup while metadata and the task branch remain', async () => {

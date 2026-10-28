@@ -10,6 +10,8 @@ const PROCESS_EXIT_POLL_MS = 50
 export interface WindowsOperatingSystemRuntime {
   spawn(command: string, args: readonly string[]): void
   listProcesses(): readonly WindowsProcess[]
+  /** Optional so fakes that exercise other behavior never see a worktree holder. */
+  listProcessCommands?(): readonly WindowsProcessCommand[]
   probeProcess(pid: number): void
   remove(path: string, options: {
     force: true
@@ -25,6 +27,12 @@ export interface WindowsOperatingSystemRuntime {
 export interface WindowsProcess {
   pid: number
   parentPid: number
+}
+
+export interface WindowsProcessCommand {
+  pid: number
+  commandLine: string | null
+  executablePath: string | null
 }
 
 let ownProcessStartIdentity: string | undefined
@@ -86,6 +94,30 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
       return { pid: Number(match[1]), parentPid: Number(match[2]) }
     })
   },
+  listProcessCommands: () => {
+    // UTF-8 output keeps a worktree path outside the console code page comparable, and
+    // JSON keeps command lines that contain commas or line breaks intact.
+    const result = spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      '[Console]::OutputEncoding = [Text.Encoding]::UTF8; ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Property ProcessId,CommandLine,ExecutablePath | ForEach-Object { @{ pid = $_.ProcessId; commandLine = $_.CommandLine; executablePath = $_.ExecutablePath } })',
+    ], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    if (result.error !== undefined) throw result.error
+    if (result.status !== 0) throw new Error('Could not inspect Windows process command lines.')
+    const parsed: unknown = JSON.parse(result.stdout)
+    if (!Array.isArray(parsed)) throw new Error('Could not parse Windows process command lines.')
+    return parsed.map((entry: Partial<WindowsProcessCommand>) => ({
+      pid: Number(entry.pid),
+      commandLine: typeof entry.commandLine === 'string' ? entry.commandLine : null,
+      executablePath: typeof entry.executablePath === 'string' ? entry.executablePath : null,
+    }))
+  },
   probeProcess: (pid) => {
     process.kill(pid, 0)
   },
@@ -102,6 +134,37 @@ function extendedLengthPath(path: string): string {
   if (absolutePath.startsWith('\\\\?\\')) return absolutePath
   if (absolutePath.startsWith('\\\\')) return `\\\\?\\UNC\\${absolutePath.slice(2)}`
   return `\\\\?\\${absolutePath}`
+}
+
+function comparablePath(text: string): string {
+  return text.replaceAll('/', '\\').toLowerCase()
+}
+
+function containsPath(text: string, path: string): boolean {
+  const haystack = comparablePath(text)
+  for (let index = haystack.indexOf(path); index !== -1; index = haystack.indexOf(path, index + 1)) {
+    // A sibling such as task-10 shares the prefix of task-1; only a separator, a quote,
+    // whitespace, or the end of the text may follow a match.
+    const next = haystack[index + path.length]
+    if (next === undefined || /[\\"'\s;,]/.test(next)) return true
+  }
+  return false
+}
+
+/** Processes whose command line or executable path names the worktree at `path`. */
+export function worktreeProcessPids(
+  processes: readonly WindowsProcessCommand[],
+  path: string,
+): number[] {
+  // Compare the plain form: processes name the worktree without the extended-length prefix.
+  const worktree = comparablePath(win32.resolve(path))
+    .replace(/^\\\\\?\\unc\\/, '\\\\')
+    .replace(/^\\\\\?\\/, '')
+    .replace(/\\+$/, '')
+  return processes.filter(({ pid, commandLine, executablePath }) => (
+    Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid
+    && [commandLine, executablePath].some((text) => text !== null && containsPath(text, worktree))
+  )).map(({ pid }) => pid)
 }
 
 function isAlive(runtime: WindowsOperatingSystemRuntime, pid: number): boolean {
@@ -189,6 +252,24 @@ export function createOperatingSystem(
     return true
   }
 
+  const terminateWorktreeProcesses = (path: string): void => {
+    let pids: number[]
+    try {
+      pids = worktreeProcessPids(runtime.listProcessCommands?.() ?? [], path)
+    } catch {
+      // Without a listing nothing can be selected; a holder makes removal fail instead.
+      return
+    }
+    for (const pid of pids) {
+      try {
+        terminateProcessTree(pid)
+      } catch {
+        // A survivor, including a tree that contains this process, keeps holding the
+        // worktree; the removal that follows reports that failure.
+      }
+    }
+  }
+
   return {
     verificationEnvironmentLabel: () => 'Windows',
     async launchDaemon(options) {
@@ -209,6 +290,7 @@ export function createOperatingSystem(
     processIsAlive: (pid) => isAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree,
+    terminateWorktreeProcesses,
     removeDirectory(path): void {
       if (path.startsWith('\\\\?\\')) {
         runtime.remove(path, { recursive: true, force: true, maxRetries: 3 })
