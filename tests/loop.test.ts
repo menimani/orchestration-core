@@ -2471,6 +2471,68 @@ describe('remote issue queue idle detection', () => {
     )
   })
 
+  it('reports recovery once queue label creation succeeds after a failure', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    const listLabels = fakeForge.listLabels.bind(fakeForge)
+    let attempts = 0
+    fakeForge.listLabels = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('label listing failed')
+      return listLabels()
+    }
+
+    expect(await loop.initializeIssueQueue()).toBe(false)
+    expect(await loop.initializeIssueQueue()).toBe(true)
+
+    expect(logText()).toContain(
+      'WARN could not ensure issue queue labels: label listing failed',
+    )
+    expect(logText()).toContain('Recovered ensuring issue queue labels after 0 minutes')
+  })
+
+  it('reports recovery once closing promoted issues succeeds after a failure', async () => {
+    paths = {
+      ...paths,
+      fleet: {
+        dir: repoRoot, project: 'example', repository: 'owner/example',
+        issueRepository: 'owner/fleet',
+      },
+    }
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, 'merged-task', [issueNumber])
+    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
+    let attempts = 0
+    fakeForge.prStatus = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('run pull request unreadable')
+      return {
+        state: 'merged',
+        isDraft: false,
+        url: 'https://example.test/pull/9',
+        headSha: mergeCommit,
+        checks: [],
+      }
+    }
+
+    await loop.poll()
+    expect(logText()).toContain('WARN could not close promoted issues: run pull request unreadable')
+
+    await loop.poll()
+    expect(logText()).toContain(`Promoted #${issueNumber}`)
+    expect(logText()).toContain('Recovered closing promoted issues after 0 minutes')
+  })
+
   beforeEach(() => {
     initializeGitRepoWithRemote()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
