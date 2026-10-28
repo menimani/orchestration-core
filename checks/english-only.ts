@@ -27,8 +27,10 @@ const SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
 const SOURCE_NAMES: ReadonlySet<string> = new Set([
   '.gitattributes', '.gitignore', 'LICENSE', 'commit-msg', 'pre-commit',
 ])
+// Only directories this repository actually produces. A speculative name here would
+// silently exempt a source directory that happened to share it.
 const GENERATED_DIRECTORY_NAMES: ReadonlySet<string> = new Set([
-  '.git', 'build', 'coverage', 'dist', 'node_modules',
+  '.git', 'coverage', 'node_modules',
 ])
 const GENERATED_DIRECTORY_PATTERNS: readonly RegExp[] = [
   /^\.node_modules\.previous-.+/,
