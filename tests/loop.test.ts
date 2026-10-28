@@ -2707,6 +2707,34 @@ describe('remote issue queue idle detection', () => {
     expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
+  it('fails a completed worker task that has no linked issue instead of skipping it', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      workerMode: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const taskId = '20260808_120000_001_user-local-fallback'
+    writeRawStatus(taskId, 'completed')
+    const taskLog = join(paths.logsDir, `${taskId}.log`)
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(logText()).toContain(`WARN worker task ${shortTaskId(taskId)} has no linked issue; marked failed`)
+    expect(readFileSync(taskLog, 'utf8')).toContain(
+      `Worker merge refused: a worker checkout merges only issue-linked tasks; ${taskId} has no linked issue`,
+    )
+
+    await loop.poll()
+
+    expect(logged).toContain(`FAILED: ${taskId} — log: ${taskLog}`)
+    expect(logged.filter((line) => line.includes('has no linked issue'))).toHaveLength(1)
+  })
+
   it('logs changed remote work immediately and unchanged work at most every ten minutes', async () => {
     let current = new Date(2026, 7, 8, 12, 0, 0)
     const loop = makeLoop({

@@ -887,7 +887,10 @@ so authorship and verified ancestry must both hold.
     on its issue, and
     swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection or an ordinary
     task with an explicit no-change verdict and no commits comments and closes its issue
-    instead. Its poll status uses the shared
+    instead. A completed task with no linked issue, such as a delegation that fell back
+    to a local task after a forge error, cannot be published, so the worker marks it
+    `failed` and appends the reason to its task log, keeping its commits on `task/<id>`.
+    Its poll status uses the shared
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.
