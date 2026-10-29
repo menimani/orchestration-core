@@ -160,14 +160,6 @@ function containsPath(text: string, path: string): boolean {
   return false
 }
 
-/** Processes whose command line or executable path names the worktree at `path`. */
-export function worktreeProcessPids(
-  processes: readonly WindowsProcessCommand[],
-  path: string,
-): number[] {
-  return worktreeProcesses(processes, path).map(({ pid }) => pid)
-}
-
 function worktreeProcesses(
   processes: readonly WindowsProcessCommand[],
   path: string,

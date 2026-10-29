@@ -5,8 +5,9 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
   processTreeRootPid, quoteWindowsArgument, startWindowsProcess,
-  WINDOWS_PROCESS_ROOT_PID_ENV, type WindowsProcessRuntime,
+  type WindowsProcessRuntime,
 } from '../src/adapters/windows-process.ts'
+import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/internalEnvironment.ts'
 
 // These are pure functions describing Windows conventions, so every platform runs them.
 // The process-launching assertions that only Windows can make live in

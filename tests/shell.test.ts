@@ -2,12 +2,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/adapters/windows-process.ts'
 import {
-  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
-} from '../src/restart.ts'
-import {
-  LOOP_STARTUP_RESULT_FILE_ENV, projectCommandEnvironment,
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV, LOOP_STARTUP_RESULT_FILE_ENV,
+  projectCommandEnvironment, WINDOWS_PROCESS_ROOT_PID_ENV,
 } from '../src/internalEnvironment.ts'
 import { execShellSync } from '../src/shell.ts'
 
