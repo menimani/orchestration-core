@@ -4827,6 +4827,60 @@ describe('completed task merge recovery', () => {
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
   })
 
+  it('stops the loop when a no-change issue can never be closed', async () => {
+    const taskId = '20260814_145209_071_auto-no-change-stuck'
+    initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFinal(taskId, 'No change is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'unclosable issue', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    fakeForge.closeIssue = async () => {
+      throw new Error('close rejected')
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).toContain('WARN could not reconcile no-change task 071_auto')
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toMatch(
+      /ERROR could not reconcile no-change task 071_auto: .*close rejected.*\(repeated 2 times\)/,
+    )
+  })
+
+  it('completes a no-change task whose linked issue was deleted', async () => {
+    const taskId = '20260814_145209_072_auto-no-change-deleted'
+    initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFinal(taskId, 'No change is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    recordIssuesForTask(paths, taskId, [999])
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged).toContain('No-change 072_auto    no change warranted')
+  })
+
   it('does not merge an abandoned grouped task after the loop restarts', async () => {
     const taskId = '20260811_120000_064_auto-abandoned-group'
     const initialHead = initializeGitRepo()
