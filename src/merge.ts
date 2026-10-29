@@ -140,12 +140,15 @@ export interface MergeOptions {
    * merge reads them from the task's specification when they are not given.
    */
   reasons?: readonly string[] | undefined
-}
-
-export interface RemoteMergeOptions extends MergeOptions {
-  /** Persist adoption before post-merge work begins or this function returns. */
+  /**
+   * Persist what follows from the merge before post-merge work begins or this function
+   * returns. A dependency install that fails afterwards stops the loop, and a restart
+   * that finds the merge already recorded never repeats this step.
+   */
   onMerged?: ((mergeCommit: string) => void) | undefined
 }
+
+export type RemoteMergeOptions = MergeOptions
 
 export interface NoChangeOptions {
   outputFile?: string | undefined
@@ -809,6 +812,7 @@ async function finalizeLocalMerge(
   options: MergeOptions,
 ): Promise<string> {
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
+  options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     options.beforeOrchestrationDepsInstall,

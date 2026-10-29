@@ -4225,6 +4225,40 @@ describe('completed task merge recovery', () => {
     expect(logged).toContain('Installed orchestration deps  after 033_auto')
   })
 
+  it('reopens the waiting gate before a failed dependency install stops the loop', async () => {
+    const taskId = '20260820_181836_035_auto-gate-dependency-installation'
+    makeDependencyChangingTask(taskId)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+    const install = vi.fn(() => {
+      throw new Error('npm ci failed')
+    })
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      { install, packageRoot: repoRoot },
+      undefined,
+      undefined,
+      undefined,
+      () => ({ terminated: [], failures: [] }),
+    )
+    loop.initializeSessionStateForBranch()
+
+    await expect(loop.poll()).rejects.toThrow(
+      /Orchestration dependency installation after 035_auto failed/,
+    )
+
+    // A restart finds the task merged and never returns to the merge, so the gate
+    // must already have been told about the new commits.
+    expect(install).toHaveBeenCalledOnce()
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+  })
+
   it('releases an issue task after its first conflicting rebase and keeps its commits', async () => {
     const taskId = '20260815_181908_194_auto-rebase-conflict'
     const initialHead = initializeGitRepo()
