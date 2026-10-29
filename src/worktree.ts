@@ -16,13 +16,15 @@ export interface WorktreeRemovalResult {
 /**
  * Remove a worktree with the long-path fallback required by Windows, after ending the
  * processes still running inside it that stopping the task's runner did not reach.
+ * Each process ended that way is reported through `report`.
  */
 export function removeWorktreeWithFallback(
   repoRoot: string,
   worktree: string,
   runtime: WorktreeRemovalRuntime,
+  report: (line: string) => void,
 ): WorktreeRemovalResult {
-  runtime.os.terminateWorktreeProcesses(worktree)
+  runtime.os.terminateWorktreeProcesses(worktree, report)
   try {
     runtime.git(repoRoot, ['worktree', 'remove', worktree, '--force'])
     return {

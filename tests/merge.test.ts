@@ -183,7 +183,7 @@ describe('removeMergedWorktree', () => {
         if (args[1] === 'prune') throw new Error('metadata is locked')
         return ''
       },
-    })
+    }, vi.fn())
 
     expect(result).toMatchObject({
       gitFailure: 'Git removal failed',
@@ -316,14 +316,18 @@ describe('removeMergedWorktree', () => {
 })
 
 describe('removeTemporaryWorktree', () => {
-  it('ends processes left in the worktree before Git removes it', () => {
+  it('ends processes left in the worktree before Git removes it and logs each one', () => {
     const worktree = join(paths.worktreesDir, '.merge-held')
     const calls: string[] = []
+    const log = vi.fn()
 
-    removeTemporaryWorktree(paths, worktree, {
+    removeTemporaryWorktree(paths, worktree, log, {
       os: {
         ...posixOperatingSystem(vi.fn()),
-        terminateWorktreeProcesses: (path) => { calls.push(`terminate ${path}`) },
+        terminateWorktreeProcesses: (path, report) => {
+          calls.push(`terminate ${path}`)
+          report(`Stopped PID 4242    bash.exe holding worktree ${path}`)
+        },
       },
       git: (_cwd, args) => {
         calls.push(args.join(' '))
@@ -332,6 +336,7 @@ describe('removeTemporaryWorktree', () => {
     })
 
     expect(calls).toEqual([`terminate ${worktree}`, `worktree remove ${worktree} --force`])
+    expect(log).toHaveBeenCalledWith(`Stopped PID 4242    bash.exe holding worktree ${worktree}`)
   })
 
   it('uses the Windows long-path fallback and prunes after git removal fails', () => {
@@ -342,7 +347,7 @@ describe('removeTemporaryWorktree', () => {
       return ''
     })
 
-    removeTemporaryWorktree(paths, worktree, {
+    removeTemporaryWorktree(paths, worktree, vi.fn(), {
       os: windowsOperatingSystem(remove), git: gitRuntime,
     })
 
@@ -362,7 +367,7 @@ describe('removeTemporaryWorktree', () => {
       return ''
     })
 
-    expect(() => removeTemporaryWorktree(paths, worktree, {
+    expect(() => removeTemporaryWorktree(paths, worktree, vi.fn(), {
       os: posixOperatingSystem(() => { throw new Error('Direct removal failed') }),
       git: gitRuntime,
     })).toThrow(

@@ -33,6 +33,8 @@ export interface WindowsProcess {
 
 export interface WindowsProcessCommand {
   pid: number
+  /** Image name, such as bash.exe; optional so fakes may give only the executable path. */
+  name?: string | null
   commandLine: string | null
   executablePath: string | null
 }
@@ -107,7 +109,7 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      '[Console]::OutputEncoding = [Text.Encoding]::UTF8; ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Property ProcessId,CommandLine,ExecutablePath | ForEach-Object { @{ pid = $_.ProcessId; commandLine = $_.CommandLine; executablePath = $_.ExecutablePath } })',
+      '[Console]::OutputEncoding = [Text.Encoding]::UTF8; ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Property ProcessId,Name,CommandLine,ExecutablePath | ForEach-Object { @{ pid = $_.ProcessId; name = $_.Name; commandLine = $_.CommandLine; executablePath = $_.ExecutablePath } })',
     ], {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
@@ -120,6 +122,7 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
     if (!Array.isArray(parsed)) throw new Error('Could not parse Windows process command lines.')
     return parsed.map((entry: Partial<WindowsProcessCommand>) => ({
       pid: Number(entry.pid),
+      name: typeof entry.name === 'string' ? entry.name : null,
       commandLine: typeof entry.commandLine === 'string' ? entry.commandLine : null,
       executablePath: typeof entry.executablePath === 'string' ? entry.executablePath : null,
     }))
@@ -162,6 +165,13 @@ export function worktreeProcessPids(
   processes: readonly WindowsProcessCommand[],
   path: string,
 ): number[] {
+  return worktreeProcesses(processes, path).map(({ pid }) => pid)
+}
+
+function worktreeProcesses(
+  processes: readonly WindowsProcessCommand[],
+  path: string,
+): WindowsProcessCommand[] {
   // Compare the plain form: processes name the worktree without the extended-length prefix.
   const worktree = comparablePath(win32.resolve(path))
     .replace(/^\\\\\?\\unc\\/, '\\\\')
@@ -170,7 +180,18 @@ export function worktreeProcessPids(
   return processes.filter(({ pid, commandLine, executablePath }) => (
     Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid
     && [commandLine, executablePath].some((text) => text !== null && containsPath(text, worktree))
-  )).map(({ pid }) => pid)
+  ))
+}
+
+function executableName({ name, executablePath }: WindowsProcessCommand): string {
+  if (name !== undefined && name !== null && name !== '') return name
+  if (executablePath !== null && executablePath !== '') return win32.basename(executablePath)
+  return 'unknown executable'
+}
+
+/** The aligned event line that formatEventLine in loop.ts produces for these fields. */
+function terminatedHolderLine(holder: WindowsProcessCommand, worktree: string): string {
+  return `Stopped ${`PID ${holder.pid}`.padEnd(12)}${executableName(holder)} holding worktree ${worktree}`
 }
 
 function isAlive(runtime: WindowsOperatingSystemRuntime, pid: number): boolean {
@@ -270,17 +291,19 @@ export function createOperatingSystem(
     return true
   }
 
-  const terminateWorktreeProcesses = (path: string): void => {
-    let pids: number[]
+  const terminateWorktreeProcesses = (path: string, report: (line: string) => void): void => {
+    let holders: WindowsProcessCommand[]
     try {
-      pids = worktreeProcessPids(runtime.listProcessCommands?.() ?? [], path)
+      holders = worktreeProcesses(runtime.listProcessCommands?.() ?? [], path)
     } catch {
       // Without a listing nothing can be selected; a holder makes removal fail instead.
       return
     }
-    for (const pid of pids) {
+    for (const holder of holders) {
       try {
-        terminateProcessTree(pid)
+        // A holder already ended inside an earlier holder's tree answers false, so each
+        // line names a tree this call stopped.
+        if (terminateProcessTree(holder.pid)) report(terminatedHolderLine(holder, path))
       } catch {
         // A survivor, including a tree that contains this process, keeps holding the
         // worktree; the removal that follows reports that failure.
