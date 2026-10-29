@@ -351,6 +351,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     from a failing test.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
+    The same merge clears the cycle's resume flag, which records that the gate has
+    passed; otherwise a merge landing after the gate passed would reach promotion without
+    the suite, CI, or review seeing its commits. A locally merged inspection task — a
+    scan, a review, or a task queued for inspection — leaves both flags in place.
 11a. After a local or remote task merge, a first-parent change to this package's
     `package.json` or `package-lock.json` runs `npm ci --no-audit --no-fund` in the
     package root. A successful install records the lockfile hash under `node_modules`.
