@@ -43,7 +43,11 @@ comments and other items cite items by number, so a number is never reused.
   same-name dispatches in the command registry in `src/cli.ts`. The manifest also owns
   the check-only `test`, `test:linux`, and `typecheck` scripts, which are not CLI
   dispatches; the registry additionally owns the hook-only `pre-commit` dispatch, which
-  is invoked by the generated Git hook rather than exposed as a package script. The skills
+  is invoked by the generated Git hook rather than exposed as a package script. Run with
+  no command, the CLI prints the package scripts it dispatches, leaving out `pre-commit`,
+  after the installed package's command prefix relative to the repository that holds it
+  (`npm run` at the package's own root, `npm run -C 'orchestration/ts'` in a subtree
+  consumer). The skills
   (`loop-start`, `loop-stop`, `loop-delegate`) invoke these
   scripts through the installed package's command prefix. A background launch prints status and stop
   commands that run from any directory: `npm run -C <absolute package root> <script> --`
