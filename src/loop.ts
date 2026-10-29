@@ -593,6 +593,7 @@ export function createLoop(deps: LoopDeps) {
             const cycle = readCount(scanCountFile)
             if (cycle > 0) {
               rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+              rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
             }
           } catch (error) {
             promotionPersistenceError = error
@@ -2440,11 +2441,15 @@ export function createLoop(deps: LoopDeps) {
           await reconcileMergedIssues(taskId, linkedIssues, mergeCommit, runBranch)
         }
         // A task delegated while the gate was waiting merges commits the gate has
-        // already pushed past; clearing the flag makes the gate push and verify
-        // again with the new commits included.
+        // already pushed past; clearing the flags makes the gate push and verify
+        // again with the new commits included. The resume flag goes too, or a merge
+        // after the gate passed would reach promotion without suite, CI, or review.
         if (!isInspectionTaskId(paths, taskId)) {
           const cycle = readCount(scanCountFile)
-          if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+          if (cycle > 0) {
+            rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+            rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
+          }
         }
       } catch (error) {
         if (error instanceof NoChangeReconciliationError) {
