@@ -4,7 +4,7 @@ import {
 } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createClaudeSharedSkills } from './shared-skills-claude.ts'
-import { startWindowsProcess } from './windows-process.ts'
+import { cmdArgumentLine, startWindowsProcess } from './windows-process.ts'
 import type {
   ReasoningEffort, Runner, RunnerLoadOptions, RunnerModelOptions, RunnerStartOptions,
 } from './runner.ts'
@@ -49,17 +49,17 @@ export function runClaudeProcess(
   args: readonly string[],
 ): Promise<number> {
   // Claude may be a native executable or an npm .cmd shim; cmd.exe launches either
-  // through PATHEXT, whichever shell started the loop.
+  // through PATHEXT, whichever shell started the loop. A model name may still hold cmd
+  // metacharacters, so the line is escaped for cmd.exe and passed verbatim.
   const viaCmd = process.platform === 'win32'
-  const command = viaCmd ? 'cmd.exe' : 'claude'
-  const commandArgs = viaCmd
-    ? ['/d', '/c', 'claude', ...args]
-    : [...args]
 
   return new Promise((resolve, reject) => {
     let child
     try {
+      const command = viaCmd ? 'cmd.exe' : 'claude'
+      const commandArgs = viaCmd ? [cmdArgumentLine('claude', args)] : [...args]
       child = spawn(command, commandArgs, {
+        ...(viaCmd ? { windowsVerbatimArguments: true } : {}),
         detached: false,
         // `claude -p` exits when its turn ends, killing anything it left running in
         // the background. Tasks that started the suite that way ended with "I'll commit

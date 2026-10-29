@@ -20,7 +20,8 @@ vi.mock('node:fs', () => ({
 }))
 
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
-vi.mock('../src/adapters/windows-process.ts', () => ({
+vi.mock('../src/adapters/windows-process.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/adapters/windows-process.ts')>(),
   startWindowsProcess: mocks.startWindowsProcess,
 }))
 
@@ -257,23 +258,47 @@ describe('createCodexRunner', () => {
 
     expect(mocks.startWindowsProcess).toHaveBeenCalledWith({
       args: [
-        '/d', '/c', 'codex',
-        'exec',
-        '--dangerously-bypass-approvals-and-sandbox',
-        '--disable', 'multi_agent',
-        '--output-last-message', 'final-message.txt',
-        '--config', 'model_reasoning_effort=high',
-        '-',
+        '/d /v:off /s /c "codex'
+        + ' ^"exec^"'
+        + ' ^"--dangerously-bypass-approvals-and-sandbox^"'
+        + ' ^"--disable^" ^"multi_agent^"'
+        + ' ^"--output-last-message^" ^"final-message.txt^"'
+        + ' ^"--config^" ^"model_reasoning_effort=high^"'
+        + ' ^"-^""',
       ],
       command: 'cmd.exe',
       cwd: 'worktree',
       inputFile: 'task.md',
       outputFile: 'task.log',
+      verbatimArguments: true,
     })
 
     await expect(started).resolves.toBe(5678)
     expect(mocks.spawn).not.toHaveBeenCalled()
     expect(mocks.openSync).not.toHaveBeenCalled()
+  })
+
+  it('escapes cmd metacharacters in a Windows final-message path and model', async () => {
+    setPlatform('win32')
+    const started = createCodexRunner().start({
+      ...options,
+      finalMessageFile: 'C:\\Users\\AT&T\\final-message.txt',
+      model: 'gpt%5^x',
+    })
+
+    const [argumentLine] = mocks.startWindowsProcess.mock.calls[0]![0].args as string[]
+    expect(argumentLine).toContain(' ^"C:\\Users\\AT^&T\\final-message.txt^" ')
+    expect(argumentLine).toContain(' ^"--model^" ^"gpt^%5^^x^" ')
+    expect(argumentLine).not.toMatch(/[^^]&/)
+    await expect(started).resolves.toBe(5678)
+  })
+
+  it('rejects on Windows an argument cmd.exe cannot pass literally', async () => {
+    setPlatform('win32')
+
+    await expect(createCodexRunner().start({ ...options, model: 'say "hi"' }))
+      .rejects.toThrow('quote or line break')
+    expect(mocks.startWindowsProcess).not.toHaveBeenCalled()
   })
 
   it('never passes the specification as an argument regardless of its size', async () => {

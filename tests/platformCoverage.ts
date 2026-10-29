@@ -14,6 +14,11 @@ export interface PlatformSuite {
 
 export const PLATFORM_SUITES: PlatformSuite[] = [
   {
+    file: 'tests/windows-cmd-arguments.test.ts',
+    platform: 'win32',
+    reason: 'runs cmd.exe and an npm-style .cmd shim to see which arguments arrive',
+  },
+  {
     file: 'tests/windows-console.test.ts',
     platform: 'win32',
     reason: 'launches a Windows process tree and observes the consoles it attaches',

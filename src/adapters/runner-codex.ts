@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { packageCommandPrefix, packagePathPrefix } from '../paths.ts'
-import { startWindowsProcess } from './windows-process.ts'
+import { cmdArgumentLine, startWindowsProcess } from './windows-process.ts'
 import type {
   Runner, RunnerModelOptions, RunnerSharedSkillRenderOptions, RunnerStartOptions,
 } from './runner.ts'
@@ -114,23 +114,25 @@ export function createCodexRunner(): Runner {
       // On Windows the `codex` on PATH is an npm .cmd shim, which Node cannot spawn
       // without a shell. cmd.exe resolves it through PATHEXT from any calling shell;
       // a bare `bash` resolved to WSL instead of Git Bash when started from PowerShell.
-      // The arguments are paths and settings the loop composed, never forge text.
-      const viaCmd = process.platform === 'win32'
-      const command = viaCmd ? 'cmd.exe' : 'codex'
-      const commandArgs = viaCmd
-        ? ['/d', '/c', 'codex', ...args]
-        : args
-
-      if (viaCmd) {
+      // The arguments are paths and settings the loop composed, never forge text, but a
+      // state path may still hold cmd metacharacters, so they are escaped for cmd.exe.
+      if (process.platform === 'win32') {
+        let argumentLine: string
+        try {
+          argumentLine = cmdArgumentLine('codex', args)
+        } catch (error) {
+          return Promise.reject(error)
+        }
         // Measured on Windows: detached launches gave every console descendant its own
         // visible window. The hidden launcher gives the task one non-visible console,
         // inherited by all of its tools, while still surviving the daemon that starts it.
         return startWindowsProcess({
-          args: commandArgs,
-          command,
+          args: [argumentLine],
+          command: 'cmd.exe',
           cwd: options.worktree,
           inputFile: options.specFile,
           outputFile: options.logFile,
+          verbatimArguments: true,
         })
       }
 
@@ -159,7 +161,7 @@ export function createCodexRunner(): Runner {
 
         let child
         try {
-          child = spawn(command, commandArgs, {
+          child = spawn('codex', args, {
             cwd: options.worktree,
             detached: true,
             stdio: [specFd, logFd, logFd],

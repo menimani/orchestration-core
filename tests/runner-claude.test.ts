@@ -22,7 +22,8 @@ vi.mock('node:fs', () => ({
 }))
 
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
-vi.mock('../src/adapters/windows-process.ts', () => ({
+vi.mock('../src/adapters/windows-process.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/adapters/windows-process.ts')>(),
   startWindowsProcess: mocks.startWindowsProcess,
 }))
 
@@ -261,7 +262,7 @@ describe('Claude process wrapper', () => {
     )
   })
 
-  it('routes the fake claude executable through Bash on Windows', async () => {
+  it('routes the fake claude executable through cmd.exe on Windows', async () => {
     setPlatform('win32')
     const child = mockChild()
     mocks.spawn.mockReturnValue(child)
@@ -271,8 +272,30 @@ describe('Claude process wrapper', () => {
 
     await expect(completed).resolves.toBe(7)
     expect(mocks.spawn).toHaveBeenCalledWith('cmd.exe', [
-      '/d', '/c', 'claude', '-p',
+      '/d /v:off /s /c "claude ^"-p^""',
+    ], expect.objectContaining({ windowsVerbatimArguments: true }))
+  })
+
+  it('escapes cmd metacharacters in a Windows model name', async () => {
+    setPlatform('win32')
+    const child = mockChild()
+    mocks.spawn.mockReturnValue(child)
+
+    const completed = runClaudeProcess('final-message.txt', ['--model', 'opus&50%^x'])
+    child.emit('close', 0)
+
+    await expect(completed).resolves.toBe(0)
+    expect(mocks.spawn).toHaveBeenCalledWith('cmd.exe', [
+      '/d /v:off /s /c "claude ^"--model^" ^"opus^&50^%^^x^""',
     ], expect.any(Object))
+  })
+
+  it('rejects on Windows an argument cmd.exe cannot pass literally', async () => {
+    setPlatform('win32')
+
+    await expect(runClaudeProcess('final-message.txt', ['--model', 'two\nlines']))
+      .rejects.toThrow('quote or line break')
+    expect(mocks.spawn).not.toHaveBeenCalled()
   })
 })
 
