@@ -472,9 +472,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     In a subtree consumer, before writing any destination, the sync verifies that every
     managed destination has no staged changes. An unverifiable or non-clean managed index
     is fatal and stops the cycle before any destination is served. A destination rendering
-    failure is reported without costing the others theirs. The sync then stages all managed
-    updates and removals and commits them as one scoped commit; a staging, inspection, or
-    commit failure is fatal and stops the cycle before task dispatch, retaining any staged
+    failure is fatal: the remaining destinations are still written, but the cycle stops
+    before task dispatch and nothing is staged or committed. Otherwise the sync stages all
+    managed updates and removals and commits them as one scoped commit; a staging,
+    inspection, or commit failure is fatal and stops the cycle before task dispatch, retaining any staged
     output for diagnosis.
     Shared canonical sources do not live below a runner skill directory, so a subtree
     exposes no nested duplicate of a shared skill.

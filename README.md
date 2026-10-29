@@ -74,10 +74,10 @@ destinations are served only once. The sync runs only for the repository that ow
 package and for subtree consumers. A fleet project runs the package from outside its own
 checkout and skips it; its skills come from `install-skills` instead. In a subtree consumer, the sync checks every managed destination for staged
 changes before writing any of them; an unverifiable or non-clean managed index is fatal
-and stops the cycle. A destination rendering failure is reported while the remaining
-destinations are still served. Managed updates and removals are then staged and committed
-together; a staging, inspection, or commit failure is fatal and stops the cycle before
-task dispatch, leaving any staged output available for diagnosis. Loop commands are
+and stops the cycle. A destination rendering failure is fatal too: the remaining
+destinations are still written, but the cycle stops and nothing is staged or committed.
+Otherwise managed updates and removals are staged and committed together; a staging,
+inspection, or commit failure is fatal and stops the cycle before task dispatch, leaving any staged output available for diagnosis. Loop commands are
 rendered for
 the installed package location (`npm run` here, `npm run -C orchestration/ts` in the
 layout below).
