@@ -504,7 +504,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
-    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. A PR with
+    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. An open
+    PR whose reported head commit is not the local `HEAD` is pending, whatever its
+    checks say, because the forge can still report the previous head after a push. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
     explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
@@ -546,7 +548,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     removes any remaining pending-ID file.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
-    unless it is already open and ready. A PR found merged before promotion, or merged
+    unless it is already open and ready. While an open PR reports a head commit other
+    than the local `HEAD`, the loop neither promotes it nor emits `LOOP_DONE`, and
+    retries on the next poll. A PR found merged before promotion, or merged
     while the ready operation is being confirmed, is also a successful terminal state;
     both paths emit the normal completion records without another ready operation.
     A PR found closed before or during promotion is not success: the first observation
