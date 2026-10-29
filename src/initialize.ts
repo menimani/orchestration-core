@@ -19,6 +19,7 @@ interface InitOptions {
   packageRoot?: string
   report?: (line: string) => void
   git?: (args: string[]) => string
+  env?: NodeJS.ProcessEnv
 }
 
 const SCAFFOLD_FILES = [
@@ -54,6 +55,15 @@ function currentGitConfig(git: (args: string[]) => string, key: string): string 
   }
 }
 
+function configuredValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const value = env[key]
+  return value === undefined || value === '' ? undefined : value
+}
+
+function adapterFilenameName(adapterPath: string): string | undefined {
+  return /^project-(.+)\.ts$/.exec(basename(adapterPath))?.[1]
+}
+
 function relativeImport(fromDirectory: string, target: string): string {
   const path = relative(fromDirectory, target).replaceAll('\\', '/')
   if (isAbsolute(path)) {
@@ -71,12 +81,25 @@ export async function initializeRepository(
   const packageRoot = resolve(options.packageRoot ?? PACKAGE_ROOT)
   const report = options.report ?? console.log
   const git = options.git ?? defaultGit(paths.repoRoot)
-  const projectName = projectSlug(requestedName ?? basename(paths.repoRoot))
+  const env = options.env ?? process.env
+  // The selection the adapter loader makes: PROJECT names the adapter and PROJECT_ADAPTER
+  // overrides its path, so init creates or repairs the file the loop will load.
+  const configuredName = configuredValue(env, 'PROJECT')
+  const configuredPath = configuredValue(env, 'PROJECT_ADAPTER')
+  const projectName = configuredName ?? projectSlug(requestedName ?? basename(paths.repoRoot))
   let ok = true
+  if (configuredName !== undefined && requestedName !== undefined
+    && projectSlug(requestedName) !== configuredName) {
+    report(`DIVERGED: project name '${projectSlug(requestedName)}' disagrees with PROJECT=${configuredName}; using PROJECT`)
+    ok = false
+  }
 
   const projectDirectory = join(paths.projectRoot, 'project')
+  const configuredAdapterPath = configuredPath !== undefined
+    ? resolve(paths.projectRoot, configuredPath)
+    : configuredName === undefined ? undefined : join(projectDirectory, `project-${configuredName}.ts`)
   const typeImport = relativeImport(
-    projectDirectory,
+    configuredAdapterPath === undefined ? projectDirectory : dirname(configuredAdapterPath),
     join(packageRoot, 'src', 'adapters', 'project.ts'),
   )
   // A fleet project's repository knows nothing of the orchestration, so its hooks stay
@@ -85,34 +108,33 @@ export async function initializeRepository(
 
   mkdirSync(paths.projectRoot, { recursive: true })
   mkdirSync(projectDirectory, { recursive: true })
-  const existingAdapters = readdirSync(projectDirectory, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && /^project-.+\.ts$/.test(entry.name))
-    .map((entry) => entry.name)
-    .sort()
   let adapterPath = join(projectDirectory, `project-${projectName}.ts`)
-  if (existingAdapters.length === 0) {
-    writeFileSync(adapterPath, renderProjectAdapter(projectName, typeImport))
-    report(`CREATED: ${adapterPath}`)
-  } else {
-    adapterPath = join(projectDirectory, existingAdapters[0]!)
-    if (existingAdapters.length > 1) {
-      report(`EXISTS: ${existingAdapters.map((name) => join(projectDirectory, name)).join(', ')} (left unchanged)`)
-      report(`DIVERGED: found ${existingAdapters.length} project adapters; automatic discovery requires one`)
-      ok = false
+  if (configuredAdapterPath !== undefined) {
+    adapterPath = configuredAdapterPath
+    const adapterName = configuredName ?? adapterFilenameName(adapterPath) ?? projectName
+    if (existsSync(adapterPath)) {
+      ok = repairAdapter(adapterPath, adapterName, report) && ok
     } else {
-      const adapterName = basename(existingAdapters[0]!, '.ts').slice('project-'.length)
-      const source = readFileSync(adapterPath, 'utf8')
-      const repair = repairProjectAdapterSource(source, adapterName)
-      if (repair.problem !== undefined) {
-        report(`DIVERGED: ${adapterPath}; ${repair.problem} (left unchanged)`)
+      mkdirSync(dirname(adapterPath), { recursive: true })
+      writeFileSync(adapterPath, renderProjectAdapter(adapterName, typeImport))
+      report(`CREATED: ${adapterPath}`)
+    }
+  } else {
+    const existingAdapters = readdirSync(projectDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^project-.+\.ts$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+    if (existingAdapters.length === 0) {
+      writeFileSync(adapterPath, renderProjectAdapter(projectName, typeImport))
+      report(`CREATED: ${adapterPath}`)
+    } else {
+      adapterPath = join(projectDirectory, existingAdapters[0]!)
+      if (existingAdapters.length > 1) {
+        report(`EXISTS: ${existingAdapters.map((name) => join(projectDirectory, name)).join(', ')} (left unchanged)`)
+        report(`DIVERGED: found ${existingAdapters.length} project adapters; automatic discovery requires one; set PROJECT=<name> or PROJECT_ADAPTER to select it`)
         ok = false
-      } else if (repair.addedMembers.length === 0) {
-        report(`EXISTS: ${adapterPath} (contract complete; left unchanged)`)
       } else {
-        writeFileSync(adapterPath, repair.source)
-        for (const member of repair.addedMembers) {
-          report(`REPAIRED: ${adapterPath}; added required member '${member}'`)
-        }
+        ok = repairAdapter(adapterPath, adapterFilenameName(adapterPath)!, report) && ok
       }
     }
   }
@@ -150,6 +172,28 @@ export async function initializeRepository(
   }
 
   return { ok, projectName, adapterPath }
+}
+
+function repairAdapter(
+  adapterPath: string,
+  adapterName: string,
+  report: (line: string) => void,
+): boolean {
+  const source = readFileSync(adapterPath, 'utf8')
+  const repair = repairProjectAdapterSource(source, adapterName)
+  if (repair.problem !== undefined) {
+    report(`DIVERGED: ${adapterPath}; ${repair.problem} (left unchanged)`)
+    return false
+  }
+  if (repair.addedMembers.length === 0) {
+    report(`EXISTS: ${adapterPath} (contract complete; left unchanged)`)
+    return true
+  }
+  writeFileSync(adapterPath, repair.source)
+  for (const member of repair.addedMembers) {
+    report(`REPAIRED: ${adapterPath}; added required member '${member}'`)
+  }
+  return true
 }
 
 function coreHooksPath(paths: OrchPaths, packageRoot: string): string {

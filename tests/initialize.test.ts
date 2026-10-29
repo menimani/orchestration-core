@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadProject, renderProjectAdapter } from '../src/adapters/project.ts'
 import { initializeRepository } from '../src/initialize.ts'
 import { QUEUE_LABELS } from '../src/issueQueue.ts'
@@ -46,7 +46,14 @@ function fleetFixture(): { repository: string; fleet: string; installedPackage: 
   return { repository, fleet, installedPackage }
 }
 
+// A developer's own adapter selection must not steer the cases that leave env unset.
+beforeEach(() => {
+  vi.stubEnv('PROJECT', '')
+  vi.stubEnv('PROJECT_ADAPTER', '')
+})
+
 afterEach(() => {
+  vi.unstubAllEnvs()
   for (const repository of repositories.splice(0)) {
     rmSync(repository, { recursive: true, force: true })
   }
@@ -255,5 +262,51 @@ describe('repository initialization', () => {
     expect(reports).toContain(
       'FAIL: core.hooksPath is .custom-hooks; expected orchestration/ts/.githooks',
     )
+  })
+
+  it('repairs the adapter PROJECT selects when the project directory holds several', async () => {
+    const { repository, installedPackage } = fixture()
+    const projectDirectory = join(repository, 'orchestration', 'project')
+    mkdirSync(projectDirectory, { recursive: true })
+    for (const name of ['alpha', 'beta']) {
+      writeFileSync(
+        join(projectDirectory, `project-${name}.ts`),
+        renderProjectAdapter(name, '../ts/src/adapters/project.ts'),
+      )
+    }
+    const adapter = join(projectDirectory, 'project-beta.ts')
+    const reports: string[] = []
+
+    const result = await initializeRepository(orchPaths(repository), makeFakeForge(), undefined, {
+      packageRoot: installedPackage,
+      report: (line) => reports.push(line),
+      env: { PROJECT: 'beta' },
+    })
+
+    expect(result).toMatchObject({ ok: true, projectName: 'beta', adapterPath: adapter })
+    expect(reports).toContain(`EXISTS: ${adapter} (contract complete; left unchanged)`)
+    expect(reports.filter((line) => line.startsWith('DIVERGED:'))).toEqual([])
+    await expect(loadProject(join(repository, 'orchestration'), { PROJECT: 'beta' }))
+      .resolves.toMatchObject({ name: 'beta' })
+  })
+
+  it('creates a missing adapter at the path PROJECT_ADAPTER names', async () => {
+    const { repository, installedPackage } = fixture()
+    const env = { PROJECT_ADAPTER: 'adapters/project-custom.ts' }
+    const adapter = join(repository, 'orchestration', 'adapters', 'project-custom.ts')
+    const reports: string[] = []
+
+    const result = await initializeRepository(orchPaths(repository), makeFakeForge(), 'consumer', {
+      packageRoot: installedPackage,
+      report: (line) => reports.push(line),
+      env,
+    })
+
+    expect(result).toMatchObject({ ok: true, adapterPath: adapter })
+    expect(reports).toContain(`CREATED: ${adapter}`)
+    expect(existsSync(join(repository, 'orchestration', 'project', 'project-consumer.ts')))
+      .toBe(false)
+    await expect(loadProject(join(repository, 'orchestration'), env))
+      .resolves.toMatchObject({ name: 'custom' })
   })
 })

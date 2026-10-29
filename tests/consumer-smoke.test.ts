@@ -131,7 +131,7 @@ describe('consumer startup', () => {
       pathsModule.orchPaths(repository),
       makeFakeForge(),
       'consumer',
-      { packageRoot: installedPackage, report: () => {} },
+      { packageRoot: installedPackage, report: () => {}, env: {} },
     )
     expect(initialized.ok).toBe(true)
     appendFileSync(initialized.adapterPath, `
