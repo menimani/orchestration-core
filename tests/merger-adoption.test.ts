@@ -292,6 +292,26 @@ describe('remote task adoption', () => {
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('1')
   })
 
+  it('logs git\'s reason for a failed worker branch fetch without posting it', async () => {
+    const branch = 'task/20260809_000000_097_auto-missing-branch'
+    const issueNumber = await forge.createIssue({
+      title: 'missing worker branch',
+      body: 'The reported worker branch was never pushed.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })
+    await forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${'b'.repeat(40)}`)
+
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    const mergeLog = readFileSync(join(paths.logsDir, `issue-${issueNumber}.merge.log`), 'utf8')
+    expect(mergeLog).toContain(`couldn't find remote ref refs/heads/${branch}`)
+    expect(mergeLog).toContain(`Could not fetch ${branch} from origin.`)
+    expect(forge.issueComments.get(issueNumber)?.at(-1))
+      .toBe(`Remote task adoption failed: Could not fetch ${branch} from origin.`)
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_FAILED)
+  })
+
   it('retries a partial release until every member leaves grouped adoption', async () => {
     const branch = 'task/20260809_000000_098_auto-partial-group'
     const head = 'b'.repeat(40)

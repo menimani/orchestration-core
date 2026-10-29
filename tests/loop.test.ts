@@ -3598,6 +3598,7 @@ describe('completion marker output', () => {
 
     expect(logText()).toContain('WARN could not push branch:')
     expect(logText()).toContain('ERROR could not push branch:')
+    expect(logText()).toContain('does not appear to be a git repository')
     expect(logText()).toContain('(repeated 2 times)')
     expect(logText()).not.toContain('CYCLE_COMPLETE:')
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
