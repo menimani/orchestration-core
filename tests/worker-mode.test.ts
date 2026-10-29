@@ -356,4 +356,58 @@ describe('worker mode', () => {
       .filter((comment) => comment.startsWith('Worker completed the task.'))
     expect(firstReports).toHaveLength(1)
   })
+
+  it('files the NEXT_TASK findings of an inspection before closing its issue', async () => {
+    const taskId = '20260809_000000_009_auto-inspection-findings'
+    await completedTask(taskId, false)
+    const issueNumber = await claimedIssue(taskId, true)
+    writeFileSync(finalMessageFile(paths, taskId), [
+      'The inspection found a defect elsewhere.',
+      'NEXT_TASK: [BUG] `src/other.ts` rejects a valid input',
+      'TASK_COMPLETE',
+      '',
+    ].join('\n'))
+    const loop = makeWorkerLoop()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect((await forge.getIssue(issueNumber)).state).toBe('closed')
+    const filed = [...forge.issues.values()].filter((issue) => issue.number !== issueNumber)
+    expect(filed).toHaveLength(1)
+    expect(filed[0]!.body).toContain('[BUG] `src/other.ts` rejects a valid input')
+    expect(filed[0]!.labels).toContain(LABEL_FINDING)
+    expect(logged.join('\n')).toContain('Filed')
+
+    await loop.poll()
+    expect(forge.issues.size).toBe(2)
+  })
+
+  it('holds the claim while findings cannot be filed and fails within the publication limit', async () => {
+    const taskId = '20260809_000000_010_auto-finding-outage'
+    await completedTask(taskId, true)
+    const issueNumber = await claimedIssue(taskId)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'NEXT_TASK: [BUG] `src/other.ts` rejects a valid input\nTASK_COMPLETE\n')
+    const createIssue = forge.createIssue.bind(forge)
+    forge.createIssue = async () => { throw new Error('issue service unavailable') }
+    const loop = makeWorkerLoop()
+
+    for (let attempt = 1; attempt < 5; attempt++) {
+      await loop.poll()
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+      expect(logged.join('\n')).toContain(`(attempt ${attempt}/5): could not file finding`)
+      const labels = (await forge.getIssue(issueNumber)).labels
+      expect(labels).toContain(LABEL_IN_PROGRESS)
+      expect(labels).not.toContain(LABEL_MERGE_READY)
+    }
+    expect(() => git(origin, ['rev-parse', `refs/heads/${branchName(taskId)}`])).toThrow()
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(readFileSync(logFile(paths, taskId), 'utf8'))
+      .toContain('Worker publication failed 5 times: could not file finding')
+    forge.createIssue = createIssue
+  })
 })
