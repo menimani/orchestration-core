@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
+import { operatingSystem } from './adapters/os.ts'
 import type { FleetLocation } from './paths.ts'
 
 // A fleet is a separate checkout that holds what each target repository would otherwise
@@ -98,7 +99,7 @@ function comparablePath(path: string): string {
   } catch {
     // A path that does not exist yet still compares by its resolved spelling.
   }
-  return process.platform === 'win32' ? canonical.toLowerCase() : canonical
+  return operatingSystem.worktreePathFor(canonical).comparisonKey
 }
 
 /**
