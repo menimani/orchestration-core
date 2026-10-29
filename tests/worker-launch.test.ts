@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { orchPaths } from '../src/paths.ts'
+import { fleetPaths, orchPaths } from '../src/paths.ts'
 import {
   runWorkerCommand, verifyWorkerModeSupported, type WorkerCommandDependencies,
 } from '../src/worker.ts'
@@ -230,6 +230,41 @@ describe('worker mode self-check', () => {
       .rejects.toThrow(/updated checkout does not support worker mode.*config\.workerMode is missing/)
     expect(readFileSync(join(worker, 'new.txt'), 'utf8').trim()).toBe('new code')
     expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('refuses a fleet project whose configuration file turns worker mode off', async () => {
+    const fleet = join(tempRoot, 'fleet')
+    const paths = fleetPaths({ dir: fleet, project: 'example', repository: 'owner/example' }, worker)
+    const configFile = join(paths.projectRoot, 'config.json')
+    mkdirSync(paths.projectRoot, { recursive: true })
+    writeFileSync(configFile, JSON.stringify({ WORKER_MODE: 'false' }))
+    const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+    const workerDependencies: WorkerCommandDependencies = {
+      verifyWorkerSupport: verifyWorkerModeSupported,
+      launchDaemon: launch,
+    }
+
+    const refusal = runWorkerCommand(paths, 'origin/main', workerDependencies)
+
+    await expect(refusal).rejects.toThrow(
+      `Refusing to start worker: ${configFile} does not enable worker mode: WORKER_MODE resolves to false`,
+    )
+    expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('accepts a fleet project whose configuration file leaves worker mode to the environment', async () => {
+    const fleet = join(tempRoot, 'fleet')
+    const paths = fleetPaths({ dir: fleet, project: 'example', repository: 'owner/example' }, worker)
+    mkdirSync(paths.projectRoot, { recursive: true })
+    writeFileSync(join(paths.projectRoot, 'config.json'), JSON.stringify({ MAX_REVIEW_ROUNDS: '3' }))
+    const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+    const workerDependencies: WorkerCommandDependencies = {
+      verifyWorkerSupport: verifyWorkerModeSupported,
+      launchDaemon: launch,
+    }
+
+    await expect(runWorkerCommand(paths, 'origin/main', workerDependencies)).resolves.toBe(0)
+    expect(launch).toHaveBeenCalledOnce()
   })
 })
 
