@@ -232,7 +232,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
    only after verifying that the task process stopped, the worktree directory and Git
    registration were removed (on Windows, after terminating the tree of every live process
    whose command line or executable path names the worktree, as item 25 describes), and the task branch was deleted; a failed cleanup returns
-   non-zero and retains the task state for a safe retry. In issue-queue mode, a successful
+   non-zero and retains the task state for a safe retry. Operator cleanup of a scan whose
+   yield the current cycle still expects records it in `queue/failed-<cycle>`, as a failed
+   scan is counted, so the cycle can still close. In issue-queue mode, a successful
    operator cleanup also returns linked issues to `loop:ready` and removes their local
    task mapping. A forge failure is warned about without undoing the local cleanup; the
    cleanup leaves a durable release intent and retains the task mapping until the daemon

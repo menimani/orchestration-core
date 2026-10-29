@@ -20,6 +20,7 @@ import { existingTaskIdForDesc, recordTaskIdForDesc, shortTaskId } from '../src/
 import {
   issueConflictKey, readConflictedAttempts, writeConflictedAttempts,
 } from '../src/conflictRetry.ts'
+import { runCleanupCommand } from '../src/cleanupCommand.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
   pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup,
@@ -1326,6 +1327,47 @@ describe('scan yield', () => {
 
     expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('1')
     expect(existsSync(join(paths.queueDir, 'scan-expected-6'))).toBe(true)
+  })
+
+  it('closes a cycle whose unfinished scan the operator cleaned up', async () => {
+    const loop = makeLoop({ maxEmptyScans: 2 })
+    const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
+    const cleanedScan = '20250101_000000_014_scan'
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '7\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-7'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-7'), '20250101_000000_015_scan\tempty\n')
+    writeFileSync(emptyScanFile, '1\n')
+    writeRawStatus(cleanedScan, 'running')
+
+    await expect(runCleanupCommand(paths, [cleanedScan], {
+      issueQueueEnabled: () => false,
+      loadForge: async () => makeForge(),
+      cleanup: (cleanupPaths, taskId) => rmSync(statusFile(cleanupPaths, taskId)),
+      error: () => {},
+    })).resolves.toBe(0)
+
+    expect(existsSync(statusFile(paths, cleanedScan))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'failed-7'), 'utf8')).toBe(`${cleanedScan}\n`)
+    loop.foldScanYields(7)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-7'))).toBe(false)
+    expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('1')
+  })
+
+  it('does not count a cleaned-up scan as failed once its yield was recorded', async () => {
+    const yieldedScan = '20250101_000000_016_scan'
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '8\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-8'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-8'), `${yieldedScan}\tfound\n`)
+    writeRawStatus(yieldedScan, 'completed')
+
+    await expect(runCleanupCommand(paths, [yieldedScan], {
+      issueQueueEnabled: () => false,
+      loadForge: async () => makeForge(),
+      cleanup: (cleanupPaths, taskId) => rmSync(statusFile(cleanupPaths, taskId)),
+      error: () => {},
+    })).resolves.toBe(0)
+
+    expect(existsSync(join(paths.queueDir, 'failed-8'))).toBe(false)
   })
 })
 
