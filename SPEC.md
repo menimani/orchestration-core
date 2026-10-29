@@ -271,8 +271,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    A clean ordinary task with no new commits and the exact `NO_CHANGE_WARRANTED` marker
    instead becomes `no-change`, removes its worktree and branch, and directly closes its
    linked issues; forge reconciliation must succeed first, so a failed close remains
-   retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
-   tasks remain exempt because investigation normally produces no commits. A
+   retryable and does not count toward the merge-failure limit. Scan, review, and
+   `--inspect` tasks need no marker because investigation normally produces no commits:
+   one without new commits takes the same `no-change` path, closing its linked issues
+   directly, since there is no merge commit to carry their closing text. A merge that
+   leaves the run branch's HEAD where it was is never recorded as a merge. A
    completed task that still records a runner PID has its process tree stopped and
    verified gone before the merge can discard that PID or remove the worktree, and on
    Windows any process still naming the worktree is terminated before it is removed. A runner

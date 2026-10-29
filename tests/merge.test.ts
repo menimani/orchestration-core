@@ -903,11 +903,72 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
-  it('lets a scan through without commits', async () => {
+  it('completes a scan without commits and without recording a merge', async () => {
     const taskId = '20260808_000000_004_scan'
-    await makeCompletedTask(taskId)
-    await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
-    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    const worktree = await makeCompletedTask(taskId)
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
+      .resolves.toEqual({ outcome: 'no-change' })
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(readStatus(paths, taskId)?.merge_commit).toBeUndefined()
+  })
+
+  it('closes the linked issues of a commit-less inspection directly', async () => {
+    const taskId = '20260808_000000_033_user-inspect-linked'
+    mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
+    writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
+    // Work that landed after the inspection started: a no-op merge would leave HEAD here.
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(repoRoot, 'unrelated.txt'), 'earlier work\n')
+    git(repoRoot, ['add', 'unrelated.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: unrelated earlier work'])
+    const unrelatedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const forge = {
+      issueClosingCommitMessage: (message: string, issue: number) => `${message} (closes #${issue})`,
+    }
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 412, forge,
+    })).rejects.toThrow('A linked no-change task requires issue reconciliation.')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(worktree)).toBe(true)
+
+    const onNoChange = vi.fn(async () => {
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+    })
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 412, forge, onNoChange,
+    })).resolves.toEqual({ outcome: 'no-change' })
+
+    expect(onNoChange).toHaveBeenCalledOnce()
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(unrelatedHead)
+    expect(git(repoRoot, ['log', '--format=%s']).trim()).not.toContain('closes #412')
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(readStatus(paths, taskId)?.merge_commit).toBeUndefined()
+  })
+
+  it('refuses to record a merge that left the run branch where it was', async () => {
+    const taskId = '20260808_000000_034_user-merge-without-commit'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string =>
+        cwd === paths.repoRoot && args[0] === 'merge' && args[1] === '--quiet' ? '' : git(cwd, args),
+    }
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+    })).rejects.toThrow(`Merging ${branchName(taskId)} created no commit on main.`)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
   it('refuses a task that is not completed', async () => {
