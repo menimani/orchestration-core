@@ -64,7 +64,7 @@ const LIFECYCLE_LABELS = [
 ] as const
 type LifecycleLabel = typeof LIFECYCLE_LABELS[number]
 const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
-export const MAX_CLAIM_GROUP_SIZE = 4
+const MAX_CLAIM_GROUP_SIZE = 4
 
 const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
 

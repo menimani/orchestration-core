@@ -125,7 +125,7 @@ export function isConfigName(name: string): name is ConfigName {
   return KEY_BY_NAME.has(name)
 }
 
-export const PINNED_CONFIG_REASONS: Readonly<Partial<Record<keyof LoopConfig, string>>> = {
+const PINNED_CONFIG_REASONS: Readonly<Partial<Record<keyof LoopConfig, string>>> = {
   forge: 'changing the forge would leave in-flight work owned by a component no longer in use',
   runner: 'changing the runner would leave in-flight work owned by a component no longer in use',
   issueQueueEnabled: 'changing queue mode would strand issues claimed under the old mode',
