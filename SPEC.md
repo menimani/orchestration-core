@@ -43,10 +43,11 @@ from or equivalent to `orchestration/tests/*.sh`.
   is invoked by the generated Git hook rather than exposed as a package script. The skills
   (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
   the npm form as part of the cutover. A background launch prints status and stop
-  commands for the package's actual location: direct `npm run` commands at the repository
-  root, or `npm run -C <package-path>` when installed as a subtree. It prints those
-  commands only after the child has acquired the PID lock and completed initialization;
-  a child startup error is returned to the launcher instead. What stays frozen:
+  commands that run from any directory: `npm run -C <absolute package root> <script> --`
+  followed by `--repo <repository root>`, or by `--fleet <fleet dir> --project <name>` when
+  the project was selected from a fleet. It prints those commands only after the child
+  has acquired the PID lock and completed initialization; a child startup error is
+  returned to the launcher instead. What stays frozen:
   the environment variable names (they pass through npm unchanged, so launch commands
   keep their shape) and the
   output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
