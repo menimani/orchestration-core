@@ -133,13 +133,57 @@ describe('CI wait', () => {
   it('returns timeout when a verdict does not become ready', async () => {
     const forge = makeFakeForge()
     forge.prStatusValue = status([['test', 'pending', '2026-08-09T01:00:00Z']])
+    const sleeps: number[] = []
+    let time = 0
+
+    await expect(waitForCi(forge, 42, {
+      timeoutSeconds: 45,
+      now: () => time,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds)
+        time += milliseconds
+      },
+    })).resolves.toBe(2)
+    expect(forge.prStatusCalls).toBe(3)
+    expect(sleeps).toEqual([30_000, 15_000])
+  })
+
+  it('polls once more after the shortened last sleep', async () => {
+    const forge = makeFakeForge()
+    forge.prStatusScript = [
+      status([['test', 'pending', '2026-08-09T01:00:00Z']]),
+      status([['test', 'pending', '2026-08-09T01:00:00Z']]),
+      status([['test', 'success', '2026-08-09T01:00:00Z']]),
+    ]
+    const output: string[] = []
     let time = 0
 
     await expect(waitForCi(forge, 42, {
       timeoutSeconds: 45,
       now: () => time,
       sleep: async (milliseconds) => { time += milliseconds },
-    })).resolves.toBe(2)
+      print: (line) => output.push(line),
+    })).resolves.toBe(0)
+    expect(forge.prStatusCalls).toBe(3)
+    expect(output).toEqual(['test: success'])
+  })
+
+  it('reaches a verdict with a timeout shorter than one poll interval', async () => {
+    const checks = status([['test', 'failure', '2026-08-09T01:00:00Z']])
+    const forge = makeFakeForge()
+    forge.prStatusValue = checks
+    const sleeps: number[] = []
+    let time = 0
+
+    await expect(waitForCi(forge, 42, {
+      timeoutSeconds: 10,
+      now: () => time,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds)
+        time += milliseconds
+      },
+    })).resolves.toBe(1)
     expect(forge.prStatusCalls).toBe(2)
+    expect(sleeps).toEqual([10_000])
   })
 })

@@ -870,7 +870,7 @@ function issueSourceFile(paths: OrchPaths, taskId: string): string {
 }
 
 /** Remember which project issues a claimed task resolves, for its merge to close. */
-export function recordIssueSourcesForTask(
+function recordIssueSourcesForTask(
   paths: OrchPaths,
   taskId: string,
   fingerprints: readonly string[],

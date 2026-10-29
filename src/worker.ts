@@ -64,10 +64,7 @@ async function isAncestor(paths: OrchPaths, ancestor: string, descendant: string
   throw new Error(`Could not compare HEAD with '${descendant}'${detail === '' ? '' : `: ${detail}`}`)
 }
 
-async function updateWorkerCheckout(
-  paths: OrchPaths,
-  baseRef: string,
-): Promise<'current' | 'fast-forwarded'> {
+async function updateWorkerCheckout(paths: OrchPaths, baseRef: string): Promise<void> {
   const remote = remoteForBaseRef(paths.repoRoot, baseRef)
     ?? currentBranchTrackingRemote(paths.repoRoot)
   await git(paths, ['fetch', '--quiet', remote])
@@ -84,7 +81,7 @@ async function updateWorkerCheckout(
   }
   if (headBehindBase && !baseBehindHead) {
     await git(paths, ['merge', '--quiet', '--ff-only', baseRef])
-    return 'fast-forwarded'
+    return
   }
   // A checkout AHEAD of the base carries commits the base never saw; every task
   // branch would fork from them and the merger would adopt them unreviewed.
@@ -93,7 +90,6 @@ async function updateWorkerCheckout(
       `Refusing to start worker: HEAD is ahead of base ref '${baseRef}', so local commits would leak into every worker branch. Start from the base ref itself.`,
     )
   }
-  return 'current'
 }
 
 const WORKER_SUPPORT_CHECK = `

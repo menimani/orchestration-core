@@ -106,9 +106,15 @@ describe('status files', () => {
     const lockDir = join(paths.statusDir, '.task-stale.lock')
     mkdirSync(lockDir)
     // PID 1 on Windows and near-max PIDs generally are not spawnable by us; use a PID
-    // from a process we started and already reaped so liveness is provably false.
+    // from a process we started and already reaped so liveness is provably false. A
+    // substituted guess would not be: an arbitrary number can name a live process, and
+    // the lock would then be waited out rather than reclaimed, so demand a real PID.
     const { spawnSync } = await import('node:child_process')
-    const dead = spawnSync('node', ['-e', 'process.exit(0)']).pid ?? 99999
+    const reaped = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { windowsHide: true })
+    expect(reaped.status).toBe(0)
+    const dead = reaped.pid
+    expect(dead).toBeTypeOf('number')
+    expect(dead).toBeGreaterThan(0)
     writeFileSync(join(lockDir, 'pid'), `${dead}\n`)
     await writeStatus(paths, 'task-stale', 'completed')
     expect(readStatus(paths, 'task-stale')?.status).toBe('completed')

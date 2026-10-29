@@ -174,6 +174,8 @@ export function createOperatingSystem(
     processIsAlive: (pid) => processIsAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree,
+    // Runners stop as a detached process group, which their shells cannot leave.
+    terminateWorktreeProcesses: () => {},
     removeDirectory(path): void {
       runtime.remove(path, { recursive: true, force: true })
     },

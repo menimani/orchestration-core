@@ -127,9 +127,16 @@ An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, a
 path, or path relative to the consumer repository root. A repository-relative selector
 must begin with `./` or `../`; for example, use `./custom/runner.mjs`, because
 `custom/runner.mjs` is treated as a package specifier. A forge module exports a `Forge`
-as its default or `forge` export, or exports `createForge(repoRoot, report)`. A runner
-module likewise exports a `Runner` as its default or `runner` export, or exports
+as its default or `forge` export, or exports `createForge(repoRoot, report, target)`. A
+runner module likewise exports a `Runner` as its default or `runner` export, or exports
 `createRunner(options)`. Factories may be asynchronous.
+
+A forge factory's `target` names the repositories to act on when they are not the
+checkout's own: `codeRepository` for branches, pull requests, and workflow runs, and
+`issueRepository` for the issue queue, each `owner/name` or absent. An absent name leaves
+the adapter to infer that repository from the checkout. A fleet names both (see *Running
+from a fleet*), so a factory that drops `target` sends the queue to the checkout's own
+repository instead of the fleet's.
 
 A project adapter answers a few questions: which interactive agents receive shared skills,
 which staged-path checks run before a commit,
@@ -199,7 +206,7 @@ MAX_SCAN_CYCLES=12 MAX_PARALLEL=8 AUTO_REVIEW=true \
   node orchestration/ts/src/cli.ts loop --approve-mode local --daemon
 ```
 
-On Windows PowerShell (with `bash` on `PATH` as described above):
+On Windows PowerShell:
 
 ```powershell
 $env:MAX_SCAN_CYCLES = '12'
@@ -396,6 +403,15 @@ linked issue. When investigation proves an ordinary task needs no implementation
 the linked issue directly instead of entering merge retries. A second machine runs execution-only with
 `worker <base-ref>` — it claims and executes, pushes finished branches, and never scans,
 reviews, or merges. Exactly one ordinary daemon owns the branch and adopts those pushes.
+
+Claims are gated on authorship. An issue is claimed only when its author holds write access
+to the repository the issue lives in — `write`, `maintain`, or `admin` — since those
+accounts may already change the code the loop will eventually merge. Every other issue is
+labelled `loop:untrusted-author` and left ready but unclaimed, with a warning naming its
+author, and a permission lookup that fails for any reason other than a rate limit resolves
+to no write access rather than to a guess. On a repository where anyone may file an issue,
+that gate is what keeps a stranger's text out of a worker's task; the trust model in
+`SPEC.md` states it in full.
 
 A failed task returns its issue to `loop:ready` until that issue reaches
 `MAX_ISSUE_RETRIES` consecutive failures. The bound defaults to 3; at the bound the issue is

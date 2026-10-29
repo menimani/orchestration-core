@@ -4,6 +4,7 @@ import type { LoopConfig } from './config.ts'
 import type { Forge } from './adapters/forge.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
+import { commandFailureSummary } from './errorText.ts'
 import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
 import { sharedSkillManagedTargets, syncSharedSkills } from './sharedSkills.ts'
 
@@ -28,15 +29,6 @@ const defaultRuntime: CoreUpdateRuntime = {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   }),
-}
-
-function summary(error: unknown): string {
-  const candidate = error as { stderr?: string | Buffer }
-  const stderr = Buffer.isBuffer(candidate.stderr)
-    ? candidate.stderr.toString('utf8')
-    : candidate.stderr
-  return (stderr?.trim() || (error instanceof Error ? error.message : String(error)))
-    .replaceAll(/\s+/g, ' ')
 }
 
 function importSplit(message: string, prefix: string): string | undefined {
@@ -106,7 +98,7 @@ function syncSkills(
           'diff', '--cached', '--name-only', '--', ...managedPaths,
         ]).trim()
       } catch (error) {
-        throw new Error(`shared skill sync could not verify a clean managed index: ${summary(error)}`)
+        throw new Error(`shared skill sync could not verify a clean managed index: ${commandFailureSummary(error)}`)
       }
       if (alreadyStaged !== '') {
         throw new Error(
@@ -161,7 +153,7 @@ function syncSkills(
           }
         }
       } catch (error) {
-        throw new Error(`shared skill sync could not be committed: ${summary(error)}`)
+        throw new Error(`shared skill sync could not be committed: ${commandFailureSummary(error)}`)
       }
     }
   }
@@ -216,7 +208,7 @@ export async function updateCoreBeforeCycle(
   try {
     runtime.git(paths.repoRoot, ['fetch', '--quiet', remote, config.upstreamBranch])
   } catch (error) {
-    warn(event, `core update fetch failed: ${summary(error)}`)
+    warn(event, `core update fetch failed: ${commandFailureSummary(error)}`)
     return finish('continue')
   }
 
@@ -231,7 +223,7 @@ export async function updateCoreBeforeCycle(
     imported = matchingUpstreamSplit(paths.repoRoot, prefix, upstream, runtime)
       ?? recordedImport
   } catch (error) {
-    warn(event, `core update check failed: ${summary(error)}`)
+    warn(event, `core update check failed: ${commandFailureSummary(error)}`)
     return finish('continue')
   }
   if (imported === undefined) {
@@ -261,7 +253,7 @@ export async function updateCoreBeforeCycle(
   try {
     dirty = runtime.git(paths.repoRoot, ['status', '--porcelain']).trim() !== ''
   } catch (error) {
-    warn(event, `core update status check failed: ${summary(error)}`)
+    warn(event, `core update status check failed: ${commandFailureSummary(error)}`)
     behind('continuing on old code')
     return finish('continue')
   }
@@ -307,8 +299,8 @@ export async function updateCoreBeforeCycle(
       recoveredStatus = runtime.git(paths.repoRoot, ['status', '--porcelain']).trim()
     } catch (verificationError) {
       throw new Error(
-        `core update pull failed and recovery could not be verified: ${summary(verificationError)}; `
-        + `pull failure: ${summary(error)}`,
+        `core update pull failed and recovery could not be verified: ${commandFailureSummary(verificationError)}; `
+        + `pull failure: ${commandFailureSummary(error)}`,
       )
     }
     if (recoveredHead !== oldHead || recoveredStatus !== '') {
@@ -321,11 +313,11 @@ export async function updateCoreBeforeCycle(
     }
     if (abortError !== undefined) {
       throw new Error(
-        `core update pull failed and merge abort failed: ${summary(abortError)}; `
-        + `pull failure: ${summary(error)}`,
+        `core update pull failed and merge abort failed: ${commandFailureSummary(abortError)}; `
+        + `pull failure: ${commandFailureSummary(error)}`,
       )
     }
-    warn(event, `core update pull conflicted; continuing on old code: ${summary(error)}`)
+    warn(event, `core update pull conflicted; continuing on old code: ${commandFailureSummary(error)}`)
     behind('continuing on old code: pull conflicted')
     return finish('continue')
   }

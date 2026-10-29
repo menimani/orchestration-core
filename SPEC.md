@@ -225,7 +225,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
    current cycle (`queue/failed-<cycle>`, once per task), never retry automatically.
    `cleanup` clears the announce markers so a manual retry is watched, not silent, but
    only after verifying that the task process stopped, the worktree directory and Git
-   registration were removed, and the task branch was deleted; a failed cleanup returns
+   registration were removed (on Windows, after terminating the tree of every live process
+   whose command line or executable path names the worktree, as item 25 describes), and the task branch was deleted; a failed cleanup returns
    non-zero and retains the task state for a safe retry. In issue-queue mode, a successful
    operator cleanup also returns linked issues to `loop:ready` and removes their local
    task mapping. A forge failure is warned about without undoing the local cleanup; the
@@ -263,7 +264,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
    retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
    tasks remain exempt because investigation normally produces no commits. A
    completed task that still records a runner PID has its process tree stopped and
-   verified gone before the merge can discard that PID or remove the worktree. A runner
+   verified gone before the merge can discard that PID or remove the worktree, and on
+   Windows any process still naming the worktree is terminated before it is removed. A runner
    recorded without the start identity that makes stopping it safe cannot be verified at
    all, so that merge is deferred rather than failed: the task stays `completed`, one WARN
    per task names the PID, and a later poll merges once the registry entry clears. When all
@@ -367,8 +369,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
     (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
     counter once, at the gate, only when every expected scan completed successfully. A
-    scan launch failure stops the loop without advancing the cycle number, and a cycle
-    missing any expected yield stops rather than advancing to another cycle or completion.
+    scan launch failure stops the loop without advancing the cycle number, discarding
+    the task state of every scan that attempt had already started so the next daemon
+    dispatches the cycle's full scan set again rather than inheriting scans no cycle
+    accounts for. A cycle missing any expected yield stops rather than advancing to
+    another cycle or completion.
     A scan the cycle recorded as failed counts towards the expected total as a delivered
     but silent yield: the cycle closes, its id still reaches the decisions and the pull
     request through the cycle's loss note, and the empty counter is neither reset nor
@@ -392,6 +397,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Invalid contents, including an empty file, log the affected repository-relative
     state path, write the stop file, and stop the loop without resetting or overwriting
     the counter, retaining it for operator repair.
+    The cap those cycles count towards is persisted separately, in
+    `queue/cycle-cap.txt`, rewritten from `MAX_SCAN_CYCLES` once a startup holds the PID
+    lock and owns the task lifecycle — a startup refused before that point leaves no cap
+    behind — and left in place at shutdown. The daemon's own `[loop <cycle>/<cap>]` log
+    prefix takes the cap from its loaded configuration, so the file exists for the
+    commands that run after the daemon has gone: it is what lets `shipped` (item 18a)
+    record an ending against the cap the run was actually working to, rather than
+    against whatever `MAX_SCAN_CYCLES` says by then.
 14. Effort defaults: scans, queued tasks, and automatic reviews all run the runner at
     medium reasoning effort. Fixes spawned by an automatic review are the exception: they
     always run at high effort because they repair findings that escaped the original
@@ -496,9 +509,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
     the pending ID remains while the attempt count and cycle-complete flag remain
-    unchanged; the next poll regenerates and retries the task with that same ID. A
-    successful enqueue records the attempt, clears the cycle-complete flag, and removes
-    the pending-ID file. Session cleanup also removes any remaining pending-ID file.
+    unchanged; the next poll regenerates and retries the task with that same ID. An
+    enqueue failure repeating with no enqueue succeeding in between stops the loop, so a
+    queue that never accepts the fix cannot leave the loop polling a failing PR with
+    nothing queued and the attempt cap out of reach. A successful enqueue records the
+    attempt, clears the cycle-complete flag, and removes the pending-ID file. Session
+    cleanup also removes any remaining pending-ID file.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a
@@ -554,7 +570,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
      appends a cycle-aware `Completed Loop`
      event to `logs/loop.log`, appends the exact standalone marker
      `LOOP_DONE: <pr-number-or-url>` to `logs/loop-markers.log`, and confirms the record
-     on stdout.
+     on stdout. The event's cycle prefix is read back from the state the stopped daemon
+     left: the cycle number from `queue/scan-count.txt` and the cap from
+     `queue/cycle-cap.txt` (item 13). A missing cycle number reads as zero, and a cap no
+     daemon recorded falls back to the configured `MAX_SCAN_CYCLES`.
 
 ## Failure containment
 
@@ -567,7 +586,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
      (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and
      parked under the exclusive `loop:retry-exhausted` lifecycle label, and the loop logs
      a `Parked` event before stopping. A completed task clears the counts for its linked
-     issues.
+     issues; in worker mode, only once its completion has been published (item 36).
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks.
 
@@ -576,10 +595,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
 21. The title reports `cycle <n>/<max>` while running and category counts when finished.
     The body is rebuilt each cycle from commit classification into the sections defined
     by `ProjectAdapter.pullRequest.categories` (generated adapters default to `Changes`),
-    followed by the core-owned Reasons and Risks sections; every empty section says
-    `- None`. Reasons lists the `Why:` lines of the run's task merge commits (item 8a),
-    each once, in merge order. Title and body come from the same classification, so they
-    cannot disagree.
+    followed by the core-owned Reasons and Risks sections; an empty category or Reasons
+    section says `- None`, and an empty Risks section says `- None identified`. Reasons
+    lists the `Why:` lines of the run's task merge commits (item 8a), each once, in merge
+    order. Title and body come from the same classification, so they cannot disagree.
 22. An HTML comment on the first body line marks the text as generated; a hand-edited
     body (marker gone) is never overwritten again. Body ownership does not freeze the
     generated title, which is still updated through the adapter's title-only field.
@@ -608,6 +627,16 @@ are not parsed by `loadConfig` and are not operator-file settings.
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
     /T /F` on Windows and the detached process group on POSIX), retain task state for
     recovery, and report each terminated task or that no live task processes were found.
+    On Windows the tree is one process snapshot of parent links and creation times, and
+    a process created before the process now holding its recorded parent PID is an orphan
+    of an exited parent: it and its descendants are outside the tree, so a recycled PID
+    never adopts them. A link whose creation times are unreadable is kept.
+    A shell whose runner exited first is outside that tree, so on Windows every removal of
+    a task worktree (stop recovery, merge, and `cleanup`) first terminates the tree of each
+    live process whose command line or executable path contains the worktree's absolute
+    path, compared case-insensitively in either slash direction. A process that survives
+    keeps holding the worktree: its removal fails and the task state is retained. Other
+    platforms stop the runner's detached process group and do nothing further.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
     the intentional termination as a missing scan yield.
@@ -862,7 +891,15 @@ so authorship and verified ancestry must both hold.
     on its issue, and
     swaps `loop:in-progress` for `loop:merge-ready`. A completed inspection or an ordinary
     task with an explicit no-change verdict and no commits comments and closes its issue
-    instead. Its poll status uses the shared
+    instead. A completed task with no linked issue, such as a delegation that fell back
+    to a local task after a forge error, cannot be published, so the worker marks it
+    `failed` and appends the reason to its task log, keeping its commits on `task/<id>`.
+    Likewise, a completed task that can never be published as it stands — missing a
+    `REQUIREMENT_COMPLETE` marker, holding uncommitted changes, or with no commits and
+    neither an inspection nor a no-change verdict — becomes failed with the reason in its
+    task log, so its issues take the counted release of item 19a rather than lapsing into
+    a reclaim of the same task.
+    Its poll status uses the shared
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.

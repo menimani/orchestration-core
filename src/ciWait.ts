@@ -53,6 +53,7 @@ export async function waitForCi(
   const print = options.print ?? console.log
   const deadline = now() + options.timeoutSeconds * 1_000
   let previousNames: string[] | undefined
+  let lastWindowSlept = false
 
   for (;;) {
     const status = await forge.prStatus({ kind: 'number', value: prNumber })
@@ -70,10 +71,15 @@ export async function waitForCi(
 
     previousNames = eligible ? names : undefined
     const remaining = deadline - now()
-    if (remaining <= 0) return 2
+    // The budget is spent only once the last window has been both slept and polled.
+    if (lastWindowSlept || remaining <= 0) return 2
     if (remaining < POLL_INTERVAL_MS) {
+      // Spend what is left of the budget, then poll once more: a result that settles
+      // inside this last window is a verdict, not a timeout, and a timeout below one
+      // interval would otherwise never reach the second poll that stable names need.
+      lastWindowSlept = true
       await sleep(remaining)
-      return 2
+      continue
     }
     await sleep(POLL_INTERVAL_MS)
   }

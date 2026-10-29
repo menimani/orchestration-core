@@ -69,10 +69,15 @@ beforeEach(() => {
   expect(init.status).toBe(0)
 })
 
+// On Windows a CLI child that has just exited can still hold a handle inside the
+// temporary repository for a moment, and the first removal then fails with EPERM.
+// Retrying with a short backoff is how Node expects that race to be handled.
+const removalOptions = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 } as const
+
 afterEach(async () => {
   await testProcesses.cleanup()
-  rmSync(repoRoot, { recursive: true, force: true })
-  for (const root of extraRoots) rmSync(root, { recursive: true, force: true })
+  rmSync(repoRoot, removalOptions)
+  for (const root of extraRoots) rmSync(root, removalOptions)
 })
 
 function daemonFile(name: string): string {

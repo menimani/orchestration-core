@@ -73,7 +73,7 @@ export interface LoadConfigOptions {
   onEvent?: (event: ConfigEvent) => void
 }
 
-export const CONFIG_ENV_NAMES: Readonly<Record<keyof LoopConfig, string>> = {
+export const CONFIG_ENV_NAMES = {
   maxParallel: 'MAX_PARALLEL',
   pollIntervalSeconds: 'POLL_INTERVAL',
   autoMerge: 'AUTO_MERGE',
@@ -111,10 +111,19 @@ export const CONFIG_ENV_NAMES: Readonly<Record<keyof LoopConfig, string>> = {
   upstreamRemote: 'UPSTREAM_REMOTE',
   upstreamBranch: 'UPSTREAM_BRANCH',
   integrationBranch: 'INTEGRATION_BRANCH',
-}
+} as const satisfies Record<keyof LoopConfig, string>
 
 const CONFIG_KEYS = Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[]
-const KEY_BY_NAME = new Map(CONFIG_KEYS.map((key) => [CONFIG_ENV_NAMES[key], key]))
+// Keyed by plain string: the names a configuration file or a command line carries are
+// unvalidated input, and this map is what decides whether one of them names a setting.
+const KEY_BY_NAME: ReadonlyMap<string, keyof LoopConfig> = new Map(
+  CONFIG_KEYS.map((key) => [CONFIG_ENV_NAMES[key], key]),
+)
+
+/** Narrow a name a configuration file or a command line supplied to a known setting. */
+export function isConfigName(name: string): name is ConfigName {
+  return KEY_BY_NAME.has(name)
+}
 
 export const PINNED_CONFIG_REASONS: Readonly<Partial<Record<keyof LoopConfig, string>>> = {
   forge: 'changing the forge would leave in-flight work owned by a component no longer in use',
@@ -310,7 +319,7 @@ export function loadConfig(
   const emitError = (message: string, setting?: string): void => report({
     type: 'error',
     message,
-    setting: setting !== undefined && KEY_BY_NAME.has(setting) ? setting as ConfigName : undefined,
+    setting: setting !== undefined && isConfigName(setting) ? setting : undefined,
   })
 
   const acceptValues = (parsed: ConfigFileValues): void => {
@@ -391,7 +400,7 @@ export function loadConfig(
       }
       refresh()
       const key = property as keyof LoopConfig
-      const name = CONFIG_ENV_NAMES[key] as ConfigName
+      const name = CONFIG_ENV_NAMES[key]
       const proposed = activeConfig[key]
       const reason = PINNED_CONFIG_REASONS[key]
       if (reason !== undefined) {

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
@@ -42,6 +42,24 @@ import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
+import { TestProcessRegistry } from './testProcess.ts'
+
+const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
+
+// Cleanup runs unchanged unless a test names a task whose cleanup must fail once.
+vi.mock('../src/cleanup.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/cleanup.ts')>()
+  return {
+    ...actual,
+    cleanupTask: (...args: Parameters<typeof actual.cleanupTask>) => {
+      if (args[1] === cleanupFailure.taskId) {
+        cleanupFailure.taskId = undefined
+        throw new Error('worktree is locked')
+      }
+      actual.cleanupTask(...args)
+    },
+  }
+})
 
 let repoRoot: string
 let paths: OrchPaths
@@ -50,6 +68,7 @@ let forgeStatus: PrStatus
 let prStatusCalls: number
 let runnerStarts: string[]
 let fakeForge: FakeForge
+const testProcesses = new TestProcessRegistry()
 
 describe('formatEventLine', () => {
   it('pads subjects to a fixed column and separates longer subjects', () => {
@@ -226,7 +245,8 @@ beforeEach(() => {
   forgeStatus = { state: 'open', isDraft: true, url: 'https://example.test/pull/1', headSha: '', checks: [] }
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await testProcesses.cleanup()
   rmSync(repoRoot, { recursive: true, force: true })
 })
 
@@ -1752,20 +1772,29 @@ describe('cycle gate', () => {
     )
   })
 
-  it('stops without advancing the cycle when any scan fails to launch', async () => {
+  it('discards the scans it started when any scan fails to launch', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(
       join(paths.root, 'templates', 'scan-template.md'),
       '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n',
     )
-    let starts = 0
+    const attempted: string[] = []
+    let scanPid: number | undefined
     const runner: Runner = {
       sharedSkills: fakeRunnerSharedSkills,
-      start: async () => {
-        starts += 1
-        if (starts === 2) throw new Error('runner unavailable')
-        return process.pid
+      start: async (options) => {
+        attempted.push(basename(options.specFile, '.md'))
+        if (attempted.length === 2) throw new Error('runner unavailable')
+        // A real process, and deliberately not this one: cleanup stops what the scan
+        // owns, which the test cannot prove by handing over the test runner's own pid.
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        scanPid = child.pid
+        return child.pid
       },
     }
     const loop = makeLoop(
@@ -1775,13 +1804,22 @@ describe('cycle gate', () => {
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
-    expect(starts).toBe(2)
+    expect(attempted).toHaveLength(2)
     expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
     expect(logText()).toContain(
       'ERROR scan startup failed: runner unavailable (log:',
     )
+    // Nothing this attempt materialized may outlive it: the next start dispatches cycle
+    // 1 again, and a retained scan would be counted against its expected yields.
+    for (const scanId of attempted) {
+      expect(existsSync(worktreeDir(paths, scanId))).toBe(false)
+      expect(existsSync(statusFile(paths, scanId))).toBe(false)
+      expect(git(['branch', '--list', branchName(scanId)])).toBe('')
+    }
+    expect(scanPid).toBeDefined()
+    expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
   })
 
   it('stops a cycle gate that is missing an expected scan yield', async () => {
@@ -1857,11 +1895,25 @@ describe('cycle gate', () => {
       join(paths.queueDir, 'stop-interrupted-scans'),
       `2\t${interrupted}\n`,
     )
+    const interruptedWorktree = worktreeDir(paths, interrupted)
+    git(['worktree', 'add', '-q', interruptedWorktree, '-b', `task/${interrupted}`])
+    const worktreePresentAtTermination: boolean[] = []
+    const terminateWorktreeProcesses = vi.spyOn(operatingSystem, 'terminateWorktreeProcesses')
+      .mockImplementation((path) => {
+        if (path === interruptedWorktree) worktreePresentAtTermination.push(existsSync(path))
+      })
     const loop = makeLoop({ autoPr: false, reviewEnabled: false })
     loop.initializeSessionStateForBranch()
 
-    expect(await loop.poll()).toBe('continue')
+    try {
+      expect(await loop.poll()).toBe('continue')
+    } finally {
+      terminateWorktreeProcesses.mockRestore()
+    }
 
+    // The scan's leftover shells end before its worktree is removed, not after.
+    expect(worktreePresentAtTermination).toEqual([true])
+    expect(existsSync(interruptedWorktree)).toBe(false)
     expect(runnerStarts).toHaveLength(1)
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
     expect(readFileSync(join(paths.queueDir, 'scan-expected-2'), 'utf8')).toBe('1\n')
@@ -2369,6 +2421,33 @@ describe('cycle gate', () => {
     expect(existsSync(join(paths.tasksDir, `${failedFixId}.md`))).toBe(true)
   })
 
+  it('stops when the CI fix enqueue keeps failing', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>(() => {
+      throw new Error('queue unavailable')
+    })
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 3,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+    const stopFile = join(paths.queueDir, 'stop')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(stopFile)).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    // The cap counts dispatched fixes, so a fix that never reached the queue cannot
+    // reach it: the repeated gate failure has to be what stops the loop.
+    expect(existsSync(attemptFile)).toBe(false)
+    expect(existsSync(completeFlag)).toBe(true)
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText())
+      .toContain('ERROR could not enqueue CI fix: queue unavailable (repeated 2 times)')
+  })
+
   it('stops instead of resetting a malformed CI fix attempt count', async () => {
     const enqueue = vi.fn<typeof enqueueTask>()
     const loop = makeLoop({
@@ -2448,6 +2527,68 @@ describe('remote issue queue idle detection', () => {
     expect(logText()).toContain(
       'could not reconcile closed issue labels: closed issue lookup failed',
     )
+  })
+
+  it('reports recovery once queue label creation succeeds after a failure', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    const listLabels = fakeForge.listLabels.bind(fakeForge)
+    let attempts = 0
+    fakeForge.listLabels = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('label listing failed')
+      return listLabels()
+    }
+
+    expect(await loop.initializeIssueQueue()).toBe(false)
+    expect(await loop.initializeIssueQueue()).toBe(true)
+
+    expect(logText()).toContain(
+      'WARN could not ensure issue queue labels: label listing failed',
+    )
+    expect(logText()).toContain('Recovered ensuring issue queue labels after 0 minutes')
+  })
+
+  it('reports recovery once closing promoted issues succeeds after a failure', async () => {
+    paths = {
+      ...paths,
+      fleet: {
+        dir: repoRoot, project: 'example', repository: 'owner/example',
+        issueRepository: 'owner/fleet',
+      },
+    }
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, 'merged-task', [issueNumber])
+    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
+    let attempts = 0
+    fakeForge.prStatus = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('run pull request unreadable')
+      return {
+        state: 'merged',
+        isDraft: false,
+        url: 'https://example.test/pull/9',
+        headSha: mergeCommit,
+        checks: [],
+      }
+    }
+
+    await loop.poll()
+    expect(logText()).toContain('WARN could not close promoted issues: run pull request unreadable')
+
+    await loop.poll()
+    expect(logText()).toContain(`Promoted #${issueNumber}`)
+    expect(logText()).toContain('Recovered closing promoted issues after 0 minutes')
   })
 
   beforeEach(() => {
@@ -2564,6 +2705,34 @@ describe('remote issue queue idle detection', () => {
       labels: expect.arrayContaining([LABEL_FINDING, LABEL_READY]),
     })
     expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('fails a completed worker task that has no linked issue instead of skipping it', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      workerMode: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const taskId = '20260808_120000_001_user-local-fallback'
+    writeRawStatus(taskId, 'completed')
+    const taskLog = join(paths.logsDir, `${taskId}.log`)
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(logText()).toContain(`WARN worker task ${shortTaskId(taskId)} has no linked issue; marked failed`)
+    expect(readFileSync(taskLog, 'utf8')).toContain(
+      `Worker merge refused: a worker checkout merges only issue-linked tasks; ${taskId} has no linked issue`,
+    )
+
+    await loop.poll()
+
+    expect(logged).toContain(`FAILED: ${taskId} — log: ${taskLog}`)
+    expect(logged.filter((line) => line.includes('has no linked issue'))).toHaveLength(1)
   })
 
   it('logs changed remote work immediately and unchanged work at most every ten minutes', async () => {
@@ -3983,6 +4152,40 @@ describe('completed task merge recovery', () => {
     expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
   })
 
+  it('cancels the issue release preparation when rebase-conflict cleanup fails', async () => {
+    const taskId = '20260815_181908_198_auto-rebase-conflict'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'conflicting fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    cleanupFailure.taskId = taskId
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(cleanupFailure.taskId).toBeUndefined()
+    expect(logText()).toContain(
+      '198_auto rebase conflict was abandoned but cleanup or issue release failed: worktree is locked',
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
+    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+  })
+
   /** A completed local task whose only commit conflicts with a later run-branch commit. */
   function makeConflictingLocalTask(taskId: string): {
     initialHead: string
@@ -4539,6 +4742,40 @@ describe('completed task merge recovery', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
     expect(attempts).toBe(2)
+  })
+
+  it('keeps merging later tasks while one merged issue cannot be reconciled, then stops', async () => {
+    const stuckTaskId = '20260811_120000_069_auto-deleted-issue'
+    const laterTaskId = '20260811_120000_070_auto-later-fix'
+    initializeGitRepo()
+    makeCompletedTask(stuckTaskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'deleted issue', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, stuckTaskId, [issueNumber])
+    const listIssueComments = fakeForge.listIssueComments.bind(fakeForge)
+    fakeForge.listIssueComments = async (number) => {
+      if (number === issueNumber) throw new Error('issue not found')
+      return listIssueComments(number)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, stuckTaskId)?.status).toBe('merged')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    makeCompletedTask(laterTaskId)
+    await loop.poll()
+
+    expect(readStatus(paths, laterTaskId)?.status).toBe('merged')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      `ERROR could not reconcile issue #${issueNumber} after merging 069_auto: issue not found (repeated 2 times)`,
+    )
   })
 
   it('keeps promotion unconfirmed while a published merge marker is absent from read-back', async () => {
