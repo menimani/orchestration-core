@@ -902,6 +902,14 @@ so authorship and verified ancestry must both hold.
     neither an inspection nor a no-change verdict — becomes failed with the reason in its
     task log, so its issues take the counted release of item 19a rather than lapsing into
     a reclaim of the same task.
+    A completed task keeps heartbeating its issues, and keeps them out of the stale-lease
+    reaper, until its publication succeeds. Immediately before reporting, the worker re-reads
+    each issue: one that is no longer open and `loop:in-progress` without `loop:ready`, and
+    that does not already carry `loop:merge-ready` with this task's branch and head, is
+    unlinked from the task, which becomes failed without releasing or counting that issue.
+    Any other publication error, such as a rejected push or a failed comment or label
+    change, is retried on later polls; the fifth consecutive failure marks the task failed
+    with the reason in its task log. Rate-limit errors are not counted.
     Its poll status uses the shared
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix

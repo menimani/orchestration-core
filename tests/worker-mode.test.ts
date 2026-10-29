@@ -9,7 +9,7 @@ import { loadConfig } from '../src/config.ts'
 import { createLoop } from '../src/loop.ts'
 import {
   buildIssueBody, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY,
-  LABEL_RETRY_EXHAUSTED, issueNumbersForTask, recordIssuesForTask,
+  LABEL_READY, LABEL_RETRY_EXHAUSTED, issueNumbersForTask, recordIssuesForTask,
 } from '../src/issueQueue.ts'
 import {
   branchName, finalMessageFile, logFile, orchPaths, worktreeDir, type OrchPaths,
@@ -270,5 +270,90 @@ describe('worker mode', () => {
     expect(labels).not.toContain(LABEL_IN_PROGRESS)
     expect(labels).not.toContain(LABEL_MERGE_READY)
     expect(logged.join('\n')).toContain(`Parked #${issueNumber}`)
+  })
+
+  it('heartbeats an unpublished completion and fails it after repeated publication errors', async () => {
+    const taskId = '20260809_000000_006_auto-relabel-outage'
+    await completedTask(taskId, true)
+    // Every claim and comment is older than the lease, so only a heartbeat keeps the reaper
+    // from returning the issue to ready while publication keeps failing.
+    forge.clock = () => new Date('2026-08-09T00:00:00Z')
+    const issueNumber = await claimedIssue(taskId)
+    const addLabel = forge.addLabel.bind(forge)
+    forge.addLabel = async (number, label) => {
+      if (label === LABEL_MERGE_READY) throw new Error('label service unavailable')
+      await addLabel(number, label)
+    }
+    const loop = makeWorkerLoop()
+
+    for (let attempt = 1; attempt < 5; attempt++) {
+      await loop.poll()
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+      expect(logged.join('\n')).toContain(`(attempt ${attempt}/5): label service unavailable`)
+      const labels = (await forge.getIssue(issueNumber)).labels
+      expect(labels).toContain(LABEL_IN_PROGRESS)
+      expect(labels).not.toContain(LABEL_READY)
+    }
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain('Heartbeat: 2026-08-09T12:00:00.000Z')
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(readFileSync(logFile(paths, taskId), 'utf8'))
+      .toContain('Worker publication failed 5 times: label service unavailable')
+  })
+
+  it('does not report a branch on an issue whose claim was reaped before publication', async () => {
+    const taskId = '20260809_000000_007_auto-reaped-claim'
+    await completedTask(taskId, true)
+    const issueNumber = await claimedIssue(taskId)
+    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+    await forge.addLabel(issueNumber, LABEL_READY)
+    await forge.unassignIssue(issueNumber, forge.user)
+    const loop = makeWorkerLoop()
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(readFileSync(logFile(paths, taskId), 'utf8'))
+      .toContain(`Worker publication refused: #${issueNumber} no longer claimed by this task`)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    expect(() => git(origin, ['rev-parse', `refs/heads/${branchName(taskId)}`])).toThrow()
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+    expect(forge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('Branch:')
+  })
+
+  it('finishes a grouped publication without reporting again on an issue already relabelled', async () => {
+    const taskId = '20260809_000000_008_auto-grouped-retry'
+    await completedTask(taskId, true)
+    const issueNumbers = await groupedIssues(taskId)
+    writeFileSync(finalMessageFile(paths, taskId), [
+      'TASK_COMPLETE',
+      ...issueNumbers.map((number) => `REQUIREMENT_COMPLETE: #${number}`),
+      '',
+    ].join('\n'))
+    const removeLabel = forge.removeLabel.bind(forge)
+    let failSecond = true
+    forge.removeLabel = async (number, label) => {
+      if (failSecond && number === issueNumbers[1]) throw new Error('transient forge error')
+      await removeLabel(number, label)
+    }
+    const loop = makeWorkerLoop()
+
+    await loop.poll()
+    expect(logged.join('\n')).toContain('(attempt 1/5): transient forge error')
+    failSecond = false
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.labels).toContain(LABEL_MERGE_READY)
+      expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    }
+    const firstReports = forge.issueComments.get(issueNumbers[0]!)!
+      .filter((comment) => comment.startsWith('Worker completed the task.'))
+    expect(firstReports).toHaveLength(1)
   })
 })
