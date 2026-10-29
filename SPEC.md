@@ -863,7 +863,10 @@ so authorship and verified ancestry must both hold.
     `PROMOTED: <task-id>` comment naming the merge commit, run branch, and pull request,
     and logs a `Promoted` event; a merge commit the head does not contain stays open for
     a later run. A failure to close is warned about and retried on the next poll without
-    holding back that poll's claims. Workers never close promoted issues. Immediately after merging, the worker comments on every linked issue with the
+    holding back that poll's claims. A promoted issue the forge reports as deleted is no
+    longer awaited: its promotion record is dropped, along with the task's issue map once no
+    promotion of that task remains, and the promotions after it still close. Workers never
+    close promoted issues. Immediately after merging, the worker comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
