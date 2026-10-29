@@ -356,7 +356,7 @@ describe('cleanupTask', () => {
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
   })
 
-  it('ends processes left in the worktree after the runner stops and before removal', () => {
+  it('ends and reports processes left in the worktree after the runner stops and before removal', () => {
     seedTask(12345)
     const calls: string[] = []
     let processAlive = true
@@ -372,8 +372,9 @@ describe('cleanupTask', () => {
     })
     const runtime = makeRuntime({ os: {
       ...os,
-      terminateWorktreeProcesses: (path) => {
+      terminateWorktreeProcesses: (path, report) => {
         calls.push(`terminate holders of ${path} (present: ${existsSync(path)})`)
+        report(`Stopped PID 4242    bash.exe holding worktree ${path}`)
       },
     } })
     const execFile = runtime.execFile
@@ -382,8 +383,10 @@ describe('cleanupTask', () => {
       return execFile(command, args, options)
     }
 
-    cleanupTask(paths, taskId, runtime)
+    const report = vi.fn()
+    cleanupTask(paths, taskId, runtime, false, report)
 
+    expect(report).toHaveBeenCalledWith(`Stopped PID 4242    bash.exe holding worktree ${worktree}`)
     expect(calls).toEqual([
       'terminate runner',
       `terminate holders of ${worktree} (present: true)`,

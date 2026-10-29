@@ -104,6 +104,7 @@ export function cleanupTask(
   taskId: string,
   runtime: CleanupRuntime = systemRuntime,
   announce = true,
+  report: (line: string) => void = console.log,
 ): void {
   const status = readStatus(
     paths, taskId, runtime.os.processStartIdentity, runtime.os.processTreeIsAlive,
@@ -123,7 +124,7 @@ export function cleanupTask(
     removeWorktreeWithFallback(paths.repoRoot, worktree, {
       os: runtime.os,
       git: (_cwd, args) => git(runtime, paths, args),
-    })
+    }, report)
   }
   if (runtime.exists(worktree)) {
     throw new Error(`Could not remove worktree ${worktree}; task state was retained.`)

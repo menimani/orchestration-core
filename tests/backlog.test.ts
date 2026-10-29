@@ -49,6 +49,17 @@ async function waitForFiles(files: string[]): Promise<void> {
   }
 }
 
+/** Replace the wall clock with one that only moves when a retry sleeps or a test advances it. */
+function simulateClock(): { advance: (ms: number) => void } {
+  let now = Date.now()
+  vi.spyOn(Date, 'now').mockImplementation(() => now)
+  vi.spyOn(Atomics, 'wait').mockImplementation((_array, _index, _value, timeout) => {
+    now += timeout ?? 0
+    return 'timed-out'
+  })
+  return { advance: (ms) => { now += ms } }
+}
+
 describe('backlog process lock', () => {
   it.each([
     ['without owner metadata', undefined],
@@ -70,10 +81,32 @@ describe('backlog process lock', () => {
     const lockDir = `${backlog}.lock`
     mkdirSync(lockDir)
     writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()}\n`)
-    vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out')
+    simulateClock()
 
     expect(() => withBacklogLock(backlog, () => undefined))
       .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+  })
+
+  it('bounds acquisition by elapsed time when identity lookups are slow', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    const identity = Buffer.from('owner-start').toString('base64url')
+    writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()} v2.token.${identity}\n`)
+    const clock = simulateClock()
+    const started = Date.now()
+    const lookup = vi.spyOn(operatingSystem, 'processStartIdentity').mockImplementation(() => {
+      clock.advance(1_000)
+      return 'owner-start'
+    })
+
+    expect(() => withBacklogLock(backlog, () => undefined))
+      .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+    // Each attempt costs about two simulated seconds, so the wait ends near the
+    // 30-second grace period instead of after thousands of attempts.
+    expect(Date.now() - started).toBeLessThan(35_000)
+    expect(lookup.mock.calls.length).toBeLessThan(40)
+    expect(existsSync(lockDir)).toBe(true)
   })
 
   it('permits a later acquisition when released-lock removal fails', () => {
@@ -193,7 +226,7 @@ describe('backlog process lock', () => {
     )
     vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('current-start')
     const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
-    vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out')
+    simulateClock()
 
     expect(() => withBacklogLock(backlog, () => undefined))
       .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
@@ -210,7 +243,7 @@ describe('backlog process lock', () => {
     mkdirSync(recoveryDir)
     const old = new Date(Date.now() - 31_000)
     utimesSync(recoveryDir, old, old)
-    vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out')
+    simulateClock()
 
     expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
     expect(existsSync(lockDir)).toBe(false)

@@ -74,21 +74,34 @@ function processIdentity(pid) {
 }
 
 function invokingWindowsShellPid() {
+  // Windows never updates ParentProcessId when a parent exits, so a recorded parent PID
+  // may since belong to an unrelated process. An ancestor created after its child is
+  // such a reuse; the walk stops there instead of watching a stranger. The walk starts
+  // at this process so the direct parent link is checked too. One snapshot serves the
+  // whole walk; a query per ancestor costs seconds on a deep tree. Newlines separate the
+  // statements; a space-joined script does not parse.
   const command = [
-    '& { param([int]$TargetPid)',
-    '$fallback = $TargetPid',
-    'while ($TargetPid -gt 0) {',
-    '  $candidate = Get-CimInstance Win32_Process -Filter "ProcessId = $TargetPid" -ErrorAction SilentlyContinue',
+    '& { param([int]$TargetPid, [int]$Fallback)',
+    '$processes = @{}',
+    'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CreationDate -ErrorAction SilentlyContinue | ForEach-Object { $processes[[int]$_.ProcessId] = $_ }',
+    '$childCreated = $null',
+    '$visited = @{}',
+    'while ($TargetPid -gt 0 -and -not $visited.ContainsKey($TargetPid)) {',
+    '  $visited[$TargetPid] = $true',
+    '  $candidate = $processes[$TargetPid]',
     '  if ($null -eq $candidate) { break }',
+    '  if ($null -ne $childCreated -and $null -ne $candidate.CreationDate -and $candidate.CreationDate -gt $childCreated) { break }',
     '  if ($candidate.Name -in @("powershell.exe", "pwsh.exe")) { $TargetPid; return }',
+    '  $childCreated = $candidate.CreationDate',
     '  $TargetPid = [int]$candidate.ParentProcessId',
     '}',
-    '$fallback',
+    '$Fallback',
     '}',
-  ].join(' ')
+  ].join('\n')
   try {
     const value = execFileSync(
-      'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command, String(process.ppid)],
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', command, String(process.pid), String(process.ppid)],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
     ).trim()
     const pid = Number(value)

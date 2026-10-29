@@ -9,8 +9,6 @@ import { fileURLToPath } from 'node:url'
 import { errorHeadline } from '../errorText.ts'
 import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../internalEnvironment.ts'
 
-export { WINDOWS_PROCESS_ROOT_PID_ENV } from '../internalEnvironment.ts'
-
 const WINDOWS_LAUNCH_CONFIG_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_CONFIG'
 const WINDOWS_LAUNCH_ERROR_FILE_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_ERROR_FILE'
 const WINDOWS_LAUNCH_TIMEOUT_MS = 10_000
@@ -44,6 +42,7 @@ interface WindowsProcessDescriptor {
   inputFile?: string
   outputFile: string
   readyFile: string
+  verbatimArguments?: boolean
 }
 
 export interface WindowsProcessOptions {
@@ -53,6 +52,8 @@ export interface WindowsProcessOptions {
   env?: NodeJS.ProcessEnv
   inputFile?: string
   outputFile: string
+  /** Pass `args` to the command line unquoted, as a cmdArgumentLine result needs. */
+  verbatimArguments?: boolean
 }
 
 interface WindowsLaunchConfig {
@@ -82,6 +83,30 @@ export function quoteWindowsArgument(argument: string): string {
     backslashes = 0
   }
   return `${quoted}${'\\'.repeat(backslashes * 2)}"`
+}
+
+const CMD_METACHARACTERS = /[()%!^"<>&|]/g
+
+/**
+ * The verbatim cmd.exe argument line that runs `program` with exactly `args`.
+ *
+ * cmd.exe parses its /c line itself: it splits commands at `&` and `|`, redirects at
+ * `<` and `>`, expands `%NAME%`, and consumes `^`, whatever quoting Node applied. Each
+ * argument is quoted for CommandLineToArgvW, then every metacharacter, quotes included,
+ * is caret-escaped so cmd passes the line through literally; `^%NAME^%` names no
+ * variable, so a percent sign survives too. An npm .cmd shim re-reads the arguments
+ * through `%*`, where the quotes from the first pass keep them literal. An embedded
+ * quote or line break would end that protection, so such an argument is refused.
+ * Measured on Windows 11 (2026-10-29) through both an npm-style shim and node.exe.
+ */
+export function cmdArgumentLine(program: string, args: readonly string[]): string {
+  const escaped = args.map((argument) => {
+    if (/["\r\n\0]/.test(argument)) {
+      throw new Error(`cmd.exe cannot pass an argument containing a quote or line break: ${JSON.stringify(argument)}`)
+    }
+    return `"${argument.replace(/(\\+)$/, '$1$1')}"`.replace(CMD_METACHARACTERS, '^$&')
+  })
+  return `/d /v:off /s /c "${[program.replace(CMD_METACHARACTERS, '^$&'), ...escaped].join(' ')}"`
 }
 
 export function processTreeRootPid(env: NodeJS.ProcessEnv = process.env): number {
@@ -257,6 +282,7 @@ export async function startWindowsProcess(
     outputFile: options.outputFile,
     readyFile,
     ...(options.inputFile === undefined ? {} : { inputFile: options.inputFile }),
+    ...(options.verbatimArguments === true ? { verbatimArguments: true } : {}),
   }
   writeFileSync(descriptorFile, JSON.stringify(descriptor))
 
@@ -364,6 +390,7 @@ async function runWindowsProcessWrapper(descriptorFile: string): Promise<void> {
         [WINDOWS_PROCESS_ROOT_PID_ENV]: `${process.pid}`,
       },
       stdio: [inputFd ?? 'ignore', outputFd, outputFd],
+      windowsVerbatimArguments: descriptor.verbatimArguments === true,
     })
     child.once('error', (error) => {
       closeDescriptors()

@@ -140,12 +140,15 @@ export interface MergeOptions {
    * merge reads them from the task's specification when they are not given.
    */
   reasons?: readonly string[] | undefined
-}
-
-export interface RemoteMergeOptions extends MergeOptions {
-  /** Persist adoption before post-merge work begins or this function returns. */
+  /**
+   * Persist what follows from the merge before post-merge work begins or this function
+   * returns. A dependency install that fails afterwards stops the loop, and a restart
+   * that finds the merge already recorded never repeats this step.
+   */
   onMerged?: ((mergeCommit: string) => void) | undefined
 }
+
+export type RemoteMergeOptions = MergeOptions
 
 export interface NoChangeOptions {
   outputFile?: string | undefined
@@ -353,7 +356,7 @@ function removeFinishedWorktree(
   runtime: WorktreeRemovalRuntime,
   completion: string,
 ): boolean {
-  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, log)
   if (result.fallbackFailure !== undefined) {
     log(`WARN: ${completion}, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
     return false
@@ -694,9 +697,10 @@ function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
 export function removeTemporaryWorktree(
   paths: OrchPaths,
   worktree: string,
+  log: (text: string) => void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
-  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, log)
   if (result.fallbackFailure === undefined && result.pruneFailure === undefined) return
   const pruneDetail = result.pruneFailure === undefined ? '' : `; prune: ${result.pruneFailure}`
   throw new MergeError(
@@ -808,6 +812,7 @@ async function finalizeLocalMerge(
   options: MergeOptions,
 ): Promise<string> {
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
+  options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     options.beforeOrchestrationDepsInstall,
@@ -1221,7 +1226,7 @@ async function mergeTaskWithGuardHeld(
     }
     runMergeChecks(prospectiveWorktree, currentBranch, options, io)
   } finally {
-    removeTemporaryWorktree(paths, prospectiveWorktree)
+    removeTemporaryWorktree(paths, prospectiveWorktree, io.out)
   }
 
   mergeWithVerifiedRecovery(
@@ -1354,7 +1359,7 @@ export async function mergeRemoteTask(
     io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
     runMergeChecks(worktree, currentBranch, options, io)
   } finally {
-    removeTemporaryWorktree(paths, worktree)
+    removeTemporaryWorktree(paths, worktree, io.out)
   }
 
   mergeWithVerifiedRecovery(

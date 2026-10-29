@@ -623,8 +623,10 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
   })
 
-  it('skips the check entirely when CORE_AUTO_UPDATE=false', async () => {
+  it('skips the check and the skill sync entirely when CORE_AUTO_UPDATE=false', async () => {
     advanceUpstream('version two\n')
+    // A manual subtree pull changes the vendored skill sources without re-rendering them.
+    writeFileSync(join(packageRoot, 'skills', 'loop-start', 'SKILL.md'), 'version two\n')
     const runtime = {
       packageRoot,
       git: vi.fn(() => { throw new Error('git must not run') }),
@@ -636,5 +638,8 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     expect(runnerStarts).toHaveLength(1)
     expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
       .toBe('version one\n')
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
+      .replaceAll('\r', ''))
+      .toBe("version one: npm run -C 'orchestration/ts' loop\n")
   })
 })

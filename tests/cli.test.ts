@@ -263,6 +263,25 @@ describe('repository selection', () => {
     expect(result.stderr).toContain(`Repository path '${notRepository}' is not a git repository.`)
   })
 
+  it('accepts the --repo=<path> form and rejects an empty value', () => {
+    const notRepository = mkdtempSync(join(tmpdir(), 'orch-cli-not-repo-'))
+    extraRoots.push(notRepository)
+    const run = (arg: string) => spawnSync(process.execPath, [CLI, 'loop-status', arg], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    const explicit = run(`--repo=${notRepository}`)
+    const empty = run('--repo=')
+
+    expect(explicit.status).toBe(1)
+    expect(explicit.stderr).toContain(`Repository path '${notRepository}' is not a git repository.`)
+    expect(empty.status).toBe(1)
+    expect(empty.stderr).toContain('--repo requires a repository path')
+  })
+
   it('reports an explicit git repository without an orchestration directory', () => {
     const repository = join(repoRoot, 'repository-without-orchestration')
     mkdirSync(repository)
@@ -371,6 +390,35 @@ describe('fleet project selection', () => {
     expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
   })
 
+  it('accepts the --fleet=<dir> and --project=<name> forms', () => {
+    const fleet = fleetFixture()
+
+    const result = runCli(['queue', `--fleet=${fleet}`, '--project=first'])
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
+  })
+
+  it('treats --project=<name> as a project option rather than an argument', () => {
+    const result = runCli(['loop-status', '--project=first'])
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('no fleet.json found at or above')
+  })
+
+  it('rejects an empty --fleet= or --project= value', () => {
+    const fleet = fleetFixture()
+
+    const emptyFleet = runCli(['loop-status', '--fleet='])
+    const emptyProject = runCli(['queue', '--fleet', fleet, '--project='])
+
+    expect(emptyFleet.status).toBe(1)
+    expect(emptyFleet.stderr).toContain('--fleet requires a value')
+    expect(emptyProject.status).toBe(1)
+    expect(emptyProject.stderr).toContain('--project requires a value')
+  })
+
   it('refuses to mix a repository path with a fleet project', () => {
     const fleet = fleetFixture()
 
@@ -439,6 +487,27 @@ describe('fleet project selection', () => {
     expect(result.stdout).toContain('Installed: .agents/skills/git-commit')
     expect(readFileSync(join(home, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toContain(`ORCHESTRATION_FLEET='${fleet.replaceAll('\\', '/')}' npm run -C `)
+  })
+
+  it('refuses --repo and --project for install-skills before installing', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+    mkdirSync(join(repoRoot, 'orchestration'))
+
+    for (const args of [['--repo', repoRoot], ['--fleet', fleet, '--project', 'first']]) {
+      const result = spawnSync(process.execPath, [CLI, 'install-skills', ...args], {
+        cwd: repoRoot,
+        env: { ...CORE_ENV, HOME: home, USERPROFILE: home },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('install-skills takes only --fleet <dir>')
+    }
+    expect(existsSync(join(home, '.claude', 'skills'))).toBe(false)
   })
 
   it('names the search start when no fleet manifest is found', () => {

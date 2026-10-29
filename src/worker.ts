@@ -92,19 +92,37 @@ async function updateWorkerCheckout(paths: OrchPaths, baseRef: string): Promise<
   }
 }
 
+// Exit 1: the checkout's code predates worker mode. Exit 2: the code supports it, but the
+// project's configuration file, which overrides the environment, does not yield it.
 const WORKER_SUPPORT_CHECK = `
 const { loadConfig } = await import(process.argv[1])
-if (loadConfig().workerMode !== true) {
+const filePath = process.argv[2]
+let workerMode
+let failure
+try {
+  workerMode = loadConfig(process.env, { filePath, onEvent: () => {} }).workerMode
+} catch (error) {
+  failure = error instanceof Error ? error.message : String(error)
+}
+if (failure !== undefined) {
+  console.error(failure)
+  process.exitCode = 2
+} else if (workerMode === undefined) {
   console.error('config.workerMode is missing')
   process.exitCode = 1
+} else if (workerMode !== true) {
+  console.error('WORKER_MODE resolves to ' + String(workerMode))
+  process.exitCode = 2
 }
 `
 
 export function verifyWorkerModeSupported(paths: OrchPaths, env: NodeJS.ProcessEnv): void {
   const configUrl = pathToFileURL(checkoutPackageFile(paths, 'src', 'config.ts')).href
+  // The daemon reads the project's file, not the default under the working directory.
+  const configFile = join(paths.projectRoot, 'config.json')
   const result = spawnSync(
     process.execPath,
-    ['--input-type=module', '--eval', WORKER_SUPPORT_CHECK, configUrl],
+    ['--input-type=module', '--eval', WORKER_SUPPORT_CHECK, configUrl, configFile],
     {
       cwd: paths.repoRoot,
       env,
@@ -113,12 +131,13 @@ export function verifyWorkerModeSupported(paths: OrchPaths, env: NodeJS.ProcessE
     },
   )
   if (result.error !== undefined) throw result.error
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout).trim()
-    throw new Error(
-      `Refusing to start worker: the updated checkout does not support worker mode${detail === '' ? '.' : `: ${detail}`}`,
-    )
+  if (result.status === 0) return
+  const detail = (result.stderr || result.stdout).trim()
+  const suffix = detail === '' ? '.' : `: ${detail}`
+  if (result.status === 2) {
+    throw new Error(`Refusing to start worker: ${configFile} does not enable worker mode${suffix}`)
   }
+  throw new Error(`Refusing to start worker: the updated checkout does not support worker mode${suffix}`)
 }
 
 function launchDaemon(paths: OrchPaths, env: NodeJS.ProcessEnv): number {

@@ -41,10 +41,6 @@ const GENERATED_DIRECTORY_PATTERNS: readonly RegExp[] = [
 // and their paths never match the escaped-fixture allowlist keyed by repository path.
 const RUNTIME_DIRECTORIES: ReadonlySet<string> = new Set([
   '.claude/worktrees',
-  'orchestration/logs',
-  'orchestration/queue',
-  'orchestration/status',
-  'orchestration/tasks',
   'orchestration/worktrees',
 ])
 

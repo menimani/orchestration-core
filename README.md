@@ -69,14 +69,15 @@ That same boundary syncs the skills declared in `skills/manifest.json` into ever
 directory an agent working in the repository reads them from. The selected runner adapter
 supplies one — the bundled Codex adapter uses `.agents/skills/` and rewrites the sources
 into Codex's own form, while the Claude adapter uses `.claude/skills/` in canonical form —
-and the project adapter selects any additional interactive-agent targets. This repository
-selects the bundled Claude target for `.claude/skills/`; duplicate destinations are served
-only once. In a subtree consumer, the sync checks every managed destination for staged
+and the project adapter selects any additional interactive-agent targets; duplicate
+destinations are served only once. The sync runs only for the repository that owns the
+package and for subtree consumers. A fleet project runs the package from outside its own
+checkout and skips it; its skills come from `install-skills` instead. In a subtree consumer, the sync checks every managed destination for staged
 changes before writing any of them; an unverifiable or non-clean managed index is fatal
-and stops the cycle. A destination rendering failure is reported while the remaining
-destinations are still served. Managed updates and removals are then staged and committed
-together; a staging, inspection, or commit failure is fatal and stops the cycle before
-task dispatch, leaving any staged output available for diagnosis. Loop commands are
+and stops the cycle. A destination rendering failure is fatal too: the remaining
+destinations are still written, but the cycle stops and nothing is staged or committed.
+Otherwise managed updates and removals are staged and committed together; a staging,
+inspection, or commit failure is fatal and stops the cycle before task dispatch, leaving any staged output available for diagnosis. Loop commands are
 rendered for
 the installed package location (`npm run` here, `npm run -C orchestration/ts` in the
 layout below).
@@ -127,8 +128,9 @@ An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, a
 path, or path relative to the consumer repository root. A repository-relative selector
 must begin with `./` or `../`; for example, use `./custom/runner.mjs`, because
 `custom/runner.mjs` is treated as a package specifier. A forge module exports a `Forge`
-as its default or `forge` export, or exports `createForge(repoRoot, report, target)`. A
-runner module likewise exports a `Runner` as its default or `runner` export, or exports
+as its default or `forge` export, or exports `createForge(repoRoot, report, target)`.
+Every forge implements `updateIssueTitle(issueNumber, title)`, which replaces an issue's
+title for project bridges rather than for the loop core. A runner module likewise exports a `Runner` as its default or `runner` export, or exports
 `createRunner(options)`. Factories may be asynchronous.
 
 A forge factory's `target` names the repositories to act on when they are not the
@@ -188,6 +190,8 @@ contract-valid adapter, project templates, points `core.hooksPath` at the core-o
 hooks, and creates missing `loop:*` labels. It is safe to repeat: missing required adapter
 members are added with marked scaffold defaults, while declared members, other existing
 project files, and a deliberately different hooks setting are reported and never overwritten.
+It works on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the
+selected file rather than the single discovered one.
 For `SCAN_PARALLEL` greater than one, keep the scan checklist as uniquely numbered
 Markdown headings outside fenced code blocks; without numbered headings the loop warns
 and runs one full scan, while ambiguous numbering stops the loop before the cycle starts.
@@ -228,8 +232,9 @@ Every start prints the resolved queue mode, run branch, runner models and effort
 settings that differ from their defaults. `--approve-mode local` for the default local
 backlog, or `--approve-mode issue` when `ISSUE_QUEUE_ENABLED=true`, approves the start
 without a prompt. Without the flag, a terminal start asks for an explicit `y` or `yes`,
-and a non-interactive caller is refused. A missing flag or a flag that does not match the
-resolved mode exits non-zero before the loop touches the queue, worktrees, or forge.
+and a non-interactive caller is refused. A refused start, whether a non-interactive start
+without the flag, a flag that does not match the resolved mode, or a declined prompt,
+exits non-zero before the loop touches the queue, worktrees, or forge.
 
 With `INTEGRATION_BRANCH` set, the original repository checkout is the daemon worktree
 and stays on its exact starting commit until the run ends. The loop creates or resumes
@@ -269,8 +274,9 @@ head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pul
 checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
 and verifies the revision that actually came up.
 
-Every command accepts `--repo <path>` to act on that repository instead of the repository
-containing the working directory. The path may name the repository or a directory inside
+Every command except `install-skills`, which takes only `--fleet <dir>` (see
+[Running from a fleet](#running-from-a-fleet)), accepts `--repo <path>` to act on that
+repository instead of the repository containing the working directory. The path may name the repository or a directory inside
 it; the CLI resolves its Git root and requires that root to contain `orchestration/`.
 Without `--repo`, repository discovery is unchanged. Repeat the option for fleet status:
 
@@ -342,6 +348,11 @@ git subtree pull --prefix=orchestration/ts \
   https://github.com/menimani/orchestration-core.git main --squash
 ```
 
+The pin also turns off the skill sync described above. A manual pull updates the vendored
+skill sources, but `.claude/skills/`, `.agents/skills/`, and any other managed destination
+keep their previous rendering, with no warning, until a cycle runs with
+`CORE_AUTO_UPDATE` on.
+
 ## Settings worth knowing
 
 Runtime settings can be stored in `orchestration/config.json`, using the uppercase names
@@ -384,7 +395,7 @@ settings update at their next use.
 | `RUNNER` | codex | Agent CLI adapter; accepts `codex`, `claude`, or an external module selector |
 | `RUNNER_CLAUDE_MODEL` | claude-opus-5 | Base Claude model used when `RUNNER=claude` and no task-specific model is set |
 | `RUNNER_CLAUDE_MODEL_MINIMAL` / `LOW` / `MEDIUM` / `HIGH` | `RUNNER_CLAUDE_MODEL` | Optional model selected for the matching reasoning effort when `RUNNER=claude` |
-| `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
+| `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check and the shared skill sync entirely |
 | `INTEGRATION_BRANCH` | empty | Empty keeps the direct single-worktree layout; a branch name freezes the daemon checkout and makes this separate branch the task base, merge target, gate target, and PR source |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |
 | `UPSTREAM_REPO` | package `upstreamRepo` | Environment-only override for the GitHub `owner/repository` where `report-upstream` files the report |

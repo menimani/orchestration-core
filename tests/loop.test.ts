@@ -20,6 +20,7 @@ import { existingTaskIdForDesc, recordTaskIdForDesc, shortTaskId } from '../src/
 import {
   issueConflictKey, readConflictedAttempts, writeConflictedAttempts,
 } from '../src/conflictRetry.ts'
+import { runCleanupCommand } from '../src/cleanupCommand.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
   pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup,
@@ -90,7 +91,16 @@ function makeForge(): Forge {
   fakeForge.prStatus = async (ref) => {
     fakeForge.prStatusRefs.push(ref)
     prStatusCalls += 1
-    return forgeStatus
+    // A fixture that names no head stands for a forge that has caught up with the
+    // checkout; a test about a stale forge sets headSha to another commit.
+    if (forgeStatus.headSha !== '' || forgeStatus.state !== 'open') return forgeStatus
+    let localHead = ''
+    try {
+      localHead = git(['rev-parse', 'HEAD'])
+    } catch {
+      localHead = ''
+    }
+    return { ...forgeStatus, headSha: localHead }
   }
   return fakeForge
 }
@@ -1060,7 +1070,10 @@ describe('CI check normalization (forge adapter)', () => {
 })
 
 describe('checkPrCiStatus', () => {
+  let headSha: string
+
   beforeEach(() => {
+    headSha = initializeGitRepo()
     writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/1\n')
   })
 
@@ -1112,8 +1125,23 @@ describe('checkPrCiStatus', () => {
       expect(await loop.checkPrCiStatus()).toBe('failure')
     })
 
+  it.each([
+    ['a passed', 'success', 'success'],
+    ['a failed', 'failure', 'failure'],
+  ] as const)('waits while the forge still reports %s earlier head', async (_description, conclusion, verdict) => {
+    const loop = makeLoop()
+    forgeStatus = {
+      ...forgeStatus,
+      headSha: 'f'.repeat(40),
+      checks: [{ name: 'a', conclusion, startedAt: '' }],
+    }
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+
+    forgeStatus = { ...forgeStatus, headSha }
+    expect(await loop.checkPrCiStatus()).toBe(verdict)
+  })
+
   it('does not clear the gate for an old PR head with no checks', async () => {
-    const headSha = initializeGitRepo()
     forgeStatus = { ...forgeStatus, headSha, checks: [] }
     const loop = makeLoop({}, stubProject, undefined, () => new Date('2030-01-01T00:00:00Z'))
     expect(await loop.checkPrCiStatus()).toBe('unknown')
@@ -1299,6 +1327,47 @@ describe('scan yield', () => {
 
     expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('1')
     expect(existsSync(join(paths.queueDir, 'scan-expected-6'))).toBe(true)
+  })
+
+  it('closes a cycle whose unfinished scan the operator cleaned up', async () => {
+    const loop = makeLoop({ maxEmptyScans: 2 })
+    const emptyScanFile = join(paths.queueDir, 'empty-scan-count.txt')
+    const cleanedScan = '20250101_000000_014_scan'
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '7\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-7'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-7'), '20250101_000000_015_scan\tempty\n')
+    writeFileSync(emptyScanFile, '1\n')
+    writeRawStatus(cleanedScan, 'running')
+
+    await expect(runCleanupCommand(paths, [cleanedScan], {
+      issueQueueEnabled: () => false,
+      loadForge: async () => makeForge(),
+      cleanup: (cleanupPaths, taskId) => rmSync(statusFile(cleanupPaths, taskId)),
+      error: () => {},
+    })).resolves.toBe(0)
+
+    expect(existsSync(statusFile(paths, cleanedScan))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'failed-7'), 'utf8')).toBe(`${cleanedScan}\n`)
+    loop.foldScanYields(7)
+    expect(existsSync(join(paths.queueDir, 'scan-expected-7'))).toBe(false)
+    expect(readFileSync(emptyScanFile, 'utf8').trim()).toBe('1')
+  })
+
+  it('does not count a cleaned-up scan as failed once its yield was recorded', async () => {
+    const yieldedScan = '20250101_000000_016_scan'
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '8\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-8'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-yield-8'), `${yieldedScan}\tfound\n`)
+    writeRawStatus(yieldedScan, 'completed')
+
+    await expect(runCleanupCommand(paths, [yieldedScan], {
+      issueQueueEnabled: () => false,
+      loadForge: async () => makeForge(),
+      cleanup: (cleanupPaths, taskId) => rmSync(statusFile(cleanupPaths, taskId)),
+      error: () => {},
+    })).resolves.toBe(0)
+
+    expect(existsSync(join(paths.queueDir, 'failed-8'))).toBe(false)
   })
 })
 
@@ -2300,6 +2369,7 @@ describe('cycle gate', () => {
   })
 
   function prepareFailedCiGate(): { attemptFile: string; completeFlag: string } {
+    if (!existsSync(join(repoRoot, '.git'))) initializeGitRepo()
     const attemptFile = join(paths.queueDir, 'ci-fix-emitted-1')
     const completeFlag = join(paths.queueDir, 'cycle-complete-1')
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
@@ -2446,6 +2516,44 @@ describe('cycle gate', () => {
     expect(existsSync(stopFile)).toBe(true)
     expect(logText())
       .toContain('ERROR could not enqueue CI fix: queue unavailable (repeated 2 times)')
+  })
+
+  it('counts a CI fix enqueue failure afresh after the CI gate passes', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>(() => {
+      throw new Error('queue unavailable')
+    })
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 3,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+    const stopFile = join(paths.queueDir, 'stop')
+    const resumeFlag = join(paths.queueDir, 'cycle-resume-1')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(stopFile)).toBe(false)
+
+    forgeStatus.checks = [
+      { name: 'frontend', conclusion: 'success', startedAt: '' },
+      { name: 'backend', conclusion: 'success', startedAt: '' },
+    ]
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(existsSync(resumeFlag)).toBe(true)
+
+    rmSync(resumeFlag)
+    prepareFailedCiGate()
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(enqueue).toHaveBeenCalledTimes(2)
+    expect(existsSync(attemptFile)).toBe(false)
+    expect(existsSync(completeFlag)).toBe(true)
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logText()).not.toContain('repeated 2 times')
+    expect(logText().match(/WARN could not enqueue CI fix: queue unavailable/g))
+      .toHaveLength(2)
   })
 
   it('stops instead of resetting a malformed CI fix attempt count', async () => {
@@ -3532,6 +3640,7 @@ describe('completion marker output', () => {
 
     expect(logText()).toContain('WARN could not push branch:')
     expect(logText()).toContain('ERROR could not push branch:')
+    expect(logText()).toContain('does not appear to be a git repository')
     expect(logText()).toContain('(repeated 2 times)')
     expect(logText()).not.toContain('CYCLE_COMPLETE:')
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
@@ -3813,6 +3922,30 @@ describe('completion marker output', () => {
       .toBeLessThan(logged.indexOf('Completed Loop        PR https://example.test/pull/1'))
   })
 
+  it('neither promotes nor emits LOOP_DONE while the forge reports an earlier head', async () => {
+    const headSha = initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    forgeStatus = { ...forgeStatus, headSha: 'f'.repeat(40) }
+    const loop = makeLoop()
+    const markPrReady = vi.fn(async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.postLoopPr()).toBe(false)
+    expect(markPrReady).not.toHaveBeenCalled()
+    expect(logText()).not.toContain('LOOP_DONE')
+
+    forgeStatus = { ...forgeStatus, headSha }
+    expect(await loop.postLoopPr()).toBe(true)
+    expect(markPrReady).toHaveBeenCalledTimes(1)
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+  })
+
   it('reports varying draft promotion errors and stops after two gate failures', async () => {
     initializeGitRepo()
     const remote = join(repoRoot, 'remote.git')
@@ -3923,7 +4056,7 @@ describe('completion marker output', () => {
     fakeForge.prStatus = async () => {
       calls += 1
       if (calls % 3 === 0) throw new Error('confirmation unavailable')
-      return forgeStatus
+      return { ...forgeStatus, headSha: git(['rev-parse', 'HEAD']) }
     }
 
     expect(await loop.postLoopPr()).toBe(false)
@@ -4090,6 +4223,40 @@ describe('completed task merge recovery', () => {
       'Stopped 034_auto    process tree PID 43121 before dependency installation',
     )
     expect(logged).toContain('Installed orchestration deps  after 033_auto')
+  })
+
+  it('reopens the waiting gate before a failed dependency install stops the loop', async () => {
+    const taskId = '20260820_181836_035_auto-gate-dependency-installation'
+    makeDependencyChangingTask(taskId)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+    const install = vi.fn(() => {
+      throw new Error('npm ci failed')
+    })
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      { install, packageRoot: repoRoot },
+      undefined,
+      undefined,
+      undefined,
+      () => ({ terminated: [], failures: [] }),
+    )
+    loop.initializeSessionStateForBranch()
+
+    await expect(loop.poll()).rejects.toThrow(
+      /Orchestration dependency installation after 035_auto failed/,
+    )
+
+    // A restart finds the task merged and never returns to the merge, so the gate
+    // must already have been told about the new commits.
+    expect(install).toHaveBeenCalledOnce()
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
   })
 
   it('releases an issue task after its first conflicting rebase and keeps its commits', async () => {
@@ -4275,6 +4442,8 @@ describe('completed task merge recovery', () => {
       autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
     })
     loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-2'), '')
 
     expect(await loop.poll()).toBe('continue')
 
@@ -4285,6 +4454,43 @@ describe('completed task merge recovery', () => {
       `Abandoned 197_user    rebase conflict; commits kept on ${conflictBranchName(taskId)}`,
     )
     for (const { branch } of earlier) expect(git(['branch', '--list', branch])).not.toBe('')
+    // Cleanup removed the status, so the poll sweep never saw this loss.
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(readFileSync(join(paths.queueDir, 'failed-2'), 'utf8')).toBe(`${taskId}\n`)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
+    expect(readConflictedAttempts(paths, taskId)).toEqual([])
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'failed-2'), 'utf8')).toBe(`${taskId}\n`)
+  })
+
+  it('records a conflicted local task as lost when its retry cannot be queued', async () => {
+    const taskId = '20260815_181908_199_user-rebase-conflict'
+    const { runHead, taskTip } = makeConflictingLocalTask(taskId)
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      undefined,
+      undefined,
+      undefined,
+      () => { throw new Error('backlog is not writable') },
+    )
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '3\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-3'), '')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(git(['rev-parse', conflictBranchName(taskId)])).toBe(taskTip)
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(logText()).toContain(
+      '199_user rebase conflict was abandoned but cleanup or issue release failed: backlog is not writable',
+    )
+    expect(readFileSync(join(paths.queueDir, 'failed-3'), 'utf8')).toBe(`${taskId}\n`)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-3'))).toBe(false)
+    expect(readConflictedAttempts(paths, taskId)).toEqual([])
   })
 
   it('removes every branch kept for a retry once the retry merges', async () => {
@@ -4870,6 +5076,43 @@ describe('completed task merge recovery', () => {
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('reruns the passed cycle gate when a task merges after it', async () => {
+    const taskId = '20260810_040800_065_auto-after-gate'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Marker', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+      }],
+    }
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: false,
+      scanEnabled: false,
+      maxParallel: 0,
+      reviewEnabled: true,
+      autoReview: false,
+      autoPr: false,
+      taskGate: 'light',
+    }, suiteProject)
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(readFileSync(join(paths.queueDir, 'cycle-suite-tip-1'), 'utf8').trim())
+      .toBe(git(['rev-parse', 'HEAD']).trim())
+    expect(logged).toContain('CYCLE_COMPLETE: 1/3')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(true)
+  })
+
   it('merges when a claim finds its existing local task completed but unmerged', async () => {
     const taskId = '20260810_040800_064_auto-claimed-again'
     const description = '[BUG] retry the completed local task'
@@ -5428,7 +5671,10 @@ describe('scanForNextTasks', () => {
     const scannedFlag = join(paths.queueDir, 'scanned', taskId)
     expect(existsSync(scannedFlag)).toBe(false)
     expect(fakeForge.issues.size).toBe(1)
-    expect(logText()).toContain('WARN could not file finding: temporary publication failure')
+    expect(logText()).toContain(
+      'WARN could not file finding from 017_scan: temporary publication failure',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logged.some((line) => line.startsWith('Completed 017_scan'))).toBe(false)
 
     await loop.poll()
@@ -5440,6 +5686,60 @@ describe('scanForNextTasks', () => {
       '[BUG] second retryable finding',
     ])
     expect(logged.filter((line) => line.startsWith('Completed 017_scan'))).toHaveLength(1)
+  })
+
+  it('logs and stops after repeated finding publication failures', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoMerge: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const taskId = '20250101_000000_026_scan'
+    writeFinal(taskId, [
+      'NEXT_TASK: [BUG] first rejected finding',
+      'NEXT_TASK: [BUG] second rejected finding',
+      'TASK_COMPLETE',
+    ].join('\n'))
+    writeRawStatus(taskId, 'completed')
+    fakeForge.createIssue = async () => {
+      throw new Error('issue body is too long')
+    }
+    const scannedFlag = join(paths.queueDir, 'scanned', taskId)
+    const stopFile = join(paths.queueDir, 'stop')
+
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(false)
+    expect(logText()).toContain('WARN could not file finding from 026_scan: issue body is too long')
+    expect(logText()).not.toContain('ERROR could not file finding')
+    expect(existsSync(stopFile)).toBe(false)
+
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(false)
+    expect(fakeForge.issues.size).toBe(0)
+    expect(logText()).toContain(
+      'ERROR could not file finding from 026_scan: issue body is too long (repeated 2 times)',
+    )
+    expect(existsSync(stopFile)).toBe(true)
+  })
+
+  it('does not count a rate-limited finding publication as a gate failure', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    const taskId = '20250101_000000_027_scan'
+    writeFinal(taskId, 'NEXT_TASK: [BUG] a finding filed during a rate limit\n')
+    fakeForge.createIssue = async () => {
+      throw new ForgeRateLimitError(new Date(Date.now() + 60_000))
+    }
+
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+
+    expect(logText()).not.toContain('could not file finding')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
   it('retries an unscanned review completion after a forge lookup outage and warns once', async () => {

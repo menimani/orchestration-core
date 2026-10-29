@@ -9,7 +9,7 @@ import { afterEach, expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
 import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
-} from '../src/restart.ts'
+} from '../src/internalEnvironment.ts'
 import { resolvedPath } from './pathComparison.ts'
 import { TestProcessRegistry } from './testProcess.ts'
 

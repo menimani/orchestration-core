@@ -462,7 +462,7 @@ describe('publishFinding', () => {
     })
     writeFileSync(join(paths.queueDir, 'issue-fingerprints'), `${fingerprint} ${untrusted}\n`)
 
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect((await forge.getIssue(untrusted)).state).toBe('open')
     expect((await forge.getIssue(trusted)).state).toBe('open')
@@ -603,7 +603,7 @@ describe('publishFinding', () => {
     ])
 
     forge.listOpenIssues = listOpenIssues
-    await reconcileFindingFingerprints(forge, otherPaths)
+    await reconcileFindingFingerprints(forge, otherPaths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect((await listOpenIssues(LABEL_FINDING)).map((issue) => issue.number)).toEqual([1])
     expect((await forge.getIssue(2)).state).toBe('closed')
@@ -624,7 +624,7 @@ describe('publishFinding', () => {
       labels: [LABEL_FINDING, LABEL_READY],
     })
 
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect((await forge.getIssue(combined.issueNumber)).state).toBe('open')
     expect((await forge.getIssue(individual)).state).toBe('closed')
@@ -653,7 +653,8 @@ describe('publishFinding', () => {
       return getIssue(issueNumber)
     }
 
-    await expect(reconcileFindingFingerprints(forge, paths))
+    const openFindings = await forge.listOpenIssues(LABEL_FINDING)
+    await expect(reconcileFindingFingerprints(forge, paths, openFindings))
       .rejects.toThrow('subsumed issue re-read unavailable')
   })
 
@@ -674,7 +675,7 @@ describe('publishFinding', () => {
       labels: [LABEL_FINDING, LABEL_READY],
     })
 
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
     expect((await forge.getIssue(second)).state).toBe('open')
@@ -707,7 +708,7 @@ describe('publishFinding', () => {
     recordIssuePromotions(paths, 'task-first-fix', 'a'.repeat(40), 'chore/run-branch')
 
     const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-2')
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect(second.outcome).toBe('created')
     expect(second.issueNumber).not.toBe(first.issueNumber)
@@ -739,7 +740,7 @@ describe('publishFinding', () => {
     const second = await publishFinding(
       forge, paths, '[SECURITY] Different wording for GHSA-QWWW-VCR4-C8H2', 'scan-2',
     )
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
     expect(forge.issues.size).toBe(1)
@@ -2219,6 +2220,21 @@ describe('reapStaleLeases', () => {
     expect(issueNumberForTask(paths, 'task-merged')).toBeUndefined()
   })
 
+  it('removes persisted merge metadata once the promoted issue is deleted', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'deleted', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-deleted', [issueNumber])
+    recordIssuePromotions(paths, 'task-deleted', 'abc123', 'feature/run-9')
+    forge.issues.delete(issueNumber)
+
+    await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
+
+    expect(readdirSync(join(paths.queueDir, 'issue-promotion'))).toEqual([])
+    expect(issueNumberForTask(paths, 'task-deleted')).toBeUndefined()
+  })
+
   it('keeps a grouped task map until every promoted issue has closed', async () => {
     const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
       title: `merged group ${index}`,
@@ -2531,5 +2547,19 @@ describe('closePromotedIssues', () => {
     expect((await forge.getIssue(contained)).state).toBe('closed')
     expect((await forge.getIssue(later)).state).toBe('open')
     expect(forge.prStatusRefs).toEqual([{ kind: 'branch', value: 'run/merged' }])
+  })
+
+  it('drops the record of a deleted issue and still closes the promotions after it', async () => {
+    const deleted = await promotedIssue('task-deleted', 'a'.repeat(40), 'run/merged')
+    const closable = await promotedIssue('task-closable', 'c'.repeat(40), 'run/merged')
+    forge.issues.delete(deleted)
+    forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual([closable])
+    expect((await forge.getIssue(closable)).state).toBe('closed')
+    expect(issuePromotionForIssue(paths, deleted)).toBeUndefined()
+    expect(issueNumbersForTask(paths, 'task-deleted')).toEqual([])
+    expect(issuePromotionForIssue(paths, closable)?.taskId).toBe('task-closable')
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual([closable])
   })
 })

@@ -27,7 +27,8 @@ from or equivalent to `orchestration/tests/*.sh`.
 - No `jq` dependency anywhere (this deletes the Windows-jq-CRLF bug class; the invariant
   it protected — values read from status files compare clean — still holds and is tested).
 - Core subtree updates default on. The daemon logs whether `CORE_AUTO_UPDATE` is on or
-  off at startup; `false` skips the pre-cycle check entirely. `UPSTREAM_REMOTE` defaults
+  off at startup; `false` skips the pre-cycle check entirely, including the shared skill
+  sync, so rendered skills stay as they were after a manual subtree pull. `UPSTREAM_REMOTE` defaults
   to the package's `upstreamRepo` value and selects the remote to fetch and subtree-pull;
   `UPSTREAM_BRANCH` defaults to `main`. Separately, `UPSTREAM_REPO` overrides the
   package's `upstreamRepo` value as the GitHub repository where `report-upstream` files
@@ -42,10 +43,11 @@ from or equivalent to `orchestration/tests/*.sh`.
   is invoked by the generated Git hook rather than exposed as a package script. The skills
   (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
   the npm form as part of the cutover. A background launch prints status and stop
-  commands for the package's actual location: direct `npm run` commands at the repository
-  root, or `npm run -C <package-path>` when installed as a subtree. It prints those
-  commands only after the child has acquired the PID lock and completed initialization;
-  a child startup error is returned to the launcher instead. What stays frozen:
+  commands that run from any directory: `npm run -C <absolute package root> <script> --`
+  followed by `--repo <repository root>`, or by `--fleet <fleet dir> --project <name>` when
+  the project was selected from a fleet. It prints those commands only after the child
+  has acquired the PID lock and completed initialization; a child startup error is
+  returned to the launcher instead. What stays frozen:
   the environment variable names (they pass through npm unchanged, so launch commands
   keep their shape) and the
   output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -59,11 +61,12 @@ from or equivalent to `orchestration/tests/*.sh`.
   marker as an exact standalone line, while a background loop writes that exact line to
   `logs/loop-markers.log`. The corresponding result is represented separately by an
   aligned display event in `loop.log`.
-- Every command accepts a global `--repo <path>` option. When present, Git resolves the
+- Every command except `install-skills`, whose own item below states its single option,
+  accepts a global `--repo <path>` option. When present, Git resolves the
   named path to its repository root and the CLI verifies both that it is a Git repository
   and that its root contains an `orchestration/` directory before dispatch. Without the
-  option, repository discovery from the working directory is unchanged. All commands
-  accept one repository; `loop-status` additionally accepts repeated `--repo` options.
+  option, repository discovery from the working directory is unchanged. Each of those
+  commands accepts one repository; `loop-status` additionally accepts repeated `--repo` options.
   For two or more repositories it emits one line per repository naming the root, loop
   running state, recorded run branch, queued count, and in-flight count. Its existing
   detailed output is unchanged for a single repository. Paths are supplied per command;
@@ -73,7 +76,8 @@ from or equivalent to `orchestration/tests/*.sh`.
   Its tracked `fleet.json` declares each project as a lowercase slug with the forge
   `owner/repository` its branches go to, and its untracked `fleet.local.json` maps each
   project to this machine's checkout; a relative path resolves from the fleet. Every
-  command accepts `--fleet <dir>` and `--project <name>`; without `--fleet`, the nearest
+  command accepts `--fleet <dir>`, and every command except `install-skills` accepts
+  `--project <name>`; without `--fleet`, the nearest
   directory at or above the working directory that holds `fleet.json` is the fleet. A
   fleet project keeps its adapter, templates, `accepted-limits.md`, and `config.json`
   under `projects/<name>/`, in the layout `orchestration/` uses, and its tasks,
@@ -82,7 +86,7 @@ from or equivalent to `orchestration/tests/*.sh`.
   or a mapped path that is not a Git repository. `loop-status` with a fleet and no
   project prints one line per declared project in the multi-repository format; a project
   this machine cannot resolve prints the reason instead and makes the command exit
-  non-zero. Every other command requires `--project`. Commands the CLI prints for a fleet
+  non-zero. Every other command except `install-skills` requires `--project`. Commands the CLI prints for a fleet
   project, and the daemon and worker launches it makes, name the fleet and project again
   instead of the repository. `init` and `verify-setup` for a fleet project configure no
   hooks in the target repository and report them as skipped. When `fleet.json` names an
@@ -104,6 +108,7 @@ from or equivalent to `orchestration/tests/*.sh`.
   `Conflict:` and left unchanged, and any conflict or failure exits non-zero. Installed
   skills carry no project guidance fragment. Without `--fleet`, the fleet is
   `ORCHESTRATION_FLEET` or the nearest `fleet.json` at or above the caller's directory.
+  It accepts neither `--repo` nor `--project`; either one fails before installing.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
@@ -227,7 +232,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
    only after verifying that the task process stopped, the worktree directory and Git
    registration were removed (on Windows, after terminating the tree of every live process
    whose command line or executable path names the worktree, as item 25 describes), and the task branch was deleted; a failed cleanup returns
-   non-zero and retains the task state for a safe retry. In issue-queue mode, a successful
+   non-zero and retains the task state for a safe retry. Operator cleanup of a scan whose
+   yield the current cycle still expects records it in `queue/failed-<cycle>`, as a failed
+   scan is counted, so the cycle can still close. In issue-queue mode, a successful
    operator cleanup also returns linked issues to `loop:ready` and removes their local
    task mapping. A forge failure is warned about without undoing the local cleanup; the
    cleanup leaves a durable release intent and retains the task mapping until the daemon
@@ -347,6 +354,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     from a failing test.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
+    The same merge clears the cycle's resume flag, which records that the gate has
+    passed; otherwise a merge landing after the gate passed would reach promotion without
+    the suite, CI, or review seeing its commits. A locally merged inspection task — a
+    scan, a review, or a task queued for inspection — leaves both flags in place.
 11a. After a local or remote task merge, a first-parent change to this package's
     `package.json` or `package-lock.json` runs `npm ci --no-audit --no-fund` in the
     package root. A successful install records the lockfile hash under `node_modules`.
@@ -446,9 +457,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     At the same boundary, the package manifest's skills are rendered into every
     directory selected by an agent adapter. The runner supplies its target, and the
     project adapter supplies targets for additional interactive agents. The Codex adapter
-    renders into repository root `.agents/skills/`; this repository's project adapter
-    selects the Claude adapter, which renders into `.claude/skills/` and resolves only the
-    command prefix because the canonical sources already use that agent's format. Both use
+    renders into repository root `.agents/skills/`; the Claude adapter renders into
+    `.claude/skills/` and resolves only the command prefix because the canonical sources
+    already use that agent's format. The sync runs only for the repository that owns the
+    package and for a subtree consumer. A fleet project runs the package from outside its
+    checkout, so the sync is skipped and its skills come from `install-skills`.
+    Both use
     `npm run` as the command prefix in the owning repository and
     `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
     served once. The renderer supplies one named
@@ -466,9 +480,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     In a subtree consumer, before writing any destination, the sync verifies that every
     managed destination has no staged changes. An unverifiable or non-clean managed index
     is fatal and stops the cycle before any destination is served. A destination rendering
-    failure is reported without costing the others theirs. The sync then stages all managed
-    updates and removals and commits them as one scoped commit; a staging, inspection, or
-    commit failure is fatal and stops the cycle before task dispatch, retaining any staged
+    failure is fatal: the remaining destinations are still written, but the cycle stops
+    before task dispatch and nothing is staged or committed. Otherwise the sync stages all
+    managed updates and removals and commits them as one scoped commit; a staging,
+    inspection, or commit failure is fatal and stops the cycle before task dispatch, retaining any staged
     output for diagnosis.
     Shared canonical sources do not live below a runner skill directory, so a subtree
     exposes no nested duplicate of a shared skill.
@@ -504,13 +519,16 @@ are not parsed by `loadConfig` and are not operator-file settings.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
-    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. A PR with
+    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. An open
+    PR whose reported head commit is not the local `HEAD` is pending, whatever its
+    checks say, because the forge can still report the previous head after a push. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
     explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
     the pending ID remains while the attempt count and cycle-complete flag remain
     unchanged; the next poll regenerates and retries the task with that same ID. An
-    enqueue failure repeating with no enqueue succeeding in between stops the loop, so a
+    enqueue failure repeating with neither an enqueue succeeding nor the CI gate passing
+    in between stops the loop, so a
     queue that never accepts the fix cannot leave the loop polling a failing PR with
     nothing queued and the attempt cap out of reach. A successful enqueue records the
     attempt, clears the cycle-complete flag, and removes the pending-ID file. Session
@@ -531,7 +549,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     placeholders to retain both protections.
     findings come back as `NEXT_TASK` lines that become fix tasks and clear the cycle
     flag (the gate re-verifies before the next round reads the corrected diff). A clean
-    round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle.
+    round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle. An ordinary
+    cycle that still has findings at that bound logs a warning and resumes. A review
+    that ends failed, or in an unknown state, without a verdict says nothing about the
+    diff: the loop logs a warning and retries it within the same bound, and if the
+    bound is already exhausted it stops the loop (`Stopped Loop review-cap`) rather
+    than resume on a review that never produced a verdict.
     `REVIEW_EVERY_N_CYCLES` skips review on off-cycles (the next reviewed cycle still
     reads their work). When automatic review is enabled, the final cycle is always
     reviewed, and its rounds continue until one is clean, bounded by
@@ -545,7 +568,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     removes any remaining pending-ID file.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
-    unless it is already open and ready. A PR found merged before promotion, or merged
+    unless it is already open and ready. While an open PR reports a head commit other
+    than the local `HEAD`, the loop neither promotes it nor emits `LOOP_DONE`, and
+    retries on the next poll. A PR found merged before promotion, or merged
     while the ready operation is being confirmed, is also a successful terminal state;
     both paths emit the normal completion records without another ready operation.
     A PR found closed before or during promotion is not success: the first observation
@@ -634,9 +659,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     A shell whose runner exited first is outside that tree, so on Windows every removal of
     a task worktree (stop recovery, merge, and `cleanup`) first terminates the tree of each
     live process whose command line or executable path contains the worktree's absolute
-    path, compared case-insensitively in either slash direction. A process that survives
-    keeps holding the worktree: its removal fails and the task state is retained. Other
-    platforms stop the runner's detached process group and do nothing further.
+    path, compared case-insensitively in either slash direction. Each holder whose tree
+    is terminated is logged once, with its PID, executable name, and the worktree path, in
+    the log of the removal: the merge output, `cleanup`, or the loop log. A process that
+    survives keeps holding the worktree: its removal fails and the task state is retained.
+    Other platforms stop the runner's detached process group and do nothing further.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
     the intentional termination as a missing scan yield.
@@ -684,6 +711,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     listing, and comments; assignment and label mutation; direct closure; and merge
     message decoration for forge-driven closure. Fingerprint deduplication, claim
     arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
+    Every forge also provides issue retitling: `updateIssueTitle(issueNumber, title)`
+    replaces an issue's title, and project bridges use it rather than the loop core.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`; any other selector
     resolves like an external forge module, including the required `./` or `../` prefix
@@ -811,10 +840,13 @@ so authorship and verified ancestry must both hold.
     merges because the same advisory recurs with different prose. Pre-granularity open
     issue bodies are interpreted from their requirement text, and their coarse local
     ledger entry is replaced when encountered, avoiding a one-time duplicate round.
-34. Before claiming, worker daemons group ready findings whose titles name the same first
-    path, using the same primary-path convention as fingerprinting. A group contains at
-    most four issues; another batch remains ready for the next claim. Titles without a
-    path stay singleton tasks. Every grouped requirement appears separately in the task
+34. Before claiming, worker daemons group ready findings that share a task origin (scan
+    `auto` or review `fix`), a mode (inspection or implementation), and the first path
+    their titles name, using the same primary-path convention as fingerprinting; a
+    grouped task has one identifier and one mode, so findings differing in either never
+    share it. A group contains at most four issues; another batch remains ready for the
+    next claim. Titles without a path and issues labelled `loop:group-singleton` stay
+    singleton tasks. Every grouped requirement appears separately in the task
     specification and requires an exact `REQUIREMENT_COMPLETE: #N` final-response marker.
     The worker refuses to publish or merge the task until all linked issues have markers,
     so partial implementation cannot close an unaddressed finding. A grouped task that
@@ -850,7 +882,10 @@ so authorship and verified ancestry must both hold.
     `PROMOTED: <task-id>` comment naming the merge commit, run branch, and pull request,
     and logs a `Promoted` event; a merge commit the head does not contain stays open for
     a later run. A failure to close is warned about and retried on the next poll without
-    holding back that poll's claims. Workers never close promoted issues. Immediately after merging, the worker comments on every linked issue with the
+    holding back that poll's claims. A promoted issue the forge reports as deleted is no
+    longer awaited: its promotion record is dropped, along with the task's issue map once no
+    promotion of that task remains, and the promotions after it still close. Workers never
+    close promoted issues. Immediately after merging, the worker comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
@@ -899,6 +934,14 @@ so authorship and verified ancestry must both hold.
     neither an inspection nor a no-change verdict — becomes failed with the reason in its
     task log, so its issues take the counted release of item 19a rather than lapsing into
     a reclaim of the same task.
+    A completed task keeps heartbeating its issues, and keeps them out of the stale-lease
+    reaper, until its publication succeeds. Immediately before reporting, the worker re-reads
+    each issue: one that is no longer open and `loop:in-progress` without `loop:ready`, and
+    that does not already carry `loop:merge-ready` with this task's branch and head, is
+    unlinked from the task, which becomes failed without releasing or counting that issue.
+    Any other publication error, such as a rejected push or a failed comment or label
+    change, is retried on later polls; the fifth consecutive failure marks the task failed
+    with the reason in its task log. Rate-limit errors are not counted.
     Its poll status uses the shared
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix

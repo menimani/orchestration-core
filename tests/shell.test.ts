@@ -2,12 +2,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/adapters/windows-process.ts'
+import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
+import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
-} from '../src/restart.ts'
-import {
-  LOOP_STARTUP_RESULT_FILE_ENV, projectCommandEnvironment,
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV, LOOP_STARTUP_RESULT_FILE_ENV,
+  projectCommandEnvironment, WINDOWS_PROCESS_ROOT_PID_ENV,
 } from '../src/internalEnvironment.ts'
 import { execShellSync } from '../src/shell.ts'
 
@@ -24,7 +23,7 @@ describe('project command environment', () => {
       [LOOP_STARTUP_RESULT_FILE_ENV]: 'private',
       orchestration_loop_restart_ready_file: 'public-lowercase',
       Orchestration_Loop_Restart_Predecessor_Pid: 'public-mixed-case',
-    }, 'linux')).toEqual({
+    }, createPosixOperatingSystem())).toEqual({
       orchestration_loop_restart_ready_file: 'public-lowercase',
       Orchestration_Loop_Restart_Predecessor_Pid: 'public-mixed-case',
     })
@@ -36,7 +35,7 @@ describe('project command environment', () => {
       orchestration_loop_startup_result_file: 'private-lowercase',
       Orchestration_Loop_Restart_Predecessor_Pid: 'private-mixed-case',
       PROJECT_SETTING: 'public',
-    }, 'win32')).toEqual({ PROJECT_SETTING: 'public' })
+    }, createWindowsOperatingSystem())).toEqual({ PROJECT_SETTING: 'public' })
   })
 
   it('keeps public settings while hiding private process-tree and restart markers', () => {

@@ -3,9 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
-import {
-  startWindowsProcess, WINDOWS_PROCESS_ROOT_PID_ENV,
-} from '../src/adapters/windows-process.ts'
+import { startWindowsProcess } from '../src/adapters/windows-process.ts'
+import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/internalEnvironment.ts'
 import { PROCESS_TEST_TIMEOUT_MS } from './testProcess.ts'
 
 // Windows console and window behaviour is what this asserts, so there is nothing for

@@ -79,7 +79,7 @@ describe('English-only source check', () => {
     expect(main(root)).toBe(0)
   })
 
-  it('ignores checkouts kept by the loop and by Claude Code session worktrees', () => {
+  it('ignores only the checkouts kept by the loop and by Claude Code session worktrees', () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-english-only-'))
     fixtures.push(root)
     writeFileSync(join(root, 'source.ts'), 'export const value = 1\n')
@@ -91,8 +91,29 @@ describe('English-only source check', () => {
       mkdirSync(source, { recursive: true })
       writeFileSync(join(source, 'fixture.test.ts'), `export const greeting = "${characters(0x65e5, 0x672c, 0x8a9e)}"\n`)
     }
+    const output = vi.spyOn(console, 'log').mockImplementation(() => undefined)
 
     expect(main(root)).toBe(0)
+    expect(output.mock.calls).toEqual([['All core sources are English.']])
+
+    const siblings = ['logs', 'queue', 'status', 'tasks']
+    for (const sibling of siblings) {
+      const source = join(root, 'orchestration', sibling)
+      mkdirSync(source, { recursive: true })
+      writeFileSync(join(source, 'fixture.md'), `${characters(0x65e5, 0x672c, 0x8a9e)}\n`)
+    }
+    output.mockClear()
+
+    expect(main(root)).toBe(1)
+    const lines = output.mock.calls.map(([line]) => String(line))
+    // Directory listing order differs between file systems, so compare each report
+    // (location and excerpt) as a unit, sorted.
+    const reports = Array.from({ length: (lines.length - 1) / 2 }, (_, index) =>
+      lines.slice(index * 2, index * 2 + 2).join('\n')).sort()
+    expect(reports).toEqual(siblings.map((sibling) =>
+      `orchestration/${sibling}/fixture.md:1: U+65E5 U+672C U+8A9E\n    ${characters(0x65e5, 0x672c, 0x8a9e)}`))
+    expect(lines.at(-1)).toBe('4 lines')
+    output.mockRestore()
   })
 
   it('checks a worktrees directory that is not a runtime checkout location', () => {

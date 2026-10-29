@@ -6,10 +6,11 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import {
-  createOperatingSystem as createWindowsOperatingSystem, worktreeProcessPids, type WindowsProcess,
+  createOperatingSystem as createWindowsOperatingSystem, type WindowsProcess,
 } from '../src/adapters/os-windows.ts'
 import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/internalEnvironment.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
+import { formatEventLine } from '../src/loop.ts'
 
 describe('operating-system adapters', () => {
   it('returns a stable start identity for the current process', () => {
@@ -165,22 +166,52 @@ describe('operating-system adapters', () => {
       { pid: process.pid, commandLine: `node ${worktree}\\src\\cli.ts cleanup`, executablePath: null },
     ]
 
-    expect(worktreeProcessPids(processes, worktree)).toEqual([101, 102, 103])
-    expect(worktreeProcessPids(processes, `\\\\?\\${worktree}\\`)).toEqual([101, 102, 103])
+    const taskkillsFor = (path: string) => {
+      const alive = new Set(processes.map(({ pid }) => pid))
+      const spawn = vi.fn((_command: string, args: readonly string[]) => {
+        alive.delete(Number(args[1]))
+      })
+      const os = createWindowsOperatingSystem({
+        spawn,
+        listProcesses: () => processes.map(({ pid }) => ({ pid, parentPid: 1 })),
+        listProcessCommands: () => processes,
+        probeProcess: (pid) => {
+          if (alive.has(pid)) return
+          const error = new Error('gone') as NodeJS.ErrnoException
+          error.code = 'ESRCH'
+          throw error
+        },
+        remove: () => {},
+        now: () => 0,
+        sleep: () => {},
+      })
+      os.terminateWorktreeProcesses(path, () => {})
+      return spawn.mock.calls
+    }
+    const expected = [101, 102, 103].map((pid) => ['taskkill', ['/PID', `${pid}`, '/T', '/F']])
+
+    expect(taskkillsFor(worktree)).toEqual(expected)
+    expect(taskkillsFor(`\\\\?\\${worktree}\\`)).toEqual(expected)
   })
 
-  it('terminates each Windows process tree holding a worktree and tolerates a survivor', () => {
+  it('terminates and reports each Windows process tree holding a worktree and tolerates a survivor', () => {
     let now = 0
-    const alive = new Set([201, 202])
+    const alive = new Set([201, 202, 204])
     const spawn = vi.fn((_command: string, args: readonly string[]) => {
       // 202 ignores taskkill, as a process the account cannot stop would.
-      if (args[1] === '201') alive.delete(201)
+      if (args[1] === '201') {
+        alive.delete(201)
+        alive.delete(204)
+      }
     })
     const os = createWindowsOperatingSystem({
       spawn,
-      listProcesses: () => [{ pid: 201, parentPid: 1 }, { pid: 202, parentPid: 1 }],
+      listProcesses: () => [
+        { pid: 201, parentPid: 1 }, { pid: 202, parentPid: 1 }, { pid: 204, parentPid: 201 },
+      ],
       listProcessCommands: () => [
-        { pid: 201, commandLine: 'bash.exe -c "cd C:/Fleet/worktrees/task-2"', executablePath: null },
+        { pid: 201, name: 'bash.exe', commandLine: 'bash.exe -c "cd C:/Fleet/worktrees/task-2"', executablePath: 'C:\\Git\\bin\\bash.exe' },
+        { pid: 204, commandLine: 'node C:\\Fleet\\worktrees\\task-2\\run.mjs', executablePath: 'C:\\Program Files\\nodejs\\node.exe' },
         { pid: 202, commandLine: 'cmd.exe /c mvn test -f C:\\Fleet\\worktrees\\task-2\\pom.xml', executablePath: null },
         { pid: 203, commandLine: 'node C:\\Fleet\\worktrees\\task-2\\run.mjs', executablePath: null },
       ],
@@ -195,12 +226,40 @@ describe('operating-system adapters', () => {
       sleep: (milliseconds) => { now += milliseconds },
     })
 
-    expect(() => os.terminateWorktreeProcesses('C:\\Fleet\\worktrees\\task-2')).not.toThrow()
+    const worktree = 'C:\\Fleet\\worktrees\\task-2'
+    const report = vi.fn()
+
+    expect(() => os.terminateWorktreeProcesses(worktree, report)).not.toThrow()
 
     expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '201', '/T', '/F'])
     expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '202', '/T', '/F'])
-    // 203 had already exited, so there was nothing to terminate.
+    // 204 ended with the tree of 201, and 203 had already exited.
     expect(spawn).toHaveBeenCalledTimes(2)
+    // Only the tree that stopped is reported, once; the survivor is left to the removal.
+    expect(report.mock.calls).toEqual([
+      [formatEventLine('Stopped', 'PID 201', `bash.exe holding worktree ${worktree}`)],
+    ])
+  })
+
+  it('reports nothing when no Windows process holds the worktree', () => {
+    const spawn = vi.fn()
+    const os = createWindowsOperatingSystem({
+      spawn,
+      listProcesses: () => [{ pid: 211, parentPid: 1 }],
+      listProcessCommands: () => [
+        { pid: 211, name: 'node.exe', commandLine: 'node C:\\Fleet\\worktrees\\task-20\\run.mjs', executablePath: null },
+      ],
+      probeProcess: () => {},
+      remove: () => {},
+      now: () => 0,
+      sleep: () => {},
+    })
+    const report = vi.fn()
+
+    os.terminateWorktreeProcesses('C:\\Fleet\\worktrees\\task-2', report)
+
+    expect(spawn).not.toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
   })
 
   function processTreeOs(
@@ -287,9 +346,12 @@ describe('operating-system adapters', () => {
       now: Date.now, sleep: () => {}, groupHasRunningMember: () => true,
     })
 
-    os.terminateWorktreeProcesses('/fleet/worktrees/task-3')
+    const report = vi.fn()
+
+    os.terminateWorktreeProcesses('/fleet/worktrees/task-3', report)
 
     expect(signalProcessGroup).not.toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
   })
 
   it('uses case-insensitive worktree comparison keys on Windows', () => {

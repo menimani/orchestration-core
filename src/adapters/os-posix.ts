@@ -188,5 +188,6 @@ export function createOperatingSystem(
         holderHint: `Find holder: lsof +D -- ${quoted}`,
       }
     },
+    environmentNameKey: (name) => name,
   }
 }

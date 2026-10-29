@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
+import { operatingSystem } from './adapters/os.ts'
 import type { FleetLocation } from './paths.ts'
 
 // A fleet is a separate checkout that holds what each target repository would otherwise
@@ -9,7 +10,7 @@ import type { FleetLocation } from './paths.ts'
 // because the same fleet is cloned on every machine that runs a worker.
 
 export const FLEET_FILE = 'fleet.json'
-export const FLEET_LOCAL_FILE = 'fleet.local.json'
+const FLEET_LOCAL_FILE = 'fleet.local.json'
 
 const projectName = z.string().regex(/^[a-z0-9][a-z0-9-]*$/)
 
@@ -98,7 +99,7 @@ function comparablePath(path: string): string {
   } catch {
     // A path that does not exist yet still compares by its resolved spelling.
   }
-  return process.platform === 'win32' ? canonical.toLowerCase() : canonical
+  return operatingSystem.worktreePathFor(canonical).comparisonKey
 }
 
 /**

@@ -4,9 +4,10 @@ import { dirname, join } from 'node:path'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  processTreeRootPid, quoteWindowsArgument, startWindowsProcess,
-  WINDOWS_PROCESS_ROOT_PID_ENV, type WindowsProcessRuntime,
+  cmdArgumentLine, processTreeRootPid, quoteWindowsArgument, startWindowsProcess,
+  type WindowsProcessRuntime,
 } from '../src/adapters/windows-process.ts'
+import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/internalEnvironment.ts'
 
 // These are pure functions describing Windows conventions, so every platform runs them.
 // The process-launching assertions that only Windows can make live in
@@ -19,6 +20,19 @@ describe('Windows process arguments', () => {
     expect(quoteWindowsArgument('two words')).toBe('"two words"')
     expect(quoteWindowsArgument('C:\\path with space\\')).toBe('"C:\\path with space\\\\"')
     expect(quoteWindowsArgument('say "hello"')).toBe('"say \\"hello\\""')
+  })
+
+  it('quotes and caret-escapes every argument so cmd.exe reads none as syntax', () => {
+    expect(cmdArgumentLine('codex', [
+      '--output-last-message', 'C:\\Users\\AT&T\\final.txt',
+    ])).toBe('/d /v:off /s /c "codex ^"--output-last-message^" ^"C:\\Users\\AT^&T\\final.txt^""')
+    expect(cmdArgumentLine('claude', ['--model', '50%^|x', 'C:\\dir\\', '']))
+      .toBe('/d /v:off /s /c "claude ^"--model^" ^"50^%^^^|x^" ^"C:\\dir\\\\^" ^"^""')
+  })
+
+  it('refuses an argument that cmd.exe cannot pass through literally', () => {
+    expect(() => cmdArgumentLine('codex', ['say "hello"'])).toThrow('quote or line break')
+    expect(() => cmdArgumentLine('codex', ['two\nlines'])).toThrow('quote or line break')
   })
 
   it('uses the wrapper PID only when it is a valid positive integer', () => {
