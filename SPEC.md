@@ -10,6 +10,14 @@ comments and other items cite items by number, so a number is never reused.
 - TypeScript executed natively by Node >= 23.6 (type stripping): no build step, no
   `enum`/`namespace`/parameter properties or other non-erasable syntax.
 - `tsc --noEmit` joins the repository checks; vitest runs the test suite.
+- `npm test` runs the suite under a test lock in the Git common directory, so every
+  worktree of a checkout runs it one at a time, in arrival order. A waiter gives up after
+  `ORCHESTRATION_TEST_LOCK_TIMEOUT_MS` milliseconds: 15 minutes when the variable is unset
+  or not a positive integer, and otherwise the configured value as given, above the
+  default as well as below it. Giving up prints
+  `Timed out after <ms>ms waiting for the repository test lock. Lock owner: <owner>.`
+  and exits with status 75 (EX_TEMPFAIL), never 1, so a caller can tell a suite that
+  never ran from one that failed.
 - Before a foreground loop enters its first cycle, or a background launcher spawns its
   daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
   runner models and reasoning efforts, and every setting whose resolved value differs
@@ -343,6 +351,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     task's runner cannot be verified yet (item 8) is no failure of the work: it leaves
     this count and the task's own failure count alone, so a runner tree that lingers for
     a few minutes cannot stop the loop and terminate the tasks still running under it.
+    Likewise a gate command that exits 75, the status a test lock wait timeout exits with
+    (see Runtime), never ran its tests: unless another check of the same gate genuinely
+    failed, the merge is deferred with a WARN that the repository test lock stayed busy,
+    the task stays `completed` for the next poll to merge again, and this count does not
+    advance. Every other non-zero exit is still `Tests failed. Aborting merge.`
     A conflicting pre-merge rebase is terminal for that task and contributes at most one
     failure to this count; ordinary
     gate failures remain retryable. Re-claiming completed-but-unmerged work

@@ -91,6 +91,21 @@ export class UnverifiedRunnerError extends MergeError {
   }
 }
 
+/**
+ * The exit status a test command uses when it never ran because a lock shared with other
+ * worktrees stayed busy: EX_TEMPFAIL, as `scripts/run-tests.mjs` exits on its lock wait
+ * timeout.
+ */
+export const TEST_LOCK_BUSY_EXIT_CODE = 75
+
+/**
+ * The gate's tests never ran because the repository test lock stayed busy. Nothing is
+ * known about the work, so this is a deferral like UnverifiedRunnerError: the task stays
+ * completed and a later poll runs the gate again, without advancing the
+ * consecutive-merge-failure guard over a queue that was merely long.
+ */
+export class TestLockBusyError extends MergeError {}
+
 export interface MergeRuntime {
   git: (cwd: string, args: string[]) => string
 }
@@ -348,8 +363,17 @@ export function syncOrchestrationDepsAtStartup(
 interface MergeIo {
   out: (text: string) => void
   run: (cwd: string, command: string) => void
-  tryRun: (cwd: string, command: string, label: string) => boolean
+  tryRun: (cwd: string, command: string, label: string) => CheckOutcome
 }
+
+type CheckOutcome = 'passed' | 'failed' | 'lock-busy'
+
+function testLockStayedBusy(error: unknown): boolean {
+  return (error as { status?: unknown }).status === TEST_LOCK_BUSY_EXIT_CODE
+}
+
+const testLockBusyMessage =
+  'Tests did not run: the repository test lock stayed busy. Deferring merge.'
 
 const worktreeRemovalRuntime: WorktreeRemovalRuntime = {
   os: operatingSystem,
@@ -606,18 +630,18 @@ function mergeIo(outputFile?: string): MergeIo {
       }
     }
   }
-  const tryRun = (cwd: string, command: string, label: string): boolean => {
+  const tryRun = (cwd: string, command: string, label: string): CheckOutcome => {
     out(`=== ${label}: ${command} ===`)
     try {
       run(cwd, command)
-      return true
+      return 'passed'
     } catch (error) {
       const failed = error as { stdout?: string; stderr?: string }
       if (outputFile !== undefined) {
         appendFileSync(outputFile, `${failed.stdout ?? ''}${failed.stderr ?? ''}`)
       }
       out(`=== ${label} failed: ${describeCommandFailure(error)} ===`)
-      return false
+      return testLockStayedBusy(error) ? 'lock-busy' : 'failed'
     }
   }
   return { out, run, tryRun }
@@ -652,6 +676,7 @@ function runMergeChecks(
       io.run(worktree, options.testCmd)
     } catch (error) {
       io.out(`=== Tests failed: ${describeCommandFailure(error)} ===`)
+      if (testLockStayedBusy(error)) throw new TestLockBusyError(testLockBusyMessage)
       throw new MergeError('Tests failed. Aborting merge.')
     }
     if (options.project.verifyDependencyIsolation === true
@@ -665,21 +690,30 @@ function runMergeChecks(
   const changed = git(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
     .split(/\r?\n/).filter((line) => line !== '')
   let ok = true
+  // A check that only waited out the test lock defers the merge, unless another check
+  // genuinely failed: that failure is known, and deferring would hide it.
+  let lockBusy = false
   for (const check of options.project.mergeChecks(options.taskGate)) {
     if (check.appliesTo !== undefined && !check.appliesTo(changed)) continue
     if (check.requires !== undefined && !existsSync(join(worktree, check.requires))) continue
     if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
     const install = check.installWhenMissing
     if (install !== undefined && !existsSync(join(worktree, install.path))) {
-      ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) && ok
+      ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) === 'passed' && ok
     }
     const directory = join(worktree, check.cwd)
-    const passed = io.tryRun(directory, check.command, check.label)
+    const outcome = io.tryRun(directory, check.command, check.label)
+    if (outcome === 'lock-busy') {
+      lockBusy = true
+      continue
+    }
+    const passed = outcome === 'passed'
     const isolated = options.project.verifyDependencyIsolation !== true
       || (passed && ranIsolated(directory, check.label, io))
     ok = passed && isolated && ok
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
+  if (lockBusy) throw new TestLockBusyError(testLockBusyMessage)
 }
 
 /**
