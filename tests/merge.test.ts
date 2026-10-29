@@ -13,7 +13,7 @@ import { createOperatingSystem as createWindowsOperatingSystem } from '../src/ad
 import {
   completeTaskWithoutChanges, describeCommandFailure, MergeError, MergeRecoveryError,
   mergeRemoteTask, mergeTask, RebaseConflictError, removeMergedWorktree,
-  removeTemporaryWorktree, UnverifiedRunnerError,
+  removeTemporaryWorktree, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError, UnverifiedRunnerError,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
@@ -1041,6 +1041,49 @@ describe('mergeTask', () => {
     })).rejects.toThrow('Tests failed. Aborting merge.')
 
     expect(readFileSync(outputFile, 'utf8')).toContain('=== Tests failed: exit status 2 ===')
+  })
+
+  it('defers rather than fails a merge whose tests waited out the repository test lock', async () => {
+    const taskId = '20260808_000000_091_user-test-lock-busy'
+    await makeCompletedTask(taskId, { commit: true })
+    const head = git(repoRoot, ['rev-parse', 'HEAD'])
+    const outputFile = join(repoRoot, 'test-lock-busy.log')
+
+    const result = mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, outputFile,
+      testCmd: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+    })
+
+    await expect(result).rejects.toBeInstanceOf(TestLockBusyError)
+    await expect(result).rejects.toThrow('the repository test lock stayed busy')
+    expect(readFileSync(outputFile, 'utf8')).toContain('=== Tests failed: exit status 75 ===')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(head)
+  })
+
+  it('defers a check that waited out the test lock only when no other check failed', async () => {
+    const taskId = '20260808_000000_092_user-test-lock-busy-check'
+    await makeCompletedTask(taskId, { commit: true })
+    const lockBusy = {
+      label: 'Locked suite', cwd: '', command: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+    }
+    const deferred: ProjectAdapter = {
+      ...stubProject,
+      name: 'lock-busy-check',
+      mergeChecks: () => [lockBusy, { label: 'Passing check', cwd: '', command: 'node -e "process.exit(0)"' }],
+    }
+    const failing: ProjectAdapter = {
+      ...stubProject,
+      name: 'lock-busy-and-failing-check',
+      mergeChecks: () => [lockBusy, { label: 'Failing check', cwd: '', command: 'node -e "process.exit(1)"' }],
+    }
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: deferred }))
+      .rejects.toBeInstanceOf(TestLockBusyError)
+    const failure = mergeTask(paths, taskId, { taskGate: 'light', project: failing })
+    await expect(failure).rejects.toThrow('Tests failed. Aborting merge.')
+    await expect(failure).rejects.not.toBeInstanceOf(TestLockBusyError)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
   it.each([

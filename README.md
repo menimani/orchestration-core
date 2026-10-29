@@ -259,6 +259,15 @@ paths and run-branch commits it collided with, and a released issue carries the 
 section when this checkout claims it again. Two retries are made at most; the branches
 are deleted once a retry merges.
 
+This repository's `npm test` takes one test lock shared by every worktree of the
+checkout, so task runners and merge gates run the suite one at a time. A waiter gives up
+after 15 minutes by default; `ORCHESTRATION_TEST_LOCK_TIMEOUT_MS` sets another limit in
+milliseconds, above or below that default. A waiter that gives up prints
+`Timed out after <ms>ms waiting for the repository test lock` and exits with status 75.
+A merge gate whose test command exits 75 never ran its tests, so the merge is deferred
+with a WARN rather than failed: the task stays completed, the next poll runs the gate
+again, and the consecutive-merge-failure count does not move.
+
 A stopped daemon retains both branch identities and the daemon commit. Restarting is a
 resume of the same run: integration commits made while it was down remain available to
 later tasks, but a changed daemon branch or commit is rejected instead of silently

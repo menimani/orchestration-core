@@ -17,7 +17,7 @@ import {
 } from './ids.ts'
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
-  NoChangeReconciliationError, RebaseConflictError, UnverifiedRunnerError,
+  NoChangeReconciliationError, RebaseConflictError, TestLockBusyError, UnverifiedRunnerError,
   OrchestrationDepsInstallError,
   type OrchestrationDepsRuntime,
 } from './merge.ts'
@@ -2552,6 +2552,14 @@ export function createLoop(deps: LoopDeps) {
           warning(`unverified-runner-${taskId}`, `merging ${shortTaskId(taskId)}`,
             `${shortTaskId(taskId)} merge deferred: completed runner ${error.pid} `
             + 'cannot be verified yet')
+          return
+        }
+        // Not a failure either: the gate's tests never ran because other worktrees held
+        // the repository test lock past its wait limit. The task stays completed, so the
+        // next poll runs the gate again.
+        if (error instanceof TestLockBusyError) {
+          appendFileSync(mergeLog, `${error.message}\n`)
+          event('WARN', `${shortTaskId(taskId)} merge gate deferred: the repository test lock stayed busy`)
           return
         }
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)

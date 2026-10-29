@@ -23,7 +23,7 @@ import {
 import { runCleanupCommand } from '../src/cleanupCommand.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
-  pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup,
+  pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup, TEST_LOCK_BUSY_EXIT_CODE,
   type OrchestrationDepsRuntime,
 } from '../src/merge.ts'
 import {
@@ -4628,6 +4628,39 @@ describe('completed task merge recovery', () => {
     expect(spec).toContain('- `src/shared.ts`')
     expect(readConflictedAttempts(paths, taskId)).toEqual([attempt])
     expect(readConflictedAttempts(paths, issueConflictKey(issueNumber))).toEqual([attempt])
+  })
+
+  it('defers a merge gate that waited out the test lock without counting a failure', async () => {
+    const taskId = '20260815_125258_038_auto-test-lock-busy'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const project: ProjectAdapter = {
+      ...stubProject,
+      mergeChecks: () => [{
+        label: 'Locked suite', cwd: '', command: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+      }],
+    }
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    }, project)
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'busy test lock', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    // Each poll runs the gate again rather than giving the task up.
+    expect(logged.filter((line) => line.startsWith('Merging 038_auto'))).toHaveLength(2)
+    expect(logText()).toContain('WARN 038_auto merge gate deferred: the repository test lock stayed busy')
+    expect(logged.some((line) => line.startsWith('Failed 038_auto'))).toBe(false)
   })
 
   it('skips a task whose merge is already active without counting a failure', async () => {

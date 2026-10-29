@@ -11,7 +11,11 @@ const lockName = '.orchestration-test-suite-lock'
 const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
 const retryMilliseconds = 250
 const unpublishedOwnerGraceMilliseconds = 30_000
-const maximumWaitMilliseconds = 15 * 60_000
+const defaultMaximumWaitMilliseconds = 15 * 60_000
+// EX_TEMPFAIL: the suite never ran because the repository lock stayed busy. The merge
+// gate defers on this status instead of reporting a test failure; src/merge.ts holds the
+// same value as TEST_LOCK_BUSY_EXIT_CODE.
+const lockTimeoutExitCode = 75
 const windowsParentPollMilliseconds = 50
 
 function commonGitDirectory() {
@@ -31,6 +35,8 @@ const ownerFile = join(lockDirectory, 'owner.json')
 const queueDirectory = `${lockDirectory}-queue`
 const ticketName = `${String(Date.now()).padStart(13, '0')}-${token}.json`
 const ticketFile = join(queueDirectory, ticketName)
+
+class TestLockTimeoutError extends Error {}
 
 function processIsAlive(pid) {
   try {
@@ -237,8 +243,8 @@ async function acquireLock(cancellationSignal) {
   const waitStartedAt = performance.now()
   const configuredMaximumWait = Number(process.env.ORCHESTRATION_TEST_LOCK_TIMEOUT_MS)
   const waitLimit = Number.isSafeInteger(configuredMaximumWait) && configuredMaximumWait > 0
-    ? Math.min(configuredMaximumWait, maximumWaitMilliseconds)
-    : maximumWaitMilliseconds
+    ? configuredMaximumWait
+    : defaultMaximumWaitMilliseconds
   const identity = processIdentity(process.pid)
   if (identity === null) throw new Error('Unable to determine the test lock process identity.')
   mkdirSync(queueDirectory, { recursive: true })
@@ -278,7 +284,7 @@ async function acquireLock(cancellationSignal) {
       }
       const remainingWait = waitLimit - (performance.now() - waitStartedAt)
       if (remainingWait <= 0) {
-        throw new Error(`Timed out after ${waitLimit}ms waiting for the repository test lock. Lock owner: ${owner.diagnostic}.`)
+        throw new TestLockTimeoutError(`Timed out after ${waitLimit}ms waiting for the repository test lock. Lock owner: ${owner.diagnostic}.`)
       }
       await waitForLockRetry(Math.min(retryMilliseconds, remainingWait), cancellationSignal)
     }
@@ -371,7 +377,12 @@ async function runLockedTestSuite(args, supervisingParentPid) {
     await acquireLock(lockCancellation?.signal)
     cancelIfParentExited?.()
   } catch (error) {
-    if (!lockCancellation?.signal.aborted) throw error
+    if (!lockCancellation?.signal.aborted) {
+      if (!(error instanceof TestLockTimeoutError)) throw error
+      console.error(error.message)
+      process.exitCode = lockTimeoutExitCode
+      return
+    }
     console.error('Test suite stopped because its invoking process exited while waiting for the repository lock.')
     process.exitCode = 1
     return
