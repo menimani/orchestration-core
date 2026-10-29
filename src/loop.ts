@@ -200,6 +200,11 @@ export function createLoop(deps: LoopDeps) {
       return false
     }
   }))
+  // Trees stopped so a merged dependency change can be installed died for the loop's
+  // own reason, not the task's. Like the startup set, they are reported failed and
+  // their issues released, but they count toward neither an issue's retry budget nor
+  // the burst guard.
+  const tasksStoppedForDependencyInstall = new Set<string>()
 
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
@@ -344,6 +349,7 @@ export function createLoop(deps: LoopDeps) {
   function stopTaskProcessesBeforeDependencyInstall(): boolean {
     const result = terminateTaskProcesses()
     for (const task of result.terminated) {
+      tasksStoppedForDependencyInstall.add(task.taskId)
       event('Stopped', shortTaskId(task.taskId),
         `process tree PID ${task.pid} before dependency installation`)
     }
@@ -2675,6 +2681,10 @@ export function createLoop(deps: LoopDeps) {
         : before.status
       if (status === undefined) continue
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
+      // A task can finish between the stop and this refresh; only once it leaves
+      // running is the stop's verdict known, so the mark is kept until then.
+      const wasStoppedByLoop = status !== 'running'
+        && tasksStoppedForDependencyInstall.delete(taskId)
 
       if (status === 'merged' && config.issueQueueEnabled) {
         const mergedStatus = readStatus(paths, taskId)
@@ -2714,7 +2724,7 @@ export function createLoop(deps: LoopDeps) {
       // silence. Say so, once per task, and keep the count for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
-      if (status === 'failed' && !existsSync(failedFlag)) {
+      if (status === 'failed' && !existsSync(failedFlag) && !wasStoppedByLoop) {
         recordIssueFailure(paths, taskId)
       }
       if (failedIssues.length > 0 && remoteOperationsAvailable) {
@@ -2741,7 +2751,7 @@ export function createLoop(deps: LoopDeps) {
           rmSync(join(paths.queueDir, `cycle-complete-${cycleNow}`), { force: true })
         }
         writeFileSync(failedFlag, '')
-        if (!wasDeadAtStartup) burstFailures += 1
+        if (!wasDeadAtStartup && !wasStoppedByLoop) burstFailures += 1
       }
 
       const scannedFlag = join(scannedDir, taskId)

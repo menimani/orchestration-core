@@ -4236,6 +4236,65 @@ describe('completed task merge recovery', () => {
     expect(logged).toContain('Installed orchestration deps  after 033_auto')
   })
 
+  it('does not count task trees stopped for a dependency install as a failure burst', async () => {
+    const taskId = '20260820_181837_036_auto-burst-dependency-installation'
+    makeDependencyChangingTask(taskId)
+    const stoppedIds = [
+      '20260820_181802_037_auto-parallel-worker',
+      '20260820_181803_038_auto-parallel-worker',
+      '20260820_181804_039_auto-parallel-worker',
+    ]
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const install = vi.fn()
+    const loop = makeLoop(
+      {
+        autoMerge: true, issueQueueEnabled: true, scanEnabled: false,
+        maxParallel: 0, maxBurstFailures: 3,
+      },
+      stubProject,
+      { install, packageRoot: repoRoot },
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        // Termination drops each registry entry, as the real stop does.
+        stoppedIds.forEach((stoppedId) => writeRawStatus(stoppedId, 'running', null))
+        return {
+          terminated: stoppedIds.map((stoppedId, index) => ({
+            taskId: stoppedId, pid: 43122 + index,
+          })),
+          failures: [],
+        }
+      },
+    )
+    loop.initializeSessionStateForBranch()
+    stoppedIds.forEach((stoppedId) => writeRawStatus(stoppedId, 'running', process.pid))
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(install).toHaveBeenCalledOnce()
+    // The merge runs after this poll refreshed its tasks; the next poll finds them dead.
+    expect(await loop.poll()).toBe('continue')
+
+    for (const stoppedId of stoppedIds) {
+      expect(readStatus(paths, stoppedId)?.status).toBe('failed')
+    }
+    expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8').trim().split('\n'))
+      .toEqual(stoppedIds)
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    // The exemption is spent once reported: the same tasks failing again count.
+    for (const stoppedId of stoppedIds) {
+      rmSync(join(paths.queueDir, 'scanned', `${stoppedId}.failed`))
+      writeRawStatus(stoppedId, 'running', null)
+    }
+    logged = []
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logText()).toContain('ERROR 3 tasks failed in one poll; stopping for environment repair')
+  })
+
   it('reopens the waiting gate before a failed dependency install stops the loop', async () => {
     const taskId = '20260820_181836_035_auto-gate-dependency-installation'
     makeDependencyChangingTask(taskId)
