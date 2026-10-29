@@ -31,6 +31,7 @@ function scriptedWait(statuses: PrStatus[]): {
     sleeps,
     run: () => waitForCi(forge, 42, {
       timeoutSeconds: 900,
+      expectedHead: 'head',
       now: () => time,
       sleep: async (milliseconds) => {
         sleeps.push(milliseconds)
@@ -130,6 +131,17 @@ describe('CI wait', () => {
     expect(wait.sleeps).toEqual([30_000, 30_000, 30_000])
   })
 
+  it('waits for the PR to report the expected head before returning a verdict', async () => {
+    const checks = status([['test', 'success', '2026-08-09T01:00:00Z']])
+    const stale = { ...status([['test', 'failure', '2026-08-09T00:00:00Z']]), headSha: 'previous' }
+    const unreported = { ...checks, headSha: '' }
+    const wait = scriptedWait([stale, stale, unreported, unreported, checks, checks])
+
+    await expect(wait.run()).resolves.toBe(0)
+    expect(wait.forge.prStatusCalls).toBe(6)
+    expect(wait.output).toEqual(['test: success'])
+  })
+
   it('returns timeout when a verdict does not become ready', async () => {
     const forge = makeFakeForge()
     forge.prStatusValue = status([['test', 'pending', '2026-08-09T01:00:00Z']])
@@ -138,6 +150,7 @@ describe('CI wait', () => {
 
     await expect(waitForCi(forge, 42, {
       timeoutSeconds: 45,
+      expectedHead: 'head',
       now: () => time,
       sleep: async (milliseconds) => {
         sleeps.push(milliseconds)
@@ -160,6 +173,7 @@ describe('CI wait', () => {
 
     await expect(waitForCi(forge, 42, {
       timeoutSeconds: 45,
+      expectedHead: 'head',
       now: () => time,
       sleep: async (milliseconds) => { time += milliseconds },
       print: (line) => output.push(line),
@@ -177,6 +191,7 @@ describe('CI wait', () => {
 
     await expect(waitForCi(forge, 42, {
       timeoutSeconds: 10,
+      expectedHead: 'head',
       now: () => time,
       sleep: async (milliseconds) => {
         sleeps.push(milliseconds)

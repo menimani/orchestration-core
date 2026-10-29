@@ -4,6 +4,9 @@ const POLL_INTERVAL_MS = 30_000
 
 export interface CiWaitOptions {
   timeoutSeconds: number
+  // Right after a push the forge can still report the previous head with finished
+  // checks, so only checks reported for this commit can yield a verdict.
+  expectedHead: string
   now?: () => number
   sleep?: (milliseconds: number) => Promise<void>
   print?: (line: string) => void
@@ -59,7 +62,10 @@ export async function waitForCi(
     const status = await forge.prStatus({ kind: 'number', value: prNumber })
     const checks = newestChecksByName(status.checks)
     const names = checks.map((check) => check.name)
-    const eligible = status.state === 'open' && checks.length > 0
+    const eligible = status.state === 'open'
+      && status.headSha !== ''
+      && status.headSha === options.expectedHead
+      && checks.length > 0
     const ready = eligible
       && sameNames(previousNames, names)
       && checks.every((check) => check.conclusion !== 'pending')

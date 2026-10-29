@@ -283,8 +283,8 @@ records `LOOP_DONE: no changes`, and exits normally.
 `node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
 the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
 head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's
-checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
-and verifies the revision that actually came up.
+checks without believing a partial rollup or a previous head's checks, and `deploy`
+dispatches a deployment workflow and verifies the revision that actually came up.
 
 Every command except `install-skills`, which takes only `--fleet <dir>` (see
 [Running from a fleet](#running-from-a-fleet)), accepts `--repo <path>` to act on that
