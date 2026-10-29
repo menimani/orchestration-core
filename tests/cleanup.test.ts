@@ -417,4 +417,14 @@ describe('cleanupTask', () => {
     expect(execFile).toHaveBeenCalledWith('git', ['worktree', 'list', '--porcelain', '-z'], expect.anything())
     expect(execFile).toHaveBeenCalledWith('git', ['for-each-ref', '--format=%(refname)', 'refs/heads'], expect.anything())
   })
+
+  it('resets the worker publication failure count', () => {
+    seedTask(null)
+    const counter = join(paths.queueDir, 'scanned', `${taskId}.publish-failures`)
+    writeFileSync(counter, '4\n')
+
+    cleanupTask(paths, taskId, makeRuntime())
+
+    expect(existsSync(counter)).toBe(false)
+  })
 })

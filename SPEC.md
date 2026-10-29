@@ -955,7 +955,8 @@ so authorship and verified ancestry must both hold.
     unlinked from the task, which becomes failed without releasing or counting that issue.
     Any other publication error, such as a rejected push or a failed comment or label
     change, is retried on later polls; the fifth consecutive failure marks the task failed
-    with the reason in its task log. Rate-limit errors are not counted.
+    with the reason in its task log. Rate-limit errors are not counted, and operator
+    `cleanup` resets the count, so a re-run of the same task starts afresh.
     Its poll status uses the shared
     `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
     `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
