@@ -1,14 +1,9 @@
-# Orchestration TypeScript rewrite — behavior specification
+# Orchestration core — behavior specification
 
-This is the completion checklist for the big-bang rewrite decided on 2026-08-08. The
-cutover is complete: the TS-driven validation run (run 9) completed and shipped on
-2026-08-08, and the bash implementation was deleted. Every numbered behavior below now
-lives only here and in the vitest suite that pins it.
-
-Every numbered item below is a behavior the bash implementation learned the hard way
-(sources: `orchestration/CLAUDE.md`, `docs/orchestration/*.html`, `bin/*.sh`). The
-rewrite is "built" when every item is implemented and covered by a vitest test ported
-from or equivalent to `orchestration/tests/*.sh`.
+This is the contract for the orchestration core. Every numbered item is a behavior the
+loop learned from a specific failure, and the vitest suite under `tests/` pins each one.
+A behavior change lands with the item that describes it, in the same commit. Source
+comments and other items cite items by number, so a number is never reused.
 
 ## Runtime
 
@@ -35,14 +30,14 @@ from or equivalent to `orchestration/tests/*.sh`.
   the report.
 - The public command surface is the runtime entries in the `scripts` block of the
   package's `package.json` (the repository-root manifest here, or
-  `orchestration/ts/package.json` when installed as a subtree) — `orchestrate.sh` is not
-  kept (decided 2026-08-08; supersedes the frozen-wrapper plan). Those entries map to
+  `orchestration/ts/package.json` when installed as a subtree) — there is no shell
+  wrapper. Those entries map to
   same-name dispatches in the command registry in `src/cli.ts`. The manifest also owns
   the check-only `test`, `test:linux`, and `typecheck` scripts, which are not CLI
   dispatches; the registry additionally owns the hook-only `pre-commit` dispatch, which
   is invoked by the generated Git hook rather than exposed as a package script. The skills
-  (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
-  the npm form as part of the cutover. A background launch prints status and stop
+  (`loop-start`, `loop-stop`, `loop-delegate`) invoke these
+  scripts through the installed package's command prefix. A background launch prints status and stop
   commands that run from any directory: `npm run -C <absolute package root> <script> --`
   followed by `--repo <repository root>`, or by `--fleet <fleet dir> --project <name>` when
   the project was selected from a fleet. It prints those commands only after the child
@@ -116,8 +111,8 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 ### Retained runtime configuration
 
-`loadConfig` keeps the runner-neutral environment-variable surface from the pre-rewrite
-launcher. The operator file is `orchestration/config.json`; its keys are the existing
+`loadConfig` keeps the runner-neutral environment-variable surface that existing launch
+commands use. The operator file is `orchestration/config.json`; its keys are the existing
 uppercase setting names. Resolution order is file, then environment, then the defaults
 below. A missing file therefore preserves the previous behavior and existing launch
 commands remain valid. Use
@@ -691,7 +686,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     report-only work whose merge is not rejected for producing no commits; its
     `NEXT_TASK` findings reach the queue either way.
 
-## Adapter seams (new in the rewrite)
+## Adapter seams
 
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; any other selector loads an external package, file URL, absolute
@@ -790,7 +785,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     any of the three timeouts, an unsuccessful workflow or revision response, and a
     revision mismatch exit non-zero.
 
-## The issue queue (new in the rewrite, opt-in)
+## The issue queue (opt-in)
 
 ### Trust model
 
@@ -1007,12 +1002,10 @@ so authorship and verified ancestry must both hold.
     issues of the project's own repository, the only issue numbers a merge in a fleet with
     a separate queue may name.
 
-## Test parity
+## Test coverage
 
-Each bash test file maps to a vitest suite: `test-lib` → id/slug/status helpers,
-`test-loop-gate` → gate state machine (cycle flags, CI outcomes, review rounds, final
-promotion, stop conditions), `test-loop-branch-state` → run-branch bookkeeping,
-`test-pr-body` → commit classification and section building, `test-task-delegate` /
-`test-task-enqueue` / `test-task-status` / `test-task-prune` / `test-checks` → their
-namesakes. The gate suite is the load-bearing one; port it first and keep its cases
-1:1 so the state machine is proven equivalent before anything else moves.
+The suite drives real git repositories in temporary directories. Its cycle-gate cases in
+`tests/loop.test.ts` are the load-bearing ones: they pin the gate's state machine — cycle
+flags, CI outcomes, review rounds, final promotion, and stop conditions.
+`tests/documented-defaults.test.ts` holds the configuration tables in this file and in
+`README.md` to the defaults the source resolves.
