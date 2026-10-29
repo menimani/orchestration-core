@@ -154,15 +154,18 @@ describe('operating-system adapters', () => {
     )
   })
 
-  it('selects Windows processes that name the worktree in either case or slash direction', () => {
+  it('selects Windows processes that name the worktree in either case, slash direction, or drive spelling', () => {
     const worktree = 'C:\\Fleet\\worktrees\\task-1'
     const processes = [
       { pid: 101, commandLine: 'bash.exe -c "cd c:/fleet/WORKTREES/task-1 && npm test"', executablePath: 'C:\\Git\\bin\\bash.exe' },
       { pid: 102, commandLine: null, executablePath: 'c:\\FLEET\\worktrees\\task-1\\node_modules\\.bin\\vitest.exe' },
       { pid: 103, commandLine: '"C:\\Program Files\\nodejs\\node.exe" C:/Fleet/worktrees/Task-1/scripts/run-tests.mjs', executablePath: null },
+      { pid: 107, commandLine: 'bash.exe -c "cd /c/Fleet/worktrees/task-1 && npm test"', executablePath: 'C:\\Git\\bin\\bash.exe' },
+      { pid: 108, commandLine: 'bash.exe --login -i --cd=/cygdrive/C/fleet/worktrees/task-1', executablePath: null },
       { pid: 104, commandLine: 'node C:\\Fleet\\worktrees\\task-10\\scripts\\run-tests.mjs', executablePath: null },
       { pid: 105, commandLine: 'mvn test', executablePath: 'C:\\maven\\bin\\mvn.cmd' },
       { pid: 106, commandLine: null, executablePath: null },
+      { pid: 109, commandLine: 'node /srv/c/Fleet/worktrees/task-1/run.mjs', executablePath: null },
       { pid: process.pid, commandLine: `node ${worktree}\\src\\cli.ts cleanup`, executablePath: null },
     ]
 
@@ -188,7 +191,7 @@ describe('operating-system adapters', () => {
       os.terminateWorktreeProcesses(path, () => {})
       return spawn.mock.calls
     }
-    const expected = [101, 102, 103].map((pid) => ['taskkill', ['/PID', `${pid}`, '/T', '/F']])
+    const expected = [101, 102, 103, 107, 108].map((pid) => ['taskkill', ['/PID', `${pid}`, '/T', '/F']])
 
     expect(taskkillsFor(worktree)).toEqual(expected)
     expect(taskkillsFor(`\\\\?\\${worktree}\\`)).toEqual(expected)
