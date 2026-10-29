@@ -128,8 +128,9 @@ An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, a
 path, or path relative to the consumer repository root. A repository-relative selector
 must begin with `./` or `../`; for example, use `./custom/runner.mjs`, because
 `custom/runner.mjs` is treated as a package specifier. A forge module exports a `Forge`
-as its default or `forge` export, or exports `createForge(repoRoot, report, target)`. A
-runner module likewise exports a `Runner` as its default or `runner` export, or exports
+as its default or `forge` export, or exports `createForge(repoRoot, report, target)`.
+Every forge implements `updateIssueTitle(issueNumber, title)`, which replaces an issue's
+title for project bridges rather than for the loop core. A runner module likewise exports a `Runner` as its default or `runner` export, or exports
 `createRunner(options)`. Factories may be asynchronous.
 
 A forge factory's `target` names the repositories to act on when they are not the
