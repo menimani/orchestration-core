@@ -2459,6 +2459,23 @@ export function createLoop(deps: LoopDeps) {
           onOrchestrationDepsEvent: orchestrationDepsEvent,
           beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
           onMergeStart: () => event('Merging', shortTaskId(taskId)),
+          // Runs before the dependency sync: an install failure there stops the loop,
+          // and a restart that finds the task merged never comes back to this point.
+          onMerged: () => {
+            writeFileSync(mergeFailureFile, '0\n')
+            retireConflictedAttempts(taskId, linkedIssues)
+            // A task delegated while the gate was waiting merges commits the gate has
+            // already pushed past; clearing the flags makes the gate push and verify
+            // again with the new commits included. The resume flag goes too, or a merge
+            // after the gate passed would reach promotion without suite, CI, or review.
+            if (!isInspectionTaskId(paths, taskId)) {
+              const cycle = readCount(scanCountFile)
+              if (cycle > 0) {
+                rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+                rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
+              }
+            }
+          },
           onMergeSkipped: (reason) => event(
             'Skipped', shortTaskId(taskId),
             reason === 'active' ? 'merge already in progress' : 'merge already succeeded',
@@ -2488,22 +2505,11 @@ export function createLoop(deps: LoopDeps) {
         if (mergeResult.outcome === 'skipped') return
         const mergeCommit = mergeResult.mergeCommit
         event('Merged', shortTaskId(taskId), `commit ${mergeCommit.slice(0, 8)}`)
-        writeFileSync(mergeFailureFile, '0\n')
-        retireConflictedAttempts(taskId, linkedIssues)
+        // Issue reconciliation needs the forge, so it waits for the merge to finish; a
+        // restart that finds the task merged reconciles from the promotion record.
         if (linkedIssues.length > 0) {
           const runBranch = optionalGit(['branch', '--show-current']).trim()
           await reconcileMergedIssues(taskId, linkedIssues, mergeCommit, runBranch)
-        }
-        // A task delegated while the gate was waiting merges commits the gate has
-        // already pushed past; clearing the flags makes the gate push and verify
-        // again with the new commits included. The resume flag goes too, or a merge
-        // after the gate passed would reach promotion without suite, CI, or review.
-        if (!isInspectionTaskId(paths, taskId)) {
-          const cycle = readCount(scanCountFile)
-          if (cycle > 0) {
-            rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
-            rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
-          }
         }
       } catch (error) {
         if (error instanceof NoChangeReconciliationError) {
