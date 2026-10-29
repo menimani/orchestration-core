@@ -12,9 +12,9 @@ import {
   currentProcessMarkerPid, parseProcessMarker, processMarker, processMarkerText,
 } from './processMarker.ts'
 
-// The queue-writing commands: new, enqueue, delegate. Everything here prints the exact
-// lines the bash implementation printed (`Created:`, `Enqueued:`, `WARN:`), because the
-// loop's tests and the skills key on them.
+// The queue-writing commands: new, enqueue, delegate. The line prefixes printed here
+// (`Created:`, `Enqueued:`, `WARN:`) are contract, not wording: the loop's tests and the
+// skills key on them.
 
 const SPEC_TAIL = `
 ## Commit

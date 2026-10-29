@@ -5,7 +5,7 @@ import { PACKAGE_ROOT } from './paths.ts'
 
 const MAX_POLL_INTERVAL_SECONDS = 30 * 60
 
-// Every setting the loop honors, with the defaults the bash implementation shipped.
+// Every setting the loop honors, with its default.
 // The environment variable names are part of the frozen CLI contract (SPEC.md,
 // "Runtime"): launch commands and the loop-start skill keep working unchanged.
 

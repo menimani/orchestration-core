@@ -90,10 +90,10 @@ export function descSlug(description: string): string {
 // same decision delegated twice, resolves to one task rather than two. An entry whose
 // spec is gone is stale and mints a fresh id.
 //
-// The bash implementation hashed with POSIX cksum; this uses sha256. The index carries
-// no state across implementations — every entry is validated against its spec file and
-// a miss mints a fresh id — so the algorithm only has to be stable within one
-// implementation, and the cutover happens between runs when the queue is empty.
+// The hash only has to be stable while the entries it names exist. Every entry is
+// validated against its spec file and a miss mints a fresh id, so changing the
+// algorithm loses deduplication against entries written before the change, never
+// correctness; change it between runs, when the queue is empty.
 function descIndexFile(paths: OrchPaths, origin: string, description: string): string {
   const hash = createHash('sha256').update(description).digest('hex').slice(0, 8)
   const indexDir = join(paths.queueDir, 'desc-index')

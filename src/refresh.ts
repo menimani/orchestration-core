@@ -3,7 +3,7 @@ import { operatingSystem } from './adapters/os.ts'
 import { finalMessageFile, type OrchPaths } from './paths.ts'
 import { readStatus, transitionStatus, type TaskStatus } from './status.ts'
 
-// The status refresh, ported from task-status.sh. Only a running task is ever
+// The status refresh. Only a running task is ever
 // rewritten: terminal files (merged, failed) are left byte-for-byte as they are, and
 // the running→completed/failed decision goes through the compare-and-swap transition
 // so a merge that won the lock first is preserved rather than overwritten.
@@ -62,7 +62,7 @@ export function listTaskIds(paths: OrchPaths): string[] {
     .sort()
 }
 
-/** Refresh every task and return the formatted listing task-status.sh printed. */
+/** Refresh every task and return the listing `status` prints, one line per task. */
 export async function refreshAll(paths: OrchPaths): Promise<string[]> {
   const lines: string[] = []
   for (const taskId of listTaskIds(paths)) {

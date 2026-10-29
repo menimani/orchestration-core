@@ -12,7 +12,7 @@ import { makeFakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { stubProject } from './stubProject.ts'
 
-// The branch-state rules ported from test-loop-branch-state.sh: a stopped loop keeps
+// The branch-state rules: a stopped loop keeps
 // its cycle state so it can resume after an environment repair, but that state belongs
 // only to the branch which created it.
 
