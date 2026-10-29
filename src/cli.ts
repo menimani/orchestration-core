@@ -1664,6 +1664,16 @@ async function main(): Promise<number> {
       }
       if (arg === '--fleet') fleetOption = value
       else projectOption = value
+    } else if (arg.startsWith('--fleet=') || arg.startsWith('--project=')) {
+      const separator = arg.indexOf('=')
+      const name = arg.slice(0, separator)
+      const value = arg.slice(separator + 1)
+      if (value === '') {
+        console.error(`ERROR: ${name} requires a value`)
+        return 1
+      }
+      if (name === '--fleet') fleetOption = value
+      else projectOption = value
     } else if (arg === '--repo') {
       const value = rawArgs[++i]
       if (value === undefined || value === '') {
