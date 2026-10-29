@@ -146,7 +146,10 @@ function extendedLengthPath(path: string): string {
 }
 
 function comparablePath(text: string): string {
-  return text.replaceAll('/', '\\').toLowerCase()
+  // Git Bash and Cygwin name a drive as /c/... or /cygdrive/c/...; spell it c:\ first.
+  return text.toLowerCase()
+    .replace(/(^|[\s"'=])\/(cygdrive\/)?([a-z])\//g, '$1$3:\\')
+    .replaceAll('/', '\\')
 }
 
 function containsPath(text: string, path: string): boolean {
