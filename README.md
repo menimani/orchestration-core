@@ -69,9 +69,10 @@ That same boundary syncs the skills declared in `skills/manifest.json` into ever
 directory an agent working in the repository reads them from. The selected runner adapter
 supplies one — the bundled Codex adapter uses `.agents/skills/` and rewrites the sources
 into Codex's own form, while the Claude adapter uses `.claude/skills/` in canonical form —
-and the project adapter selects any additional interactive-agent targets. This repository
-selects the bundled Claude target for `.claude/skills/`; duplicate destinations are served
-only once. In a subtree consumer, the sync checks every managed destination for staged
+and the project adapter selects any additional interactive-agent targets; duplicate
+destinations are served only once. The sync runs only for the repository that owns the
+package and for subtree consumers. A fleet project runs the package from outside its own
+checkout and skips it; its skills come from `install-skills` instead. In a subtree consumer, the sync checks every managed destination for staged
 changes before writing any of them; an unverifiable or non-clean managed index is fatal
 and stops the cycle. A destination rendering failure is reported while the remaining
 destinations are still served. Managed updates and removals are then staged and committed
