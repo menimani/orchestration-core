@@ -608,7 +608,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
 19. `MAX_BURST_FAILURES` (default 3) task failures observed in one poll stop the loop —
     the cause is the environment (network, credentials, runner CLI), and every task
     started meanwhile burns tokens reaching the same wall. Work that never ran leaves no
-    diff, so nothing downstream can notice it is missing; the loop must.
+    diff, so nothing downstream can notice it is missing; the loop must. A task whose
+    process tree the loop itself stopped before a dependency install (item 11a) is still
+    reported failed and its issues released, but it counts neither toward the burst nor
+    toward its issues' consecutive failure counts (item 19a).
 19a. In issue-queue mode, every failed-task release increments a persistent per-issue
      consecutive failure count in the queue directory. Before `MAX_ISSUE_RETRIES`
      (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and
