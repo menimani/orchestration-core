@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -8,20 +8,38 @@ import { fileURLToPath } from 'node:url'
 // looks for them, and the skills that read them name these paths directly.
 
 /**
+ * The on-disk spelling of a path: symlinks resolved and, on a case-insensitive
+ * filesystem, every component in the case the filesystem stores. Git reports paths that
+ * way, so a path an operator typed is canonicalized before it is compared with one. A
+ * path that does not exist yet keeps its resolved spelling.
+ */
+export function canonicalPath(path: string): string {
+  const resolved = resolve(path)
+  try {
+    return realpathSync.native(resolved)
+  } catch {
+    return resolved
+  }
+}
+
+/**
  * This package's own directory, derived from where it executes rather than from an
  * assumed position inside the repository. A consumer keeps the package at
  * <repo>/orchestration/ts; the repository that owns it keeps it at the root. Anything
  * that re-invokes the CLI, or reaches for the package's lockfile or node_modules,
- * resolves from here — hardcoding 'orchestration/ts' broke the owning repository.
+ * resolves from here — hardcoding 'orchestration/ts' broke the owning repository. It is
+ * canonical because the launch directory keeps the case the operator typed, while the
+ * repository root it is compared with comes from Git.
  */
-export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+export const PACKAGE_ROOT = canonicalPath(resolve(dirname(fileURLToPath(import.meta.url)), '..'))
 
 /** This package's repository-relative path when it is installed inside a consumer. */
 export function packageSubtreePrefix(
   repoRoot: string,
   packageRoot = PACKAGE_ROOT,
 ): string | undefined {
-  const prefix = relative(repoRoot, packageRoot)
+  // The prefix names a subtree to Git, so it must carry the case Git stores.
+  const prefix = relative(canonicalPath(repoRoot), canonicalPath(packageRoot))
   if (prefix === '' || prefix === '..' || prefix.startsWith(`..${sep}`)
     || isAbsolute(prefix)) return undefined
   return prefix.replaceAll('\\', '/')

@@ -13,7 +13,7 @@ import { shortTaskId } from './ids.ts'
 import { verifyModuleIsolation } from './moduleIsolation.ts'
 import {
   branchName, isInspectionTaskId, issueQueueIsSeparate, logFile, packageFile, worktreeDir,
-  PACKAGE_ROOT,
+  canonicalPath, PACKAGE_ROOT,
   type OrchPaths,
 } from './paths.ts'
 import {
@@ -196,9 +196,16 @@ const ORCHESTRATION_MANIFESTS = new Set([
   packageFile('package-lock.json'),
 ])
 
+// Manifests and merged paths compare through the platform's key, under canonical roots: a
+// package root spelled in another case than the one Git reports for the repository must
+// still recognize its own lockfile.
+function manifestKey(root: string, path: string): string {
+  return operatingSystem.worktreePathFor(resolve(canonicalPath(root), path)).comparisonKey
+}
+
 function orchestrationManifests(root: string): Set<string> {
   return new Set(
-    [...ORCHESTRATION_MANIFESTS].map((manifest) => resolve(root, relative(PACKAGE_ROOT, manifest))),
+    [...ORCHESTRATION_MANIFESTS].map((manifest) => manifestKey(root, relative(PACKAGE_ROOT, manifest))),
   )
 }
 
@@ -278,7 +285,7 @@ function syncOrchestrationDepsAfterMerge(
     'diff', '--name-only', firstParent, mergeCommit,
   ]).split(/\r?\n/).filter((path) => path !== '')
   const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
-  if (!changed.some((path) => manifests.has(resolve(paths.repoRoot, path)))) return
+  if (!changed.some((path) => manifests.has(manifestKey(paths.repoRoot, path)))) return
   const root = runtime.packageRoot ?? PACKAGE_ROOT
   installOrchestrationDeps(
     `after ${shortTaskId(taskId)}`, event, runtime,
