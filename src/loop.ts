@@ -2142,6 +2142,9 @@ export function createLoop(deps: LoopDeps) {
           }
           return 'continue'
         }
+        // A passing gate ends the failing episode, so an enqueue failure in a later one
+        // starts its own count instead of inheriting this one's.
+        previousGateFailures.delete('ci-fix-enqueue')
         if (emptyPrGate) {
           writeFileSync(resumeFlag, '')
         } else if (config.reviewEnabled && config.autoReview) {

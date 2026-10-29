@@ -2448,6 +2448,44 @@ describe('cycle gate', () => {
       .toContain('ERROR could not enqueue CI fix: queue unavailable (repeated 2 times)')
   })
 
+  it('counts a CI fix enqueue failure afresh after the CI gate passes', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>(() => {
+      throw new Error('queue unavailable')
+    })
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 3,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    const { attemptFile, completeFlag } = prepareFailedCiGate()
+    const stopFile = join(paths.queueDir, 'stop')
+    const resumeFlag = join(paths.queueDir, 'cycle-resume-1')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(stopFile)).toBe(false)
+
+    forgeStatus.checks = [
+      { name: 'frontend', conclusion: 'success', startedAt: '' },
+      { name: 'backend', conclusion: 'success', startedAt: '' },
+    ]
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(existsSync(resumeFlag)).toBe(true)
+
+    rmSync(resumeFlag)
+    prepareFailedCiGate()
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(enqueue).toHaveBeenCalledTimes(2)
+    expect(existsSync(attemptFile)).toBe(false)
+    expect(existsSync(completeFlag)).toBe(true)
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logText()).not.toContain('repeated 2 times')
+    expect(logText().match(/WARN could not enqueue CI fix: queue unavailable/g))
+      .toHaveLength(2)
+  })
+
   it('stops instead of resetting a malformed CI fix attempt count', async () => {
     const enqueue = vi.fn<typeof enqueueTask>()
     const loop = makeLoop({
