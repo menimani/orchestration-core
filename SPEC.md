@@ -835,10 +835,13 @@ so authorship and verified ancestry must both hold.
     merges because the same advisory recurs with different prose. Pre-granularity open
     issue bodies are interpreted from their requirement text, and their coarse local
     ledger entry is replaced when encountered, avoiding a one-time duplicate round.
-34. Before claiming, worker daemons group ready findings whose titles name the same first
-    path, using the same primary-path convention as fingerprinting. A group contains at
-    most four issues; another batch remains ready for the next claim. Titles without a
-    path stay singleton tasks. Every grouped requirement appears separately in the task
+34. Before claiming, worker daemons group ready findings that share a task origin (scan
+    `auto` or review `fix`), a mode (inspection or implementation), and the first path
+    their titles name, using the same primary-path convention as fingerprinting; a
+    grouped task has one identifier and one mode, so findings differing in either never
+    share it. A group contains at most four issues; another batch remains ready for the
+    next claim. Titles without a path and issues labelled `loop:group-singleton` stay
+    singleton tasks. Every grouped requirement appears separately in the task
     specification and requires an exact `REQUIREMENT_COMPLETE: #N` final-response marker.
     The worker refuses to publish or merge the task until all linked issues have markers,
     so partial implementation cannot close an unaddressed finding. A grouped task that
