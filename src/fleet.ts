@@ -9,7 +9,7 @@ import type { FleetLocation } from './paths.ts'
 // because the same fleet is cloned on every machine that runs a worker.
 
 export const FLEET_FILE = 'fleet.json'
-export const FLEET_LOCAL_FILE = 'fleet.local.json'
+const FLEET_LOCAL_FILE = 'fleet.local.json'
 
 const projectName = z.string().regex(/^[a-z0-9][a-z0-9-]*$/)
 
