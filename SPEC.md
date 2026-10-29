@@ -627,6 +627,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
     /T /F` on Windows and the detached process group on POSIX), retain task state for
     recovery, and report each terminated task or that no live task processes were found.
+    On Windows the tree is one process snapshot of parent links and creation times, and
+    a process created before the process now holding its recorded parent PID is an orphan
+    of an exited parent: it and its descendants are outside the tree, so a recycled PID
+    never adopts them. A link whose creation times are unreadable is kept.
     A shell whose runner exited first is outside that tree, so on Windows every removal of
     a task worktree (stop recovery, merge, and `cleanup`) first terminates the tree of each
     live process whose command line or executable path contains the worktree's absolute
