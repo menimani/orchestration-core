@@ -546,7 +546,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     placeholders to retain both protections.
     findings come back as `NEXT_TASK` lines that become fix tasks and clear the cycle
     flag (the gate re-verifies before the next round reads the corrected diff). A clean
-    round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle.
+    round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle. An ordinary
+    cycle that still has findings at that bound logs a warning and resumes. A review
+    that ends failed, or in an unknown state, without a verdict says nothing about the
+    diff: the loop logs a warning and retries it within the same bound, and if the
+    bound is already exhausted it stops the loop (`Stopped Loop review-cap`) rather
+    than resume on a review that never produced a verdict.
     `REVIEW_EVERY_N_CYCLES` skips review on off-cycles (the next reviewed cycle still
     reads their work). When automatic review is enabled, the final cycle is always
     reviewed, and its rounds continue until one is clean, bounded by
