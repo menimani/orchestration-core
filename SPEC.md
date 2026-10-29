@@ -446,9 +446,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     At the same boundary, the package manifest's skills are rendered into every
     directory selected by an agent adapter. The runner supplies its target, and the
     project adapter supplies targets for additional interactive agents. The Codex adapter
-    renders into repository root `.agents/skills/`; this repository's project adapter
-    selects the Claude adapter, which renders into `.claude/skills/` and resolves only the
-    command prefix because the canonical sources already use that agent's format. Both use
+    renders into repository root `.agents/skills/`; the Claude adapter renders into
+    `.claude/skills/` and resolves only the command prefix because the canonical sources
+    already use that agent's format. The sync runs only for the repository that owns the
+    package and for a subtree consumer. A fleet project runs the package from outside its
+    checkout, so the sync is skipped and its skills come from `install-skills`.
+    Both use
     `npm run` as the command prefix in the owning repository and
     `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
     served once. The renderer supplies one named
