@@ -2219,6 +2219,21 @@ describe('reapStaleLeases', () => {
     expect(issueNumberForTask(paths, 'task-merged')).toBeUndefined()
   })
 
+  it('removes persisted merge metadata once the promoted issue is deleted', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'deleted', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-deleted', [issueNumber])
+    recordIssuePromotions(paths, 'task-deleted', 'abc123', 'feature/run-9')
+    forge.issues.delete(issueNumber)
+
+    await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
+
+    expect(readdirSync(join(paths.queueDir, 'issue-promotion'))).toEqual([])
+    expect(issueNumberForTask(paths, 'task-deleted')).toBeUndefined()
+  })
+
   it('keeps a grouped task map until every promoted issue has closed', async () => {
     const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
       title: `merged group ${index}`,
@@ -2531,5 +2546,19 @@ describe('closePromotedIssues', () => {
     expect((await forge.getIssue(contained)).state).toBe('closed')
     expect((await forge.getIssue(later)).state).toBe('open')
     expect(forge.prStatusRefs).toEqual([{ kind: 'branch', value: 'run/merged' }])
+  })
+
+  it('drops the record of a deleted issue and still closes the promotions after it', async () => {
+    const deleted = await promotedIssue('task-deleted', 'a'.repeat(40), 'run/merged')
+    const closable = await promotedIssue('task-closable', 'c'.repeat(40), 'run/merged')
+    forge.issues.delete(deleted)
+    forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual([closable])
+    expect((await forge.getIssue(closable)).state).toBe('closed')
+    expect(issuePromotionForIssue(paths, deleted)).toBeUndefined()
+    expect(issueNumbersForTask(paths, 'task-deleted')).toEqual([])
+    expect(issuePromotionForIssue(paths, closable)?.taskId).toBe('task-closable')
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual([closable])
   })
 })

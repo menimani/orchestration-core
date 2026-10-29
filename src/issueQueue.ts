@@ -1444,6 +1444,20 @@ export function confirmIssuePromotion(paths: OrchPaths, issueNumber: number): vo
   }
 }
 
+/** Drop an issue's promotion record, and its task's issue map once no promotion of it is left. */
+function removePromotionRecord(paths: OrchPaths, issueNumber: number): void {
+  const dir = promotionDir(paths)
+  const promotion = issuePromotionForIssue(paths, issueNumber)
+  rmSync(promotionFile(paths, issueNumber), { force: true })
+  if (promotion === undefined) return
+  const taskStillPromoting = readdirSync(dir).some((candidate) => {
+    const candidateNumber = /^(\d+)\.json$/.exec(candidate)?.[1]
+    return candidateNumber !== undefined
+      && issuePromotionForIssue(paths, Number(candidateNumber))?.taskId === promotion.taskId
+  })
+  if (!taskStillPromoting) rmSync(issueMapFile(paths, promotion.taskId), { force: true })
+}
+
 async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Promise<void> {
   const dir = promotionDir(paths)
   if (!existsSync(dir)) return
@@ -1454,20 +1468,13 @@ async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Pro
     let issue: ForgeIssue
     try {
       issue = await forge.getIssue(issueNumber)
-    } catch {
+    } catch (error) {
+      // A deleted issue can never close, so its record is finished rather than pending.
+      if (error instanceof ForgeIssueNotFoundError) removePromotionRecord(paths, issueNumber)
       continue
     }
     if (issue.state !== 'closed') continue
-    const promotion = issuePromotionForIssue(paths, issueNumber)
-    rmSync(join(dir, name), { force: true })
-    if (promotion !== undefined) {
-      const taskStillPromoting = readdirSync(dir).some((candidate) => {
-        const candidateNumber = /^(\d+)\.json$/.exec(candidate)?.[1]
-        return candidateNumber !== undefined
-          && issuePromotionForIssue(paths, Number(candidateNumber))?.taskId === promotion.taskId
-      })
-      if (!taskStillPromoting) rmSync(issueMapFile(paths, promotion.taskId), { force: true })
-    }
+    removePromotionRecord(paths, issueNumber)
   }
 }
 
@@ -1498,10 +1505,17 @@ export async function closePromotedIssues(
     if (pr.state !== 'merged' || pr.headSha === '') continue
     for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
       if (!contains(promotion.mergeCommit, pr.headSha)) continue
-      await closeIssueAndRemoveLifecycleLabels(forge, promotion.issueNumber, [
-        `PROMOTED: ${promotion.taskId}`,
-        `Merged as ${promotion.mergeCommit} into run branch ${runBranch}, whose pull request ${pr.url} has merged.`,
-      ].join('\n'))
+      try {
+        await closeIssueAndRemoveLifecycleLabels(forge, promotion.issueNumber, [
+          `PROMOTED: ${promotion.taskId}`,
+          `Merged as ${promotion.mergeCommit} into run branch ${runBranch}, whose pull request ${pr.url} has merged.`,
+        ].join('\n'))
+      } catch (error) {
+        // A deleted issue would fail every poll and hold back each promotion after it.
+        if (!(error instanceof ForgeIssueNotFoundError)) throw error
+        removePromotionRecord(paths, promotion.issueNumber)
+        continue
+      }
       closed.push(promotion.issueNumber)
     }
   }
