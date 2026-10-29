@@ -191,7 +191,10 @@ hooks, and creates missing `loop:*` labels. It is safe to repeat: missing requir
 members are added with marked scaffold defaults, while declared members, other existing
 project files, and a deliberately different hooks setting are reported and never overwritten.
 It works on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the
-selected file rather than the single discovered one.
+selected file rather than the single discovered one. A project name given to `init` that
+disagrees with `PROJECT` is reported as `DIVERGED` and `PROJECT` is used; several adapters
+with neither variable set are left unchanged and reported as `DIVERGED`. Either report
+makes `init` exit non-zero.
 For `SCAN_PARALLEL` greater than one, keep the scan checklist as uniquely numbered
 Markdown headings outside fenced code blocks; without numbered headings the loop warns
 and runs one full scan, while ambiguous numbering stops the loop before the cycle starts.

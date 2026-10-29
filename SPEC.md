@@ -255,7 +255,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    or digit. `MAX_GROWTH_DEPTH` (default 2) and `MAX_TOTAL_TASKS` (default 50) bound the
    growth. Directives elsewhere in the transcript are ignored. The completion remains
    pending, and cannot merge or pass the cycle gate, until accepted findings are
-   reconciled and the durable scanned flag is written.
+   reconciled and the durable scanned flag is written. A scan attempt that cannot file or
+   enqueue an accepted finding counts one gate failure under that completion scan's key,
+   however many findings it rejected: the first warns, a repeat stops the loop rather
+   than holding the completion pending forever, and a forge rate limit is not counted.
 7. `DECISION_REQUIRED: <text>` is logged and carried into the PR risks, never queued.
    Dedup: a line naming a `GHSA-`/`CVE-` identifier matches on the identifier (a scan
    words the same advisory differently every cycle); a line naming neither matches on
@@ -752,7 +755,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     points the repository-local `core.hooksPath` at the core's hooks, and creates only
     missing `loop:*` labels. Re-running it adds and reports marked scaffold defaults for
     missing required adapter members, but never overwrites a declared member, another
-    project-owned file, or a different hooks setting; divergence is reported. The
+    project-owned file, or a different hooks setting; divergence is reported. Init works
+    on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the
+    selected file rather than the single discovered one. A project name given to init
+    that disagrees with `PROJECT` is reported as `DIVERGED` and `PROJECT` is used;
+    several adapters with neither variable set are left unchanged and reported as
+    `DIVERGED`. Either report makes init exit non-zero. The
     `loop-setup` skill gathers the repository decisions, fills a newly generated adapter,
     and runs `verify-setup`. That
     verifier reports separately the core typecheck, adapter suite, real loader discovery

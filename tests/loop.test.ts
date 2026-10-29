@@ -1141,6 +1141,17 @@ describe('checkPrCiStatus', () => {
     expect(await loop.checkPrCiStatus()).toBe(verdict)
   })
 
+  it('judges a closed PR by its checks even when its head is not the local HEAD', async () => {
+    const loop = makeLoop()
+    forgeStatus = {
+      ...forgeStatus,
+      state: 'closed',
+      headSha: 'f'.repeat(40),
+      checks: [{ name: 'a', conclusion: 'failure', startedAt: '' }],
+    }
+    expect(await loop.checkPrCiStatus()).toBe('failure')
+  })
+
   it('does not clear the gate for an old PR head with no checks', async () => {
     forgeStatus = { ...forgeStatus, headSha, checks: [] }
     const loop = makeLoop({}, stubProject, undefined, () => new Date('2030-01-01T00:00:00Z'))
