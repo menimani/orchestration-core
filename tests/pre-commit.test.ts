@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -65,6 +65,85 @@ describe('project pre-commit checks', () => {
     expect(appliesTo).toHaveBeenCalledWith(['change.ts'])
     expect(log).toHaveBeenCalledWith('PASS: Selected')
     expect(log).toHaveBeenCalledWith('SKIP: Skipped; staged paths do not apply')
+  })
+
+  it('fails the hook when a selected check fails and still runs the checks after it', () => {
+    const { root } = repository()
+    const project: ProjectAdapter = {
+      ...stubProject,
+      preCommitChecks: [
+        { label: 'Failing', cwd: '', command: 'node -e "process.exit(1)"' },
+        { label: 'Passing', cwd: '', command: 'node -e "process.exit(0)"' },
+      ],
+    }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(runPreCommitChecks(root, project)).toBe(false)
+    expect(log.mock.calls).toEqual([['FAIL: Failing'], ['PASS: Passing']])
+  })
+
+  it('skips a check whose required path is missing', () => {
+    const { root } = repository()
+    const project: ProjectAdapter = {
+      ...stubProject,
+      preCommitChecks: [
+        { label: 'Frontend', cwd: '', command: 'node -e "process.exit(1)"', requires: 'frontend' },
+      ],
+    }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(runPreCommitChecks(root, project)).toBe(true)
+    expect(log.mock.calls).toEqual([['SKIP: Frontend; missing frontend']])
+  })
+
+  it('skips a check whose unless path exists', () => {
+    const { root } = repository()
+    const project: ProjectAdapter = {
+      ...stubProject,
+      preCommitChecks: [
+        { label: 'Docs', cwd: '', command: 'node -e "process.exit(1)"', unless: 'README.md' },
+      ],
+    }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(runPreCommitChecks(root, project)).toBe(true)
+    expect(log.mock.calls).toEqual([['SKIP: Docs; README.md exists']])
+  })
+
+  it('fails the hook and never runs the check when its install fails', () => {
+    const { root } = repository()
+    const project: ProjectAdapter = {
+      ...stubProject,
+      preCommitChecks: [{
+        label: 'Lint',
+        cwd: '',
+        command: `node -e "require('fs').writeFileSync('check-ran', '')"`,
+        installWhenMissing: { path: 'node_modules', command: 'node -e "process.exit(1)"' },
+      }],
+    }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(runPreCommitChecks(root, project)).toBe(false)
+    expect(log.mock.calls).toEqual([['FAIL: Lint install']])
+    expect(existsSync(join(root, 'check-ran'))).toBe(false)
+  })
+
+  it('runs the check after its install succeeds', () => {
+    const { root } = repository()
+    const project: ProjectAdapter = {
+      ...stubProject,
+      preCommitChecks: [{
+        label: 'Lint',
+        cwd: '',
+        command: `node -e "require('fs').writeFileSync('check-ran', '')"`,
+        installWhenMissing: { path: 'node_modules', command: 'node -e "process.exit(0)"' },
+      }],
+    }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(runPreCommitChecks(root, project)).toBe(true)
+    expect(log.mock.calls).toEqual([['PASS: Lint install'], ['PASS: Lint']])
+    expect(existsSync(join(root, 'check-ran'))).toBe(true)
   })
 
   it('prohibits commits to the default branch advertised by the remote', () => {
