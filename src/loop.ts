@@ -1777,6 +1777,9 @@ export function createLoop(deps: LoopDeps) {
     previousGateFailures.delete('ci-status')
     if (status.state === 'none') return 'unknown'
     if (status.state === 'merged') return 'success'
+    // Right after a push the forge can still report the previous head and its checks.
+    // Only a verdict about the commit this checkout holds may open or fail the gate.
+    if (!prHeadIsLocalHead(status.headSha)) return 'pending'
     const checks = newestChecksByName(status.checks)
     if (checks.length === 0) {
       // Silence cannot prove success: workflows may be delayed or misconfigured. Only a
@@ -1786,6 +1789,11 @@ export function createLoop(deps: LoopDeps) {
     if (checks.some((check) => check.conclusion === 'pending')) return 'pending'
     if (checks.some((check) => check.conclusion === 'failure')) return 'failure'
     return 'success'
+  }
+
+  function prHeadIsLocalHead(headSha: string): boolean {
+    const localHead = optionalGit(['rev-parse', 'HEAD']).trim()
+    return headSha !== '' && headSha === localHead
   }
 
   function generateCiFixTask(cycle: number, prUrl: string, failSummary: string): string {
@@ -1833,6 +1841,9 @@ export function createLoop(deps: LoopDeps) {
       }
       return false
     }
+    // The CI gate judged the pushed commit; promoting while the forge still reports an
+    // earlier head would publish a branch whose newest commit nobody has checked.
+    if (status.state === 'open' && !prHeadIsLocalHead(status.headSha)) return false
     if (status.state === 'merged') {
       previousGateFailures.delete('pr-promotion-state')
     } else if (status.state === 'closed') {

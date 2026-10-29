@@ -90,7 +90,16 @@ function makeForge(): Forge {
   fakeForge.prStatus = async (ref) => {
     fakeForge.prStatusRefs.push(ref)
     prStatusCalls += 1
-    return forgeStatus
+    // A fixture that names no head stands for a forge that has caught up with the
+    // checkout; a test about a stale forge sets headSha to another commit.
+    if (forgeStatus.headSha !== '' || forgeStatus.state !== 'open') return forgeStatus
+    let localHead = ''
+    try {
+      localHead = git(['rev-parse', 'HEAD'])
+    } catch {
+      localHead = ''
+    }
+    return { ...forgeStatus, headSha: localHead }
   }
   return fakeForge
 }
@@ -1060,7 +1069,10 @@ describe('CI check normalization (forge adapter)', () => {
 })
 
 describe('checkPrCiStatus', () => {
+  let headSha: string
+
   beforeEach(() => {
+    headSha = initializeGitRepo()
     writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/1\n')
   })
 
@@ -1112,8 +1124,23 @@ describe('checkPrCiStatus', () => {
       expect(await loop.checkPrCiStatus()).toBe('failure')
     })
 
+  it.each([
+    ['a passed', 'success', 'success'],
+    ['a failed', 'failure', 'failure'],
+  ] as const)('waits while the forge still reports %s earlier head', async (_description, conclusion, verdict) => {
+    const loop = makeLoop()
+    forgeStatus = {
+      ...forgeStatus,
+      headSha: 'f'.repeat(40),
+      checks: [{ name: 'a', conclusion, startedAt: '' }],
+    }
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+
+    forgeStatus = { ...forgeStatus, headSha }
+    expect(await loop.checkPrCiStatus()).toBe(verdict)
+  })
+
   it('does not clear the gate for an old PR head with no checks', async () => {
-    const headSha = initializeGitRepo()
     forgeStatus = { ...forgeStatus, headSha, checks: [] }
     const loop = makeLoop({}, stubProject, undefined, () => new Date('2030-01-01T00:00:00Z'))
     expect(await loop.checkPrCiStatus()).toBe('unknown')
@@ -2300,6 +2327,7 @@ describe('cycle gate', () => {
   })
 
   function prepareFailedCiGate(): { attemptFile: string; completeFlag: string } {
+    if (!existsSync(join(repoRoot, '.git'))) initializeGitRepo()
     const attemptFile = join(paths.queueDir, 'ci-fix-emitted-1')
     const completeFlag = join(paths.queueDir, 'cycle-complete-1')
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
@@ -3851,6 +3879,30 @@ describe('completion marker output', () => {
       .toBeLessThan(logged.indexOf('Completed Loop        PR https://example.test/pull/1'))
   })
 
+  it('neither promotes nor emits LOOP_DONE while the forge reports an earlier head', async () => {
+    const headSha = initializeGitRepo()
+    const remote = join(repoRoot, 'remote.git')
+    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+    git(['remote', 'add', 'origin', remote])
+    git(['push', '-u', 'origin', 'main'])
+    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    forgeStatus = { ...forgeStatus, headSha: 'f'.repeat(40) }
+    const loop = makeLoop()
+    const markPrReady = vi.fn(async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.postLoopPr()).toBe(false)
+    expect(markPrReady).not.toHaveBeenCalled()
+    expect(logText()).not.toContain('LOOP_DONE')
+
+    forgeStatus = { ...forgeStatus, headSha }
+    expect(await loop.postLoopPr()).toBe(true)
+    expect(markPrReady).toHaveBeenCalledTimes(1)
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+  })
+
   it('reports varying draft promotion errors and stops after two gate failures', async () => {
     initializeGitRepo()
     const remote = join(repoRoot, 'remote.git')
@@ -3961,7 +4013,7 @@ describe('completion marker output', () => {
     fakeForge.prStatus = async () => {
       calls += 1
       if (calls % 3 === 0) throw new Error('confirmation unavailable')
-      return forgeStatus
+      return { ...forgeStatus, headSha: git(['rev-parse', 'HEAD']) }
     }
 
     expect(await loop.postLoopPr()).toBe(false)

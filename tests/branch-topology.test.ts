@@ -165,6 +165,10 @@ describe('integration branch topology', () => {
   it('uses the integration branch for PR updates and final promotion', async () => {
     const topology = prepareBranchTopology(paths, 'integration/run')
     const forge = makeFakeForge()
+    forge.prStatusValue = {
+      ...forge.prStatusValue,
+      headSha: git(topology.paths.repoRoot, ['rev-parse', 'HEAD']).trim(),
+    }
     const updatePr = vi.spyOn(forge, 'updatePr')
     const markPrReady = vi.spyOn(forge, 'markPrReady').mockImplementation(async () => {
       forge.prStatusValue = { ...forge.prStatusValue, isDraft: false }
