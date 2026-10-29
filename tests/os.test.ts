@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import {
-  createOperatingSystem as createWindowsOperatingSystem, worktreeProcessPids,
+  createOperatingSystem as createWindowsOperatingSystem, worktreeProcessPids, type WindowsProcess,
 } from '../src/adapters/os-windows.ts'
 import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/internalEnvironment.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
@@ -201,6 +201,83 @@ describe('operating-system adapters', () => {
     expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '202', '/T', '/F'])
     // 203 had already exited, so there was nothing to terminate.
     expect(spawn).toHaveBeenCalledTimes(2)
+  })
+
+  function processTreeOs(
+    processes: readonly WindowsProcess[],
+    spawn: (command: string, args: readonly string[]) => void = () => {},
+  ) {
+    const alive = new Set(processes.map(({ pid }) => pid))
+    let now = 0
+    return {
+      alive,
+      os: createWindowsOperatingSystem({
+        spawn: (command, args) => {
+          spawn(command, args)
+          if (command === 'taskkill') alive.clear()
+        },
+        listProcesses: () => processes,
+        probeProcess: (pid) => {
+          if (alive.has(pid)) return
+          const error = new Error('gone') as NodeJS.ErrnoException
+          error.code = 'ESRCH'
+          throw error
+        },
+        remove: () => {},
+        now: () => now,
+        sleep: (milliseconds) => { now += milliseconds },
+      }),
+    }
+  }
+
+  it('excludes an orphan that predates the process now holding its parent PID', () => {
+    // 401 is a recycled PID: 402 was started by the PID's earlier owner and 403 by 402.
+    const { alive, os } = processTreeOs([
+      { pid: 401, parentPid: 1, createdAt: 5_000 },
+      { pid: 402, parentPid: 401, createdAt: 1_000 },
+      { pid: 403, parentPid: 402, createdAt: 2_000 },
+    ])
+    alive.delete(401)
+
+    expect(os.processTreeIsAlive(401)).toBe(false)
+  })
+
+  it('includes a child created after its parent', () => {
+    const { alive, os } = processTreeOs([
+      { pid: 411, parentPid: 1, createdAt: 1_000 },
+      { pid: 412, parentPid: 411, createdAt: 1_000 },
+      { pid: 413, parentPid: 412, createdAt: 3_000 },
+    ])
+    alive.delete(411)
+    alive.delete(412)
+
+    expect(os.processTreeIsAlive(411)).toBe(true)
+  })
+
+  it('keeps a parent link when either creation time is missing', () => {
+    const { alive, os } = processTreeOs([
+      { pid: 421, parentPid: 1, createdAt: 5_000 },
+      { pid: 422, parentPid: 421 },
+      { pid: 423, parentPid: 1 },
+      { pid: 424, parentPid: 423, createdAt: 1_000 },
+    ])
+    alive.delete(421)
+    alive.delete(423)
+
+    expect(os.processTreeIsAlive(421)).toBe(true)
+    expect(os.processTreeIsAlive(423)).toBe(true)
+  })
+
+  it('terminates a recycled PID whose stale descendants include the current process', () => {
+    const spawn = vi.fn()
+    const { os } = processTreeOs([
+      { pid: 431, parentPid: 1, createdAt: 5_000 },
+      { pid: 432, parentPid: 431, createdAt: 1_000 },
+      { pid: process.pid, parentPid: 432, createdAt: 2_000 },
+    ], spawn)
+
+    expect(os.terminateProcessTree(431)).toBe(true)
+    expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '431', '/T', '/F'])
   })
 
   it('leaves worktree processes alone on POSIX', () => {

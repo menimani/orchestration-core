@@ -27,6 +27,8 @@ export interface WindowsOperatingSystemRuntime {
 export interface WindowsProcess {
   pid: number
   parentPid: number
+  /** Creation time in epoch milliseconds; absent when Windows did not report one. */
+  createdAt?: number
 }
 
 export interface WindowsProcessCommand {
@@ -76,11 +78,13 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
     // took 1,040 ms at the median. Selecting these two properties took 1,017 ms;
     // PowerShell startup dominates, so terminateProcessTree snapshots once and polls the
     // captured PIDs instead of launching this command again during its exit wait.
+    // CreationDate rides along in the same launch so the tree walk can reject stale
+    // parent links.
     const result = spawnSync('powershell.exe', [
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId | ForEach-Object { '{0},{1}' -f $_.ProcessId,$_.ParentProcessId }",
+      "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | ForEach-Object { '{0},{1},{2}' -f $_.ProcessId,$_.ParentProcessId,$(if ($null -ne $_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }) }",
     ], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -89,9 +93,11 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
     if (result.error !== undefined) throw result.error
     if (result.status !== 0) throw new Error('Could not inspect the Windows process tree.')
     return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-      const match = /^(\d+),(\d+)$/.exec(line)
+      const match = /^(\d+),(\d+),(.*)$/.exec(line)
       if (match === null) throw new Error('Could not parse the Windows process tree.')
-      return { pid: Number(match[1]), parentPid: Number(match[2]) }
+      const entry: WindowsProcess = { pid: Number(match[1]), parentPid: Number(match[2]) }
+      if (/^-?\d+$/.test(match[3]!)) entry.createdAt = Number(match[3])
+      return entry
     })
   },
   listProcessCommands: () => {
@@ -190,8 +196,20 @@ function processTreePids(
   }
 
   const runningPids = new Set(processes.map(({ pid }) => pid))
+  const createdAtByPid = new Map<number, number>()
+  for (const { pid, createdAt } of processes) {
+    if (createdAt !== undefined) createdAtByPid.set(pid, createdAt)
+  }
   const childrenByParent = new Map<number, number[]>()
-  for (const { pid, parentPid } of processes) {
+  for (const { pid, parentPid, createdAt } of processes) {
+    // Windows never updates ParentProcessId when a parent exits, so an orphan keeps
+    // naming a PID that may since belong to a newer process. A child created before its
+    // recorded parent is such an orphan; it and its descendants stay out of the tree.
+    // A missing creation time keeps the link so an unreadable field never hides a child.
+    const parentCreatedAt = createdAtByPid.get(parentPid)
+    if (createdAt !== undefined && parentCreatedAt !== undefined && createdAt < parentCreatedAt) {
+      continue
+    }
     const children = childrenByParent.get(parentPid) ?? []
     children.push(pid)
     childrenByParent.set(parentPid, children)
