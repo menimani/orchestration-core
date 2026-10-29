@@ -1519,7 +1519,7 @@ export function createLoop(deps: LoopDeps) {
       }
 
       const taskIds = [...new Set(entries.map((entry) => entry.taskId))]
-      for (const taskId of taskIds) cleanupTask(paths, taskId, undefined, false)
+      for (const taskId of taskIds) cleanupTask(paths, taskId, undefined, false, log)
 
       const failedFile = join(paths.queueDir, `failed-${currentCycle}`)
       if (existsSync(failedFile)) {
@@ -2273,7 +2273,7 @@ export function createLoop(deps: LoopDeps) {
       // gate would then stop every later start over a scan yield that cannot arrive.
       for (const scanId of attemptedScans) {
         try {
-          cleanupTask(paths, scanId, undefined, false)
+          cleanupTask(paths, scanId, undefined, false, log)
         } catch (error) {
           event('WARN', `${shortTaskId(scanId)} scan startup cleanup failed: ${errorSummary(error)}`)
         }
@@ -2492,7 +2492,7 @@ export function createLoop(deps: LoopDeps) {
               }
               prepareIssueReleaseIntent(paths, taskId, linkedIssues)
             }
-            cleanupTask(paths, taskId, undefined, false)
+            cleanupTask(paths, taskId, undefined, false, log)
             if (linkedIssues.length === 0) {
               dropClaimedTaskMaterialization(paths, taskId)
             } else {
@@ -2887,7 +2887,7 @@ export function createLoop(deps: LoopDeps) {
             }
             if (released) {
               try {
-                cleanupTask(paths, entry.taskId, undefined, false)
+                cleanupTask(paths, entry.taskId, undefined, false, log)
                 dropClaimedTaskMaterialization(paths, entry.taskId)
               } catch (cleanupError) {
                 event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)

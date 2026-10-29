@@ -353,7 +353,7 @@ function removeFinishedWorktree(
   runtime: WorktreeRemovalRuntime,
   completion: string,
 ): boolean {
-  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, log)
   if (result.fallbackFailure !== undefined) {
     log(`WARN: ${completion}, but the worktree is still there and has to go by hand: ${worktree} (${result.gitFailure})`)
     return false
@@ -694,9 +694,10 @@ function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
 export function removeTemporaryWorktree(
   paths: OrchPaths,
   worktree: string,
+  log: (text: string) => void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
-  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime)
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, log)
   if (result.fallbackFailure === undefined && result.pruneFailure === undefined) return
   const pruneDetail = result.pruneFailure === undefined ? '' : `; prune: ${result.pruneFailure}`
   throw new MergeError(
@@ -1221,7 +1222,7 @@ async function mergeTaskWithGuardHeld(
     }
     runMergeChecks(prospectiveWorktree, currentBranch, options, io)
   } finally {
-    removeTemporaryWorktree(paths, prospectiveWorktree)
+    removeTemporaryWorktree(paths, prospectiveWorktree, io.out)
   }
 
   mergeWithVerifiedRecovery(
@@ -1354,7 +1355,7 @@ export async function mergeRemoteTask(
     io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
     runMergeChecks(worktree, currentBranch, options, io)
   } finally {
-    removeTemporaryWorktree(paths, worktree)
+    removeTemporaryWorktree(paths, worktree, io.out)
   }
 
   mergeWithVerifiedRecovery(

@@ -635,9 +635,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     A shell whose runner exited first is outside that tree, so on Windows every removal of
     a task worktree (stop recovery, merge, and `cleanup`) first terminates the tree of each
     live process whose command line or executable path contains the worktree's absolute
-    path, compared case-insensitively in either slash direction. A process that survives
-    keeps holding the worktree: its removal fails and the task state is retained. Other
-    platforms stop the runner's detached process group and do nothing further.
+    path, compared case-insensitively in either slash direction. Each holder whose tree
+    is terminated is logged once, with its PID, executable name, and the worktree path, in
+    the log of the removal: the merge output, `cleanup`, or the loop log. A process that
+    survives keeps holding the worktree: its removal fails and the task state is retained.
+    Other platforms stop the runner's detached process group and do nothing further.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
     the intentional termination as a missing scan yield.

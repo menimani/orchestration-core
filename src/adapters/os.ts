@@ -53,8 +53,9 @@ export interface OperatingSystem {
    * or executable path, before the worktree is removed. A shell whose parent exited first
    * is outside the tree that stopping a runner reaches, and its open files block removal.
    * Best effort: a process that survives keeps holding the worktree, so removal fails.
+   * Each holder whose tree this ends is reported once, as an event line through `report`.
    */
-  terminateWorktreeProcesses(path: string): void
+  terminateWorktreeProcesses(path: string, report: (line: string) => void): void
   removeDirectory(path: string): void
   worktreePathFor(path: string): WorktreePath
 }
