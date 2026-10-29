@@ -11,7 +11,6 @@ import {
 
 const LOCK_RETRY_MS = 10
 const OWNER_GRACE_MS = 30_000
-const MAX_LOCK_RETRIES = Math.ceil(OWNER_GRACE_MS / LOCK_RETRY_MS)
 const sleepBuffer = new SharedArrayBuffer(4)
 const releasedOwnedLockTokens = new Set<string>()
 
@@ -166,17 +165,21 @@ function tryAcquireBacklogLock(lockDir: string): string | undefined {
 /** Serialize backlog read-modify-write operations across loop and CLI processes. */
 export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
   const lockDir = `${backlog}.lock`
+  // Bound the wait by elapsed time, not attempts: an attempt against a live owner can
+  // run a synchronous process-identity lookup that costs far more than the retry delay.
+  const deadline = Date.now() + OWNER_GRACE_MS
   let lockToken: string
-  for (let attempts = 0; ; attempts++) {
+  for (;;) {
     const acquired = tryAcquireBacklogLock(lockDir)
     if (acquired !== undefined) {
       lockToken = acquired
       break
     }
-    if (attempts >= MAX_LOCK_RETRIES) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
       throw new Error(`Timed out waiting for the backlog lock: ${backlog}`)
     }
-    Atomics.wait(new Int32Array(sleepBuffer), 0, 0, LOCK_RETRY_MS)
+    Atomics.wait(new Int32Array(sleepBuffer), 0, 0, Math.min(LOCK_RETRY_MS, remaining))
   }
 
   try {
