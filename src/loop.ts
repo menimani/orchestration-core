@@ -112,11 +112,25 @@ const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
 // A local task whose rebase conflicts is retried from its kept commits at most this many
 // times. Each retry races the same sibling merges, so a third conflict is left for a person.
 const MAX_CONFLICT_RETRIES = 2
+// A worker publication that keeps failing for another reason, such as a rejected push or
+// a forge error, is retried on this many polls before the task is failed.
+const MAX_WORKER_PUBLICATION_FAILURES = 5
 
 class InvalidPersistedCounterError extends Error {}
 // A finished worker task whose output can never be published as it stands. Retrying the
 // publication cannot help, because the worker that would change it has already exited.
 class UnpublishableWorkerTaskError extends Error {}
+// A finished worker task whose issues are no longer its own: a lapsed claim was reaped and
+// may already belong to another task, so reporting this branch there would have the merger
+// adopt stale work.
+class LostWorkerClaimError extends UnpublishableWorkerTaskError {
+  readonly lostIssues: number[]
+
+  constructor(lostIssues: number[]) {
+    super(`${lostIssues.map((number) => `#${number}`).join(', ')} no longer claimed by this task`)
+    this.lostIssues = lostIssues
+  }
+}
 
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
@@ -461,11 +475,30 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const branch = branchName(taskId)
+    const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
+    // Re-read every claim right before reporting on it. An issue an earlier attempt already
+    // reported is skipped; any other issue that left loop:in-progress was reaped, and may
+    // since have been handed to another task.
+    const pending: number[] = []
+    const lost: number[] = []
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      if (issue.state === 'open' && issue.labels.includes(LABEL_IN_PROGRESS)
+        && !issue.labels.includes(LABEL_READY)) {
+        pending.push(issueNumber)
+        continue
+      }
+      const report = issue.labels.includes(LABEL_MERGE_READY)
+        ? workerBranchReport(await commentsForIssue(issue))
+        : undefined
+      if (report?.branch !== branch || report.head !== head) lost.push(issueNumber)
+    }
+    if (lost.length > 0) throw new LostWorkerClaimError(lost)
+
     const remote = currentBranchPushRemote(paths.repoRoot)
     gitIn(worktree, ['push', '--quiet', '--set-upstream', remote, branch])
-    const head = gitIn(worktree, ['rev-parse', 'HEAD']).trim()
     const issueList = issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
-    await Promise.all(issueNumbers.map(async (issueNumber) => {
+    await Promise.all(pending.map(async (issueNumber) => {
       await forge.commentIssue(issueNumber,
         `Worker completed the task.\nBranch: ${branch}\nHead commit: ${head}\nIssues: ${issueList}`)
       await forge.addLabel(issueNumber, LABEL_MERGE_READY)
@@ -2589,7 +2622,12 @@ export function createLoop(deps: LoopDeps) {
         }
       }
 
-      const linkedIssues = status === 'running' ? issueNumbersForTask(paths, taskId) : []
+      // A worker's completed task still holds its claim until it is published. Without a
+      // heartbeat, a publication that keeps failing would let the lease lapse and the issue
+      // be reaped back to ready while this task still means to report on it.
+      const holdsClaim = status === 'running' || (status === 'completed' && config.workerMode
+        && !existsSync(join(scannedDir, taskId)))
+      const linkedIssues = holdsClaim ? issueNumbersForTask(paths, taskId) : []
       if (linkedIssues.length > 0 && remoteOperationsAvailable) {
         linkedIssues.forEach((issueNumber) => locallyRunningIssues.add(issueNumber))
         try {
@@ -2661,12 +2699,20 @@ export function createLoop(deps: LoopDeps) {
             }
             continue
           }
+          const publicationFailuresFile = join(scannedDir, `${taskId}.publish-failures`)
           try {
             await publishWorkerCompletion(taskId, linkedIssues)
             clearIssueFailureCounts(paths, taskId)
             writeFileSync(scannedFlag, '')
+            rmSync(publicationFailuresFile, { force: true })
           } catch (error) {
             if (error instanceof UnpublishableWorkerTaskError) {
+              // A lost claim is not this task's to release or count: unlink those issues
+              // first, so failing the task cannot return another claimant's issue to ready.
+              if (error instanceof LostWorkerClaimError) {
+                recordIssuesForTask(paths, taskId,
+                  linkedIssues.filter((issueNumber) => !error.lostIssues.includes(issueNumber)))
+              }
               // Left completed, the claim would lapse, be reaped back to ready, and be
               // claimed into this same task again without ever counting as a failure.
               // Failed, the next poll counts it and releases or parks its issues.
@@ -2675,7 +2721,17 @@ export function createLoop(deps: LoopDeps) {
                 event('WARN', `${shortTaskId(taskId)} cannot be published: ${errorSummary(error)}`)
               }
             } else if (!(error instanceof ForgeRateLimitError)) {
-              event('WARN', `could not publish ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+              const failures = readCount(publicationFailuresFile) + 1
+              if (failures < MAX_WORKER_PUBLICATION_FAILURES) {
+                writeFileSync(publicationFailuresFile, `${failures}\n`)
+                event('WARN', `could not publish ${shortTaskId(taskId)} `
+                  + `(attempt ${failures}/${MAX_WORKER_PUBLICATION_FAILURES}): ${errorSummary(error)}`)
+              } else if (await transitionStatus(paths, taskId, 'completed', 'failed')) {
+                appendFileSync(logFile(paths, taskId),
+                  `\nWorker publication failed ${failures} times: ${errorSummary(error)}\n`)
+                event('WARN', `${shortTaskId(taskId)} failed after ${failures} publication attempts: `
+                  + errorSummary(error))
+              }
             }
           }
           continue
