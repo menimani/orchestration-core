@@ -17,19 +17,37 @@ async function waitForPath(path: string): Promise<void> {
   }
 }
 
+function queuedTickets(path: string): string[] {
+  return existsSync(path) ? readdirSync(path).filter((name) => name.endsWith('.json')) : []
+}
+
+// Waits for exactly `count` tickets. The lock owner publishes owner.json before it
+// withdraws its own ticket, so "at least" would count the owner as a waiter.
 async function waitForTicketCount(path: string, count: number): Promise<void> {
   const deadline = Date.now() + 5_000
-  while (!existsSync(path) || readdirSync(path).filter((name) => name.endsWith('.json')).length < count) {
-    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${count} tickets in ${path}`)
+  while (queuedTickets(path).length !== count) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${count} tickets in ${path}; found ${JSON.stringify(queuedTickets(path))}`)
+    }
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
 }
 
-function run(command: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv): Promise<{
+interface RunResult {
   status: number | null
   stderr: string
   stdout: string
-}> {
+}
+
+function describeResults(results: readonly RunResult[]): string {
+  return results.map(({ status, stderr, stdout }, index) => [
+    `child ${index + 1} exited with status ${String(status)}`,
+    `--- stdout ---\n${stdout}`,
+    `--- stderr ---\n${stderr}`,
+  ].join('\n')).join('\n')
+}
+
+function run(command: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       cwd,
@@ -104,49 +122,57 @@ describe('test suite wrapper', () => {
       ORCHESTRATION_TEST_SHARED_ROOT: sharedRoot,
     }
 
-    const first = run(
-      process.execPath,
-      [join(firstWorktree, 'scripts', 'run-tests.mjs'), '--pool=threads'],
-      firstWorktree,
-      env,
-    )
-    await waitForPath(join(repository, '.git', '.orchestration-test-suite-lock', 'owner.json'))
-    const second = run(
-      process.execPath,
-      [join(secondWorktree, 'scripts', 'run-tests.mjs'), '--no-file-parallelism'],
-      secondWorktree,
-      env,
-    )
     const queue = join(repository, '.git', '.orchestration-test-suite-lock-queue')
-    await waitForTicketCount(queue, 1)
-    const third = run(
-      process.execPath,
-      [join(firstWorktree, 'scripts', 'run-tests.mjs'), '--pool=forks'],
-      firstWorktree,
-      env,
-    )
+    const children: Promise<RunResult>[] = []
     let contentionError: unknown
     try {
+      children.push(run(
+        process.execPath,
+        [join(firstWorktree, 'scripts', 'run-tests.mjs'), '--pool=threads'],
+        firstWorktree,
+        env,
+      ))
+      await waitForPath(join(repository, '.git', '.orchestration-test-suite-lock', 'owner.json'))
+      // The owner withdraws its ticket only after publishing owner.json. Until it has,
+      // a single ticket may be the owner's, and the third invocation could then race the
+      // second for its place in the queue.
+      await waitForTicketCount(queue, 0)
+      children.push(run(
+        process.execPath,
+        [join(secondWorktree, 'scripts', 'run-tests.mjs'), '--no-file-parallelism'],
+        secondWorktree,
+        env,
+      ))
+      await waitForTicketCount(queue, 1)
+      children.push(run(
+        process.execPath,
+        [join(firstWorktree, 'scripts', 'run-tests.mjs'), '--pool=forks'],
+        firstWorktree,
+        env,
+      ))
       await waitForTicketCount(queue, 2)
     } catch (error) {
       contentionError = error
     } finally {
       writeFileSync(join(sharedRoot, 'release-first'), '')
     }
-    const results = await Promise.all([first, second, third])
-    if (contentionError !== undefined) throw contentionError
+    const results = await Promise.all(children)
+    const report = describeResults(results)
+    if (contentionError !== undefined) {
+      throw new Error(`${contentionError instanceof Error ? contentionError.message : String(contentionError)}\n${report}`)
+    }
 
-    expect(results.map(({ status }) => status)).toEqual([0, 0, 0])
-    expect(results.map(({ stderr }) => stderr)).toEqual(['', '', ''])
-    expect(() => readFileSync(join(sharedRoot, 'overlap'), 'utf8')).toThrow()
+    expect(results.map(({ status }) => status), report).toEqual([0, 0, 0])
+    expect(results.map(({ stderr }) => stderr), report).toEqual(['', '', ''])
+    expect(existsSync(join(sharedRoot, 'overlap')), report).toBe(false)
     const invocations = readFileSync(join(sharedRoot, 'args'), 'utf8')
       .trim().split(/\r?\n/).map((line) => JSON.parse(line) as string[])
-    expect(invocations).toEqual([
+    expect(invocations, report).toEqual([
       ['run', '--pool=threads'],
       ['run', '--no-file-parallelism'],
       ['run', '--pool=forks'],
     ])
-    expect(results.some(({ stdout }) => stdout.includes('waiting for its repository lock'))).toBe(true)
+    expect(results.some(({ stdout }) => stdout.includes('waiting for its repository lock')), report).toBe(true)
   })
 
   it('rejects a live PID when its process identity does not match', async () => {
