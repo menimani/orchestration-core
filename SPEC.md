@@ -797,6 +797,21 @@ are not parsed by `loadConfig` and are not operator-file settings.
     only for an exact revision match; invalid usage, a missing deployment declaration,
     any of the three timeouts, an unsuccessful workflow or revision response, and a
     revision mismatch exit non-zero.
+32b. `ci-wait <pr-number> [--timeout <seconds>]` polls the forge's check rollup for that
+    pull request every thirty seconds, for at most `--timeout` seconds (default 900).
+    Each poll keeps, per check name, only the run with the newest valid start time; a
+    check without a valid start time, and every run tied for newest, is kept, so a later
+    success cannot hide a same-name failure it does not provably supersede. A verdict is
+    reached only when the pull request is open, the rollup is non-empty, no kept check is
+    pending, and the sorted check names equal those of the previous poll — a rollup that
+    is still gaining checks is not believed. The checks are those the forge reports for
+    the pull request's head at each poll; head commits are not compared between polls.
+    When less than one interval remains, the command sleeps the remainder and polls once
+    more, so a result settling in that window, or a timeout shorter than one interval,
+    still reaches a verdict. On a verdict it prints `<name>: <conclusion>` per kept check
+    and exits 0, or 1 when any kept check failed; it exits 2 once the budget is spent
+    without one. A missing or non-positive PR number, or a malformed `--timeout`, prints
+    usage and exits 1.
 
 ## The issue queue (opt-in)
 
