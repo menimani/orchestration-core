@@ -12,8 +12,9 @@ import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
   branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId,
   isScanTaskId,
-  absolutePackageScriptCommand, orchPaths, statusFile, type OrchPaths,
+  absolutePackageScriptCommand, orchPaths, packageSubtreePrefix, statusFile, type OrchPaths,
 } from '../src/paths.ts'
+import { nonCanonicalSpelling } from './pathComparison.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, transitionStatus, writeMergedStatus, writeStatus } from '../src/status.ts'
 import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
@@ -270,6 +271,18 @@ describe('package script commands', () => {
 
     expect(absolutePackageScriptCommand(repoRoot, 'loop-status', packageRoot))
       .toBe(`npm run -C '${expectedPackageRoot}' loop-status -- --repo '${expectedRepoRoot}'`)
+  })
+
+  it('names the subtree in the spelling Git stores, whatever spelling the package root has', () => {
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    mkdirSync(packageRoot, { recursive: true })
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-lib-alias-'))
+    try {
+      expect(packageSubtreePrefix(repoRoot, nonCanonicalSpelling(packageRoot, linkDir)))
+        .toBe('orchestration/ts')
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true })
+    }
   })
 })
 

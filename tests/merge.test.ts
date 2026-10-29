@@ -26,6 +26,7 @@ import {
 } from '../src/worktree.ts'
 import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject } from './stubProject.ts'
+import { nonCanonicalSpelling } from './pathComparison.ts'
 import { PROCESS_TEST_TIMEOUT_MS, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
@@ -1297,6 +1298,31 @@ describe('mergeTask', () => {
 
     expect(install).toHaveBeenCalledOnce()
     expect(install).toHaveBeenCalledWith(repoRoot)
+  })
+
+  it('installs orchestration dependencies when the package root is spelled differently from the repository', async () => {
+    const taskId = '20260808_000000_014_user-updates-mis-cased-dependency'
+    const worktree = await makeCompletedTask(taskId)
+    mkdirSync(join(worktree, 'orchestration', 'ts'), { recursive: true })
+    writeFileSync(join(worktree, 'orchestration', 'ts', 'package-lock.json'), '{}\n')
+    git(worktree, ['add', 'orchestration/ts/package-lock.json'])
+    git(worktree, ['commit', '-qm', 'feat: update orchestration lockfile'])
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-merge-alias-'))
+    const install = vi.fn()
+
+    try {
+      const packageRoot = join(nonCanonicalSpelling(repoRoot, linkDir), 'orchestration', 'ts')
+      await mergeTask(paths, taskId, {
+        taskGate: 'light',
+        project: noCheckProject,
+        orchestrationDepsRuntime: { install, packageRoot },
+      })
+
+      expect(install).toHaveBeenCalledOnce()
+      expect(install).toHaveBeenCalledWith(packageRoot)
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true })
+    }
   })
 
   it('does not install orchestration dependencies when the merge leaves manifests unchanged', async () => {
