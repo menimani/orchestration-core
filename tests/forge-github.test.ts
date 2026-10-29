@@ -602,6 +602,41 @@ describe('GitHub author permissions', () => {
     permission = 'read'
     expect((await forge.getIssue(1)).author.hasWriteAccess).toBe(false)
   })
+
+  it('treats a failed permission lookup as no write access', async () => {
+    const calls: string[][] = []
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'issue') return JSON.stringify(openIssueFixture)
+      throw new Error('HTTP 502: Bad Gateway')
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    expect((await forge.getIssue(357)).author)
+      .toEqual({ login: 'maintainer-one', hasWriteAccess: false })
+    expect(calls.filter((args) => args[0] === 'api'))
+      .toEqual([['api', 'repos/example/repo/collaborators/maintainer-one/permission']])
+  })
+
+  it('propagates a rate-limited permission lookup instead of judging the author', async () => {
+    const command: GithubCommand = async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'issue') return JSON.stringify(openIssueFixture)
+      throw new Error('HTTP 403: API rate limit exceeded (x-ratelimit-reset: 1786435200)')
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    let error: unknown
+    try {
+      await forge.getIssue(357)
+    } catch (caught) {
+      error = caught
+    }
+
+    expect(error).toBeInstanceOf(ForgeRateLimitError)
+    expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
+  })
 })
 
 describe('GitHub forge JSON schemas', () => {
