@@ -9,8 +9,6 @@ import { fileURLToPath } from 'node:url'
 import { errorHeadline } from '../errorText.ts'
 import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../internalEnvironment.ts'
 
-export { WINDOWS_PROCESS_ROOT_PID_ENV } from '../internalEnvironment.ts'
-
 const WINDOWS_LAUNCH_CONFIG_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_CONFIG'
 const WINDOWS_LAUNCH_ERROR_FILE_ENV = 'ORCHESTRATION_WINDOWS_LAUNCH_ERROR_FILE'
 const WINDOWS_LAUNCH_TIMEOUT_MS = 10_000

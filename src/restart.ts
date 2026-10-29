@@ -13,10 +13,6 @@ import {
   currentProcessMarkerPid, parseProcessMarker, processMarker, processMarkerText,
 } from './processMarker.ts'
 
-export {
-  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
-} from './internalEnvironment.ts'
-
 export interface LoopRestartCommand {
   executable: string
   args: string[]

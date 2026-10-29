@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import {
-  createOperatingSystem as createWindowsOperatingSystem, worktreeProcessPids, type WindowsProcess,
+  createOperatingSystem as createWindowsOperatingSystem, type WindowsProcess,
 } from '../src/adapters/os-windows.ts'
 import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/internalEnvironment.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
@@ -166,8 +166,32 @@ describe('operating-system adapters', () => {
       { pid: process.pid, commandLine: `node ${worktree}\\src\\cli.ts cleanup`, executablePath: null },
     ]
 
-    expect(worktreeProcessPids(processes, worktree)).toEqual([101, 102, 103])
-    expect(worktreeProcessPids(processes, `\\\\?\\${worktree}\\`)).toEqual([101, 102, 103])
+    const taskkillsFor = (path: string) => {
+      const alive = new Set(processes.map(({ pid }) => pid))
+      const spawn = vi.fn((_command: string, args: readonly string[]) => {
+        alive.delete(Number(args[1]))
+      })
+      const os = createWindowsOperatingSystem({
+        spawn,
+        listProcesses: () => processes.map(({ pid }) => ({ pid, parentPid: 1 })),
+        listProcessCommands: () => processes,
+        probeProcess: (pid) => {
+          if (alive.has(pid)) return
+          const error = new Error('gone') as NodeJS.ErrnoException
+          error.code = 'ESRCH'
+          throw error
+        },
+        remove: () => {},
+        now: () => 0,
+        sleep: () => {},
+      })
+      os.terminateWorktreeProcesses(path, () => {})
+      return spawn.mock.calls
+    }
+    const expected = [101, 102, 103].map((pid) => ['taskkill', ['/PID', `${pid}`, '/T', '/F']])
+
+    expect(taskkillsFor(worktree)).toEqual(expected)
+    expect(taskkillsFor(`\\\\?\\${worktree}\\`)).toEqual(expected)
   })
 
   it('terminates and reports each Windows process tree holding a worktree and tolerates a survivor', () => {

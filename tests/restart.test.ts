@@ -9,10 +9,11 @@ import type {
   DaemonLaunchOptions, DaemonProcess, OperatingSystem,
 } from '../src/adapters/os.ts'
 import {
-  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
   publishLoopReplacementPid, signalLoopRestartReady, startLoopReplacement,
 } from '../src/restart.ts'
-import { WINDOWS_PROCESS_ROOT_PID_ENV } from '../src/adapters/windows-process.ts'
+import {
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV, WINDOWS_PROCESS_ROOT_PID_ENV,
+} from '../src/internalEnvironment.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
 
 const fixtureRoots: string[] = []
