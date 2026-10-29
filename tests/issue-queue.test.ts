@@ -462,7 +462,7 @@ describe('publishFinding', () => {
     })
     writeFileSync(join(paths.queueDir, 'issue-fingerprints'), `${fingerprint} ${untrusted}\n`)
 
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect((await forge.getIssue(untrusted)).state).toBe('open')
     expect((await forge.getIssue(trusted)).state).toBe('open')
@@ -603,7 +603,7 @@ describe('publishFinding', () => {
     ])
 
     forge.listOpenIssues = listOpenIssues
-    await reconcileFindingFingerprints(forge, otherPaths)
+    await reconcileFindingFingerprints(forge, otherPaths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect((await listOpenIssues(LABEL_FINDING)).map((issue) => issue.number)).toEqual([1])
     expect((await forge.getIssue(2)).state).toBe('closed')
@@ -624,7 +624,7 @@ describe('publishFinding', () => {
       labels: [LABEL_FINDING, LABEL_READY],
     })
 
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect((await forge.getIssue(combined.issueNumber)).state).toBe('open')
     expect((await forge.getIssue(individual)).state).toBe('closed')
@@ -653,7 +653,8 @@ describe('publishFinding', () => {
       return getIssue(issueNumber)
     }
 
-    await expect(reconcileFindingFingerprints(forge, paths))
+    const openFindings = await forge.listOpenIssues(LABEL_FINDING)
+    await expect(reconcileFindingFingerprints(forge, paths, openFindings))
       .rejects.toThrow('subsumed issue re-read unavailable')
   })
 
@@ -674,7 +675,7 @@ describe('publishFinding', () => {
       labels: [LABEL_FINDING, LABEL_READY],
     })
 
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
     expect((await forge.getIssue(second)).state).toBe('open')
@@ -707,7 +708,7 @@ describe('publishFinding', () => {
     recordIssuePromotions(paths, 'task-first-fix', 'a'.repeat(40), 'chore/run-branch')
 
     const second = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-2')
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect(second.outcome).toBe('created')
     expect(second.issueNumber).not.toBe(first.issueNumber)
@@ -739,7 +740,7 @@ describe('publishFinding', () => {
     const second = await publishFinding(
       forge, paths, '[SECURITY] Different wording for GHSA-QWWW-VCR4-C8H2', 'scan-2',
     )
-    await reconcileFindingFingerprints(forge, paths)
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
 
     expect(second).toEqual({ outcome: 'duplicate', issueNumber: first.issueNumber })
     expect(forge.issues.size).toBe(1)
