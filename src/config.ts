@@ -152,7 +152,7 @@ function num(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const raw = env[name]
   if (raw === undefined || raw === '') return fallback
   const value = Number(raw)
-  if (!Number.isInteger(value) || value < 0) {
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value)) {
     throw new Error(`${name} must be a non-negative integer, got '${raw}'`)
   }
   return value
