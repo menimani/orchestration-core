@@ -711,6 +711,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     listing, and comments; assignment and label mutation; direct closure; and merge
     message decoration for forge-driven closure. Fingerprint deduplication, claim
     arbitration, and stale-lease reaping live in `src/issueQueue.ts` on those primitives.
+    Every forge also provides issue retitling: `updateIssueTitle(issueNumber, title)`
+    replaces an issue's title, and project bridges use it rather than the loop core.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`; any other selector
     resolves like an external forge module, including the required `./` or `../` prefix
