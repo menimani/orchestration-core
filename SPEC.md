@@ -27,7 +27,8 @@ from or equivalent to `orchestration/tests/*.sh`.
 - No `jq` dependency anywhere (this deletes the Windows-jq-CRLF bug class; the invariant
   it protected — values read from status files compare clean — still holds and is tested).
 - Core subtree updates default on. The daemon logs whether `CORE_AUTO_UPDATE` is on or
-  off at startup; `false` skips the pre-cycle check entirely. `UPSTREAM_REMOTE` defaults
+  off at startup; `false` skips the pre-cycle check entirely, including the shared skill
+  sync, so rendered skills stay as they were after a manual subtree pull. `UPSTREAM_REMOTE` defaults
   to the package's `upstreamRepo` value and selects the remote to fetch and subtree-pull;
   `UPSTREAM_BRANCH` defaults to `main`. Separately, `UPSTREAM_REPO` overrides the
   package's `upstreamRepo` value as the GitHub repository where `report-upstream` files

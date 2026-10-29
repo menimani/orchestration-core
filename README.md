@@ -346,6 +346,11 @@ git subtree pull --prefix=orchestration/ts \
   https://github.com/menimani/orchestration-core.git main --squash
 ```
 
+The pin also turns off the skill sync described above. A manual pull updates the vendored
+skill sources, but `.claude/skills/`, `.agents/skills/`, and any other managed destination
+keep their previous rendering, with no warning, until a cycle runs with
+`CORE_AUTO_UPDATE` on.
+
 ## Settings worth knowing
 
 Runtime settings can be stored in `orchestration/config.json`, using the uppercase names
@@ -388,7 +393,7 @@ settings update at their next use.
 | `RUNNER` | codex | Agent CLI adapter; accepts `codex`, `claude`, or an external module selector |
 | `RUNNER_CLAUDE_MODEL` | claude-opus-5 | Base Claude model used when `RUNNER=claude` and no task-specific model is set |
 | `RUNNER_CLAUDE_MODEL_MINIMAL` / `LOW` / `MEDIUM` / `HIGH` | `RUNNER_CLAUDE_MODEL` | Optional model selected for the matching reasoning effort when `RUNNER=claude` |
-| `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check entirely |
+| `CORE_AUTO_UPDATE` | true | Check and pull the shared-core subtree immediately before each cycle; `false` skips the check and the shared skill sync entirely |
 | `INTEGRATION_BRANCH` | empty | Empty keeps the direct single-worktree layout; a branch name freezes the daemon checkout and makes this separate branch the task base, merge target, gate target, and PR source |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL/path, or GitHub `owner/repository` to fetch and subtree-pull |
 | `UPSTREAM_REPO` | package `upstreamRepo` | Environment-only override for the GitHub `owner/repository` where `report-upstream` files the report |
