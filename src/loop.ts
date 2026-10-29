@@ -105,6 +105,8 @@ interface FindingDispatch {
   findings: string[]
   destinations: string[]
   reconciled: boolean
+  /** Why a finding could not be filed, unless the forge only asked the loop to wait. */
+  failure?: string
 }
 
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
@@ -1023,7 +1025,10 @@ export function createLoop(deps: LoopDeps) {
               `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
             )
           }
-          return { findings, destinations, reconciled: false }
+          const failure = error instanceof ForgeRateLimitError
+            ? undefined
+            : `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
+          return { findings, destinations, reconciled: false, failure }
         }
         pendingFindings = filtered.unresolved
         for (const duplicate of filtered.duplicates) {
@@ -1061,11 +1066,11 @@ export function createLoop(deps: LoopDeps) {
       }
       // One report per scan attempt, so an outage that rejects several findings counts
       // once; a rejection that survives the retry stops the loop instead of holding the
-      // completion scan open forever.
-      if (publishFailure !== undefined) {
+      // completion scan open forever. A worker counts it against its publication limit.
+      if (publishFailure !== undefined && !config.workerMode) {
         reportGateFailure(publishFailure, true, `completion-scan-${taskId}`)
       }
-      return { findings, destinations, reconciled }
+      return { findings, destinations, reconciled, failure: publishFailure }
     }
 
     const pendingFindings = isReview
@@ -2779,11 +2784,24 @@ export function createLoop(deps: LoopDeps) {
             continue
           }
           const publicationFailuresFile = join(scannedDir, `${taskId}.publish-failures`)
+          const findingsFiledFile = join(scannedDir, `${taskId}.findings-filed`)
           try {
+            // Findings are filed before the completion is published: publishing an
+            // inspection closes its issue, and nothing revisits the final message after.
+            if (!existsSync(findingsFiledFile)) {
+              const dispatch = await scanForNextTasks(taskId, depth)
+              if (!dispatch.reconciled) {
+                // A rate limit is a wait, not a failed attempt.
+                if (dispatch.failure === undefined) continue
+                throw new Error(dispatch.failure)
+              }
+              writeFileSync(findingsFiledFile, '')
+            }
             await publishWorkerCompletion(taskId, linkedIssues)
             clearIssueFailureCounts(paths, taskId)
             writeFileSync(scannedFlag, '')
             rmSync(publicationFailuresFile, { force: true })
+            rmSync(findingsFiledFile, { force: true })
           } catch (error) {
             if (error instanceof UnpublishableWorkerTaskError) {
               // A lost claim is not this task's to release or count: unlink those issues
@@ -2797,6 +2815,7 @@ export function createLoop(deps: LoopDeps) {
               // Failed, the next poll counts it and releases or parks its issues.
               if (await transitionStatus(paths, taskId, 'completed', 'failed')) {
                 appendFileSync(logFile(paths, taskId), `\nWorker publication refused: ${errorSummary(error)}\n`)
+                rmSync(findingsFiledFile, { force: true })
                 event('WARN', `${shortTaskId(taskId)} cannot be published: ${errorSummary(error)}`)
               }
             } else if (!(error instanceof ForgeRateLimitError)) {
@@ -2808,6 +2827,7 @@ export function createLoop(deps: LoopDeps) {
               } else if (await transitionStatus(paths, taskId, 'completed', 'failed')) {
                 appendFileSync(logFile(paths, taskId),
                   `\nWorker publication failed ${failures} times: ${errorSummary(error)}\n`)
+                rmSync(findingsFiledFile, { force: true })
                 event('WARN', `${shortTaskId(taskId)} failed after ${failures} publication attempts: `
                   + errorSummary(error))
               }
