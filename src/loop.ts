@@ -2528,8 +2528,19 @@ export function createLoop(deps: LoopDeps) {
         event('Failed', shortTaskId(taskId), `log ${shortLogPath(mergeLog)}`)
         if (error instanceof RebaseConflictError) {
           noteMergeFailure(mergeLog)
+          // Cleanup removes the status the poll sweep reports failures from, so an
+          // abandonment that queues no retry records its loss here instead: the cycle's
+          // loss note names it, and the gate verifies the branch again before promotion.
+          const recordAbandonedConflict = (): void => {
+            const cycle = readCount(scanCountFile)
+            appendFileSync(join(paths.queueDir, `failed-${cycle}`), `${taskId}\n`)
+            if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+          }
+          let terminalized = false
+          let retryId: string | undefined
+          let lossRecorded = false
           try {
-            const terminalized = await transitionStatus(paths, taskId, 'completed', 'failed')
+            terminalized = await transitionStatus(paths, taskId, 'completed', 'failed')
             if (!terminalized) {
               throw new Error('task status changed before rebase-conflict abandonment')
             }
@@ -2558,10 +2569,14 @@ export function createLoop(deps: LoopDeps) {
               completeIssueReleaseIntent(paths, taskId)
               dropClaimedTaskMaterialization(paths, taskId, true)
             }
-            const retryId = linkedIssues.length > 0 || kept.attempts === undefined
+            retryId = linkedIssues.length > 0 || kept.attempts === undefined
               ? undefined
               : requeueConflictedTask(taskId, kept.attempts, specification, effort, depth)
             removeConflictedAttempts(paths, taskId)
+            if (retryId === undefined) {
+              recordAbandonedConflict()
+              lossRecorded = true
+            }
             if (linkedIssues.length > 0 && remoteOperationsAvailable) {
               const failures = await reconcileIssueReleaseIntent(
                 forge, paths, taskId, issueReleaseOptions,
@@ -2595,6 +2610,17 @@ export function createLoop(deps: LoopDeps) {
             }
             if (!(abandonmentError instanceof ForgeRateLimitError)) {
               event('WARN', `${shortTaskId(taskId)} rebase conflict was abandoned but cleanup or issue release failed: ${errorSummary(abandonmentError)}`)
+            }
+            // A status that survived a failed cleanup still reaches the poll sweep, which
+            // records the loss itself. One that cleanup already removed reaches nobody.
+            if (terminalized && retryId === undefined && !lossRecorded
+              && readStatus(paths, taskId) === undefined) {
+              try {
+                removeConflictedAttempts(paths, taskId)
+                recordAbandonedConflict()
+              } catch (recordError) {
+                event('WARN', `${shortTaskId(taskId)} abandoned rebase conflict could not be recorded as lost: ${errorSummary(recordError)}`)
+              }
             }
           }
           return

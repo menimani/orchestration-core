@@ -4408,6 +4408,8 @@ describe('completed task merge recovery', () => {
       autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
     })
     loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-2'), '')
 
     expect(await loop.poll()).toBe('continue')
 
@@ -4418,6 +4420,43 @@ describe('completed task merge recovery', () => {
       `Abandoned 197_user    rebase conflict; commits kept on ${conflictBranchName(taskId)}`,
     )
     for (const { branch } of earlier) expect(git(['branch', '--list', branch])).not.toBe('')
+    // Cleanup removed the status, so the poll sweep never saw this loss.
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(readFileSync(join(paths.queueDir, 'failed-2'), 'utf8')).toBe(`${taskId}\n`)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
+    expect(readConflictedAttempts(paths, taskId)).toEqual([])
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(paths.queueDir, 'failed-2'), 'utf8')).toBe(`${taskId}\n`)
+  })
+
+  it('records a conflicted local task as lost when its retry cannot be queued', async () => {
+    const taskId = '20260815_181908_199_user-rebase-conflict'
+    const { runHead, taskTip } = makeConflictingLocalTask(taskId)
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      undefined,
+      undefined,
+      undefined,
+      () => { throw new Error('backlog is not writable') },
+    )
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '3\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-3'), '')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(git(['rev-parse', conflictBranchName(taskId)])).toBe(taskTip)
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(logText()).toContain(
+      '199_user rebase conflict was abandoned but cleanup or issue release failed: backlog is not writable',
+    )
+    expect(readFileSync(join(paths.queueDir, 'failed-3'), 'utf8')).toBe(`${taskId}\n`)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-3'))).toBe(false)
+    expect(readConflictedAttempts(paths, taskId)).toEqual([])
   })
 
   it('removes every branch kept for a retry once the retry merges', async () => {
