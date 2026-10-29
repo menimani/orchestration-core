@@ -504,9 +504,13 @@ describe('remote task adoption', () => {
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const completeFlag = join(paths.queueDir, 'cycle-complete-1')
     writeFileSync(completeFlag, '')
+    const resumeFlag = join(paths.queueDir, 'cycle-resume-1')
+    writeFileSync(resumeFlag, '')
     let completeFlagAtUpdate = true
+    let resumeFlagAtUpdate = true
     forge.commentIssue = async () => {
       completeFlagAtUpdate = existsSync(completeFlag)
+      resumeFlagAtUpdate = existsSync(resumeFlag)
       throw new ForgeRateLimitError(new Date('2026-08-09T12:05:00Z'))
     }
 
@@ -518,5 +522,7 @@ describe('remote task adoption', () => {
     })
     expect(completeFlagAtUpdate).toBe(false)
     expect(existsSync(completeFlag)).toBe(false)
+    expect(resumeFlagAtUpdate).toBe(false)
+    expect(existsSync(resumeFlag)).toBe(false)
   })
 })

@@ -4908,6 +4908,43 @@ describe('completed task merge recovery', () => {
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('reruns the passed cycle gate when a task merges after it', async () => {
+    const taskId = '20260810_040800_065_auto-after-gate'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Marker', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+      }],
+    }
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: false,
+      scanEnabled: false,
+      maxParallel: 0,
+      reviewEnabled: true,
+      autoReview: false,
+      autoPr: false,
+      taskGate: 'light',
+    }, suiteProject)
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(readFileSync(join(paths.queueDir, 'cycle-suite-tip-1'), 'utf8').trim())
+      .toBe(git(['rev-parse', 'HEAD']).trim())
+    expect(logged).toContain('CYCLE_COMPLETE: 1/3')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(true)
+  })
+
   it('merges when a claim finds its existing local task completed but unmerged', async () => {
     const taskId = '20260810_040800_064_auto-claimed-again'
     const description = '[BUG] retry the completed local task'
