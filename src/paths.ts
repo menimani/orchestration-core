@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 
 // The on-disk layout is shared state with everything the loop leaves behind between
 // runs, so the names here are contract, not implementation: queue markers, status
-// files, logs and worktrees must land exactly where the bash implementation put them.
+// files, logs and worktrees written by an earlier run must be found where this run
+// looks for them, and the skills that read them name these paths directly.
 
 /**
  * This package's own directory, derived from where it executes rather than from an
