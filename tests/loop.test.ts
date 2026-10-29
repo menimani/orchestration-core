@@ -5556,7 +5556,10 @@ describe('scanForNextTasks', () => {
     const scannedFlag = join(paths.queueDir, 'scanned', taskId)
     expect(existsSync(scannedFlag)).toBe(false)
     expect(fakeForge.issues.size).toBe(1)
-    expect(logText()).toContain('WARN could not file finding: temporary publication failure')
+    expect(logText()).toContain(
+      'WARN could not file finding from 017_scan: temporary publication failure',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logged.some((line) => line.startsWith('Completed 017_scan'))).toBe(false)
 
     await loop.poll()
@@ -5568,6 +5571,60 @@ describe('scanForNextTasks', () => {
       '[BUG] second retryable finding',
     ])
     expect(logged.filter((line) => line.startsWith('Completed 017_scan'))).toHaveLength(1)
+  })
+
+  it('logs and stops after repeated finding publication failures', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoMerge: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const taskId = '20250101_000000_026_scan'
+    writeFinal(taskId, [
+      'NEXT_TASK: [BUG] first rejected finding',
+      'NEXT_TASK: [BUG] second rejected finding',
+      'TASK_COMPLETE',
+    ].join('\n'))
+    writeRawStatus(taskId, 'completed')
+    fakeForge.createIssue = async () => {
+      throw new Error('issue body is too long')
+    }
+    const scannedFlag = join(paths.queueDir, 'scanned', taskId)
+    const stopFile = join(paths.queueDir, 'stop')
+
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(false)
+    expect(logText()).toContain('WARN could not file finding from 026_scan: issue body is too long')
+    expect(logText()).not.toContain('ERROR could not file finding')
+    expect(existsSync(stopFile)).toBe(false)
+
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(false)
+    expect(fakeForge.issues.size).toBe(0)
+    expect(logText()).toContain(
+      'ERROR could not file finding from 026_scan: issue body is too long (repeated 2 times)',
+    )
+    expect(existsSync(stopFile)).toBe(true)
+  })
+
+  it('does not count a rate-limited finding publication as a gate failure', async () => {
+    const loop = makeLoop({ issueQueueEnabled: true })
+    const taskId = '20250101_000000_027_scan'
+    writeFinal(taskId, 'NEXT_TASK: [BUG] a finding filed during a rate limit\n')
+    fakeForge.createIssue = async () => {
+      throw new ForgeRateLimitError(new Date(Date.now() + 60_000))
+    }
+
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+
+    expect(logText()).not.toContain('could not file finding')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
   it('retries an unscanned review completion after a forge lookup outage and warns once', async () => {

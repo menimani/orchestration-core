@@ -1030,6 +1030,7 @@ export function createLoop(deps: LoopDeps) {
         ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
         : pendingFindings
       let reconciled = true
+      let publishFailure: string | undefined
       for (const desc of descriptions) {
         if (!hasTaskCapacity(taskId)) continue
         const effort = isReview ? 'high' : undefined
@@ -1048,9 +1049,15 @@ export function createLoop(deps: LoopDeps) {
         } catch (error) {
           reconciled = false
           if (!(error instanceof ForgeRateLimitError)) {
-            event('WARN', `could not file finding: ${errorSummary(error)}`)
+            publishFailure ??= `could not file finding from ${shortTaskId(taskId)}: ${errorSummary(error)}`
           }
         }
+      }
+      // One report per scan attempt, so an outage that rejects several findings counts
+      // once; a rejection that survives the retry stops the loop instead of holding the
+      // completion scan open forever.
+      if (publishFailure !== undefined) {
+        reportGateFailure(publishFailure, true, `completion-scan-${taskId}`)
       }
       return { findings, destinations, reconciled }
     }
