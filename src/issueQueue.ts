@@ -584,9 +584,9 @@ async function reconcileCreatedFinding(
 export async function reconcileFindingFingerprints(
   forge: Forge,
   paths: OrchPaths,
-  knownOpenFindings?: readonly ForgeIssue[],
+  knownOpenFindings: readonly ForgeIssue[],
 ): Promise<void> {
-  let openFindings = [...(knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING))]
+  let openFindings = [...knownOpenFindings]
   const excludedIssueNumbers = new Set(openFindings
     .filter((issue) => !isTrustedFingerprintOwner(issue))
     .map((issue) => issue.number))
@@ -622,9 +622,7 @@ export async function reconcileFindingFingerprints(
   // scan issue carrying {A}. Prefer claimed work, then the broadest ready issue, and
   // close a ready issue only when every one of its constituents is already covered.
   // Partially overlapping issues stay open so their unmatched findings are not lost.
-  openFindings = knownOpenFindings === undefined
-    ? (await forge.listOpenIssues(LABEL_FINDING)).filter(isTrustedFingerprintOwner)
-    : openFindings.filter((issue) => !closedIssueNumbers.has(issue.number))
+  openFindings = openFindings.filter((issue) => !closedIssueNumbers.has(issue.number))
   const ordered = openFindings
     .filter((issue) => issueFingerprints(issue).length > 0)
     .sort((a, b) => Number(isClaimed(b)) - Number(isClaimed(a))
