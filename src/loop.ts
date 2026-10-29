@@ -777,7 +777,7 @@ export function createLoop(deps: LoopDeps) {
     return false
   }
 
-  function dequeueNext(remoteOperationsAvailable = true): QueueEntry | undefined {
+  function dequeueNext(remoteOperationsAvailable: boolean): QueueEntry | undefined {
     const first = dequeueBacklog(queueFile, (line) => {
       if (remoteOperationsAvailable) return true
       const taskId = line.split(':', 1)[0]
@@ -3069,7 +3069,6 @@ export function createLoop(deps: LoopDeps) {
     initializeIssueQueue,
     validatePushTarget,
     initializeSessionStateForBranch,
-    cleanupSessionState,
     restartSubject: () => restartSubject,
     // exported for tests
     actionableFindings,
@@ -3077,10 +3076,7 @@ export function createLoop(deps: LoopDeps) {
     foldScanYields,
     scanForNextTasks,
     collectDecisions,
-    decisionIdentifiers,
-    decisionAlreadyRecorded,
     noteMergeFailure,
-    workerBranchReport,
     adoptRemoteTasks,
     cycleIsFinal,
     runAutoReview,
@@ -3090,7 +3086,6 @@ export function createLoop(deps: LoopDeps) {
     ensureDraftPr,
     postLoopPr,
     countAllTasks,
-    dequeueNext,
   }
 }
 
