@@ -1,6 +1,0 @@
-interface:
-  display_name: "Skill Create"
-  short_description: "Create or revise a repository skill"
-  default_prompt: "Use $skill-create to create or revise a repository skill."
-policy:
-  allow_implicit_invocation: false
