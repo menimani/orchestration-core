@@ -134,6 +134,15 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ MAX_PARALLEL: 'many' })).toThrow(/MAX_PARALLEL/)
   })
 
+  it.each(['1e3', '0x10', ' 5 ', '3.0', '+4', '-1', '9007199254740993'])(
+    'rejects the numeric form %j, which is not a plain decimal integer',
+    (raw) => {
+      expect(() => loadConfig({ MAX_PARALLEL: raw })).toThrow(
+        `MAX_PARALLEL must be a non-negative integer, got '${raw}'`,
+      )
+    },
+  )
+
   it('rejects MAX_PARALLEL below one', () => {
     expect(() => loadConfig({ MAX_PARALLEL: '0' })).toThrow(/MAX_PARALLEL must be at least 1/)
   })
