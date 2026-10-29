@@ -1789,7 +1789,8 @@ export function createLoop(deps: LoopDeps) {
     if (status.state === 'merged') return 'success'
     // Right after a push the forge can still report the previous head and its checks.
     // Only a verdict about the commit this checkout holds may open or fail the gate.
-    if (!prHeadIsLocalHead(status.headSha)) return 'pending'
+    // A closed PR receives no further pushes, so its head can never catch up.
+    if (status.state === 'open' && !prHeadIsLocalHead(status.headSha)) return 'pending'
     const checks = newestChecksByName(status.checks)
     if (checks.length === 0) {
       // Silence cannot prove success: workflows may be delayed or misconfigured. Only a
