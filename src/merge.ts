@@ -1183,7 +1183,10 @@ async function mergeTaskWithGuardHeld(
       )
       return { outcome: 'merged', mergeCommit }
     }
-    if (!isInspectionTaskId(paths, taskId) && noChangeMarkerPresent(paths, taskId)) {
+    // An inspection that committed nothing has nothing to merge: `git merge` would answer
+    // "Already up to date", leave HEAD on earlier work, and never commit the message that
+    // closes its linked issues. It completes the way a no-change verdict does.
+    if (isInspectionTaskId(paths, taskId) || noChangeMarkerPresent(paths, taskId)) {
       if (closingIssues.length > 0 && options.onNoChange === undefined) {
         throw new NoChangeReconciliationError(
           'A linked no-change task requires issue reconciliation.',
@@ -1192,12 +1195,10 @@ async function mergeTaskWithGuardHeld(
       await finalizeNoChange(paths, taskId, branch, worktree, io, options)
       return { outcome: 'no-change' }
     }
-    if (!isInspectionTaskId(paths, taskId)) {
-      throw new MergeError(
-        `${taskId} has no new commits relative to ${currentBranch}.\n`
-        + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
-      )
-    }
+    throw new MergeError(
+      `${taskId} has no new commits relative to ${currentBranch}.\n`
+      + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
+    )
   }
   rebaseTaskOntoRunTip(worktree, currentBranch, io)
   if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
@@ -1231,6 +1232,7 @@ async function mergeTaskWithGuardHeld(
     removeTemporaryWorktree(paths, prospectiveWorktree, io.out)
   }
 
+  const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   mergeWithVerifiedRecovery(
     paths.repoRoot,
     ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage],
@@ -1239,6 +1241,14 @@ async function mergeTaskWithGuardHeld(
   )
 
   const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  // A merge judged by its exit status alone would record whatever HEAD already was. When
+  // no commit was created, nothing of the task landed and no linked issue can close.
+  if (mergeCommit === headBeforeMerge) {
+    throw new MergeError(
+      `Merging ${branch} created no commit on ${currentBranch}.\n`
+      + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
+    )
+  }
   // Publish the merge identity before any post-merge work. If dependency synchronization
   // or later cleanup is interrupted, startup can retry it without attempting to merge
   // commits that are already on the run branch or counting a false merge failure.

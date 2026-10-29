@@ -1459,7 +1459,7 @@ export function createLoop(deps: LoopDeps) {
 
     if (lastId !== '') {
       const status = readStatus(paths, lastId)?.status
-      if (status !== 'completed' && status !== 'merged') {
+      if (status !== 'completed' && status !== 'merged' && status !== 'no-change') {
         event('WARN', `review ${shortTaskId(lastId)} ended ${status ?? 'unknown'} without a verdict`)
         missingVerdict = true
         // A crashed review says nothing about the diff, regardless of whether this is
