@@ -608,7 +608,10 @@ export function createLoop(deps: LoopDeps) {
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
-        } catch {
+        } catch (error) {
+          // git's reason stays in the local log: it can quote the remote URL, and the
+          // MergeError text is also posted to the issue.
+          appendFileSync(mergeLog, `${errorSummary(error)}\n`)
           throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
 
@@ -1648,7 +1651,7 @@ export function createLoop(deps: LoopDeps) {
         'push', '--quiet', ...(hasUpstream ? [] : ['--set-upstream']), pushRemote, branch,
       ], {
         cwd: paths.repoRoot,
-        stdio: 'ignore',
+        stdio: ['ignore', 'ignore', 'pipe'],
         windowsHide: true,
       })
     } catch (error) {
