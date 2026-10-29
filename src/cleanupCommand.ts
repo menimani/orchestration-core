@@ -1,10 +1,12 @@
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import {
   completeIssueReleaseIntent, dropClaimedTaskMaterialization, issueNumbersForTask,
   issueReleaseIntentForTask, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
   removeIssueReleasePreparation, type IssueReleaseFailure,
 } from './issueQueue.ts'
-import type { OrchPaths } from './paths.ts'
+import { isScanTaskId, statusFile, type OrchPaths } from './paths.ts'
 
 export const CLEANUP_USAGE = 'Usage: cleanup <task-id>'
 
@@ -28,6 +30,45 @@ function releaseWarning(failures: readonly IssueReleaseFailure[]): string {
   return `WARN: Could not release ${subject} from the forge (${details}). The daemon will retry the persisted release.`
 }
 
+/**
+ * The cycle a scan still owes its yield to, read before cleanup removes the markers that
+ * show whether it already answered. A scan whose completion or failure the daemon has
+ * recorded, or one with no task state left, owes nothing.
+ */
+function pendingScanCycle(paths: OrchPaths, taskId: string): number | undefined {
+  if (!isScanTaskId(taskId) || !existsSync(statusFile(paths, taskId))) return undefined
+  const scannedDir = join(paths.queueDir, 'scanned')
+  if (existsSync(join(scannedDir, taskId)) || existsSync(join(scannedDir, `${taskId}.failed`))) {
+    return undefined
+  }
+  const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+  if (!existsSync(scanCountFile)) return undefined
+  const rawCycle = readFileSync(scanCountFile, 'utf8').trim()
+  if (!/^[1-9][0-9]*$/.test(rawCycle)) return undefined
+  const cycle = Number(rawCycle)
+  if (!existsSync(join(paths.queueDir, `scan-expected-${cycle}`))) return undefined
+  const yieldFile = join(paths.queueDir, `scan-yield-${cycle}`)
+  if (existsSync(yieldFile) && readFileSync(yieldFile, 'utf8').split(/\r?\n/)
+    .some((line) => line.startsWith(`${taskId}\t`))) {
+    return undefined
+  }
+  return cycle
+}
+
+/**
+ * Count a cleaned-up scan as failed for its cycle, the way the daemon counts a scan that
+ * died: its yield can no longer arrive, and without the record the cycle waits for it
+ * forever.
+ */
+function recordCleanedScanFailure(paths: OrchPaths, taskId: string, cycle: number): void {
+  const failedFile = join(paths.queueDir, `failed-${cycle}`)
+  if (existsSync(failedFile)
+    && readFileSync(failedFile, 'utf8').split(/\r?\n/).includes(taskId)) {
+    return
+  }
+  appendFileSync(failedFile, `${taskId}\n`)
+}
+
 /** Clean local task state and release any operator-owned issue-queue claim. */
 export async function runCleanupCommand(
   paths: OrchPaths,
@@ -40,6 +81,7 @@ export async function runCleanupCommand(
     return 1
   }
 
+  const scanCycle = pendingScanCycle(paths, taskId)
   const issueQueueEnabled = runtime.issueQueueEnabled()
   const issueNumbers = issueQueueEnabled ? issueNumbersForTask(paths, taskId) : []
   const releaseAlreadyCompleted = issueNumbers.length > 0
@@ -63,6 +105,7 @@ export async function runCleanupCommand(
     }
     throw error
   }
+  if (scanCycle !== undefined) recordCleanedScanFailure(paths, taskId, scanCycle)
   if (issueNumbers.length === 0) return 0
   if (releaseAlreadyCompleted.length === 0) completeIssueReleaseIntent(paths, taskId)
 
