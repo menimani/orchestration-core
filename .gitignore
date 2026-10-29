@@ -15,6 +15,16 @@ node_modules/
 /.agents/skills/loop-start/
 /.agents/skills/loop-stop/
 /.agents/skills/skill-create/
+/.claude/skills/.orchestration-core-sync.json
+/.claude/skills/git-commit/
+/.claude/skills/git-merge/
+/.claude/skills/git-pr/
+/.claude/skills/git-review/
+/.claude/skills/loop-delegate/
+/.claude/skills/loop-setup/
+/.claude/skills/loop-start/
+/.claude/skills/loop-stop/
+/.claude/skills/skill-create/
 
 # Loop state: queues, logs, worktrees and task files are per-checkout runtime data.
 orchestration/queue/
