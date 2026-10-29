@@ -441,6 +441,27 @@ describe('fleet project selection', () => {
       .toContain(`ORCHESTRATION_FLEET='${fleet.replaceAll('\\', '/')}' npm run -C `)
   })
 
+  it('refuses --repo and --project for install-skills before installing', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+    mkdirSync(join(repoRoot, 'orchestration'))
+
+    for (const args of [['--repo', repoRoot], ['--fleet', fleet, '--project', 'first']]) {
+      const result = spawnSync(process.execPath, [CLI, 'install-skills', ...args], {
+        cwd: repoRoot,
+        env: { ...CORE_ENV, HOME: home, USERPROFILE: home },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('install-skills takes only --fleet <dir>')
+    }
+    expect(existsSync(join(home, '.claude', 'skills'))).toBe(false)
+  })
+
   it('names the search start when no fleet manifest is found', () => {
     const result = runCli(['loop-status', '--project', 'first'])
 

@@ -270,8 +270,9 @@ head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pul
 checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
 and verifies the revision that actually came up.
 
-Every command accepts `--repo <path>` to act on that repository instead of the repository
-containing the working directory. The path may name the repository or a directory inside
+Every command except `install-skills`, which takes only `--fleet <dir>` (see
+[Running from a fleet](#running-from-a-fleet)), accepts `--repo <path>` to act on that
+repository instead of the repository containing the working directory. The path may name the repository or a directory inside
 it; the CLI resolves its Git root and requires that root to contain `orchestration/`.
 Without `--repo`, repository discovery is unchanged. Repeat the option for fleet status:
 
