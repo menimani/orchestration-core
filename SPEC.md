@@ -59,11 +59,12 @@ from or equivalent to `orchestration/tests/*.sh`.
   marker as an exact standalone line, while a background loop writes that exact line to
   `logs/loop-markers.log`. The corresponding result is represented separately by an
   aligned display event in `loop.log`.
-- Every command accepts a global `--repo <path>` option. When present, Git resolves the
+- Every command except `install-skills`, whose own item below states its single option,
+  accepts a global `--repo <path>` option. When present, Git resolves the
   named path to its repository root and the CLI verifies both that it is a Git repository
   and that its root contains an `orchestration/` directory before dispatch. Without the
-  option, repository discovery from the working directory is unchanged. All commands
-  accept one repository; `loop-status` additionally accepts repeated `--repo` options.
+  option, repository discovery from the working directory is unchanged. Each of those
+  commands accepts one repository; `loop-status` additionally accepts repeated `--repo` options.
   For two or more repositories it emits one line per repository naming the root, loop
   running state, recorded run branch, queued count, and in-flight count. Its existing
   detailed output is unchanged for a single repository. Paths are supplied per command;
@@ -73,7 +74,8 @@ from or equivalent to `orchestration/tests/*.sh`.
   Its tracked `fleet.json` declares each project as a lowercase slug with the forge
   `owner/repository` its branches go to, and its untracked `fleet.local.json` maps each
   project to this machine's checkout; a relative path resolves from the fleet. Every
-  command accepts `--fleet <dir>` and `--project <name>`; without `--fleet`, the nearest
+  command accepts `--fleet <dir>`, and every command except `install-skills` accepts
+  `--project <name>`; without `--fleet`, the nearest
   directory at or above the working directory that holds `fleet.json` is the fleet. A
   fleet project keeps its adapter, templates, `accepted-limits.md`, and `config.json`
   under `projects/<name>/`, in the layout `orchestration/` uses, and its tasks,
@@ -82,7 +84,7 @@ from or equivalent to `orchestration/tests/*.sh`.
   or a mapped path that is not a Git repository. `loop-status` with a fleet and no
   project prints one line per declared project in the multi-repository format; a project
   this machine cannot resolve prints the reason instead and makes the command exit
-  non-zero. Every other command requires `--project`. Commands the CLI prints for a fleet
+  non-zero. Every other command except `install-skills` requires `--project`. Commands the CLI prints for a fleet
   project, and the daemon and worker launches it makes, name the fleet and project again
   instead of the repository. `init` and `verify-setup` for a fleet project configure no
   hooks in the target repository and report them as skipped. When `fleet.json` names an
@@ -104,6 +106,7 @@ from or equivalent to `orchestration/tests/*.sh`.
   `Conflict:` and left unchanged, and any conflict or failure exits non-zero. Installed
   skills carry no project guidance fragment. Without `--fleet`, the fleet is
   `ORCHESTRATION_FLEET` or the nearest `fleet.json` at or above the caller's directory.
+  It accepts neither `--repo` nor `--project`; either one fails before installing.
 - `report-upstream` requires one explicit, non-blank description. `--help` prints its
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
