@@ -4,7 +4,7 @@ import {
 } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import {
-  ForgeRateLimitError, type Forge, type ForgeIssue, type ForgeIssueComment,
+  ForgeIssueNotFoundError, ForgeRateLimitError, type Forge, type ForgeIssue, type ForgeIssueComment,
 } from './adapters/forge.ts'
 import { dequeueBacklog, ensureBacklog } from './backlog.ts'
 import type { ProjectAdapter, SuiteStep } from './adapters/project.ts'
@@ -2483,9 +2483,15 @@ export function createLoop(deps: LoopDeps) {
           ),
           onNoChange: async () => {
             if (linkedIssues.length > 0) {
-              await Promise.all(linkedIssues.map((issueNumber) =>
-                closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
-                  `Task ${taskId} completed without changes because no change was warranted.`)))
+              await Promise.all(linkedIssues.map(async (issueNumber) => {
+                try {
+                  await closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
+                    `Task ${taskId} completed without changes because no change was warranted.`)
+                } catch (error) {
+                  // A deleted issue cannot be closed, and nothing remains open to close.
+                  if (!(error instanceof ForgeIssueNotFoundError)) throw error
+                }
+              }))
             }
             recordIssueCompletions(paths, taskId, 'no-change')
           },
@@ -2493,6 +2499,7 @@ export function createLoop(deps: LoopDeps) {
         // Reaching an outcome at all means the runner no longer blocks the merge.
         warningLog.recovered(`unverified-runner-${taskId}`)
         if (mergeResult.outcome === 'no-change') {
+          previousGateFailures.delete(`no-change-reconciliation-${taskId}`)
           event('No-change', shortTaskId(taskId), 'no change warranted')
           retireConflictedAttempts(taskId, linkedIssues)
           if (!isInspectionTaskId(paths, taskId)) {
@@ -2514,7 +2521,15 @@ export function createLoop(deps: LoopDeps) {
         }
       } catch (error) {
         if (error instanceof NoChangeReconciliationError) {
-          event('WARN', `could not reconcile no-change task ${shortTaskId(taskId)}: ${error.message}`)
+          // Counted per task, like merged-issue reconciliation, so a close that can
+          // never succeed stops the loop with its reason instead of idling it forever.
+          if (!(error.cause instanceof ForgeRateLimitError)) {
+            reportGateFailure(
+              `could not reconcile no-change task ${shortTaskId(taskId)}: ${error.message}`,
+              true,
+              `no-change-reconciliation-${taskId}`,
+            )
+          }
           issueReconciliationPending = true
           return
         }

@@ -31,8 +31,8 @@ import {
 
 export class MergeError extends Error {
   keepWorktree: boolean
-  constructor(message: string, keepWorktree = true) {
-    super(message)
+  constructor(message: string, keepWorktree = true, options?: ErrorOptions) {
+    super(message, options)
     this.keepWorktree = keepWorktree
   }
 }
@@ -845,6 +845,8 @@ async function finalizeNoChange(
   } catch (error) {
     throw new NoChangeReconciliationError(
       `Could not reconcile the no-change verdict: ${commandFailureSummary(error)}`,
+      true,
+      { cause: error },
     )
   }
   await writeStatus(paths, taskId, 'no-change')
