@@ -343,5 +343,6 @@ export function createOperatingSystem(
         holderHint: `Find holder: handle.exe "${path}" (Sysinternals)`,
       }
     },
+    environmentNameKey: (name) => name.toUpperCase(),
   }
 }

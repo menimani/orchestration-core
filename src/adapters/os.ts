@@ -58,6 +58,8 @@ export interface OperatingSystem {
   terminateWorktreeProcesses(path: string, report: (line: string) => void): void
   removeDirectory(path: string): void
   worktreePathFor(path: string): WorktreePath
+  /** Canonical value used when comparing environment variable names. */
+  environmentNameKey(name: string): string
 }
 
 // Unlike the consumer-selected adapters, the operating system is a fact about this

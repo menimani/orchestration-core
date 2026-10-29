@@ -1,4 +1,5 @@
 import { execSync, type ExecSyncOptionsWithStringEncoding } from 'node:child_process'
+import { operatingSystem } from './adapters/os.ts'
 import { projectCommandEnvironment } from './internalEnvironment.ts'
 
 /** Execute a project command without exposing the core's private process metadata. */
@@ -8,6 +9,6 @@ export function execShellSync(
 ): string {
   return execSync(command, {
     ...options,
-    env: projectCommandEnvironment(options.env ?? process.env),
+    env: projectCommandEnvironment(options.env ?? process.env, operatingSystem),
   })
 }
