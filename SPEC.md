@@ -593,9 +593,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Before generating a review task, the loop persists its candidate task ID in a
     per-cycle pending-ID file. If enqueueing fails, that pending ID remains and neither
     the review round nor the dispatched review ID is recorded; the next gate pass
-    regenerates and retries the task with the same ID. A successful enqueue records the
-    round and dispatched ID, then removes the pending-ID file. Session cleanup also
-    removes any remaining pending-ID file.
+    regenerates and retries the task with the same ID. An enqueue failure repeating
+    with no review enqueue succeeding in between stops the loop, so a queue that never
+    accepts the review cannot leave the loop idling at the gate with nothing
+    dispatched. A successful enqueue records the round and dispatched ID, then removes
+    the pending-ID file. Session cleanup also removes any remaining pending-ID file.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
     unless it is already open and ready. While an open PR reports a head commit other

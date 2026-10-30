@@ -1503,9 +1503,17 @@ export function createLoop(deps: LoopDeps) {
     try {
       enqueueTaskImpl(paths, reviewId, 0)
     } catch (error) {
-      event('WARN', `could not enqueue review: ${errorSummary(error)}`)
+      // The pending ID makes the next poll retry the same review, but a queue that never
+      // accepts it would leave the loop idling at the gate with nothing dispatched, so a
+      // repeated failure stops the loop as the CI-fix enqueue does.
+      reportGateFailure(
+        `could not enqueue review: ${errorSummary(error)}`,
+        true,
+        'review-enqueue',
+      )
       return false
     }
+    previousGateFailures.delete('review-enqueue')
     // The round and id are the durable receipt for a dispatched review. Publishing
     // them before the backlog mutation succeeds consumes a round without any worker
     // being able to perform it, so keep them behind the enqueue boundary.
