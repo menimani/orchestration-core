@@ -273,6 +273,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    enqueue an accepted finding counts one gate failure under that completion scan's key,
    however many findings it rejected: the first warns, a repeat stops the loop rather
    than holding the completion pending forever, and a forge rate limit is not counted.
+   A worker-mode daemon (item 36) has no gate to count against: it files a completion's
+   findings before publishing it, so a filing failure is one of its publication errors,
+   retried on later polls until the fifth consecutive failure marks the task failed, and
+   never stops the loop.
 7. `DECISION_REQUIRED: <text>` is logged and carried into the PR risks, never queued.
    Dedup: a line naming a `GHSA-`/`CVE-` identifier matches on the identifier (a scan
    words the same advisory differently every cycle); a line naming neither matches on
