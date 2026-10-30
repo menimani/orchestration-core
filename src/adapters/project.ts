@@ -644,6 +644,14 @@ export async function loadMonitoredProject(
   }
 }
 
+/** The adapter file `loadProject` imports for the same root and environment. */
+export function projectAdapterPath(
+  orchestrationRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveProjectAdapter(orchestrationRoot, env).path
+}
+
 export async function loadProject(
   orchestrationRoot: string,
   env: NodeJS.ProcessEnv = process.env,

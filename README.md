@@ -203,8 +203,9 @@ Requests above the number of numbered sections are reduced to that count and rep
 
 Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
 the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,
-adapter suite, real adapter discovery, referenced paths, pushable branch upstream, hooks
-setting, and labels separately; skipped checks retain their reason.
+whether that gate covered the loaded adapter, adapter suite, real adapter discovery,
+referenced paths, pushable branch upstream, hooks setting, and labels separately; skipped
+checks retain their reason.
 
 Then start a run on a topic branch — never on your default branch, because the loop
 commits and merges on its own. On POSIX shells:

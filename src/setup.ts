@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
-import { loadProject, type ProjectAdapter, type SuiteStep } from './adapters/project.ts'
+import { loadProject, projectAdapterPath, type ProjectAdapter, type SuiteStep } from './adapters/project.ts'
 import { QUEUE_LABELS } from './issueQueue.ts'
 import { projectScopeLabel } from './issueScope.ts'
 import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
@@ -70,6 +70,13 @@ function safeRepositoryPath(repoRoot: string, referencedPath: string): string | 
     : target
 }
 
+// tsconfig.project.json includes only `../project/project-*.ts`, the adapter beside a core
+// installed under `orchestration/ts`; any other adapter is outside `npm run typecheck`.
+function typecheckCoversAdapter(packageRoot: string, adapterPath: string): boolean {
+  return dirname(adapterPath) === resolve(packageRoot, '..', 'project')
+    && /^project-.+\.ts$/.test(basename(adapterPath))
+}
+
 function runSuiteStep(
   repoRoot: string,
   step: SuiteStep,
@@ -108,22 +115,34 @@ export async function verifyRepositorySetup(
   ok = typecheckPassed && ok
 
   let project: ProjectAdapter | undefined
+  let adapterPath: string | undefined
   try {
     const env = options.env ?? process.env
     if (env['PROJECT_ADAPTER'] !== undefined && env['PROJECT_ADAPTER'] !== '') {
       project = await loadProject(paths.projectRoot, env)
+      adapterPath = projectAdapterPath(paths.projectRoot, env)
       report(`PASS: loadProject selected adapter '${project.name}' with PROJECT_ADAPTER`)
     } else if (env['PROJECT'] !== undefined && env['PROJECT'] !== '') {
       project = await loadProject(paths.projectRoot, env)
+      adapterPath = projectAdapterPath(paths.projectRoot, env)
       report(`PASS: loadProject selected adapter '${project.name}' with PROJECT`)
     } else {
       const discovered = await loadProject(paths.projectRoot, {})
       project = await loadProject(paths.projectRoot, { PROJECT: discovered.name })
+      adapterPath = projectAdapterPath(paths.projectRoot, { PROJECT: discovered.name })
       report(`PASS: loadProject discovered adapter '${project.name}' by name`)
     }
   } catch (error) {
     report(`FAIL: loadProject adapter discovery; ${(error as Error).message}`)
     ok = false
+  }
+
+  if (adapterPath === undefined) {
+    report('SKIP: adapter TypeScript typecheck; adapter could not be loaded')
+  } else if (typecheckCoversAdapter(packageRoot, adapterPath)) {
+    report(`${typecheckPassed ? 'PASS' : 'FAIL'}: adapter TypeScript typecheck`)
+  } else {
+    report(`SKIP: adapter TypeScript typecheck; ${adapterPath} is outside tsconfig.project.json`)
   }
 
   if (project === undefined) {

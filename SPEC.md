@@ -802,9 +802,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `DIVERGED`. Either report makes init exit non-zero. The
     `loop-setup` skill gathers the repository decisions, fills a newly generated adapter,
     and runs `verify-setup`. That
-    verifier reports separately the core typecheck, adapter suite, real loader discovery
-    by name, referenced paths, pushable upstream, hooks setting, and labels. A skipped
-    check retains its reason and is never reported as a pass.
+    verifier reports separately the core typecheck, adapter typecheck, adapter suite,
+    real loader discovery by name, referenced paths, pushable upstream, hooks setting,
+    and labels. The adapter typecheck passes only when the loaded adapter is one the
+    core's `tsconfig.project.json` includes; a fleet adapter or another explicit
+    `PROJECT_ADAPTER` path is skipped. A skipped check retains its reason and is never
+    reported as a pass.
 32. Operating-system behavior is detected once from the running process and exposed
     through `adapters/os.ts`. Callers receive intent-level process-tree, directory, and
     worktree-path operations from either `os-windows.ts` or `os-posix.ts`; there is no
