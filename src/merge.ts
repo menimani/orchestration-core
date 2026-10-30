@@ -735,6 +735,30 @@ function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
   return false
 }
 
+// The error a step throws decides how the loop treats the attempt: a test-lock deferral is
+// retried uncounted and a recovery failure stops the loop. A removal that also fails is
+// logged beside that error rather than replacing it, and fails the merge only when the
+// step itself succeeded.
+export function inTemporaryWorktree(
+  paths: OrchPaths,
+  worktree: string,
+  log: (text: string) => void,
+  step: () => void,
+  runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
+): void {
+  try {
+    step()
+  } catch (error) {
+    try {
+      removeTemporaryWorktree(paths, worktree, log, runtime)
+    } catch (removalError) {
+      log(`WARN: ${removalError instanceof Error ? removalError.message : String(removalError)}`)
+    }
+    throw error
+  }
+  removeTemporaryWorktree(paths, worktree, log, runtime)
+}
+
 export function removeTemporaryWorktree(
   paths: OrchPaths,
   worktree: string,
@@ -1254,7 +1278,7 @@ async function mergeTaskWithGuardHeld(
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
-  try {
+  inTemporaryWorktree(paths, prospectiveWorktree, io.out, () => {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', prospectiveWorktree, currentBranch])
     mergeWithVerifiedRecovery(
       prospectiveWorktree,
@@ -1269,9 +1293,7 @@ async function mergeTaskWithGuardHeld(
       // an empty inspection diff is fine
     }
     runMergeChecks(prospectiveWorktree, currentBranch, options, io)
-  } finally {
-    removeTemporaryWorktree(paths, prospectiveWorktree, io.out)
-  }
+  })
 
   const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   mergeWithVerifiedRecovery(
@@ -1400,7 +1422,7 @@ export async function mergeRemoteTask(
     )
     return appliedCommit
   }
-  try {
+  inTemporaryWorktree(paths, worktree, io.out, () => {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     mergeWithVerifiedRecovery(
       worktree,
@@ -1411,9 +1433,7 @@ export async function mergeRemoteTask(
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
     runMergeChecks(worktree, currentBranch, options, io)
-  } finally {
-    removeTemporaryWorktree(paths, worktree, io.out)
-  }
+  })
 
   mergeWithVerifiedRecovery(
     paths.repoRoot,

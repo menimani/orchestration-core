@@ -11,7 +11,8 @@ import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  completeTaskWithoutChanges, describeCommandFailure, MergeError, MergeRecoveryError,
+  completeTaskWithoutChanges, describeCommandFailure, inTemporaryWorktree, MergeError,
+  MergeRecoveryError,
   mergeRemoteTask, mergeTask, RebaseConflictError, removeMergedWorktree,
   removeTemporaryWorktree, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError, UnverifiedRunnerError,
 } from '../src/merge.ts'
@@ -376,6 +377,55 @@ describe('removeTemporaryWorktree', () => {
       + '(git: Git removal failed; fallback: Direct removal failed)',
     )
     expect(gitRuntime).toHaveBeenNthCalledWith(2, paths.repoRoot, ['worktree', 'prune'])
+  })
+})
+
+describe('inTemporaryWorktree', () => {
+  const removalFailure = (worktree: string): string =>
+    `Could not remove temporary worktree ${worktree}; merge was not applied. `
+    + '(git: Git removal failed; fallback: Direct removal failed)'
+
+  it.each([
+    ['a test-lock deferral', new TestLockBusyError('the repository test lock stayed busy')],
+    ['a recovery failure', new MergeRecoveryError('Could not restore the worktree.')],
+  ])('keeps %s when the worktree removal also fails, and logs the removal', (_name, failure) => {
+    const worktree = join(paths.worktreesDir, '.merge-failed-step')
+    const log = vi.fn()
+
+    let thrown: unknown
+    try {
+      inTemporaryWorktree(paths, worktree, log, () => { throw failure }, failedWorktreeRemovalRuntime())
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBe(failure)
+    expect(log).toHaveBeenCalledWith(`WARN: ${removalFailure(worktree)}`)
+  })
+
+  it('fails with the removal error when the step passed', () => {
+    const worktree = join(paths.worktreesDir, '.merge-passed-step')
+    const step = vi.fn()
+
+    expect(() => inTemporaryWorktree(
+      paths, worktree, vi.fn(), step, failedWorktreeRemovalRuntime(),
+    )).toThrow(removalFailure(worktree))
+    expect(step).toHaveBeenCalledOnce()
+  })
+
+  it('removes the worktree after a step that passed', () => {
+    const worktree = join(paths.worktreesDir, '.merge-clean')
+    const calls: string[] = []
+
+    inTemporaryWorktree(paths, worktree, vi.fn(), () => { calls.push('step') }, {
+      os: posixOperatingSystem(vi.fn()),
+      git: (_cwd, args) => {
+        calls.push(args.join(' '))
+        return ''
+      },
+    })
+
+    expect(calls).toEqual(['step', `worktree remove ${worktree} --force`])
   })
 })
 
