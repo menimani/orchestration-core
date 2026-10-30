@@ -1065,6 +1065,9 @@ account with write access withdraws every `MERGED:` comment before it.
     each issue: one that is no longer open and `loop:in-progress` without `loop:ready`, and
     that does not already carry `loop:merge-ready` with this task's branch and head, is
     unlinked from the task, which becomes failed without releasing or counting that issue.
+    A completed task without commits re-reads each issue the same way before closing it:
+    an open issue that is no longer `loop:in-progress` without `loop:ready` is unlinked
+    the same way and left open, while one an earlier attempt already closed is finished.
     Any other publication error, such as a rejected push or a failed comment or label
     change, is retried on later polls; the fifth consecutive failure marks the task failed
     with the reason in its task log. Rate-limit errors are not counted, and operator
