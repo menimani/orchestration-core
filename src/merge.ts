@@ -553,11 +553,14 @@ function rebaseTaskOntoRunTip(
     const conflict = conflictedFiles.length > 0
       ? describeRebaseConflict(worktree, currentBranch, taskTip, conflictedFiles)
       : undefined
+    let abortError: unknown
     try {
       git(worktree, ['rebase', '--abort'])
-    } catch {
-      // nothing to abort
+    } catch (error) {
+      // A rebase that never started leaves nothing to abort; the state check below decides.
+      abortError = error
     }
+    verifyRebaseAborted(worktree, currentBranch, taskTip, rebaseError, abortError)
     if (conflictedFiles.length === 0) {
       throw new MergeError(
         `Rebasing the task onto ${currentBranch} failed without a conflict; the rebase was aborted. `
@@ -568,6 +571,57 @@ function rebaseTaskOntoRunTip(
       `A conflict occurred while rebasing the task onto ${currentBranch}; the rebase was aborted.`,
       conflict,
     )
+  }
+}
+
+/**
+ * Confirm the abort left the task worktree where the rebase found it. A worktree still
+ * mid-rebase, or on another commit, would be misread by the next merge attempt, so it
+ * stops the loop instead of staying retryable; a failed lookup proves nothing and stops it
+ * too.
+ */
+function verifyRebaseAborted(
+  worktree: string,
+  currentBranch: string,
+  taskTip: string,
+  rebaseError: unknown,
+  abortError: unknown,
+): void {
+  let inProgress: boolean
+  let head: string
+  try {
+    inProgress = gitPathExists(worktree, 'rebase-merge') || gitPathExists(worktree, 'rebase-apply')
+    head = git(worktree, ['rev-parse', 'HEAD']).trim()
+  } catch (verificationError) {
+    throw new MergeRecoveryError(
+      `Rebasing the task onto ${currentBranch} failed and recovery could not be verified: `
+      + `${commandFailureSummary(verificationError)}; `
+      + `rebase abort ${abortError === undefined ? 'reported success' : `failed: ${commandFailureSummary(abortError)}`}. `
+      + `Rebase failure: ${commandFailureSummary(rebaseError)}. `
+      + 'Inspect and restore the task worktree before restarting orchestration.',
+    )
+  }
+  if (inProgress || head !== taskTip) {
+    throw new MergeRecoveryError(
+      `Rebasing the task onto ${currentBranch} failed and the abort did not restore the task worktree: `
+      + `expected HEAD ${taskTip.slice(0, 8)}, found ${head.slice(0, 8)}; `
+      + `rebase ${inProgress ? 'is still in progress' : 'is not in progress'}; `
+      + `rebase abort ${abortError === undefined ? 'reported success' : `failed: ${commandFailureSummary(abortError)}`}. `
+      + `Rebase failure: ${commandFailureSummary(rebaseError)}. `
+      + 'Inspect and restore the task worktree before restarting orchestration.',
+    )
+  }
+}
+
+/** Whether the repository holds the named entry under its git directory. */
+function gitPathExists(cwd: string, name: string): boolean {
+  const gitPath = git(cwd, ['rev-parse', '--git-path', name]).trim()
+  try {
+    statSync(isAbsolute(gitPath) ? gitPath : resolve(cwd, gitPath))
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
   }
 }
 
