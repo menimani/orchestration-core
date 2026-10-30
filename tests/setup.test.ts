@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { renderProjectAdapter } from '../src/adapters/project.ts'
 import { QUEUE_LABELS } from '../src/issueQueue.ts'
-import { orchPaths } from '../src/paths.ts'
+import { fleetPaths, orchPaths } from '../src/paths.ts'
 import { verifyRepositorySetup } from '../src/setup.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
@@ -49,6 +49,7 @@ describe('setup verification', () => {
     expect(reports).toEqual([
       'PASS: orchestration TypeScript typecheck',
       "PASS: loadProject discovered adapter 'consumer' by name",
+      'PASS: adapter TypeScript typecheck',
       "PASS: adapter suite step 'Consumer suite'",
       'PASS: adapter suite',
       'PASS: all 0 adapter-referenced paths exist',
@@ -146,6 +147,7 @@ describe('setup verification', () => {
       run: (_cwd: string, command: string) => command !== 'npm run typecheck',
       expected: [
         /^FAIL: orchestration TypeScript typecheck$/,
+        /^FAIL: adapter TypeScript typecheck$/,
       ],
     },
     {
@@ -153,6 +155,7 @@ describe('setup verification', () => {
       omitAdapter: true,
       expected: [
         /^FAIL: loadProject adapter discovery;/,
+        /^SKIP: adapter TypeScript typecheck; adapter could not be loaded$/,
         /^SKIP: adapter suite; adapter could not be loaded$/,
         /^SKIP: adapter referenced paths; adapter could not be loaded$/,
       ],
@@ -294,5 +297,42 @@ describe('setup verification', () => {
     expect(ok).toBe(true)
     expect(reports)
       .toContain("PASS: loadProject selected adapter 'explicit' with PROJECT_ADAPTER")
+    expect(reports).toContain(
+      `SKIP: adapter TypeScript typecheck; ${join(customDirectory, 'selected.ts')} is outside tsconfig.project.json`,
+    )
+  })
+
+  it('skips the adapter typecheck for a fleet adapter the core typecheck does not include', async () => {
+    const fleet = mkdtempSync(join(tmpdir(), 'orchestration-verify-fleet-'))
+    repositories.push(fleet)
+    const packageRoot = join(fleet, 'orchestration-core')
+    mkdirSync(join(packageRoot, '.githooks'), { recursive: true })
+    const projectDirectory = join(fleet, 'projects', 'consumer', 'project')
+    mkdirSync(projectDirectory, { recursive: true })
+    const adapterPath = join(projectDirectory, 'project-consumer.ts')
+    writeFileSync(adapterPath,
+      renderProjectAdapter('consumer', 'orchestration-core/src/adapters/project.ts'))
+    const checkout = join(fleet, 'checkout')
+    mkdirSync(checkout)
+    const forge = makeFakeForge()
+    const reports: string[] = []
+    const git = (args: string[]): string => {
+      if (args.includes('@{upstream}')) return 'origin/topic'
+      if (args.includes('--dry-run')) return ''
+      throw new Error(`unexpected git call: ${args.join(' ')}`)
+    }
+
+    const ok = await verifyRepositorySetup(
+      fleetPaths({ dir: fleet, project: 'consumer', repository: 'owner/consumer' }, checkout, false),
+      forge,
+      { packageRoot, env: {}, report: (line) => reports.push(line), git, run: () => true },
+    )
+
+    expect(ok).toBe(true)
+    expect(reports).toContain('PASS: orchestration TypeScript typecheck')
+    expect(reports).toContain(
+      `SKIP: adapter TypeScript typecheck; ${adapterPath} is outside tsconfig.project.json`,
+    )
+    expect(reports).not.toContain('PASS: adapter TypeScript typecheck')
   })
 })
