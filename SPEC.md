@@ -514,7 +514,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     edits, deletions, and added support files in its rendered tree; repository-specific
     additions belong in the fragment. A skill absent from the managed index is
     repository-owned and remains
-    entirely untouched.
+    entirely untouched. A managed tree is compared with CRLF folded to LF in every file
+    without a NUL byte, so a checkout that converts line endings is not rewritten.
     In a subtree consumer, before writing any destination, the sync verifies that every
     managed destination has no staged changes. An unverifiable or non-clean managed index
     is fatal and stops the cycle before any destination is served. A destination rendering
