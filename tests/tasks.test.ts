@@ -333,6 +333,35 @@ describe('delegateTask', () => {
     expect(result.issue).toBeUndefined()
     expect(loadedForge).toBe(false)
   })
+
+  it('publishes delegated work when only the configuration file enables issue mode', async () => {
+    writeFileSync(join(paths.projectRoot, 'config.json'), '{ "ISSUE_QUEUE_ENABLED": true }\n')
+    const forge = makeFakeForge('delegator')
+    const result = await delegateTaskVisible(paths, DESC, {}, {
+      env: {},
+      loadForge: async () => forge,
+      warn: () => {},
+    })
+
+    expect(result.issue).toEqual({ outcome: 'created', issueNumber: 1, materialize: false })
+    expect(queueLines()).toEqual([])
+  })
+
+  it('lets the configuration file win over the environment', () => {
+    const configFile = join(paths.projectRoot, 'config.json')
+    writeFileSync(configFile, '{ "ISSUE_QUEUE_ENABLED": true }\n')
+    expect(isIssueModeActive(paths, { ISSUE_QUEUE_ENABLED: 'false' })).toBe(true)
+
+    writeIssueModeMarker(paths, true)
+    writeFileSync(configFile, '{ "ISSUE_QUEUE_ENABLED": false, "MAX_PARALLEL": 2 }\n')
+    expect(isIssueModeActive(paths, { ISSUE_QUEUE_ENABLED: 'true' })).toBe(false)
+  })
+
+  it('rejects a malformed issue-mode setting instead of reading it as disabled', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(() => isIssueModeActive(paths, { ISSUE_QUEUE_ENABLED: 'TRUE' }))
+      .toThrow(/ISSUE_QUEUE_ENABLED/)
+  })
 })
 
 describe('newTaskSpec', () => {
