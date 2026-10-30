@@ -1035,6 +1035,9 @@ so authorship and verified ancestry must both hold.
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
+    A grouped member still `loop:in-progress` with no worker report is still being
+    published, so the poll skips the group and leaves every member as it is; only a
+    different reported branch or head, or an unavailable member, fails the adoption.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
     `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and
