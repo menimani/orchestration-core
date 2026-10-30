@@ -623,9 +623,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
      ending after observing the already-ready or merged PR itself. Use `shipped` only
      when that automatic ending was not recorded. It performs no forge operation: it
      appends a cycle-aware `Completed Loop`
-     event to `logs/loop.log`, appends the exact standalone marker
-     `LOOP_DONE: <pr-number-or-url>` to `logs/loop-markers.log`, and confirms the record
-     on stdout. The event's cycle prefix is read back from the state the stopped daemon
+     event to `logs/loop.log`, appends the standalone marker `LOOP_DONE: <reference>`
+     to `logs/loop-markers.log`, and confirms the record on stdout. The reference is
+     normalized rather than copied: a number becomes `#<n>`, and a URL is written in its
+     parsed form, with the scheme and host lowercased and a default port dropped. The event's cycle prefix is read back from the state the stopped daemon
      left: the cycle number from `queue/scan-count.txt` and the cap from
      `queue/cycle-cap.txt` (item 13). A missing cycle number reads as zero, and a cap no
      daemon recorded falls back to the configured `MAX_SCAN_CYCLES`.

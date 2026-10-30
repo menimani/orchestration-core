@@ -347,8 +347,10 @@ If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
 subtree installation). The command requires exactly one positive PR number, optionally
 prefixed with `#`, or one absolute HTTP(S) URL. It refuses to run while the loop is active,
-performs no forge operation, records the completion in `logs/loop.log`, and emits the exact
-standalone `LOOP_DONE: <pr-number-or-url>` marker to `logs/loop-markers.log`.
+performs no forge operation, records the completion in `logs/loop.log`, and emits a
+standalone `LOOP_DONE:` marker to `logs/loop-markers.log` carrying the normalized
+reference: `#<n>` for a number, and for a URL its parsed form, with the scheme and host
+lowercased and a default port dropped.
 An active loop that observes the PR already ready or merged records its normal ending
 itself, so `shipped` is only needed when that ending is absent. If the PR is closed rather
 than ready or merged, the loop warns once and retries; observing the same closed state on
