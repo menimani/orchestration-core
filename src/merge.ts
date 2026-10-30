@@ -546,17 +546,41 @@ function rebaseTaskOntoRunTip(
     git(worktree, [
       'rebase', '--quiet', '--reapply-cherry-picks', '--empty=keep', currentBranch,
     ])
-  } catch {
-    const conflict = describeRebaseConflict(worktree, currentBranch, taskTip)
+  } catch (rebaseError) {
+    // Only unmerged paths prove a conflict. A rebase also stops on a held file or a stale
+    // index lock, and abandoning the task for that would discard work a retry can merge.
+    const conflictedFiles = unmergedPaths(worktree)
+    const conflict = conflictedFiles.length > 0
+      ? describeRebaseConflict(worktree, currentBranch, taskTip, conflictedFiles)
+      : undefined
     try {
       git(worktree, ['rebase', '--abort'])
     } catch {
       // nothing to abort
     }
+    if (conflictedFiles.length === 0) {
+      throw new MergeError(
+        `Rebasing the task onto ${currentBranch} failed without a conflict; the rebase was aborted. `
+        + `Rebase failure: ${commandFailureSummary(rebaseError)}`,
+      )
+    }
     throw new RebaseConflictError(
       `A conflict occurred while rebasing the task onto ${currentBranch}; the rebase was aborted.`,
       conflict,
     )
+  }
+}
+
+/**
+ * Paths a stopped rebase left unmerged. A lookup that fails proves no conflict, so it
+ * answers none and the failure stays retryable rather than abandoning the task.
+ */
+function unmergedPaths(worktree: string): string[] {
+  try {
+    return git(worktree, ['diff', '--name-only', '--diff-filter=U'])
+      .split(/\r?\n/).filter((line) => line !== '')
+  } catch {
+    return []
   }
 }
 
@@ -568,17 +592,14 @@ function describeRebaseConflict(
   worktree: string,
   currentBranch: string,
   taskTip: string,
+  conflictedFiles: string[],
 ): RebaseConflict | undefined {
   try {
     const runTip = git(worktree, ['rev-parse', currentBranch]).trim()
     const base = git(worktree, ['merge-base', currentBranch, taskTip]).trim()
-    const conflictedFiles = git(worktree, ['diff', '--name-only', '--diff-filter=U'])
-      .split(/\r?\n/).filter((line) => line !== '')
-    const conflictingCommits = conflictedFiles.length === 0
-      ? []
-      : git(worktree, [
-        'log', '--reverse', '--format=%H', `${base}..${runTip}`, '--', ...conflictedFiles,
-      ]).split(/\r?\n/).filter((line) => line !== '')
+    const conflictingCommits = git(worktree, [
+      'log', '--reverse', '--format=%H', `${base}..${runTip}`, '--', ...conflictedFiles,
+    ]).split(/\r?\n/).filter((line) => line !== '')
     return {
       runBranch: currentBranch, runTip, base, taskTip, conflictedFiles, conflictingCommits,
     }
