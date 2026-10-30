@@ -1485,6 +1485,46 @@ describe('runAutoReview', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
+  it('stops when the review enqueue keeps failing', () => {
+    const enqueue = vi.fn<typeof enqueueTask>(() => {
+      throw new Error('queue unavailable')
+    })
+    const loop = makeLoop({}, stubProject, undefined, undefined, undefined, enqueue)
+    const stopFile = join(paths.queueDir, 'stop')
+
+    expect(loop.runAutoReview(7, false)).toBe(false)
+    expect(existsSync(stopFile)).toBe(false)
+
+    expect(loop.runAutoReview(7, false)).toBe(false)
+
+    expect(enqueue).toHaveBeenCalledTimes(2)
+    expect(existsSync(join(paths.queueDir, 'review-round-7'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-7'))).toBe(false)
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText())
+      .toContain('ERROR could not enqueue review: queue unavailable (repeated 2 times)')
+  })
+
+  it('counts a review enqueue failure afresh after an enqueue succeeds', () => {
+    const enqueue = vi.fn<typeof enqueueTask>()
+      .mockImplementationOnce(() => { throw new Error('queue unavailable') })
+      .mockImplementationOnce((enqueuePaths, taskId, depth) =>
+        enqueueTask(enqueuePaths, taskId, depth))
+      .mockImplementation(() => { throw new Error('queue unavailable') })
+    const loop = makeLoop({}, stubProject, undefined, undefined, undefined, enqueue)
+
+    expect(loop.runAutoReview(7, false)).toBe(false)
+    expect(loop.runAutoReview(7, false)).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'review-round-7'), 'utf8')).toBe('1\n')
+    expect(loop.runAutoReview(8, false)).toBe(false)
+
+    expect(enqueue).toHaveBeenCalledTimes(3)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).not.toContain('repeated 2 times')
+    expect(logText().match(/WARN could not enqueue review: queue unavailable/g))
+      .toHaveLength(2)
+  })
+
   it('resolves the advertised remote default branch when the local HEAD ref is missing', () => {
     git(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
     git(['branch', '-m', 'main', 'trunk'])
