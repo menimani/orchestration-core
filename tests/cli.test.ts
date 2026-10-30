@@ -509,6 +509,42 @@ describe('fleet project selection', () => {
       .toContain(`ORCHESTRATION_FLEET='${fleet.replaceAll('\\', '/')}' npm run -C `)
   })
 
+  it('installs the shared skills where each fleet project runner discovers them', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+    writeFileSync(join(repoRoot, 'external-runner.mjs'), [
+      "import { join } from 'node:path'",
+      'export const runner = {',
+      '  sharedSkills: {',
+      "    destinationRoot: (root) => join(root, '.external', 'skills'),",
+      "    userDestinationRoot: (home) => join(home, '.external', 'skills'),",
+      '    renderFile: (contents) => contents,',
+      '  },',
+      '  start: async () => process.pid,',
+      '}',
+      '',
+    ].join('\n'))
+    const runners = [['first', './external-runner.mjs'], ['second', 'claude']] as const
+    for (const [project, runner] of runners) {
+      mkdirSync(join(fleet, 'projects', project), { recursive: true })
+      writeFileSync(join(fleet, 'projects', project, 'config.json'), JSON.stringify({ RUNNER: runner }))
+    }
+
+    const result = spawnSync(process.execPath, [CLI, 'install-skills', '--fleet', fleet], {
+      cwd: fleet,
+      env: { ...CORE_ENV, HOME: home, USERPROFILE: home },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
+    expect(result.stdout).toContain('Installed: .external/skills/git-commit')
+    expect(existsSync(join(home, '.agents', 'skills'))).toBe(false)
+  })
+
   it('refuses --repo and --project for install-skills before installing', () => {
     const fleet = fleetFixture()
     const home = join(fleet, 'home')

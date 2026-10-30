@@ -106,8 +106,10 @@ comments and other items cite items by number, so a number is never reused.
   repository discovery is unchanged. `ORCHESTRATION_FLEET` also names the fleet for
   `--project` when `--fleet` is absent.
 - `install-skills [--fleet <dir>]` installs the shared skills once per user instead of
-  into a repository a fleet keeps clean: into `~/.claude/skills` for Claude and
-  `~/.agents/skills` for Codex. Their commands are rendered as
+  into a repository a fleet keeps clean: into `~/.claude/skills` for interactive Claude
+  and into the user destination of the runner each declared project's `RUNNER` selects,
+  `~/.agents/skills` for Codex. A project whose configuration or runner fails to load is
+  reported as `FAIL:` and exits non-zero after the others install. Their commands are rendered as
   `ORCHESTRATION_FLEET='<fleet>' npm run -C '<package>'`, and package paths as the
   package's absolute path, so they work from any of the fleet's project checkouts. Each
   destination keeps its own record of the skills the core owns, as a repository sync
