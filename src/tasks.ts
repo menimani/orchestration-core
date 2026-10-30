@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { appendBacklogUnless } from './backlog.ts'
+import { loadConfig } from './config.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { taskIdForDesc } from './ids.ts'
 import { statusFile, type OrchPaths } from './paths.ts'
@@ -155,13 +156,24 @@ export function removeIssueModeMarker(paths: OrchPaths, pid: number): void {
   }
 }
 
-/** The delegate process prefers its own explicit setting, then the daemon marker. */
+function fileSetsIssueQueue(configFile: string): boolean {
+  if (!existsSync(configFile)) return false
+  const values = JSON.parse(readFileSync(configFile, 'utf8')) as Record<string, unknown>
+  return Object.hasOwn(values, 'ISSUE_QUEUE_ENABLED')
+}
+
+/**
+ * The delegate process prefers an explicit setting, resolved as the daemon resolves it
+ * (the repository configuration file over the environment), then the daemon marker.
+ */
 export function isIssueModeActive(
   paths: OrchPaths,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  const configured = env['ISSUE_QUEUE_ENABLED']
-  if (configured !== undefined) return configured === 'true'
+  const configFile = join(paths.projectRoot, 'config.json')
+  // Resolving first rejects a malformed value instead of silently reading it as false.
+  if (loadConfig(env, { filePath: configFile }).issueQueueEnabled) return true
+  if ((env['ISSUE_QUEUE_ENABLED'] ?? '') !== '' || fileSetsIssueQueue(configFile)) return false
   const marker = issueModeMarkerFile(paths)
   if (!existsSync(marker)) return false
   const [enabled, ownerText] = readFileSync(marker, 'utf8').split(/\r?\n/, 2)
