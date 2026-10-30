@@ -324,7 +324,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
    because they are repository-controlled text. A chain of conflicts is retried at most
    twice, after which the commits stay kept for a person. Linked issues return to ready
    before another poll can select the task again, and when this checkout claims such an
-   issue again its new specification carries the same section. When a retry merges or
+   issue again its new specification carries the same section. An issue whose chain has
+   used both retries is instead parked under `loop:retry-exhausted` by the same release,
+   with a `Parked` event that does not stop the loop; its record and branches are kept. When a retry merges or
    completes without changes, every branch kept for its chain is deleted and its records
    are removed. Pre-merge tests are chosen from the paths the
    rebased worktree touched. `TASK_GATE=full` asks the project adapter for its full merge

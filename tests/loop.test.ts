@@ -4413,6 +4413,63 @@ describe('completed task merge recovery', () => {
     expect(logged.filter((line) => line.startsWith('Merging 194_auto'))).toHaveLength(1)
   })
 
+  it('parks an issue whose conflict chain uses its retries and keeps every branch', async () => {
+    const taskId = '20260815_181908_193_auto-rebase-conflict'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+    const earlier = ['20260815_150000_101_auto-rebase-conflict', '20260815_160000_102_auto-rebase-conflict']
+      .map((earlierId) => {
+        git(['branch', conflictBranchName(earlierId), initialHead])
+        return {
+          taskId: earlierId,
+          branch: conflictBranchName(earlierId),
+          runBranch: 'main',
+          runTip: initialHead,
+          base: initialHead,
+          taskTip: initialHead,
+          conflictedFiles: ['tracked.txt'],
+          conflictingCommits: [],
+        }
+      })
+    // The claim handed this task the chain its issue had already used up to the limit.
+    writeConflictedAttempts(paths, taskId, earlier)
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'conflicting fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+
+    expect(await loop.poll()).toBe('continue')
+
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_RETRY_EXHAUSTED)
+    expect(issue.labels).not.toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(issue.assignees).toEqual([])
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    for (const { branch } of earlier) expect(git(['branch', '--list', branch])).not.toBe('')
+    expect(git(['branch', '--list', conflictBranchName(taskId)])).not.toBe('')
+    expect(readConflictedAttempts(paths, issueConflictKey(issueNumber)).map(({ taskId: id }) => id))
+      .toEqual([...earlier.map(({ taskId: id }) => id), taskId])
+    expect(logged).toContain(
+      `Abandoned 193_auto    rebase conflict retries exhausted; commits kept on ${conflictBranchName(taskId)}`,
+    )
+    expect(logText()).toContain(`Parked #${issueNumber}`)
+    expect(backlogEntries()).toEqual([])
+  })
+
   it('cancels the issue release preparation when rebase-conflict cleanup fails', async () => {
     const taskId = '20260815_181908_198_auto-rebase-conflict'
     initializeGitRepo()
