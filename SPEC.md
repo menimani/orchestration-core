@@ -1015,8 +1015,10 @@ so authorship and verified ancestry must both hold.
     with the reason in its task log. Rate-limit errors are not counted, and operator
     `cleanup` resets the count, so a re-run of the same task starts afresh.
     Its poll status uses the shared
-    `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
-    `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
+    `Running    Status      Task=<n>  Queue=<n>` event while work is active and, when
+    idle, the shared `Idle` event of item 15, whose `Status` subject is followed by
+    `Task=0`, `Queue=0`, the idle duration, and `Waiting=open finding`; because workers
+    never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.
 37. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts `loop:merge-ready`
