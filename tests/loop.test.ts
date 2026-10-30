@@ -2805,6 +2805,66 @@ describe('remote issue queue idle detection', () => {
     expect(logText()).toContain('Recovered closing promoted issues after 0 minutes')
   })
 
+  async function promotedIssueLoop(headSha: string) {
+    paths = {
+      ...paths,
+      fleet: {
+        dir: repoRoot, project: 'example', repository: 'owner/example',
+        issueRepository: 'owner/fleet',
+      },
+    }
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, 'merged-task', [issueNumber])
+    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
+    fakeForge.prStatus = async () => ({
+      state: 'merged',
+      isDraft: false,
+      url: 'https://example.test/pull/9',
+      headSha,
+      checks: [],
+    })
+    return { loop, issueNumber }
+  }
+
+  it('fetches a merged run head that was pushed outside the loop before comparing', async () => {
+    const outside = join(repoRoot, 'outside')
+    execFileSync('git', ['clone', '--quiet', join(repoRoot, 'origin.git'), outside], { windowsHide: true })
+    git(['config', 'user.email', 'outside@example.test'], outside)
+    git(['config', 'user.name', 'Outside'], outside)
+    writeFileSync(join(outside, 'outside.txt'), 'outside\n')
+    git(['add', 'outside.txt'], outside)
+    git(['commit', '--quiet', '-m', 'outside push'], outside)
+    git(['push', '--quiet', 'origin', 'HEAD:refs/heads/run/outside'], outside)
+    const headSha = git(['rev-parse', 'HEAD'], outside).trim()
+    const { loop, issueNumber } = await promotedIssueLoop(headSha)
+
+    await loop.poll()
+
+    expect(logText()).toContain(`Promoted #${issueNumber}`)
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+  })
+
+  it('warns instead of reporting recovery when the merged run head cannot be found', async () => {
+    const { loop, issueNumber } = await promotedIssueLoop('f'.repeat(40))
+
+    await loop.poll()
+
+    expect(logText()).toContain('WARN could not close promoted issues:')
+    expect(logText()).not.toContain('Recovered closing promoted issues')
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('open')
+  })
+
   beforeEach(() => {
     initializeGitRepoWithRemote()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
