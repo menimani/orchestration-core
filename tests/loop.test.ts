@@ -3775,6 +3775,49 @@ describe('failure announcement and burst stop (via poll)', () => {
       `ERROR 3 consecutive issue release failures for #${issueNumber}; stopping the loop`,
     )
   })
+
+  it('counts a startup failure once while its issue release is still pending', async () => {
+    initializeGitRepo()
+    const description = '[BUG] count a startup failure once across release retries'
+    const attemptedTaskIds: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
+        throw new Error('runner spawn failed')
+      },
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, maxParallel: 1 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'single failure count',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const addLabel = fakeForge.addLabel.bind(fakeForge)
+    fakeForge.addLabel = async (number, label) => {
+      if (number === issueNumber && label === LABEL_READY) throw new Error('forge unavailable')
+      await addLabel(number, label)
+    }
+    const failureCountFile = join(paths.queueDir, 'issue-failure-count', String(issueNumber))
+
+    expect(await loop.poll()).toBe('continue')
+
+    const taskId = attemptedTaskIds[0]!
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(readFileSync(failureCountFile, 'utf8')).toBe('1\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(attemptedTaskIds).toEqual([taskId])
+    expect(readFileSync(failureCountFile, 'utf8')).toBe('1\n')
+  })
 })
 
 describe('completion marker output', () => {
