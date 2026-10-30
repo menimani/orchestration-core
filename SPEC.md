@@ -745,8 +745,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
     the intentional termination as a missing scan yield.
-26. The daemon holds the code it started with; the wrapper prints where the log lives
-    and how to stop.
+26. The daemon holds the code it started with; `loop`, once it has launched the daemon in
+    the background, prints where the log lives and how to stop.
 27. `prune --days N` deletes logs/status/generated specs/queue markers of tasks finished
     more than N days ago; it accepts merged and no-change tasks and never touches an
     unfinished or failed task, a worktree still on disk, or a spec tracked by git.
@@ -957,8 +957,8 @@ account with write access withdraws every `MERGED:` comment before it.
     merges because the same advisory recurs with different prose. Pre-granularity open
     issue bodies are interpreted from their requirement text, and their coarse local
     ledger entry is replaced when encountered, avoiding a one-time duplicate round.
-34. Before claiming, worker daemons group ready findings that share a task origin (scan
-    `auto` or review `fix`), a mode (inspection or implementation), and the first path
+34. Before claiming, every daemon with the issue queue enabled groups ready findings
+    that share a task origin (scan `auto` or review `fix`), a mode (inspection or implementation), and the first path
     their titles name, using the same primary-path convention as fingerprinting; a
     grouped task has one identifier and one mode, so findings differing in either never
     share it. A group contains at most four issues; another batch remains ready for the
@@ -973,8 +973,8 @@ account with write access withdraws every `MERGED:` comment before it.
     once its per-issue retry bound is reached. Fingerprints and their ledger remain per
     finding.
 
-    Worker daemons claim a ready issue or group by self-assignment. The forge login is the
-    worker identity, and every daemon that may claim the same project's issues concurrently
+    Such a daemon, the merger included, claims a ready issue or group by self-assignment.
+    The forge login is the claimant's identity, and every daemon that may claim the same project's issues concurrently
     must authenticate as a distinct forge account. Under that invariant, a simultaneous claim is settled
     deterministically — the lexicographically first login wins, losers unassign
     themselves — and the winner relabels to `loop:in-progress` and materializes the
