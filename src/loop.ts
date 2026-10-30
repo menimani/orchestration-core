@@ -484,6 +484,16 @@ export function createLoop(deps: LoopDeps) {
     const commits = gitIn(worktree, ['log', `${baseSha}..HEAD`, '--format=%H'])
       .trim().split(/\r?\n/).filter((line) => line !== '')
     if (commits.length === 0) {
+      // Re-read every claim right before closing it. An issue an earlier attempt already
+      // closed is finished again harmlessly; an open issue that left loop:in-progress was
+      // reaped, and may since have been handed to another task.
+      const lost: number[] = []
+      for (const issueNumber of issueNumbers) {
+        const issue = await forge.getIssue(issueNumber)
+        if (issue.state === 'open' && (!issue.labels.includes(LABEL_IN_PROGRESS)
+          || issue.labels.includes(LABEL_READY))) lost.push(issueNumber)
+      }
+      if (lost.length > 0) throw new LostWorkerClaimError(lost)
       if (isInspectionTaskId(paths, taskId)) {
         await Promise.all(issueNumbers.map((issueNumber) =>
           closeIssueAndRemoveLifecycleLabels(forge, issueNumber,

@@ -324,6 +324,28 @@ describe('worker mode', () => {
     expect(forge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('Branch:')
   })
 
+  it('does not close an issue whose claim was reaped before an inspection published', async () => {
+    const taskId = '20260809_000000_011_auto-reaped-inspection'
+    await completedTask(taskId, false)
+    const issueNumber = await claimedIssue(taskId, true)
+    writeFileSync(finalMessageFile(paths, taskId), 'The inspection found nothing.\nTASK_COMPLETE\n')
+    await forge.removeLabel(issueNumber, LABEL_IN_PROGRESS)
+    await forge.addLabel(issueNumber, LABEL_READY)
+    await forge.unassignIssue(issueNumber, forge.user)
+    const loop = makeWorkerLoop()
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(readFileSync(logFile(paths, taskId), 'utf8'))
+      .toContain(`Worker publication refused: #${issueNumber} no longer claimed by this task`)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.state).toBe('open')
+    expect(taskClaiming(issueNumber)).not.toBe(taskId)
+    expect(forge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('completed without commits')
+  })
+
   it('finishes a grouped publication without reporting again on an issue already relabelled', async () => {
     const taskId = '20260809_000000_008_auto-grouped-retry'
     await completedTask(taskId, true)
