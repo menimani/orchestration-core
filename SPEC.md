@@ -656,7 +656,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     diff, so nothing downstream can notice it is missing; the loop must. A task whose
     process tree the loop itself stopped before a dependency install (item 11a) is still
     reported failed and its issues released, but it counts neither toward the burst nor
-    toward its issues' consecutive failure counts (item 19a).
+    toward its issues' consecutive failure counts (item 19a). A task already dead when
+    the daemon starts — still recorded running but with no process id, as a graceful
+    shutdown leaves its in-flight tasks — is likewise reported failed without counting
+    toward the burst, since it is not fresh evidence of a broken environment; it still
+    counts toward its issues' consecutive failure counts.
 19a. In issue-queue mode, every failed-task release increments a persistent per-issue
      consecutive failure count in the queue directory. Before `MAX_ISSUE_RETRIES`
      (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and
