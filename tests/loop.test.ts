@@ -1737,6 +1737,11 @@ describe('cycleIsFinal', () => {
     writeFileSync(join(paths.queueDir, 'scan-yield-3'), 'empty\nempty\n')
     expect(loop.cycleIsFinal(3)).toBe(true)
   })
+
+  it('marks every cycle final when scanning is disabled', () => {
+    const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6, maxEmptyScans: 2 })
+    expect(loop.cycleIsFinal(1)).toBe(true)
+  })
 })
 
 describe('cycle gate', () => {
@@ -2180,6 +2185,56 @@ describe('cycle gate', () => {
     expect(logged).toContain(`LOOP_DONE: ${prUrl}`)
     expect(logged).toContain(`Completed Loop        PR ${prUrl}`)
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('reviews the closing cycle before promoting when no source can produce more work', async () => {
+    initializeGitRepoWithRemote()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'review-template.md'),
+      '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({
+      scanEnabled: false,
+      autoPr: true,
+      reviewEnabled: true,
+      autoReview: true,
+      reviewEveryNCycles: 2,
+      maxReviewRounds: 1,
+      maxFinalReviewRounds: 3,
+    })
+    loop.initializeSessionStateForBranch()
+    const markPrReady = vi.fn(async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.poll()).toBe('continue')
+
+    const idFile = join(paths.queueDir, 'review-id-1')
+    expect(existsSync(idFile)).toBe(true)
+    expect(markPrReady).not.toHaveBeenCalled()
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+
+    // The off-cadence closing cycle is reviewed with the final round budget, so a
+    // second round is dispatched where the ordinary cap of one would have resumed.
+    const firstReviewId = readFileSync(idFile, 'utf8').trim()
+    writeRawStatus(firstReviewId, 'completed')
+    writeFinal(firstReviewId, 'NEXT_TASK: [BUG] found at the close\n')
+    expect(loop.runAutoReview(1, loop.cycleIsFinal(1))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'review-round-1'), 'utf8').trim()).toBe('2')
+
+    const secondReviewId = readFileSync(idFile, 'utf8').trim()
+    writeRawStatus(secondReviewId, 'completed')
+    writeFinal(secondReviewId, 'NO_FINDINGS\n')
+    // Stand in for the dispatcher having run both reviews to completion.
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    for (const reviewId of [firstReviewId, secondReviewId]) {
+      writeFileSync(join(paths.queueDir, 'scanned', reviewId), '')
+    }
+
+    expect(await loop.triggerScanIfIdle()).toBe('done')
+    expect(markPrReady).toHaveBeenCalledOnce()
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
   })
 
   it('reports the OS-adapter environment only after promotion is confirmed', async () => {

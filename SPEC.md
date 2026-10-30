@@ -424,9 +424,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     count. If the rendered template has no numbered sections, the daemon warns and runs
     one full scan. If its numbered sections cannot be parsed unambiguously, the daemon
     logs an error and stops before creating the next cycle's state or starting a scan.
-13. `cycle_is_final` is true when the cycle number reaches `MAX_SCAN_CYCLES`, or when
+13. `cycle_is_final` is true when the cycle number reaches `MAX_SCAN_CYCLES`, when
     the cycle's scans all came back empty and one more empty cycle reaches
-    `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
+    `MAX_EMPTY_SCANS`, or when `SCAN_ENABLED` is `false`, since no scan can follow the
+    cycle gate. The current cycle number lives in `queue/scan-count.txt` and is
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop). A missing persisted counter reads as zero; an existing
     counter must contain base-10 digits representing a non-negative safe integer.

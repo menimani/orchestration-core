@@ -1438,11 +1438,13 @@ export function createLoop(deps: LoopDeps) {
   }
 
   /**
-   * The final cycle is the scan-limit cycle, or one whose scans all came back empty
-   * when one more empty cycle reaches MAX_EMPTY_SCANS — the run ends after it either
-   * way, so it is the last chance for a review to read the branch.
+   * The final cycle is the scan-limit cycle, one whose scans all came back empty when
+   * one more empty cycle reaches MAX_EMPTY_SCANS, or any cycle while scanning is
+   * disabled, whose drained gate no scan can follow — the run ends after it in every
+   * case, so it is the last chance for a review to read the branch.
    */
   function cycleIsFinal(cycle: number): boolean {
+    if (!config.scanEnabled) return true
     if (cycle >= config.maxScanCycles) return true
     const yields = completeScanYields(cycle)
     if (yields !== undefined && !yields.includes('found') && !yields.includes('failed')) {
