@@ -86,3 +86,66 @@ writeFileSync(process.argv[2], JSON.stringify({
     })
   })
 })
+
+describe('timed shell commands', () => {
+  function processIsAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+    }
+  }
+
+  it('returns the output of a command that finishes within its limit', () => {
+    expect(execShellSync('node -e "process.stdout.write(\'ready\')"', {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: 30_000,
+    })).toBe('ready')
+  })
+
+  it('reports the exit status and output of a command that fails within its limit', () => {
+    let failure: { status?: unknown; stderr?: unknown } | undefined
+    try {
+      execShellSync('node -e "process.stderr.write(\'broken\'); process.exit(3)"', {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: 30_000,
+      })
+    } catch (error) {
+      failure = error as typeof failure
+    }
+    expect(failure?.status).toBe(3)
+    expect(failure?.stderr).toBe('broken')
+  })
+
+  it('stops the processes a timed-out command started, not only its shell', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orchestration-shell-'))
+    fixtureRoots.push(root)
+    const script = join(root, 'hang.cjs')
+    const pidFile = join(root, 'grandchild.pid')
+    writeFileSync(script, `
+const { spawn } = require('node:child_process')
+const { writeFileSync } = require('node:fs')
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+writeFileSync(process.argv[2], String(child.pid))
+setInterval(() => {}, 1000)
+`)
+
+    let failure: { code?: unknown; status?: unknown } | undefined
+    try {
+      execShellSync(`node "${script}" "${pidFile}"`, {
+        cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+        timeout: 3_000,
+      })
+    } catch (error) {
+      failure = error as typeof failure
+    }
+    expect(failure?.code).toBe('ETIMEDOUT')
+    expect(failure?.status).toBeNull()
+
+    const grandchild = Number(readFileSync(pidFile, 'utf8'))
+    try {
+      await expect.poll(() => processIsAlive(grandchild), { timeout: 5_000 }).toBe(false)
+    } finally {
+      if (processIsAlive(grandchild)) process.kill(grandchild)
+    }
+  })
+})
