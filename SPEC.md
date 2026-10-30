@@ -1064,6 +1064,10 @@ account with write access withdraws every `MERGED:` comment before it.
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
+    As in item 10, a gate command that exits 75 never ran its tests: the adoption is
+    deferred with a WARN that the repository test lock stayed busy, without the comment,
+    the relabel, or a failure count, and every member stays `loop:merge-ready` for the
+    next poll to adopt again.
     A grouped member still `loop:in-progress` with no worker report is still being
     published, so the poll skips the group and leaves every member as it is; only a
     different reported branch or head, or an unavailable member, fails the adoption.
