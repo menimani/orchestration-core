@@ -41,9 +41,13 @@ interface RenderedFile {
   contents: Buffer
 }
 
-/** Repository-owned guidance appended at the shared skill's named injection point. */
-function projectGuidanceFileForSkill(repoRoot: string, skill: string): string {
-  return join(repoRoot, 'orchestration', 'project', 'skills', `${skill}.md`)
+/**
+ * Project-owned guidance appended at the shared skill's named injection point. The root is
+ * the project's asset directory, never derived from the destination: a user install
+ * serves every project of a fleet and so carries no project's guidance.
+ */
+function projectGuidanceFileForSkill(guidanceRoot: string, skill: string): string {
+  return join(guidanceRoot, 'project', 'skills', `${skill}.md`)
 }
 
 export interface SharedSkillsSyncResult {
@@ -152,14 +156,19 @@ function renderedSkill(
   skill: string,
   manifest: SharedSkillsManifest,
   repoRoot: string,
+  guidanceRoot: string | undefined,
   target: SharedSkillTarget,
 ): RenderedFile[] {
   const source = join(packageRoot, 'skills', skill)
   if (!existsSync(join(source, 'SKILL.md'))) {
     throw new Error(`shared skill has no SKILL.md: ${source}`)
   }
-  const guidanceFile = projectGuidanceFileForSkill(repoRoot, skill)
-  const guidance = existsSync(guidanceFile) ? readFileSync(guidanceFile, 'utf8') : ''
+  const guidanceFile = guidanceRoot === undefined
+    ? undefined
+    : projectGuidanceFileForSkill(guidanceRoot, skill)
+  const guidance = guidanceFile !== undefined && existsSync(guidanceFile)
+    ? readFileSync(guidanceFile, 'utf8')
+    : ''
   return filesIn(source).map((file) => {
     let contents = file.contents
     if (file.path === 'SKILL.md') {
@@ -302,6 +311,7 @@ function migrateLegacySkills(
 function syncTarget(
   repoRoot: string,
   packageRoot: string,
+  guidanceRoot: string | undefined,
   target: SharedSkillTarget,
   os: OperatingSystem,
 ): SharedSkillsSyncResult {
@@ -320,7 +330,7 @@ function syncTarget(
   // before migrating or replacing anything so failed rendering cannot leave an updated
   // directory paired with its stale state hash.
   const desiredSkills = manifest.skills.map((skill) => {
-    const files = renderedSkill(packageRoot, skill, manifest, repoRoot, target)
+    const files = renderedSkill(packageRoot, skill, manifest, repoRoot, guidanceRoot, target)
     return { skill, files, hash: hashFiles(files) }
   })
   const migration = migrateLegacySkills(target.legacyRoots, destinationRoot, os)
@@ -421,7 +431,7 @@ export function installUserSkills(
     destinations.push(destinationRoot)
     let result: SharedSkillsSyncResult
     try {
-      result = syncTarget(home, packageRoot, {
+      result = syncTarget(home, packageRoot, undefined, {
         destinationRoot,
         legacyRoots: [],
         renderFile: (contents, options) => adapter.renderFile(contents, {
@@ -441,13 +451,15 @@ export function installUserSkills(
 
 /**
  * Materialize the declared shared skills for every agent that discovers skills in this
- * repository. A target that fails is reported through its own error rather than leaving
- * the remaining targets unserved: losing one reader's workflows must not lose the others'.
+ * repository, with the guidance found under the project's asset directory. A target that
+ * fails is reported through its own error rather than leaving the remaining targets
+ * unserved: losing one reader's workflows must not lose the others'.
  */
 export function syncSharedSkills(
   repoRoot: string,
   packageRoot: string,
   adapters: readonly SharedSkillsAdapter[],
+  guidanceRoot: string,
   os: OperatingSystem = operatingSystem,
   skippedDestinationRoots: readonly string[] = [],
 ): SharedSkillsSyncResult {
@@ -461,7 +473,7 @@ export function syncSharedSkills(
     }
     let result: SharedSkillsSyncResult
     try {
-      result = syncTarget(repoRoot, packageRoot, target, os)
+      result = syncTarget(repoRoot, packageRoot, guidanceRoot, target, os)
     } catch (error) {
       // Files another target already wrote are still owed a report: throwing here would
       // leave them on disk with nothing naming them to the consumer commit path.
