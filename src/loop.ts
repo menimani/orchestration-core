@@ -734,6 +734,16 @@ export function createLoop(deps: LoopDeps) {
         if (error instanceof ForgeRateLimitError) return
         const message = error instanceof Error ? error.message : String(error)
         appendFileSync(mergeLog, `${message}\n`)
+        // Not a failure: the gate's tests never ran because other worktrees held the
+        // repository test lock past its wait limit. The issue stays merge-ready, so the
+        // next poll adopts the pushed branch again.
+        if (error instanceof TestLockBusyError) {
+          const subject = adoptionTaskId === undefined
+            ? `issue #${issue.number}`
+            : shortTaskId(adoptionTaskId)
+          event('WARN', `${subject} adoption deferred: the repository test lock stayed busy`)
+          continue
+        }
         if (error instanceof OrchestrationDepsInstallError || error instanceof MergeRecoveryError) {
           throw error
         }
