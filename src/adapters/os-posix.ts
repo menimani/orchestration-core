@@ -160,7 +160,8 @@ export function createOperatingSystem(
       }
       return {
         pid,
-        isAlive: () => child.exitCode === null,
+        // A child killed by a signal keeps a null exitCode; only signalCode records it.
+        isAlive: () => child.exitCode === null && child.signalCode === null,
         terminate: () => { terminateProcessTree(pid) },
         release: () => { child.unref() },
         onError: (listener) => { child.on('error', listener) },

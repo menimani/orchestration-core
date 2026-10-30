@@ -37,6 +37,7 @@ describe('operating-system adapters', () => {
     const child = Object.assign(new EventEmitter(), {
       pid: 43210,
       exitCode: null,
+      signalCode: null,
       kill: vi.fn(() => true),
       unref: vi.fn(),
     }) as unknown as ChildProcess
@@ -68,11 +69,44 @@ describe('operating-system adapters', () => {
     }
   })
 
+  it('reports a POSIX daemon killed by a signal as no longer alive', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-os-'))
+    const child = Object.assign(new EventEmitter(), {
+      pid: 43210,
+      exitCode: null,
+      signalCode: null as NodeJS.Signals | null,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    })
+    const spawnDaemon = vi.fn(() => child) as unknown as typeof spawn
+    const os = createPosixOperatingSystem({
+      signalProcessGroup: () => {}, probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, groupHasRunningMember: () => undefined,
+      spawnDaemon,
+    })
+
+    try {
+      const daemon = await os.launchDaemon({
+        args: ['src/cli.ts', 'loop'],
+        command: process.execPath,
+        cwd: root,
+        outputFile: join(root, 'loop.log'),
+      })
+
+      expect(daemon.isAlive()).toBe(true)
+      child.signalCode = 'SIGKILL'
+      expect(daemon.isAlive()).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('terminates and verifies the entire POSIX daemon process group', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-os-'))
     const child = Object.assign(new EventEmitter(), {
       pid: 43210,
       exitCode: null,
+      signalCode: null,
       kill: vi.fn(() => true),
       unref: vi.fn(),
     }) as unknown as ChildProcess
