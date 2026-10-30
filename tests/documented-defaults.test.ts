@@ -19,6 +19,18 @@ const RUNNER_MODEL_EFFORTS: Readonly<Record<string, ReasoningEffort>> = {
 }
 // Read by `report-upstream` straight from the environment; not a loop setting.
 const ENVIRONMENT_ONLY = new Set(['UPSTREAM_REPO'])
+// Settings a table may leave out. SPEC.md is the contract, so it states every one; README.md
+// keeps to the settings an adopter is likely to change and leaves the rest to SPEC.md.
+const UNDOCUMENTED_SETTINGS: Readonly<Record<string, readonly string[]>> = {
+  'README.md': [
+    'POLL_INTERVAL', 'AUTO_MERGE', 'TEST_CMD', 'SKIP_AUTO_TEST', 'MAX_GROWTH_DEPTH',
+    'MAX_TOTAL_TASKS', 'SCAN_ENABLED', 'MAX_CI_FIX_ATTEMPTS', 'MAX_EMPTY_SCANS', 'AUTO_PR',
+    'REVIEW_ENABLED', 'MAX_REVIEW_ROUNDS', 'MAX_FINAL_REVIEW_ROUNDS', 'MAX_BURST_FAILURES',
+    'MAX_CONSECUTIVE_MERGE_FAILURES', 'SCAN_MODEL', 'TASK_MODEL', 'FORGE', 'WORKER_MODE',
+    'ISSUE_LEASE_HOURS',
+  ],
+  'SPEC.md': [],
+}
 
 const CONFIG_KEY_BY_NAME: ReadonlyMap<string, keyof LoopConfig> = new Map(
   (Object.keys(CONFIG_ENV_NAMES) as (keyof LoopConfig)[])
@@ -74,6 +86,12 @@ describe.each(['README.md', 'SPEC.md'])('%s configuration table', (file) => {
   it('names only settings the source reads', () => {
     expect(rows.length).toBeGreaterThan(10)
     expect(rows.map((row) => row.name).filter((name) => !KNOWN_NAMES.has(name))).toEqual([])
+  })
+
+  it('states every loop setting except the ones it may leave out', () => {
+    const documented = new Set(rows.map((row) => row.name))
+    const omitted = [...CONFIG_KEY_BY_NAME.keys()].filter((name) => !documented.has(name))
+    expect(omitted.sort()).toEqual([...UNDOCUMENTED_SETTINGS[file]!].sort())
   })
 
   it('states the defaults loadConfig resolves for an empty environment', () => {
