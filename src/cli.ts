@@ -39,7 +39,8 @@ import {
 import { deploy } from './deploy.ts'
 import {
   absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isScanTaskId,
-  issueQueueIsSeparate, locationArgs, logFile, orchPaths, packageFile, type OrchPaths,
+  issueQueueIsSeparate, locationArgs, logFile, orchPaths, PACKAGE_ROOT, packageCommandPrefix,
+  packageFile, type OrchPaths,
 } from './paths.ts'
 import {
   findFleetDir, FLEET_FILE, projectForDirectory, readFleet, resolveFleetProject,
@@ -1666,6 +1667,26 @@ const commands: Record<string, Command> = {
   'install-skills': cmdInstallSkills,
 }
 
+// The generated Git hook calls `pre-commit` directly; it has no package script, so
+// `npm run pre-commit` would fail with "Missing script".
+const HOOK_ONLY_COMMANDS = new Set(['pre-commit'])
+
+function usageText(): string {
+  let prefix = 'npm run'
+  try {
+    const root = execFileSync('git', ['-C', PACKAGE_ROOT, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    }).trim()
+    prefix = packageCommandPrefix(root)
+  } catch {
+    // Outside a Git checkout the package can only be run from its own directory.
+  }
+  const available = Object.keys(commands).filter((name) => !HOOK_ONLY_COMMANDS.has(name))
+  return `Usage: ${prefix} <command>\nAvailable: ${available.join(', ')}`
+}
+
 async function main(): Promise<number> {
   const rawArgs = process.argv.slice(2)
   const repositories: string[] = []
@@ -1712,7 +1733,7 @@ async function main(): Promise<number> {
   }
   const [commandName, ...args] = positional
   if (commandName === undefined || commandName === '') {
-    console.error(`Usage: npm run <command>\nAvailable: ${Object.keys(commands).join(', ')}`)
+    console.error(usageText())
     return 1
   }
   const command = commands[commandName]

@@ -1,6 +1,7 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import {
   appendFileSync, copyFileSync, cpSync, existsSync, mkdtempSync, realpathSync, rmSync,
+  symlinkSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
@@ -103,6 +104,22 @@ describe('consumer startup', () => {
       ...invocation.slice(2),
     ])
     expect(isAbsolute(command.args[0]!)).toBe(true)
+  })
+
+  it('prints the subtree command prefix when no command is given', () => {
+    const repository = createConsumerRepository()
+    const installedPackage = join(repository, 'orchestration', 'ts')
+    // The copied package has no install of its own; a junction needs no elevation on Windows.
+    symlinkSync(join(packageRoot, 'node_modules'), join(installedPackage, 'node_modules'), 'junction')
+
+    const result = spawnSync(process.execPath, [join(installedPackage, 'src', 'cli.ts')], {
+      cwd: repository,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("Usage: npm run -C 'orchestration/ts' <command>\n")
   })
 
   it('discovers a consumer adapter and reaches the first poll', async () => {

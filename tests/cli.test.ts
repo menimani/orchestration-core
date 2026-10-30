@@ -134,6 +134,26 @@ describe('command registry', () => {
     expect(result.stderr).toContain('verify-setup')
   })
 
+  it('lists only package scripts, under the npm prefix, when no command is given', () => {
+    const result = spawnSync(process.execPath, [CLI], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    const [usage, available] = result.stderr.trim().split('\n')
+    expect(usage).toBe('Usage: npm run <command>')
+    const scripts = Object.keys(
+      (createRequire(import.meta.url)('../package.json') as { scripts: Record<string, string> })
+        .scripts,
+    )
+    const listed = available!.replace(/^Available: /, '').split(', ')
+    expect(listed).not.toContain('pre-commit')
+    expect(listed.filter((name) => !scripts.includes(name))).toEqual([])
+  })
+
   it('refuses to start a worker without a base ref', () => {
     const result = spawnSync(process.execPath, [CLI, 'worker'], {
       cwd: repoRoot,

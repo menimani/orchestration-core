@@ -280,7 +280,8 @@ When a run finishes with no commits beyond the fetched default branch, there is 
 request for the forge to create. The loop skips the inapplicable PR, CI, and review gates,
 records `LOOP_DONE: no changes`, and exits normally.
 
-`node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
+`node orchestration/ts/src/cli.ts` with no arguments lists every package script it
+dispatches, with the `npm run` prefix that reaches them from the repository root: `init` repairs
 the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
 head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's
 checks without believing a partial rollup or a previous head's checks, and `deploy`
