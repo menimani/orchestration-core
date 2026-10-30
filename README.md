@@ -256,8 +256,9 @@ the task completes as no-change and its linked issues are closed normally. If th
 conflicts, the finished commits are kept on `conflict/<task-id>` and the work is retried
 from them: a local task is queued again with a specification naming that branch and the
 paths and run-branch commits it collided with, and a released issue carries the same
-section when this checkout claims it again. Two retries are made at most; the branches
-are deleted once a retry merges.
+section when this checkout claims it again. Two retries are made at most; after that an
+issue is parked as `loop:retry-exhausted` instead of returning to ready, and the branches
+stay for a person. They are deleted once a retry merges.
 
 This repository's `npm test` takes one test lock shared by every worktree of the
 checkout, so task runners and merge gates run the suite one at a time. A waiter gives up

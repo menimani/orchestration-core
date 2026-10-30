@@ -26,8 +26,8 @@ import {
   branchName, conflictBranchName, PACKAGE_ROOT, worktreeDir, type OrchPaths,
 } from './paths.ts'
 import {
-  conflictRetrySection, issueConflictKey, readConflictedAttempts, removeConflictedAttempts,
-  writeConflictedAttempts, type ConflictedAttempt,
+  conflictRetriesExhausted, conflictRetrySection, issueConflictKey, readConflictedAttempts,
+  removeConflictedAttempts, writeConflictedAttempts, type ConflictedAttempt,
 } from './conflictRetry.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
@@ -111,9 +111,6 @@ interface FindingDispatch {
 
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
 const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
-// A local task whose rebase conflicts is retried from its kept commits at most this many
-// times. Each retry races the same sibling merges, so a third conflict is left for a person.
-const MAX_CONFLICT_RETRIES = 2
 // A worker publication that keeps failing for another reason, such as a rejected push or
 // a forge error, is retried on this many polls before the task is failed.
 const MAX_WORKER_PUBLICATION_FAILURES = 5
@@ -957,7 +954,7 @@ export function createLoop(deps: LoopDeps) {
     effort: string | undefined,
     depth: number,
   ): string | undefined {
-    if (attempts.length > MAX_CONFLICT_RETRIES) return undefined
+    if (conflictRetriesExhausted(attempts)) return undefined
     const retryId = newTaskId(paths, taskId.replace(/^\d{8}_\d{6}_\d{3}_/, ''))
     writeFileSync(specFile(paths, retryId), [
       `# ${retryId}: retry of ${taskId} after a rebase conflict\n`,
@@ -2404,6 +2401,10 @@ export function createLoop(deps: LoopDeps) {
         event('Parked', `#${issueNumber}`, `${failures} consecutive task failures`)
         writeFileSync(stopFile, '')
       },
+      // Sibling merges, not a broken loop, exhaust a conflict chain, so the loop goes on.
+      onConflictPark: (issueNumber: number, attempts: number) => {
+        event('Parked', `#${issueNumber}`, `${attempts} conflicting rebases; commits kept`)
+      },
     }
 
     const reconcileMergedIssues = async (
@@ -2641,6 +2642,11 @@ export function createLoop(deps: LoopDeps) {
                 `rebase conflict; ${shortTaskId(retryId)} starts from ${kept.branch}`)
             } else if (linkedIssues.length === 0) {
               event('Abandoned', shortTaskId(taskId), `rebase conflict; commits kept on ${kept.branch}`)
+            } else if (kept.attempts !== undefined && conflictRetriesExhausted(kept.attempts)) {
+              // Release reconciliation parks issues whose chain has used its retries.
+              event('Abandoned', shortTaskId(taskId),
+                `rebase conflict retries exhausted; ${remoteOperationsAvailable ? '' : 'issue release pending; '}`
+                + `commits kept on ${kept.branch}`)
             } else if (remoteOperationsAvailable) {
               event('Released', shortTaskId(taskId),
                 `rebase conflict abandoned; commits kept on ${kept.branch}`)

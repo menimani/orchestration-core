@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import type { Forge, ForgeIssue } from './adapters/forge.ts'
 import { ForgeIssueNotFoundError } from './adapters/forge.ts'
 import { withBacklogLock } from './backlog.ts'
+import { conflictRetriesExhausted, issueConflictKey, readConflictedAttempts } from './conflictRetry.ts'
 import {
   descSlug, existingTaskIdForDesc, forgetTaskId, newTaskId, recordTaskIdForDesc, taskIdForDesc,
 } from './ids.ts'
@@ -1215,6 +1216,7 @@ async function parkIssue(forge: Forge, issueNumber: number): Promise<boolean> {
 export interface IssueReleaseOptions {
   maxIssueRetries?: number
   onPark?: (issueNumber: number, failures: number) => void
+  onConflictPark?: (issueNumber: number, attempts: number) => void
 }
 
 export interface IssueReleaseFailure {
@@ -1251,6 +1253,14 @@ export async function reconcileIssueReleaseIntent(
     if (failures >= (options.maxIssueRetries ?? Number.POSITIVE_INFINITY)) {
       const newlyParked = await parkIssue(forge, issueNumber)
       if (newlyParked) options.onPark?.(issueNumber, failures)
+      return
+    }
+    // A parked issue keeps its conflict record, so a person who readies it again hands
+    // the kept commits to the next claim, and the merge that lands deletes their branches.
+    const attempts = readConflictedAttempts(paths, issueConflictKey(issueNumber))
+    if (conflictRetriesExhausted(attempts)) {
+      const newlyParked = await parkIssue(forge, issueNumber)
+      if (newlyParked) options.onConflictPark?.(issueNumber, attempts.length)
       return
     }
     await returnIssueToReady(forge, issueNumber, keepSingleton)
