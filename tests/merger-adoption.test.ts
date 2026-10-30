@@ -12,7 +12,7 @@ import {
   LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { createLoop } from '../src/loop.ts'
-import type { OrchestrationDepsRuntime } from '../src/merge.ts'
+import { TEST_LOCK_BUSY_EXIT_CODE, type OrchestrationDepsRuntime } from '../src/merge.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -435,6 +435,36 @@ describe('remote task adoption', () => {
     expect(forge.issueComments.get(failedIssueNumber)?.join('\n'))
       .toContain('Remote task adoption failed')
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('1')
+  })
+
+  it('defers adoption without counting a failure when the test lock stays busy', async () => {
+    const task = pushWorkerBranch('20260809_000000_008_auto-test-lock-busy')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'adoption-lock-busy',
+      mergeChecks: () => [{
+        label: 'Locked suite',
+        cwd: '',
+        command: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+      }],
+    }
+
+    await makeLoop(project).adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .not.toContain('Remote task adoption failed')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
+    expect(readFileSync(join(paths.logsDir, `issue-${issueNumber}.merge.log`), 'utf8'))
+      .toContain('the repository test lock stayed busy')
+    expect(logged.join('\n'))
+      .toContain('008_auto adoption deferred: the repository test lock stayed busy')
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
   })
 
   it('retries issue updates for a persisted adoption without merging it again', async () => {
