@@ -2105,6 +2105,17 @@ export function createLoop(deps: LoopDeps) {
         return 'continue'
       }
     }
+    // A scanned task whose merge failed or was deferred stays completed for the next
+    // poll to retry. Passing the gate over it would promote without its work and let
+    // session cleanup erase the merge-failure count that should stop the loop.
+    if (config.autoMerge && !config.workerMode) {
+      const unmerged = listTaskIds(paths).find((taskId) => !isInspectionTaskId(paths, taskId)
+        && readStatus(paths, taskId)?.status === 'completed')
+      if (unmerged !== undefined) {
+        gateWaitTarget = `merge of ${shortTaskId(unmerged)}`
+        return 'continue'
+      }
+    }
 
     const currentScans = readCount(scanCountFile)
     const expectedScanFile = join(paths.queueDir, `scan-expected-${currentScans}`)

@@ -531,7 +531,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot
-    remains an external source whose state is unknown, so the gate waits. An idle continuing
+    remains an external source whose state is unknown, so the gate waits. With
+    `AUTO_MERGE` in a non-worker loop, a non-inspection task still `completed` after its
+    completion scan, because its merge failed or was deferred, holds the gate as
+    `Waiting=merge of <task>` until a later poll merges it or marks it failed. An idle continuing
     status names its wait target, such as an open finding or finding status that could not
     be read. A continuing status with no scan, running task, or queued item carries the
     current idle stretch as an `Idle` event whose `Status` subject is followed by

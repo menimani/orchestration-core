@@ -2618,7 +2618,7 @@ describe('cycle gate', () => {
     const fixId = enqueue.mock.calls[1]?.[1]
     expect(fixId).toMatch(/^20260808_120000_001_ci-fix-c1$/)
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
-    writeRawStatus(fixId as string, 'completed')
+    writeRawStatus(fixId as string, 'merged')
     writeFileSync(join(paths.queueDir, 'scanned', fixId as string), '')
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
@@ -5312,6 +5312,41 @@ describe('completed task merge recovery', () => {
     expect(logged.filter((line) => line.startsWith('Merging 064_auto'))).toHaveLength(2)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('holds the final local gate while a scanned task is still unmerged', async () => {
+    const taskId = '20260810_040700_066_auto-unmerged'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    let mergeChecks = 0
+    const transientProject: ProjectAdapter = {
+      ...stubProject,
+      mergeChecks: () => ++mergeChecks === 1
+        ? [{ label: 'Transient outage', cwd: '', command: 'node -e "process.exit(1)"' }]
+        : [],
+    }
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: false,
+      scanEnabled: false,
+      reviewEnabled: false,
+      autoPr: false,
+      maxScanCycles: 1,
+      maxConsecutiveMergeFailures: 3,
+      taskGate: 'full',
+    }, transientProject)
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(logged.some((line) => line.startsWith('CYCLE_COMPLETE:'))).toBe(false)
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+    expect(logged.at(-1)).toMatch(/Waiting=merge of 066_auto$/)
+
+    expect(await loop.poll()).toBe('done')
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
   it('reruns the passed cycle gate when a task merges after it', async () => {
