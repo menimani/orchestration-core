@@ -61,7 +61,7 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   isReadyToClaim,
   issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
-  reapStaleLeases, sourceIssueNumbers,
+  reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
@@ -301,8 +301,7 @@ export function createLoop(deps: LoopDeps) {
     issueCommentCache.set(issue.number, {
       updatedAt: issue.updatedAt,
       comments,
-      hasMergeMarker: comments.some((comment) =>
-        comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
+      hasMergeMarker: standingMergeMarkers(comments).length > 0,
     })
     return comments
   }
@@ -2122,8 +2121,7 @@ export function createLoop(deps: LoopDeps) {
           if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
           try {
             const comments = await commentsForIssue(issue)
-            const mergeSha = comments
-              .filter((comment) => comment.author.hasWriteAccess)
+            const mergeSha = standingMergeMarkers(comments)
               .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment.body)?.[1])
               .find((sha) => sha !== undefined
                 && optionalGit(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
@@ -3005,9 +3003,12 @@ export function createLoop(deps: LoopDeps) {
             // Closing promoted issues is bookkeeping a later poll can finish; it must not
             // cost this poll its claims.
             try {
-              const closed = await closePromotedIssues(forge, paths, promotedCommitContained)
+              const { closed, returned } = await closePromotedIssues(forge, paths, promotedCommitContained)
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
+              }
+              for (const issueNumber of returned) {
+                event('Released', `#${issueNumber}`, 'run pull request closed without merging')
               }
               warningLog.recovered('promoted-issues')
             } catch (error) {

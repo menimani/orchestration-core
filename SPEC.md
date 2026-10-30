@@ -906,7 +906,8 @@ is made by a person. Repository-controlled prose carries no such verification an
 the stricter framing, which additionally refuses orchestration and CI changes prompted by
 it; scan and review prompts apply that rule to the text they inspect or quote. A `MERGED:` comment affects stale-lease reaping or idle detection only when its
 author has write access; idle detection additionally retains the merge-SHA ancestry check,
-so authorship and verified ancestry must both hold.
+so authorship and verified ancestry must both hold. A later `UNPROMOTED:` comment from an
+account with write access withdraws every `MERGED:` comment before it.
 
 33. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
@@ -973,7 +974,12 @@ so authorship and verified ancestry must both hold.
     a later run. A failure to close is warned about and retried on the next poll without
     holding back that poll's claims. A promoted issue the forge reports as deleted is no
     longer awaited: its promotion record is dropped, along with the task's issue map once no
-    promotion of that task remains, and the promotions after it still close. Workers never
+    promotion of that task remains, and the promotions after it still close. A run pull
+    request closed without merging will never land its work, so the merger comments
+    `UNPROMOTED: <task-id>` on each issue recorded for that run branch, naming the merge
+    commit, run branch, and pull request, returns the issue to ready and unassigned, drops
+    its promotion record the same way, and logs a `Released` event. The comment withdraws
+    the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. Workers never
     close promoted issues. Immediately after merging, the worker comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
