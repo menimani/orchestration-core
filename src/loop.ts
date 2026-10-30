@@ -4,7 +4,7 @@ import {
 } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import {
-  ForgeRateLimitError, type Forge, type ForgeIssue, type ForgeIssueComment,
+  ForgeIssueNotFoundError, ForgeRateLimitError, type Forge, type ForgeIssue, type ForgeIssueComment,
 } from './adapters/forge.ts'
 import { dequeueBacklog, ensureBacklog } from './backlog.ts'
 import type { ProjectAdapter, SuiteStep } from './adapters/project.ts'
@@ -17,8 +17,8 @@ import {
 } from './ids.ts'
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
-  NoChangeReconciliationError, RebaseConflictError, UnverifiedRunnerError,
-  OrchestrationDepsInstallError,
+  NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
+  UnverifiedRunnerError, OrchestrationDepsInstallError,
   type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
@@ -26,8 +26,8 @@ import {
   branchName, conflictBranchName, PACKAGE_ROOT, worktreeDir, type OrchPaths,
 } from './paths.ts'
 import {
-  conflictRetrySection, issueConflictKey, readConflictedAttempts, removeConflictedAttempts,
-  writeConflictedAttempts, type ConflictedAttempt,
+  conflictRetriesExhausted, conflictRetrySection, issueConflictKey, readConflictedAttempts,
+  removeConflictedAttempts, writeConflictedAttempts, type ConflictedAttempt,
 } from './conflictRetry.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
@@ -105,13 +105,12 @@ interface FindingDispatch {
   findings: string[]
   destinations: string[]
   reconciled: boolean
+  /** Why a finding could not be filed, unless the forge only asked the loop to wait. */
+  failure?: string
 }
 
 const IDLE_LOG_MAX_INTERVAL_MS = 5 * 60 * 1000
 const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
-// A local task whose rebase conflicts is retried from its kept commits at most this many
-// times. Each retry races the same sibling merges, so a third conflict is left for a person.
-const MAX_CONFLICT_RETRIES = 2
 // A worker publication that keeps failing for another reason, such as a rejected push or
 // a forge error, is retried on this many polls before the task is failed.
 const MAX_WORKER_PUBLICATION_FAILURES = 5
@@ -200,6 +199,11 @@ export function createLoop(deps: LoopDeps) {
       return false
     }
   }))
+  // Trees stopped so a merged dependency change can be installed died for the loop's
+  // own reason, not the task's. Like the startup set, they are reported failed and
+  // their issues released, but they count toward neither an issue's retry budget nor
+  // the burst guard.
+  const tasksStoppedForDependencyInstall = new Set<string>()
 
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
@@ -344,6 +348,7 @@ export function createLoop(deps: LoopDeps) {
   function stopTaskProcessesBeforeDependencyInstall(): boolean {
     const result = terminateTaskProcesses()
     for (const task of result.terminated) {
+      tasksStoppedForDependencyInstall.add(task.taskId)
       event('Stopped', shortTaskId(task.taskId),
         `process tree PID ${task.pid} before dependency installation`)
     }
@@ -589,13 +594,24 @@ export function createLoop(deps: LoopDeps) {
           }
           return candidate
         })
+        // The worker publishes each member of a group in parallel, so a poll can see one
+        // member reported while another is still claimed with no report yet. That member is
+        // still being published, not contradicting the group: releasing it here would make
+        // the worker's next attempt lose its claim and discard pushed work.
+        let stillPublishing = false
         for (const candidate of adoptionIssues) {
           const candidateReport = workerBranchReport(await commentsForIssue(candidate))
+          if (candidateReport === undefined && candidate.labels.includes(LABEL_IN_PROGRESS)
+            && !candidate.labels.includes(LABEL_READY)) {
+            stillPublishing = true
+            break
+          }
           if (candidateReport?.branch !== report.branch || candidateReport.head !== report.head) {
             throw new MergeError(`Grouped issue #${candidate.number} does not report the same worker branch.`)
           }
         }
         adoptionIssues.forEach((candidate) => processedIssues.add(candidate.number))
+        if (stillPublishing) continue
         const taskId = report.branch.slice('task/'.length)
         adoptionTaskId = taskId
         event('Merging', shortTaskId(taskId))
@@ -949,7 +965,7 @@ export function createLoop(deps: LoopDeps) {
     effort: string | undefined,
     depth: number,
   ): string | undefined {
-    if (attempts.length > MAX_CONFLICT_RETRIES) return undefined
+    if (conflictRetriesExhausted(attempts)) return undefined
     const retryId = newTaskId(paths, taskId.replace(/^\d{8}_\d{6}_\d{3}_/, ''))
     writeFileSync(specFile(paths, retryId), [
       `# ${retryId}: retry of ${taskId} after a rebase conflict\n`,
@@ -1017,7 +1033,10 @@ export function createLoop(deps: LoopDeps) {
               `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
             )
           }
-          return { findings, destinations, reconciled: false }
+          const failure = error instanceof ForgeRateLimitError
+            ? undefined
+            : `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
+          return { findings, destinations, reconciled: false, failure }
         }
         pendingFindings = filtered.unresolved
         for (const duplicate of filtered.duplicates) {
@@ -1055,11 +1074,11 @@ export function createLoop(deps: LoopDeps) {
       }
       // One report per scan attempt, so an outage that rejects several findings counts
       // once; a rejection that survives the retry stops the loop instead of holding the
-      // completion scan open forever.
-      if (publishFailure !== undefined) {
+      // completion scan open forever. A worker counts it against its publication limit.
+      if (publishFailure !== undefined && !config.workerMode) {
         reportGateFailure(publishFailure, true, `completion-scan-${taskId}`)
       }
-      return { findings, destinations, reconciled }
+      return { findings, destinations, reconciled, failure: publishFailure }
     }
 
     const pendingFindings = isReview
@@ -1419,11 +1438,13 @@ export function createLoop(deps: LoopDeps) {
   }
 
   /**
-   * The final cycle is the scan-limit cycle, or one whose scans all came back empty
-   * when one more empty cycle reaches MAX_EMPTY_SCANS — the run ends after it either
-   * way, so it is the last chance for a review to read the branch.
+   * The final cycle is the scan-limit cycle, one whose scans all came back empty when
+   * one more empty cycle reaches MAX_EMPTY_SCANS, or any cycle while scanning is
+   * disabled, whose drained gate no scan can follow — the run ends after it in every
+   * case, so it is the last chance for a review to read the branch.
    */
   function cycleIsFinal(cycle: number): boolean {
+    if (!config.scanEnabled) return true
     if (cycle >= config.maxScanCycles) return true
     const yields = completeScanYields(cycle)
     if (yields !== undefined && !yields.includes('found') && !yields.includes('failed')) {
@@ -1453,7 +1474,7 @@ export function createLoop(deps: LoopDeps) {
 
     if (lastId !== '') {
       const status = readStatus(paths, lastId)?.status
-      if (status !== 'completed' && status !== 'merged') {
+      if (status !== 'completed' && status !== 'merged' && status !== 'no-change') {
         event('WARN', `review ${shortTaskId(lastId)} ended ${status ?? 'unknown'} without a verdict`)
         missingVerdict = true
         // A crashed review says nothing about the diff, regardless of whether this is
@@ -1465,10 +1486,9 @@ export function createLoop(deps: LoopDeps) {
 
     if (rounds >= maxRounds) {
       if (isFinal || missingVerdict) {
-        // Promoting here would ship findings nobody resolved — the failure the round
-        // cap used to allow — or trust a review that never produced a verdict. Rounds
-        // this persistent signal something structural, which is a person's call, so
-        // the loop stops instead of promoting.
+        // Promoting here would ship findings nobody resolved or trust a review that
+        // never produced a verdict. Rounds this persistent signal something
+        // structural, which is a person's call, so the loop stops instead of promoting.
         // Ending at the cap is the run's normal handoff to a person, not a malfunction,
         // so it closes the log as a first-class event rather than a bare ERROR.
         event('Stopped', 'Loop', `review-cap rounds ${rounds}/${maxRounds}`)
@@ -1496,9 +1516,17 @@ export function createLoop(deps: LoopDeps) {
     try {
       enqueueTaskImpl(paths, reviewId, 0)
     } catch (error) {
-      event('WARN', `could not enqueue review: ${errorSummary(error)}`)
+      // The pending ID makes the next poll retry the same review, but a queue that never
+      // accepts it would leave the loop idling at the gate with nothing dispatched, so a
+      // repeated failure stops the loop as the CI-fix enqueue does.
+      reportGateFailure(
+        `could not enqueue review: ${errorSummary(error)}`,
+        true,
+        'review-enqueue',
+      )
       return false
     }
+    previousGateFailures.delete('review-enqueue')
     // The round and id are the durable receipt for a dispatched review. Publishing
     // them before the backlog mutation succeeds consumes a round without any worker
     // being able to perform it, so keep them behind the enqueue boundary.
@@ -1789,7 +1817,8 @@ export function createLoop(deps: LoopDeps) {
     if (status.state === 'merged') return 'success'
     // Right after a push the forge can still report the previous head and its checks.
     // Only a verdict about the commit this checkout holds may open or fail the gate.
-    if (!prHeadIsLocalHead(status.headSha)) return 'pending'
+    // A closed PR receives no further pushes, so its head can never catch up.
+    if (status.state === 'open' && !prHeadIsLocalHead(status.headSha)) return 'pending'
     const checks = newestChecksByName(status.checks)
     if (checks.length === 0) {
       // Silence cannot prove success: workflows may be delayed or misconfigured. Only a
@@ -1954,18 +1983,19 @@ export function createLoop(deps: LoopDeps) {
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
     writeFileSync(suiteLog, '')
 
-    const runStep = (cwd: string, command: string, timeout?: number): boolean => {
+    /** Run one command into the suite log; answers 0, its exit status, or null if killed. */
+    const runStep = (cwd: string, command: string, timeout?: number): number | null => {
       try {
         const out = execShellSync(command, {
           cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true, timeout,
         })
         appendFileSync(suiteLog, out)
-        return true
+        return 0
       } catch (error) {
-        const failed = error as { stdout?: string; stderr?: string }
+        const failed = error as { status?: unknown; stdout?: string; stderr?: string }
         appendFileSync(suiteLog, `${failed.stdout ?? ''}${failed.stderr ?? ''}`)
-        return false
+        return typeof failed.status === 'number' && failed.status !== 0 ? failed.status : null
       }
     }
 
@@ -1978,7 +2008,7 @@ export function createLoop(deps: LoopDeps) {
         writeFileSync(stopFile, '')
         return false
       }
-      if (!runStep(paths.repoRoot, probe.command, probe.timeoutMs)) {
+      if (runStep(paths.repoRoot, probe.command, probe.timeoutMs) !== 0) {
         event('ERROR', probe.remediation)
         writeFileSync(stopFile, '')
         return false
@@ -1991,13 +2021,22 @@ export function createLoop(deps: LoopDeps) {
       // branch; the repair keeps the suite's verdict about the code.
       const repair = step.repairWhenMissing
       if (repair !== undefined && !existsSync(join(paths.repoRoot, repair.path))) {
-        if (!runStep(join(paths.repoRoot, step.cwd), repair.command)) {
+        if (runStep(join(paths.repoRoot, step.cwd), repair.command) !== 0) {
           event('ERROR', repair.message)
           writeFileSync(stopFile, '')
           return false
         }
       }
-      ok = runStep(join(paths.repoRoot, step.cwd), step.command)
+      const status = runStep(join(paths.repoRoot, step.cwd), step.command)
+      // The suite never ran: other worktrees held the repository test lock past its wait
+      // limit. Nothing is known about the tip, so the gate waits and a later poll runs the
+      // suite again, rather than stopping the loop and blaming the branch for a long queue.
+      if (status === TEST_LOCK_BUSY_EXIT_CODE) {
+        event('WARN', `cycle suite deferred: the repository test lock stayed busy (log: ${shortLogPath(suiteLog)})`)
+        gateWaitTarget = 'test lock'
+        return false
+      }
+      ok = status === 0
       if (!ok) break
     }
 
@@ -2083,6 +2122,17 @@ export function createLoop(deps: LoopDeps) {
             `could not count remote issue work: ${errorSummary(error)}`)
         }
         gateWaitTarget = 'finding status'
+        return 'continue'
+      }
+    }
+    // A scanned task whose merge failed or was deferred stays completed for the next
+    // poll to retry. Passing the gate over it would promote without its work and let
+    // session cleanup erase the merge-failure count that should stop the loop.
+    if (config.autoMerge && !config.workerMode) {
+      const unmerged = listTaskIds(paths).find((taskId) => !isInspectionTaskId(paths, taskId)
+        && readStatus(paths, taskId)?.status === 'completed')
+      if (unmerged !== undefined) {
+        gateWaitTarget = `merge of ${shortTaskId(unmerged)}`
         return 'continue'
       }
     }
@@ -2382,6 +2432,10 @@ export function createLoop(deps: LoopDeps) {
         event('Parked', `#${issueNumber}`, `${failures} consecutive task failures`)
         writeFileSync(stopFile, '')
       },
+      // Sibling merges, not a broken loop, exhaust a conflict chain, so the loop goes on.
+      onConflictPark: (issueNumber: number, attempts: number) => {
+        event('Parked', `#${issueNumber}`, `${attempts} conflicting rebases; commits kept`)
+      },
     }
 
     const reconcileMergedIssues = async (
@@ -2482,9 +2536,15 @@ export function createLoop(deps: LoopDeps) {
           ),
           onNoChange: async () => {
             if (linkedIssues.length > 0) {
-              await Promise.all(linkedIssues.map((issueNumber) =>
-                closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
-                  `Task ${taskId} completed without changes because no change was warranted.`)))
+              await Promise.all(linkedIssues.map(async (issueNumber) => {
+                try {
+                  await closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
+                    `Task ${taskId} completed without changes because no change was warranted.`)
+                } catch (error) {
+                  // A deleted issue cannot be closed, and nothing remains open to close.
+                  if (!(error instanceof ForgeIssueNotFoundError)) throw error
+                }
+              }))
             }
             recordIssueCompletions(paths, taskId, 'no-change')
           },
@@ -2492,6 +2552,7 @@ export function createLoop(deps: LoopDeps) {
         // Reaching an outcome at all means the runner no longer blocks the merge.
         warningLog.recovered(`unverified-runner-${taskId}`)
         if (mergeResult.outcome === 'no-change') {
+          previousGateFailures.delete(`no-change-reconciliation-${taskId}`)
           event('No-change', shortTaskId(taskId), 'no change warranted')
           retireConflictedAttempts(taskId, linkedIssues)
           if (!isInspectionTaskId(paths, taskId)) {
@@ -2513,7 +2574,15 @@ export function createLoop(deps: LoopDeps) {
         }
       } catch (error) {
         if (error instanceof NoChangeReconciliationError) {
-          event('WARN', `could not reconcile no-change task ${shortTaskId(taskId)}: ${error.message}`)
+          // Counted per task, like merged-issue reconciliation, so a close that can
+          // never succeed stops the loop with its reason instead of idling it forever.
+          if (!(error.cause instanceof ForgeRateLimitError)) {
+            reportGateFailure(
+              `could not reconcile no-change task ${shortTaskId(taskId)}: ${error.message}`,
+              true,
+              `no-change-reconciliation-${taskId}`,
+            )
+          }
           issueReconciliationPending = true
           return
         }
@@ -2525,6 +2594,14 @@ export function createLoop(deps: LoopDeps) {
           warning(`unverified-runner-${taskId}`, `merging ${shortTaskId(taskId)}`,
             `${shortTaskId(taskId)} merge deferred: completed runner ${error.pid} `
             + 'cannot be verified yet')
+          return
+        }
+        // Not a failure either: the gate's tests never ran because other worktrees held
+        // the repository test lock past its wait limit. The task stays completed, so the
+        // next poll runs the gate again.
+        if (error instanceof TestLockBusyError) {
+          appendFileSync(mergeLog, `${error.message}\n`)
+          event('WARN', `${shortTaskId(taskId)} merge gate deferred: the repository test lock stayed busy`)
           return
         }
         if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
@@ -2596,6 +2673,11 @@ export function createLoop(deps: LoopDeps) {
                 `rebase conflict; ${shortTaskId(retryId)} starts from ${kept.branch}`)
             } else if (linkedIssues.length === 0) {
               event('Abandoned', shortTaskId(taskId), `rebase conflict; commits kept on ${kept.branch}`)
+            } else if (kept.attempts !== undefined && conflictRetriesExhausted(kept.attempts)) {
+              // Release reconciliation parks issues whose chain has used its retries.
+              event('Abandoned', shortTaskId(taskId),
+                `rebase conflict retries exhausted; ${remoteOperationsAvailable ? '' : 'issue release pending; '}`
+                + `commits kept on ${kept.branch}`)
             } else if (remoteOperationsAvailable) {
               event('Released', shortTaskId(taskId),
                 `rebase conflict abandoned; commits kept on ${kept.branch}`)
@@ -2659,6 +2741,10 @@ export function createLoop(deps: LoopDeps) {
         : before.status
       if (status === undefined) continue
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
+      // A task can finish between the stop and this refresh; only once it leaves
+      // running is the stop's verdict known, so the mark is kept until then.
+      const wasStoppedByLoop = status !== 'running'
+        && tasksStoppedForDependencyInstall.delete(taskId)
 
       if (status === 'merged' && config.issueQueueEnabled) {
         const mergedStatus = readStatus(paths, taskId)
@@ -2694,11 +2780,11 @@ export function createLoop(deps: LoopDeps) {
         }
       }
 
-      // A task whose process is gone without the completion marker used to pass in
-      // silence. Say so, once per task, and keep the count for the gate to report.
+      // A task whose process is gone without the completion marker is reported once
+      // per task, and the count is kept for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
-      if (status === 'failed' && !existsSync(failedFlag)) {
+      if (status === 'failed' && !existsSync(failedFlag) && !wasStoppedByLoop) {
         recordIssueFailure(paths, taskId)
       }
       if (failedIssues.length > 0 && remoteOperationsAvailable) {
@@ -2725,7 +2811,7 @@ export function createLoop(deps: LoopDeps) {
           rmSync(join(paths.queueDir, `cycle-complete-${cycleNow}`), { force: true })
         }
         writeFileSync(failedFlag, '')
-        if (!wasDeadAtStartup) burstFailures += 1
+        if (!wasDeadAtStartup && !wasStoppedByLoop) burstFailures += 1
       }
 
       const scannedFlag = join(scannedDir, taskId)
@@ -2753,11 +2839,24 @@ export function createLoop(deps: LoopDeps) {
             continue
           }
           const publicationFailuresFile = join(scannedDir, `${taskId}.publish-failures`)
+          const findingsFiledFile = join(scannedDir, `${taskId}.findings-filed`)
           try {
+            // Findings are filed before the completion is published: publishing an
+            // inspection closes its issue, and nothing revisits the final message after.
+            if (!existsSync(findingsFiledFile)) {
+              const dispatch = await scanForNextTasks(taskId, depth)
+              if (!dispatch.reconciled) {
+                // A rate limit is a wait, not a failed attempt.
+                if (dispatch.failure === undefined) continue
+                throw new Error(dispatch.failure)
+              }
+              writeFileSync(findingsFiledFile, '')
+            }
             await publishWorkerCompletion(taskId, linkedIssues)
             clearIssueFailureCounts(paths, taskId)
             writeFileSync(scannedFlag, '')
             rmSync(publicationFailuresFile, { force: true })
+            rmSync(findingsFiledFile, { force: true })
           } catch (error) {
             if (error instanceof UnpublishableWorkerTaskError) {
               // A lost claim is not this task's to release or count: unlink those issues
@@ -2771,6 +2870,7 @@ export function createLoop(deps: LoopDeps) {
               // Failed, the next poll counts it and releases or parks its issues.
               if (await transitionStatus(paths, taskId, 'completed', 'failed')) {
                 appendFileSync(logFile(paths, taskId), `\nWorker publication refused: ${errorSummary(error)}\n`)
+                rmSync(findingsFiledFile, { force: true })
                 event('WARN', `${shortTaskId(taskId)} cannot be published: ${errorSummary(error)}`)
               }
             } else if (!(error instanceof ForgeRateLimitError)) {
@@ -2782,6 +2882,7 @@ export function createLoop(deps: LoopDeps) {
               } else if (await transitionStatus(paths, taskId, 'completed', 'failed')) {
                 appendFileSync(logFile(paths, taskId),
                   `\nWorker publication failed ${failures} times: ${errorSummary(error)}\n`)
+                rmSync(findingsFiledFile, { force: true })
                 event('WARN', `${shortTaskId(taskId)} failed after ${failures} publication attempts: `
                   + errorSummary(error))
               }

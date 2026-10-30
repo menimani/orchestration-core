@@ -39,7 +39,8 @@ import {
 import { deploy } from './deploy.ts'
 import {
   absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isScanTaskId,
-  issueQueueIsSeparate, locationArgs, logFile, orchPaths, packageFile, type OrchPaths,
+  issueQueueIsSeparate, locationArgs, logFile, orchPaths, PACKAGE_ROOT, packageCommandPrefix,
+  packageFile, type OrchPaths,
 } from './paths.ts'
 import {
   findFleetDir, FLEET_FILE, projectForDirectory, readFleet, resolveFleetProject,
@@ -1284,24 +1285,42 @@ const cmdWorker: Command = async (paths, args) => {
 const cmdCiWait: Command = async (paths, args) => {
   const prNumber = args[0]
   let timeoutSeconds = 900
+  let expectedHead: string | undefined
   if (prNumber === undefined || !/^\d+$/.test(prNumber)
-    || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) {
-    console.error('Usage: ci-wait <pr-number> [--timeout <seconds>]')
+    || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1
+    || args.length % 2 !== 1) {
+    console.error('Usage: ci-wait <pr-number> [--timeout <seconds>] [--head <sha>]')
     return 1
   }
-  if (args.length > 1) {
-    const timeout = args[2]
-    if (args.length !== 3 || args[1] !== '--timeout' || timeout === undefined
-      || !/^\d+$/.test(timeout) || !Number.isSafeInteger(Number(timeout))) {
-      console.error('ERROR: --timeout must be a non-negative number of seconds')
+  for (let index = 1; index < args.length; index += 2) {
+    const value = args[index + 1] ?? ''
+    if (args[index] === '--timeout') {
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+        console.error('ERROR: --timeout must be a non-negative number of seconds')
+        return 1
+      }
+      timeoutSeconds = Number(value)
+    } else if (args[index] === '--head') {
+      // The forge reports full object names, so an abbreviation could never match.
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)) {
+        console.error('ERROR: --head must be a full commit SHA')
+        return 1
+      }
+      expectedHead = value.toLowerCase()
+    } else {
+      console.error('Usage: ci-wait <pr-number> [--timeout <seconds>] [--head <sha>]')
       return 1
     }
-    timeoutSeconds = Number(timeout)
   }
+  expectedHead ??= execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: paths.repoRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+  }).trim()
 
   const config = loadRepositoryConfig(paths)
   const forge = await loadPathsForge(config.forge, paths)
-  return waitForCi(forge, Number(prNumber), { timeoutSeconds })
+  return waitForCi(forge, Number(prNumber), { timeoutSeconds, expectedHead })
 }
 
 async function runLoopDaemon(
@@ -1579,8 +1598,8 @@ const cmdShipped: Command = async (paths, args) => {
     console.error('Usage: shipped <pr-number-or-url>')
     return 1
   }
-  const isPositiveNumber = /^#?\d+$/.test(pr) && BigInt(pr.replace(/^#/, '')) > 0n
-  let reference = isPositiveNumber ? `#${pr.replace(/^#/, '')}` : undefined
+  const number = /^#?\d+$/.test(pr) ? BigInt(pr.replace(/^#/, '')) : 0n
+  let reference = number > 0n ? `#${number.toString()}` : undefined
   if (reference === undefined && !/[\u0000-\u001f\u007f]/.test(pr)) {
     try {
       const url = new URL(pr)
@@ -1648,6 +1667,26 @@ const commands: Record<string, Command> = {
   'install-skills': cmdInstallSkills,
 }
 
+// The generated Git hook calls `pre-commit` directly; it has no package script, so
+// `npm run pre-commit` would fail with "Missing script".
+const HOOK_ONLY_COMMANDS = new Set(['pre-commit'])
+
+function usageText(): string {
+  let prefix = 'npm run'
+  try {
+    const root = execFileSync('git', ['-C', PACKAGE_ROOT, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    }).trim()
+    prefix = packageCommandPrefix(root)
+  } catch {
+    // Outside a Git checkout the package can only be run from its own directory.
+  }
+  const available = Object.keys(commands).filter((name) => !HOOK_ONLY_COMMANDS.has(name))
+  return `Usage: ${prefix} <command>\nAvailable: ${available.join(', ')}`
+}
+
 async function main(): Promise<number> {
   const rawArgs = process.argv.slice(2)
   const repositories: string[] = []
@@ -1694,7 +1733,7 @@ async function main(): Promise<number> {
   }
   const [commandName, ...args] = positional
   if (commandName === undefined || commandName === '') {
-    console.error(`Usage: npm run <command>\nAvailable: ${Object.keys(commands).join(', ')}`)
+    console.error(usageText())
     return 1
   }
   const command = commands[commandName]

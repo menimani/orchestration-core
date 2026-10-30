@@ -1,26 +1,53 @@
-import { existsSync, mkdirSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { existsSync, mkdirSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // The on-disk layout is shared state with everything the loop leaves behind between
 // runs, so the names here are contract, not implementation: queue markers, status
-// files, logs and worktrees must land exactly where the bash implementation put them.
+// files, logs and worktrees written by an earlier run must be found where this run
+// looks for them, and the skills that read them name these paths directly.
+
+/**
+ * The on-disk spelling of a path: symlinks resolved and, on a case-insensitive
+ * filesystem, every component in the case the filesystem stores. Git reports paths that
+ * way, so a path an operator typed is canonicalized before it is compared with one. A
+ * path that does not exist yet is canonical down to its deepest existing ancestor; only
+ * the missing tail keeps its resolved spelling, since nothing on disk spells it yet.
+ */
+export function canonicalPath(path: string): string {
+  const resolved = resolve(path)
+  const missing: string[] = []
+  let existing = resolved
+  for (;;) {
+    try {
+      return join(realpathSync.native(existing), ...missing)
+    } catch {
+      const parent = dirname(existing)
+      if (parent === existing) return resolved
+      missing.unshift(basename(existing))
+      existing = parent
+    }
+  }
+}
 
 /**
  * This package's own directory, derived from where it executes rather than from an
  * assumed position inside the repository. A consumer keeps the package at
  * <repo>/orchestration/ts; the repository that owns it keeps it at the root. Anything
  * that re-invokes the CLI, or reaches for the package's lockfile or node_modules,
- * resolves from here — hardcoding 'orchestration/ts' broke the owning repository.
+ * resolves from here — hardcoding 'orchestration/ts' broke the owning repository. It is
+ * canonical because the launch directory keeps the case the operator typed, while the
+ * repository root it is compared with comes from Git.
  */
-export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+export const PACKAGE_ROOT = canonicalPath(resolve(dirname(fileURLToPath(import.meta.url)), '..'))
 
 /** This package's repository-relative path when it is installed inside a consumer. */
 export function packageSubtreePrefix(
   repoRoot: string,
   packageRoot = PACKAGE_ROOT,
 ): string | undefined {
-  const prefix = relative(repoRoot, packageRoot)
+  // The prefix names a subtree to Git, so it must carry the case Git stores.
+  const prefix = relative(canonicalPath(repoRoot), canonicalPath(packageRoot))
   if (prefix === '' || prefix === '..' || prefix.startsWith(`..${sep}`)
     || isAbsolute(prefix)) return undefined
   return prefix.replaceAll('\\', '/')

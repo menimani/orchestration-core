@@ -8,8 +8,8 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
 import {
-  buildIssueBody, issuePromotionForIssue, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_MERGE_FAILED,
-  LABEL_MERGE_READY, LABEL_READY,
+  buildIssueBody, issuePromotionForIssue, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
+  LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
 import { createLoop } from '../src/loop.ts'
 import type { OrchestrationDepsRuntime } from '../src/merge.ts'
@@ -263,6 +263,47 @@ describe('remote task adoption', () => {
       expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
       expect(forge.issueComments.get(issueNumber)?.join('\n'))
         .toContain('does not report the same worker branch')
+    }
+  })
+
+  it('waits for a grouped member the worker has not published yet', async () => {
+    const task = pushWorkerBranch('20260809_000000_013_auto-group-still-publishing')
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const published = await forge.createIssue({
+      title: 'grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+      assignees: ['worker-a'],
+    })
+    const unpublished = await forge.createIssue({
+      title: 'grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
+    })
+    const report = `Worker completed the task.\nBranch: ${task.branch}\nHead commit: ${task.head}\nIssues: #${published} #${unpublished}`
+    await forge.commentIssue(published, report)
+
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    expect((await forge.getIssue(published)).labels).toEqual([LABEL_FINDING, LABEL_MERGE_READY])
+    expect((await forge.getIssue(unpublished)).labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+    for (const issueNumber of [published, unpublished]) {
+      expect((await forge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+      expect(forge.issueComments.get(issueNumber)?.join('\n') ?? '')
+        .not.toContain('Remote task adoption failed')
+    }
+
+    await forge.commentIssue(unpublished, report)
+    await forge.addLabel(unpublished, LABEL_MERGE_READY)
+    await forge.removeLabel(unpublished, LABEL_IN_PROGRESS)
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    const mergeCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(mergeCommit).not.toBe(headBefore)
+    for (const issueNumber of [published, unpublished]) {
+      expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({ mergeCommit })
     }
   })
 

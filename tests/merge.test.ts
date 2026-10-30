@@ -11,9 +11,10 @@ import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
-  completeTaskWithoutChanges, describeCommandFailure, MergeError, MergeRecoveryError,
+  completeTaskWithoutChanges, describeCommandFailure, inTemporaryWorktree, MergeError,
+  MergeRecoveryError,
   mergeRemoteTask, mergeTask, RebaseConflictError, removeMergedWorktree,
-  removeTemporaryWorktree, UnverifiedRunnerError,
+  removeTemporaryWorktree, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError, UnverifiedRunnerError,
 } from '../src/merge.ts'
 import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
@@ -26,6 +27,7 @@ import {
 } from '../src/worktree.ts'
 import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject } from './stubProject.ts'
+import { nonCanonicalSpelling } from './pathComparison.ts'
 import { PROCESS_TEST_TIMEOUT_MS, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
@@ -375,6 +377,55 @@ describe('removeTemporaryWorktree', () => {
       + '(git: Git removal failed; fallback: Direct removal failed)',
     )
     expect(gitRuntime).toHaveBeenNthCalledWith(2, paths.repoRoot, ['worktree', 'prune'])
+  })
+})
+
+describe('inTemporaryWorktree', () => {
+  const removalFailure = (worktree: string): string =>
+    `Could not remove temporary worktree ${worktree}; merge was not applied. `
+    + '(git: Git removal failed; fallback: Direct removal failed)'
+
+  it.each([
+    ['a test-lock deferral', new TestLockBusyError('the repository test lock stayed busy')],
+    ['a recovery failure', new MergeRecoveryError('Could not restore the worktree.')],
+  ])('keeps %s when the worktree removal also fails, and logs the removal', (_name, failure) => {
+    const worktree = join(paths.worktreesDir, '.merge-failed-step')
+    const log = vi.fn()
+
+    let thrown: unknown
+    try {
+      inTemporaryWorktree(paths, worktree, log, () => { throw failure }, failedWorktreeRemovalRuntime())
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBe(failure)
+    expect(log).toHaveBeenCalledWith(`WARN: ${removalFailure(worktree)}`)
+  })
+
+  it('fails with the removal error when the step passed', () => {
+    const worktree = join(paths.worktreesDir, '.merge-passed-step')
+    const step = vi.fn()
+
+    expect(() => inTemporaryWorktree(
+      paths, worktree, vi.fn(), step, failedWorktreeRemovalRuntime(),
+    )).toThrow(removalFailure(worktree))
+    expect(step).toHaveBeenCalledOnce()
+  })
+
+  it('removes the worktree after a step that passed', () => {
+    const worktree = join(paths.worktreesDir, '.merge-clean')
+    const calls: string[] = []
+
+    inTemporaryWorktree(paths, worktree, vi.fn(), () => { calls.push('step') }, {
+      os: posixOperatingSystem(vi.fn()),
+      git: (_cwd, args) => {
+        calls.push(args.join(' '))
+        return ''
+      },
+    })
+
+    expect(calls).toEqual(['step', `worktree remove ${worktree} --force`])
   })
 })
 
@@ -903,11 +954,72 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
-  it('lets a scan through without commits', async () => {
+  it('completes a scan without commits and without recording a merge', async () => {
     const taskId = '20260808_000000_004_scan'
-    await makeCompletedTask(taskId)
-    await mergeTask(paths, taskId, { taskGate: 'light', project: stubProject })
-    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    const worktree = await makeCompletedTask(taskId)
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
+      .resolves.toEqual({ outcome: 'no-change' })
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(readStatus(paths, taskId)?.merge_commit).toBeUndefined()
+  })
+
+  it('closes the linked issues of a commit-less inspection directly', async () => {
+    const taskId = '20260808_000000_033_user-inspect-linked'
+    mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
+    writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
+    // Work that landed after the inspection started: a no-op merge would leave HEAD here.
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(repoRoot, 'unrelated.txt'), 'earlier work\n')
+    git(repoRoot, ['add', 'unrelated.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: unrelated earlier work'])
+    const unrelatedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const forge = {
+      issueClosingCommitMessage: (message: string, issue: number) => `${message} (closes #${issue})`,
+    }
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 412, forge,
+    })).rejects.toThrow('A linked no-change task requires issue reconciliation.')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(worktree)).toBe(true)
+
+    const onNoChange = vi.fn(async () => {
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+    })
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 412, forge, onNoChange,
+    })).resolves.toEqual({ outcome: 'no-change' })
+
+    expect(onNoChange).toHaveBeenCalledOnce()
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(unrelatedHead)
+    expect(git(repoRoot, ['log', '--format=%s']).trim()).not.toContain('closes #412')
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).toBe('')
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(readStatus(paths, taskId)?.merge_commit).toBeUndefined()
+  })
+
+  it('refuses to record a merge that left the run branch where it was', async () => {
+    const taskId = '20260808_000000_034_user-merge-without-commit'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string =>
+        cwd === paths.repoRoot && args[0] === 'merge' && args[1] === '--quiet' ? '' : git(cwd, args),
+    }
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+    })).rejects.toThrow(`Merging ${branchName(taskId)} created no commit on main.`)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
   it('refuses a task that is not completed', async () => {
@@ -979,6 +1091,49 @@ describe('mergeTask', () => {
     })).rejects.toThrow('Tests failed. Aborting merge.')
 
     expect(readFileSync(outputFile, 'utf8')).toContain('=== Tests failed: exit status 2 ===')
+  })
+
+  it('defers rather than fails a merge whose tests waited out the repository test lock', async () => {
+    const taskId = '20260808_000000_091_user-test-lock-busy'
+    await makeCompletedTask(taskId, { commit: true })
+    const head = git(repoRoot, ['rev-parse', 'HEAD'])
+    const outputFile = join(repoRoot, 'test-lock-busy.log')
+
+    const result = mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, outputFile,
+      testCmd: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+    })
+
+    await expect(result).rejects.toBeInstanceOf(TestLockBusyError)
+    await expect(result).rejects.toThrow('the repository test lock stayed busy')
+    expect(readFileSync(outputFile, 'utf8')).toContain('=== Tests failed: exit status 75 ===')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(head)
+  })
+
+  it('defers a check that waited out the test lock only when no other check failed', async () => {
+    const taskId = '20260808_000000_092_user-test-lock-busy-check'
+    await makeCompletedTask(taskId, { commit: true })
+    const lockBusy = {
+      label: 'Locked suite', cwd: '', command: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+    }
+    const deferred: ProjectAdapter = {
+      ...stubProject,
+      name: 'lock-busy-check',
+      mergeChecks: () => [lockBusy, { label: 'Passing check', cwd: '', command: 'node -e "process.exit(0)"' }],
+    }
+    const failing: ProjectAdapter = {
+      ...stubProject,
+      name: 'lock-busy-and-failing-check',
+      mergeChecks: () => [lockBusy, { label: 'Failing check', cwd: '', command: 'node -e "process.exit(1)"' }],
+    }
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: deferred }))
+      .rejects.toBeInstanceOf(TestLockBusyError)
+    const failure = mergeTask(paths, taskId, { taskGate: 'light', project: failing })
+    await expect(failure).rejects.toThrow('Tests failed. Aborting merge.')
+    await expect(failure).rejects.not.toBeInstanceOf(TestLockBusyError)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
   it.each([
@@ -1236,6 +1391,31 @@ describe('mergeTask', () => {
 
     expect(install).toHaveBeenCalledOnce()
     expect(install).toHaveBeenCalledWith(repoRoot)
+  })
+
+  it('installs orchestration dependencies when the package root is spelled differently from the repository', async () => {
+    const taskId = '20260808_000000_014_user-updates-mis-cased-dependency'
+    const worktree = await makeCompletedTask(taskId)
+    mkdirSync(join(worktree, 'orchestration', 'ts'), { recursive: true })
+    writeFileSync(join(worktree, 'orchestration', 'ts', 'package-lock.json'), '{}\n')
+    git(worktree, ['add', 'orchestration/ts/package-lock.json'])
+    git(worktree, ['commit', '-qm', 'feat: update orchestration lockfile'])
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-merge-alias-'))
+    const install = vi.fn()
+
+    try {
+      const packageRoot = join(nonCanonicalSpelling(repoRoot, linkDir), 'orchestration', 'ts')
+      await mergeTask(paths, taskId, {
+        taskGate: 'light',
+        project: noCheckProject,
+        orchestrationDepsRuntime: { install, packageRoot },
+      })
+
+      expect(install).toHaveBeenCalledOnce()
+      expect(install).toHaveBeenCalledWith(packageRoot)
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true })
+    }
   })
 
   it('does not install orchestration dependencies when the merge leaves manifests unchanged', async () => {

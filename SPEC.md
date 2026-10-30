@@ -1,20 +1,23 @@
-# Orchestration TypeScript rewrite — behavior specification
+# Orchestration core — behavior specification
 
-This is the completion checklist for the big-bang rewrite decided on 2026-08-08. The
-cutover is complete: the TS-driven validation run (run 9) completed and shipped on
-2026-08-08, and the bash implementation was deleted. Every numbered behavior below now
-lives only here and in the vitest suite that pins it.
-
-Every numbered item below is a behavior the bash implementation learned the hard way
-(sources: `orchestration/CLAUDE.md`, `docs/orchestration/*.html`, `bin/*.sh`). The
-rewrite is "built" when every item is implemented and covered by a vitest test ported
-from or equivalent to `orchestration/tests/*.sh`.
+This is the contract for the orchestration core. Every numbered item is a behavior the
+loop learned from a specific failure, and the vitest suite under `tests/` pins each one.
+A behavior change lands with the item that describes it, in the same commit. Source
+comments and other items cite items by number, so a number is never reused.
 
 ## Runtime
 
 - TypeScript executed natively by Node >= 23.6 (type stripping): no build step, no
   `enum`/`namespace`/parameter properties or other non-erasable syntax.
 - `tsc --noEmit` joins the repository checks; vitest runs the test suite.
+- `npm test` runs the suite under a test lock in the Git common directory, so every
+  worktree of a checkout runs it one at a time, in arrival order. A waiter gives up after
+  `ORCHESTRATION_TEST_LOCK_TIMEOUT_MS` milliseconds: 15 minutes when the variable is unset
+  or not a positive integer, and otherwise the configured value as given, above the
+  default as well as below it. Giving up prints
+  `Timed out after <ms>ms waiting for the repository test lock. Lock owner: <owner>.`
+  and exits with status 75 (EX_TEMPFAIL), never 1, so a caller can tell a suite that
+  never ran from one that failed.
 - Before a foreground loop enters its first cycle, or a background launcher spawns its
   daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
   runner models and reasoning efforts, and every setting whose resolved value differs
@@ -35,14 +38,18 @@ from or equivalent to `orchestration/tests/*.sh`.
   the report.
 - The public command surface is the runtime entries in the `scripts` block of the
   package's `package.json` (the repository-root manifest here, or
-  `orchestration/ts/package.json` when installed as a subtree) — `orchestrate.sh` is not
-  kept (decided 2026-08-08; supersedes the frozen-wrapper plan). Those entries map to
+  `orchestration/ts/package.json` when installed as a subtree) — there is no shell
+  wrapper. Those entries map to
   same-name dispatches in the command registry in `src/cli.ts`. The manifest also owns
   the check-only `test`, `test:linux`, and `typecheck` scripts, which are not CLI
   dispatches; the registry additionally owns the hook-only `pre-commit` dispatch, which
-  is invoked by the generated Git hook rather than exposed as a package script. The skills
-  (`loop-start`, `loop-stop`, `loop-delegate`) are updated to
-  the npm form as part of the cutover. A background launch prints status and stop
+  is invoked by the generated Git hook rather than exposed as a package script. Run with
+  no command, the CLI prints the package scripts it dispatches, leaving out `pre-commit`,
+  after the installed package's command prefix relative to the repository that holds it
+  (`npm run` at the package's own root, `npm run -C 'orchestration/ts'` in a subtree
+  consumer). The skills
+  (`loop-start`, `loop-stop`, `loop-delegate`) invoke these
+  scripts through the installed package's command prefix. A background launch prints status and stop
   commands that run from any directory: `npm run -C <absolute package root> <script> --`
   followed by `--repo <repository root>`, or by `--fleet <fleet dir> --project <name>` when
   the project was selected from a fleet. It prints those commands only after the child
@@ -116,8 +123,8 @@ from or equivalent to `orchestration/tests/*.sh`.
 
 ### Retained runtime configuration
 
-`loadConfig` keeps the runner-neutral environment-variable surface from the pre-rewrite
-launcher. The operator file is `orchestration/config.json`; its keys are the existing
+`loadConfig` keeps the runner-neutral environment-variable surface that existing launch
+commands use. The operator file is `orchestration/config.json`; its keys are the existing
 uppercase setting names. Resolution order is file, then environment, then the defaults
 below. A missing file therefore preserves the previous behavior and existing launch
 commands remain valid. Use
@@ -162,8 +169,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
 | `SCAN_PARALLEL` | `2` | Requested scan processes per cycle. It must be at least 1 and is reduced at launch when the scan template has fewer numbered sections. |
+| `MAX_EMPTY_SCANS` | `2` | Consecutive empty scan cycles that end the run early (item 12). |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
 | `REVIEW_EFFORT` | `medium` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
+| `REVIEW_EVERY_N_CYCLES` | `1` | With automatic review, review every Nth cycle; the final cycle is always reviewed. It must be at least 1. |
+| `MAX_REVIEW_ROUNDS` | `2` | Automatic review rounds per ordinary cycle. |
+| `MAX_FINAL_REVIEW_ROUNDS` | `4` | Automatic review rounds for the final cycle; exceeding it stops the loop instead of promoting the pull request. |
+| `MAX_CI_FIX_ATTEMPTS` | `2` | ci-fix tasks generated for a failing CI gate before the loop stops (item 16). |
 | `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter, or an external adapter module. |
 | `RUNNER_CLAUDE_MODEL` | `claude-opus-5` | Base model for the Claude runner when no task-specific model override applies. |
 | `RUNNER_CLAUDE_MODEL_MINIMAL`, `RUNNER_CLAUDE_MODEL_LOW`, `RUNNER_CLAUDE_MODEL_MEDIUM`, `RUNNER_CLAUDE_MODEL_HIGH` | `RUNNER_CLAUDE_MODEL` | Optional Claude model mapping for each runner-neutral reasoning effort. |
@@ -255,7 +267,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    or digit. `MAX_GROWTH_DEPTH` (default 2) and `MAX_TOTAL_TASKS` (default 50) bound the
    growth. Directives elsewhere in the transcript are ignored. The completion remains
    pending, and cannot merge or pass the cycle gate, until accepted findings are
-   reconciled and the durable scanned flag is written.
+   reconciled and the durable scanned flag is written. A scan attempt that cannot file or
+   enqueue an accepted finding counts one gate failure under that completion scan's key,
+   however many findings it rejected: the first warns, a repeat stops the loop rather
+   than holding the completion pending forever, and a forge rate limit is not counted.
 7. `DECISION_REQUIRED: <text>` is logged and carried into the PR risks, never queued.
    Dedup: a line naming a `GHSA-`/`CVE-` identifier matches on the identifier (a scan
    words the same advisory differently every cycle); a line naming neither matches on
@@ -268,8 +283,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    A clean ordinary task with no new commits and the exact `NO_CHANGE_WARRANTED` marker
    instead becomes `no-change`, removes its worktree and branch, and directly closes its
    linked issues; forge reconciliation must succeed first, so a failed close remains
-   retryable and does not count toward the merge-failure limit. Scan tasks and `--inspect`
-   tasks remain exempt because investigation normally produces no commits. A
+   retryable and does not count toward the merge-failure limit. Scan, review, and
+   `--inspect` tasks need no marker because investigation normally produces no commits:
+   one without new commits takes the same `no-change` path, closing its linked issues
+   directly, since there is no merge commit to carry their closing text. A merge that
+   leaves the run branch's HEAD where it was is never recorded as a merge. A
    completed task that still records a runner PID has its process tree stopped and
    verified gone before the merge can discard that PID or remove the worktree, and on
    Windows any process still naming the worktree is terminated before it is removed. A runner
@@ -306,7 +324,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
    because they are repository-controlled text. A chain of conflicts is retried at most
    twice, after which the commits stay kept for a person. Linked issues return to ready
    before another poll can select the task again, and when this checkout claims such an
-   issue again its new specification carries the same section. When a retry merges or
+   issue again its new specification carries the same section. An issue whose chain has
+   used both retries is instead parked under `loop:retry-exhausted` by the same release,
+   with a `Parked` event that does not stop the loop; its record and branches are kept. When a retry merges or
    completes without changes, every branch kept for its chain is deleted and its records
    are removed. Pre-merge tests are chosen from the paths the
    rebased worktree touched. `TASK_GATE=full` asks the project adapter for its full merge
@@ -342,6 +362,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     task's runner cannot be verified yet (item 8) is no failure of the work: it leaves
     this count and the task's own failure count alone, so a runner tree that lingers for
     a few minutes cannot stop the loop and terminate the tasks still running under it.
+    Likewise a gate command that exits 75, the status a test lock wait timeout exits with
+    (see Runtime), never ran its tests: unless another check of the same gate genuinely
+    failed, the merge is deferred with a WARN that the repository test lock stayed busy,
+    the task stays `completed` for the next poll to merge again, and this count does not
+    advance. Every other non-zero exit is still `Tests failed. Aborting merge.`
     A conflicting pre-merge rebase is terminal for that task and contributes at most one
     failure to this count; ordinary
     gate failures remain retryable. Re-claiming completed-but-unmerged work
@@ -399,9 +424,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     count. If the rendered template has no numbered sections, the daemon warns and runs
     one full scan. If its numbered sections cannot be parsed unambiguously, the daemon
     logs an error and stops before creating the next cycle's state or starting a scan.
-13. `cycle_is_final` is true when the cycle number reaches `MAX_SCAN_CYCLES`, or when
+13. `cycle_is_final` is true when the cycle number reaches `MAX_SCAN_CYCLES`, when
     the cycle's scans all came back empty and one more empty cycle reaches
-    `MAX_EMPTY_SCANS`. The current cycle number lives in `queue/scan-count.txt` and is
+    `MAX_EMPTY_SCANS`, or when `SCAN_ENABLED` is `false`, since no scan can follow the
+    cycle gate. The current cycle number lives in `queue/scan-count.txt` and is
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop). A missing persisted counter reads as zero; an existing
     counter must contain base-10 digits representing a non-negative safe integer.
@@ -498,13 +524,18 @@ are not parsed by `loadConfig` and are not operator-file settings.
     pending issue set changes and every ten minutes while unchanged. A light-gate cycle
     suite logs its `Started Suite` event before invoking the blocking commands. Its
     passing verdict is retained for that commit while PR setup retries, and is discarded
-    as soon as the branch tip changes. Repeated gate failures remain visible with a
-    count; any repeated non-rate-limit PR-setup failure logs `ERROR`, writes the stop
-    file, and stops retrying.
+    as soon as the branch tip changes. A suite step that exits 75 (the test lock wait
+    timeout, see Runtime) never ran: the gate logs a WARN that the repository test lock
+    stayed busy, writes no stop file, and a later poll runs the suite again. Repeated
+    gate failures remain visible with a count; any repeated non-rate-limit PR-setup
+    failure logs `ERROR`, writes the stop file, and stops retrying.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot
-    remains an external source whose state is unknown, so the gate waits. An idle continuing
+    remains an external source whose state is unknown, so the gate waits. With
+    `AUTO_MERGE` in a non-worker loop, a non-inspection task still `completed` after its
+    completion scan, because its merge failed or was deferred, holds the gate as
+    `Waiting=merge of <task>` until a later poll merges it or marks it failed. An idle continuing
     status names its wait target, such as an open finding or finding status that could not
     be read. A continuing status with no scan, running task, or queued item carries the
     current idle stretch as an `Idle` event whose `Status` subject is followed by
@@ -537,8 +568,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a
     review rather than reviewing against a missing or stale base.
-    The optional consumer file `orchestration/accepted-limits.md` supplies findings that
-    a review should not repeat; a missing or whitespace-only file renders as `(none)`.
+    The optional file `accepted-limits.md` in the project directory (`orchestration/` in
+    a subtree consumer, `projects/<name>/` in a fleet) supplies findings that a review
+    should not repeat; a missing or whitespace-only file renders as `(none)`.
     Its contents are repository-controlled prose and are framed as untrusted text in the
     generated task, so they can narrow review findings but cannot authorize commands,
     credential access, or orchestration and CI changes.
@@ -563,9 +595,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Before generating a review task, the loop persists its candidate task ID in a
     per-cycle pending-ID file. If enqueueing fails, that pending ID remains and neither
     the review round nor the dispatched review ID is recorded; the next gate pass
-    regenerates and retries the task with the same ID. A successful enqueue records the
-    round and dispatched ID, then removes the pending-ID file. Session cleanup also
-    removes any remaining pending-ID file.
+    regenerates and retries the task with the same ID. An enqueue failure repeating
+    with no review enqueue succeeding in between stops the loop, so a queue that never
+    accepts the review cannot leave the loop idling at the gate with nothing
+    dispatched. A successful enqueue records the round and dispatched ID, then removes
+    the pending-ID file. Session cleanup also removes any remaining pending-ID file.
     Review tasks commit nothing and are exempt from the merge commit check.
 18. After the final cycle passes the same gate, the PR is promoted from draft,
     unless it is already open and ready. While an open PR reports a head commit other
@@ -593,9 +627,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
      ending after observing the already-ready or merged PR itself. Use `shipped` only
      when that automatic ending was not recorded. It performs no forge operation: it
      appends a cycle-aware `Completed Loop`
-     event to `logs/loop.log`, appends the exact standalone marker
-     `LOOP_DONE: <pr-number-or-url>` to `logs/loop-markers.log`, and confirms the record
-     on stdout. The event's cycle prefix is read back from the state the stopped daemon
+     event to `logs/loop.log`, appends the standalone marker `LOOP_DONE: <reference>`
+     to `logs/loop-markers.log`, and confirms the record on stdout. The reference is
+     normalized rather than copied: a number becomes `#<n>`, and a URL is written in its
+     parsed form, with the scheme and host lowercased and a default port dropped. The event's cycle prefix is read back from the state the stopped daemon
      left: the cycle number from `queue/scan-count.txt` and the cap from
      `queue/cycle-cap.txt` (item 13). A missing cycle number reads as zero, and a cap no
      daemon recorded falls back to the configured `MAX_SCAN_CYCLES`.
@@ -605,7 +640,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
 19. `MAX_BURST_FAILURES` (default 3) task failures observed in one poll stop the loop —
     the cause is the environment (network, credentials, runner CLI), and every task
     started meanwhile burns tokens reaching the same wall. Work that never ran leaves no
-    diff, so nothing downstream can notice it is missing; the loop must.
+    diff, so nothing downstream can notice it is missing; the loop must. A task whose
+    process tree the loop itself stopped before a dependency install (item 11a) is still
+    reported failed and its issues released, but it counts neither toward the burst nor
+    toward its issues' consecutive failure counts (item 19a).
 19a. In issue-queue mode, every failed-task release increments a persistent per-issue
      consecutive failure count in the queue directory. Before `MAX_ISSUE_RETRIES`
      (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and
@@ -682,7 +720,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     report-only work whose merge is not rejected for producing no commits; its
     `NEXT_TASK` findings reach the queue either way.
 
-## Adapter seams (new in the rewrite)
+## Adapter seams
 
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; any other selector loads an external package, file URL, absolute
@@ -752,7 +790,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     points the repository-local `core.hooksPath` at the core's hooks, and creates only
     missing `loop:*` labels. Re-running it adds and reports marked scaffold defaults for
     missing required adapter members, but never overwrites a declared member, another
-    project-owned file, or a different hooks setting; divergence is reported. The
+    project-owned file, or a different hooks setting; divergence is reported. Init works
+    on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the
+    selected file rather than the single discovered one. A project name given to init
+    that disagrees with `PROJECT` is reported as `DIVERGED` and `PROJECT` is used;
+    several adapters with neither variable set are left unchanged and reported as
+    `DIVERGED`. Either report makes init exit non-zero. The
     `loop-setup` skill gathers the repository decisions, fills a newly generated adapter,
     and runs `verify-setup`. That
     verifier reports separately the core typecheck, adapter suite, real loader discovery
@@ -775,8 +818,36 @@ are not parsed by `loadConfig` and are not operator-file settings.
     only for an exact revision match; invalid usage, a missing deployment declaration,
     any of the three timeouts, an unsuccessful workflow or revision response, and a
     revision mismatch exit non-zero.
+32b. `ci-wait <pr-number> [--timeout <seconds>] [--head <sha>]` polls the forge's check
+    rollup for that pull request every thirty seconds, for at most `--timeout` seconds
+    (default 900). `--head` names the commit whose checks may decide the verdict, as a
+    full 40- or 64-character hexadecimal SHA in either case; it defaults to
+    `git rev-parse HEAD` in the repository root, because right after a push the forge
+    can still report the previous head with finished checks.
+    Each poll keeps, per check name, only the run with the newest valid start time; a
+    check without a valid start time, and every run tied for newest, is kept, so a later
+    success cannot hide a same-name failure it does not provably supersede. A verdict is
+    reached only when the pull request is open, its head reported at that poll equals
+    the expected head, the rollup is non-empty, no kept check is pending, and the sorted
+    check names equal those of the previous poll — a rollup that is still gaining checks
+    is not believed. A poll whose head differs from the expected one cannot reach a
+    verdict and does not count as the previous poll for that comparison.
+    When less than one interval remains, the command sleeps the remainder and polls once
+    more, so a result settling in that window, or a timeout shorter than one interval,
+    still reaches a verdict. On a verdict it prints `<name>: <conclusion>` per kept check
+    and exits 0, or 1 when any kept check failed; it exits 2 once the budget is spent
+    without one. A forge call that fails is reported on stderr as
+    `ci-wait: forge poll failed: <message>` and polling continues; such a poll does not
+    count as the previous poll for the name comparison. After a rate-limit failure the
+    next poll waits until the reported reset, or one interval if that is later; a reset
+    at or past the deadline exits 3 at once. A budget spent with a failed last poll also
+    exits 3, so a forge outage is never read as a failed check. A missing or non-positive PR number, an unknown option, or an option
+    without a value prints usage and exits 1. A `--timeout` that is not a non-negative
+    whole number prints `ERROR: --timeout must be a non-negative number of seconds`, and
+    a `--head` that is not a full SHA prints `ERROR: --head must be a full commit SHA`;
+    both exit 1.
 
-## The issue queue (new in the rewrite, opt-in)
+## The issue queue (opt-in)
 
 ### Trust model
 
@@ -941,10 +1012,13 @@ so authorship and verified ancestry must both hold.
     unlinked from the task, which becomes failed without releasing or counting that issue.
     Any other publication error, such as a rejected push or a failed comment or label
     change, is retried on later polls; the fifth consecutive failure marks the task failed
-    with the reason in its task log. Rate-limit errors are not counted.
+    with the reason in its task log. Rate-limit errors are not counted, and operator
+    `cleanup` resets the count, so a re-run of the same task starts afresh.
     Its poll status uses the shared
-    `Running    Status      Task=<n>  Queue=<n>` event while work is active and appends
-    `Waiting=open finding` when idle; because workers never scan, their loop-log prefix
+    `Running    Status      Task=<n>  Queue=<n>` event while work is active and, when
+    idle, the shared `Idle` event of item 15, whose `Status` subject is followed by
+    `Task=0`, `Queue=0`, the idle duration, and `Waiting=open finding`; because workers
+    never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.
 37. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts `loop:merge-ready`
@@ -965,6 +1039,9 @@ so authorship and verified ancestry must both hold.
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
+    A grouped member still `loop:in-progress` with no worker report is still being
+    published, so the poll skips the group and leaves every member as it is; only a
+    different reported branch or head, or an unavailable member, fails the adoption.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
     `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and
@@ -992,12 +1069,10 @@ so authorship and verified ancestry must both hold.
     issues of the project's own repository, the only issue numbers a merge in a fleet with
     a separate queue may name.
 
-## Test parity
+## Test coverage
 
-Each bash test file maps to a vitest suite: `test-lib` → id/slug/status helpers,
-`test-loop-gate` → gate state machine (cycle flags, CI outcomes, review rounds, final
-promotion, stop conditions), `test-loop-branch-state` → run-branch bookkeeping,
-`test-pr-body` → commit classification and section building, `test-task-delegate` /
-`test-task-enqueue` / `test-task-status` / `test-task-prune` / `test-checks` → their
-namesakes. The gate suite is the load-bearing one; port it first and keep its cases
-1:1 so the state machine is proven equivalent before anything else moves.
+The suite drives real git repositories in temporary directories. Its cycle-gate cases in
+`tests/loop.test.ts` are the load-bearing ones: they pin the gate's state machine — cycle
+flags, CI outcomes, review rounds, final promotion, and stop conditions.
+`tests/documented-defaults.test.ts` holds the configuration tables in this file and in
+`README.md` to the defaults the source resolves.

@@ -134,6 +134,26 @@ describe('command registry', () => {
     expect(result.stderr).toContain('verify-setup')
   })
 
+  it('lists only package scripts, under the npm prefix, when no command is given', () => {
+    const result = spawnSync(process.execPath, [CLI], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    const [usage, available] = result.stderr.trim().split('\n')
+    expect(usage).toBe('Usage: npm run <command>')
+    const scripts = Object.keys(
+      (createRequire(import.meta.url)('../package.json') as { scripts: Record<string, string> })
+        .scripts,
+    )
+    const listed = available!.replace(/^Available: /, '').split(', ')
+    expect(listed).not.toContain('pre-commit')
+    expect(listed.filter((name) => !scripts.includes(name))).toEqual([])
+  })
+
   it('refuses to start a worker without a base ref', () => {
     const result = spawnSync(process.execPath, [CLI, 'worker'], {
       cwd: repoRoot,
@@ -814,6 +834,22 @@ describe('manually promoted run ending', () => {
     )
     expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
       .toBe('LOOP_DONE: #322\n')
+  })
+
+  it('normalizes a zero-padded pull request number', () => {
+    const paths = orchPaths(repoRoot)
+
+    const result = spawnSync(process.execPath, [CLI, 'shipped', '007'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('Recorded: Completed Loop PR #7')
+    expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
+      .toBe('LOOP_DONE: #7\n')
   })
 
   it('falls back to its configured cycle cap when no daemon cap was recorded', () => {

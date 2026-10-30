@@ -1,7 +1,7 @@
 import type { ChildProcess } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync,
-  writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
+  utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,8 +12,9 @@ import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
   branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId,
   isScanTaskId,
-  absolutePackageScriptCommand, orchPaths, statusFile, type OrchPaths,
+  absolutePackageScriptCommand, orchPaths, packageSubtreePrefix, statusFile, type OrchPaths,
 } from '../src/paths.ts'
+import { nonCanonicalSpelling } from './pathComparison.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, transitionStatus, writeMergedStatus, writeStatus } from '../src/status.ts'
 import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
@@ -270,6 +271,33 @@ describe('package script commands', () => {
 
     expect(absolutePackageScriptCommand(repoRoot, 'loop-status', packageRoot))
       .toBe(`npm run -C '${expectedPackageRoot}' loop-status -- --repo '${expectedRepoRoot}'`)
+  })
+
+  it('names the subtree in the spelling Git stores, whatever spelling the package root has', () => {
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    mkdirSync(packageRoot, { recursive: true })
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-lib-alias-'))
+    try {
+      expect(packageSubtreePrefix(repoRoot, nonCanonicalSpelling(packageRoot, linkDir)))
+        .toBe('orchestration/ts')
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true })
+    }
+  })
+
+  // A package root that does not exist yet is reached through its ancestors, and an
+  // ancestor spelled another way (a link here, a short 8.3 name on a CI runner) must
+  // still resolve to the repository Git reports.
+  it('names the subtree of a package root that does not exist yet under an aliased repository', () => {
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-lib-alias-'))
+    try {
+      const alias = join(linkDir, 'alias')
+      symlinkSync(repoRoot, alias, 'junction')
+      expect(packageSubtreePrefix(repoRoot, join(alias, 'orchestration-core')))
+        .toBe('orchestration-core')
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true })
+    }
   })
 })
 

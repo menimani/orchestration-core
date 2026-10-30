@@ -232,7 +232,7 @@ describe('test suite wrapper', () => {
       ORCHESTRATION_TEST_UNKNOWN_IDENTITY_PID: String(process.pid),
     })
 
-    expect(result.status).toBe(1)
+    expect(result.status).toBe(75)
     expect(result.stdout).toContain('identity unavailable')
     expect(result.stderr).toMatch(/Timed out after 100ms/)
     expect(existsSync(lock)).toBe(true)
@@ -272,7 +272,7 @@ describe('test suite wrapper', () => {
       ORCHESTRATION_TEST_RECLAIM_EPERM: '1',
     })
 
-    expect(result.status).toBe(1)
+    expect(result.status).toBe(75)
     expect(result.stderr).toMatch(/Timed out after 400ms/)
     expect(performance.now() - startedAt).toBeGreaterThanOrEqual(300)
     // The 250ms backoff admits two scheduled attempts within the 400ms budget; the
@@ -319,8 +319,43 @@ describe('test suite wrapper', () => {
     const ownerResult = await owner
 
     expect(ownerResult.status).toBe(0)
-    expect(waiter.status).toBe(1)
+    expect(waiter.status).toBe(75)
     expect(waiter.stdout).toMatch(/waiting for its repository lock \(PID \d+, acquired .+, cwd .+\)/)
     expect(waiter.stderr).toMatch(/Timed out after 100ms.+Lock owner: PID \d+, acquired .+, cwd .+/s)
+  })
+
+  it('lets the configured wait limit exceed the 15-minute default', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-raised-limit-'))
+    fixtures.push(fixture)
+    const scripts = join(fixture, 'scripts')
+    const vitest = join(fixture, 'node_modules', 'vitest')
+    mkdirSync(scripts, { recursive: true })
+    mkdirSync(vitest, { recursive: true })
+    // Starting the wait clock 15 minutes in the past proves the waiter keeps waiting past
+    // the default instead of sitting out a real quarter hour.
+    const wrapper = readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs'), 'utf8')
+      .replace(
+        'const waitStartedAt = performance.now()',
+        'const waitStartedAt = performance.now() - 15 * 60_000',
+      )
+    writeFileSync(join(scripts, 'run-tests.mjs'), wrapper)
+    writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+    writeFileSync(join(vitest, 'vitest.mjs'), '')
+    // A fresh lock whose owner record is not yet published counts as held.
+    const lock = join(fixture, '.orchestration-test-suite-lock')
+    mkdirSync(lock)
+    const raisedLimit = 15 * 60_000 + 300
+
+    const startedAt = performance.now()
+    const result = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, {
+      ...process.env,
+      ORCHESTRATION_TEST_LOCK_TIMEOUT_MS: String(raisedLimit),
+    })
+
+    expect(result.status).toBe(75)
+    expect(result.stderr).toContain(`Timed out after ${raisedLimit}ms waiting for the repository test lock.`)
+    expect(result.stderr).toContain('Lock owner: owner record not yet available.')
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(200)
+    expect(existsSync(lock)).toBe(true)
   })
 })

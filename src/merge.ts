@@ -13,7 +13,7 @@ import { shortTaskId } from './ids.ts'
 import { verifyModuleIsolation } from './moduleIsolation.ts'
 import {
   branchName, isInspectionTaskId, issueQueueIsSeparate, logFile, packageFile, worktreeDir,
-  PACKAGE_ROOT,
+  canonicalPath, PACKAGE_ROOT,
   type OrchPaths,
 } from './paths.ts'
 import {
@@ -31,8 +31,8 @@ import {
 
 export class MergeError extends Error {
   keepWorktree: boolean
-  constructor(message: string, keepWorktree = true) {
-    super(message)
+  constructor(message: string, keepWorktree = true, options?: ErrorOptions) {
+    super(message, options)
     this.keepWorktree = keepWorktree
   }
 }
@@ -90,6 +90,21 @@ export class UnverifiedRunnerError extends MergeError {
     this.pid = pid
   }
 }
+
+/**
+ * The exit status a test command uses when it never ran because a lock shared with other
+ * worktrees stayed busy: EX_TEMPFAIL, as `scripts/run-tests.mjs` exits on its lock wait
+ * timeout.
+ */
+export const TEST_LOCK_BUSY_EXIT_CODE = 75
+
+/**
+ * The gate's tests never ran because the repository test lock stayed busy. Nothing is
+ * known about the work, so this is a deferral like UnverifiedRunnerError: the task stays
+ * completed and a later poll runs the gate again, without advancing the
+ * consecutive-merge-failure guard over a queue that was merely long.
+ */
+export class TestLockBusyError extends MergeError {}
 
 export interface MergeRuntime {
   git: (cwd: string, args: string[]) => string
@@ -196,9 +211,16 @@ const ORCHESTRATION_MANIFESTS = new Set([
   packageFile('package-lock.json'),
 ])
 
+// Manifests and merged paths compare through the platform's key, under canonical roots: a
+// package root spelled in another case than the one Git reports for the repository must
+// still recognize its own lockfile.
+function manifestKey(root: string, path: string): string {
+  return operatingSystem.worktreePathFor(resolve(canonicalPath(root), path)).comparisonKey
+}
+
 function orchestrationManifests(root: string): Set<string> {
   return new Set(
-    [...ORCHESTRATION_MANIFESTS].map((manifest) => resolve(root, relative(PACKAGE_ROOT, manifest))),
+    [...ORCHESTRATION_MANIFESTS].map((manifest) => manifestKey(root, relative(PACKAGE_ROOT, manifest))),
   )
 }
 
@@ -278,7 +300,7 @@ function syncOrchestrationDepsAfterMerge(
     'diff', '--name-only', firstParent, mergeCommit,
   ]).split(/\r?\n/).filter((path) => path !== '')
   const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
-  if (!changed.some((path) => manifests.has(resolve(paths.repoRoot, path)))) return
+  if (!changed.some((path) => manifests.has(manifestKey(paths.repoRoot, path)))) return
   const root = runtime.packageRoot ?? PACKAGE_ROOT
   installOrchestrationDeps(
     `after ${shortTaskId(taskId)}`, event, runtime,
@@ -341,8 +363,17 @@ export function syncOrchestrationDepsAtStartup(
 interface MergeIo {
   out: (text: string) => void
   run: (cwd: string, command: string) => void
-  tryRun: (cwd: string, command: string, label: string) => boolean
+  tryRun: (cwd: string, command: string, label: string) => CheckOutcome
 }
+
+type CheckOutcome = 'passed' | 'failed' | 'lock-busy'
+
+function testLockStayedBusy(error: unknown): boolean {
+  return (error as { status?: unknown }).status === TEST_LOCK_BUSY_EXIT_CODE
+}
+
+const testLockBusyMessage =
+  'Tests did not run: the repository test lock stayed busy. Deferring merge.'
 
 const worktreeRemovalRuntime: WorktreeRemovalRuntime = {
   os: operatingSystem,
@@ -599,18 +630,18 @@ function mergeIo(outputFile?: string): MergeIo {
       }
     }
   }
-  const tryRun = (cwd: string, command: string, label: string): boolean => {
+  const tryRun = (cwd: string, command: string, label: string): CheckOutcome => {
     out(`=== ${label}: ${command} ===`)
     try {
       run(cwd, command)
-      return true
+      return 'passed'
     } catch (error) {
       const failed = error as { stdout?: string; stderr?: string }
       if (outputFile !== undefined) {
         appendFileSync(outputFile, `${failed.stdout ?? ''}${failed.stderr ?? ''}`)
       }
       out(`=== ${label} failed: ${describeCommandFailure(error)} ===`)
-      return false
+      return testLockStayedBusy(error) ? 'lock-busy' : 'failed'
     }
   }
   return { out, run, tryRun }
@@ -645,6 +676,7 @@ function runMergeChecks(
       io.run(worktree, options.testCmd)
     } catch (error) {
       io.out(`=== Tests failed: ${describeCommandFailure(error)} ===`)
+      if (testLockStayedBusy(error)) throw new TestLockBusyError(testLockBusyMessage)
       throw new MergeError('Tests failed. Aborting merge.')
     }
     if (options.project.verifyDependencyIsolation === true
@@ -658,21 +690,30 @@ function runMergeChecks(
   const changed = git(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
     .split(/\r?\n/).filter((line) => line !== '')
   let ok = true
+  // A check that only waited out the test lock defers the merge, unless another check
+  // genuinely failed: that failure is known, and deferring would hide it.
+  let lockBusy = false
   for (const check of options.project.mergeChecks(options.taskGate)) {
     if (check.appliesTo !== undefined && !check.appliesTo(changed)) continue
     if (check.requires !== undefined && !existsSync(join(worktree, check.requires))) continue
     if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
     const install = check.installWhenMissing
     if (install !== undefined && !existsSync(join(worktree, install.path))) {
-      ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) && ok
+      ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) === 'passed' && ok
     }
     const directory = join(worktree, check.cwd)
-    const passed = io.tryRun(directory, check.command, check.label)
+    const outcome = io.tryRun(directory, check.command, check.label)
+    if (outcome === 'lock-busy') {
+      lockBusy = true
+      continue
+    }
+    const passed = outcome === 'passed'
     const isolated = options.project.verifyDependencyIsolation !== true
       || (passed && ranIsolated(directory, check.label, io))
     ok = passed && isolated && ok
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
+  if (lockBusy) throw new TestLockBusyError(testLockBusyMessage)
 }
 
 /**
@@ -692,6 +733,30 @@ function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
   io.out(`=== ${label}: passed on dependencies it does not have ===`)
   io.out(isolation.reason ?? '')
   return false
+}
+
+// The error a step throws decides how the loop treats the attempt: a test-lock deferral is
+// retried uncounted and a recovery failure stops the loop. A removal that also fails is
+// logged beside that error rather than replacing it, and fails the merge only when the
+// step itself succeeded.
+export function inTemporaryWorktree(
+  paths: OrchPaths,
+  worktree: string,
+  log: (text: string) => void,
+  step: () => void,
+  runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
+): void {
+  try {
+    step()
+  } catch (error) {
+    try {
+      removeTemporaryWorktree(paths, worktree, log, runtime)
+    } catch (removalError) {
+      log(`WARN: ${removalError instanceof Error ? removalError.message : String(removalError)}`)
+    }
+    throw error
+  }
+  removeTemporaryWorktree(paths, worktree, log, runtime)
 }
 
 export function removeTemporaryWorktree(
@@ -845,6 +910,8 @@ async function finalizeNoChange(
   } catch (error) {
     throw new NoChangeReconciliationError(
       `Could not reconcile the no-change verdict: ${commandFailureSummary(error)}`,
+      true,
+      { cause: error },
     )
   }
   await writeStatus(paths, taskId, 'no-change')
@@ -1181,7 +1248,10 @@ async function mergeTaskWithGuardHeld(
       )
       return { outcome: 'merged', mergeCommit }
     }
-    if (!isInspectionTaskId(paths, taskId) && noChangeMarkerPresent(paths, taskId)) {
+    // An inspection that committed nothing has nothing to merge: `git merge` would answer
+    // "Already up to date", leave HEAD on earlier work, and never commit the message that
+    // closes its linked issues. It completes the way a no-change verdict does.
+    if (isInspectionTaskId(paths, taskId) || noChangeMarkerPresent(paths, taskId)) {
       if (closingIssues.length > 0 && options.onNoChange === undefined) {
         throw new NoChangeReconciliationError(
           'A linked no-change task requires issue reconciliation.',
@@ -1190,12 +1260,10 @@ async function mergeTaskWithGuardHeld(
       await finalizeNoChange(paths, taskId, branch, worktree, io, options)
       return { outcome: 'no-change' }
     }
-    if (!isInspectionTaskId(paths, taskId)) {
-      throw new MergeError(
-        `${taskId} has no new commits relative to ${currentBranch}.\n`
-        + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
-      )
-    }
+    throw new MergeError(
+      `${taskId} has no new commits relative to ${currentBranch}.\n`
+      + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
+    )
   }
   rebaseTaskOntoRunTip(worktree, currentBranch, io)
   if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
@@ -1210,7 +1278,7 @@ async function mergeTaskWithGuardHeld(
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
-  try {
+  inTemporaryWorktree(paths, prospectiveWorktree, io.out, () => {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', prospectiveWorktree, currentBranch])
     mergeWithVerifiedRecovery(
       prospectiveWorktree,
@@ -1225,10 +1293,9 @@ async function mergeTaskWithGuardHeld(
       // an empty inspection diff is fine
     }
     runMergeChecks(prospectiveWorktree, currentBranch, options, io)
-  } finally {
-    removeTemporaryWorktree(paths, prospectiveWorktree, io.out)
-  }
+  })
 
+  const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   mergeWithVerifiedRecovery(
     paths.repoRoot,
     ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage],
@@ -1237,6 +1304,14 @@ async function mergeTaskWithGuardHeld(
   )
 
   const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  // A merge judged by its exit status alone would record whatever HEAD already was. When
+  // no commit was created, nothing of the task landed and no linked issue can close.
+  if (mergeCommit === headBeforeMerge) {
+    throw new MergeError(
+      `Merging ${branch} created no commit on ${currentBranch}.\n`
+      + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
+    )
+  }
   // Publish the merge identity before any post-merge work. If dependency synchronization
   // or later cleanup is interrupted, startup can retry it without attempting to merge
   // commits that are already on the run branch or counting a false merge failure.
@@ -1347,7 +1422,7 @@ export async function mergeRemoteTask(
     )
     return appliedCommit
   }
-  try {
+  inTemporaryWorktree(paths, worktree, io.out, () => {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     mergeWithVerifiedRecovery(
       worktree,
@@ -1358,9 +1433,7 @@ export async function mergeRemoteTask(
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
     runMergeChecks(worktree, currentBranch, options, io)
-  } finally {
-    removeTemporaryWorktree(paths, worktree, io.out)
-  }
+  })
 
   mergeWithVerifiedRecovery(
     paths.repoRoot,

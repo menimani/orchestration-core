@@ -34,8 +34,9 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
-Consumers may list review findings that have been explicitly accepted in the optional
-`orchestration/accepted-limits.md` file. A missing or blank file contributes `(none)`.
+Consumers may list review findings that have been explicitly accepted in an optional
+`accepted-limits.md` file in the project directory (`orchestration/` in a subtree
+consumer, `projects/<name>/` in a fleet). A missing or blank file contributes `(none)`.
 The loop places its contents in the generated review task as untrusted repository text:
 entries can exclude accepted findings, but cannot authorize commands, credential access,
 or changes to orchestration and CI controls.
@@ -191,7 +192,10 @@ hooks, and creates missing `loop:*` labels. It is safe to repeat: missing requir
 members are added with marked scaffold defaults, while declared members, other existing
 project files, and a deliberately different hooks setting are reported and never overwritten.
 It works on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the
-selected file rather than the single discovered one.
+selected file rather than the single discovered one. A project name given to `init` that
+disagrees with `PROJECT` is reported as `DIVERGED` and `PROJECT` is used; several adapters
+with neither variable set are left unchanged and reported as `DIVERGED`. Either report
+makes `init` exit non-zero.
 For `SCAN_PARALLEL` greater than one, keep the scan checklist as uniquely numbered
 Markdown headings outside fenced code blocks; without numbered headings the loop warns
 and runs one full scan, while ambiguous numbering stops the loop before the cycle starts.
@@ -253,8 +257,18 @@ the task completes as no-change and its linked issues are closed normally. If th
 conflicts, the finished commits are kept on `conflict/<task-id>` and the work is retried
 from them: a local task is queued again with a specification naming that branch and the
 paths and run-branch commits it collided with, and a released issue carries the same
-section when this checkout claims it again. Two retries are made at most; the branches
-are deleted once a retry merges.
+section when this checkout claims it again. Two retries are made at most; after that an
+issue is parked as `loop:retry-exhausted` instead of returning to ready, and the branches
+stay for a person. They are deleted once a retry merges.
+
+This repository's `npm test` takes one test lock shared by every worktree of the
+checkout, so task runners and merge gates run the suite one at a time. A waiter gives up
+after 15 minutes by default; `ORCHESTRATION_TEST_LOCK_TIMEOUT_MS` sets another limit in
+milliseconds, above or below that default. A waiter that gives up prints
+`Timed out after <ms>ms waiting for the repository test lock` and exits with status 75.
+A merge gate whose test command exits 75 never ran its tests, so the merge is deferred
+with a WARN rather than failed: the task stays completed, the next poll runs the gate
+again, and the consecutive-merge-failure count does not move.
 
 A stopped daemon retains both branch identities and the daemon commit. Restarting is a
 resume of the same run: integration commits made while it was down remain available to
@@ -268,11 +282,12 @@ When a run finishes with no commits beyond the fetched default branch, there is 
 request for the forge to create. The loop skips the inapplicable PR, CI, and review gates,
 records `LOOP_DONE: no changes`, and exits normally.
 
-`node orchestration/ts/src/cli.ts` with no arguments lists every command: `init` repairs
+`node orchestration/ts/src/cli.ts` with no arguments lists every package script it
+dispatches, with the `npm run` prefix that reaches them from the repository root: `init` repairs
 the adoption scaffold, `verify-setup` checks it, `delegate` hands a decision from your own
 head to the loop, `loop-status` says what is in flight, `ci-wait` waits on a pull request's
-checks without believing a partial rollup, and `deploy` dispatches a deployment workflow
-and verifies the revision that actually came up.
+checks without believing a partial rollup or a previous head's checks, and `deploy`
+dispatches a deployment workflow and verifies the revision that actually came up.
 
 Every command except `install-skills`, which takes only `--fleet <dir>` (see
 [Running from a fleet](#running-from-a-fleet)), accepts `--repo <path>` to act on that
@@ -333,8 +348,10 @@ If you promote a run's pull request by hand, record that completed run with
 `npm run shipped -- <pr-number-or-url>` (or the equivalent direct `node` command for a
 subtree installation). The command requires exactly one positive PR number, optionally
 prefixed with `#`, or one absolute HTTP(S) URL. It refuses to run while the loop is active,
-performs no forge operation, records the completion in `logs/loop.log`, and emits the exact
-standalone `LOOP_DONE: <pr-number-or-url>` marker to `logs/loop-markers.log`.
+performs no forge operation, records the completion in `logs/loop.log`, and emits a
+standalone `LOOP_DONE:` marker to `logs/loop-markers.log` carrying the normalized
+reference: `#<n>` for a number, and for a URL its parsed form, with the scheme and host
+lowercased and a default port dropped.
 An active loop that observes the PR already ready or merged records its normal ending
 itself, so `shipped` is only needed when that ending is absent. If the PR is closed rather
 than ready or merged, the loop warns once and retries; observing the same closed state on

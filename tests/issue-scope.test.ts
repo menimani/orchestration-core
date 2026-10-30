@@ -44,6 +44,29 @@ describe('project-scoped issue queue', () => {
     expect(queue.labels).toEqual(new Set(['project:first']))
   })
 
+  it('retries creating the scope label after a failed attempt', async () => {
+    const createLabel = queue.createLabel.bind(queue)
+    const attempts: string[] = []
+    queue.createLabel = async (name: string, description: string) => {
+      attempts.push(name)
+      if (attempts.length === 1) throw new Error('label creation failed')
+      return createLabel(name, description)
+    }
+    const scoped = scopeForgeToProject(queue, 'project:first')
+
+    await expect(scoped.createIssue({ title: 'one', body: 'one', labels: [LABEL_READY] }))
+      .rejects.toThrow('label creation failed')
+    expect(queue.labels).toEqual(new Set())
+    expect(await queue.listOpenIssues(LABEL_READY)).toEqual([])
+
+    const issueNumber = await scoped.createIssue({ title: 'two', body: 'two', labels: [LABEL_READY] })
+
+    expect(attempts).toEqual(['project:first', 'project:first'])
+    expect(queue.labels).toEqual(new Set(['project:first']))
+    expect((await queue.getIssue(issueNumber)).title).toBe('two')
+    expect((await queue.getIssue(issueNumber)).labels).toEqual([LABEL_READY, 'project:first'])
+  })
+
   it('keeps the methods of a forge implemented as a class', async () => {
     class ClassForge {
       readonly inner: FakeForge
