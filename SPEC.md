@@ -1012,6 +1012,12 @@ account with write access withdraws every `MERGED:` comment before it.
     The daemon records issue mode in
     `queue/issue-mode` so a separate `delegate` process can publish ready work for the
     daemon to claim and materialize locally, including any effort or inspection setting.
+    `delegate` first resolves `ISSUE_QUEUE_ENABLED` as the daemon does, the repository's
+    `config.json` over the environment, rejecting a malformed value; it reads the marker
+    only when neither sets the variable. An explicit setting therefore wins in both
+    directions: `delegate` follows the current setting, not the one a running daemon pinned
+    at startup, so setting it to `false` while an issue-mode daemon runs sends delegated
+    work to the local queue.
     A new issue is unassigned with
     `loop:finding` + `loop:ready`; a matching open issue is reused without claiming it.
     Delegation remains local-only with a warning only when the forge fails before any remote write;
