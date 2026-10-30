@@ -282,8 +282,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
    no new commits — an agent that forgot to commit must not silently lose its work.
    A clean ordinary task with no new commits and the exact `NO_CHANGE_WARRANTED` marker
    instead becomes `no-change`, removes its worktree and branch, and directly closes its
-   linked issues; forge reconciliation must succeed first, so a failed close remains
-   retryable and does not count toward the merge-failure limit. Scan, review, and
+   linked issues; forge reconciliation must succeed first, so a failed close leaves the
+   task `completed` for a later poll to retry and does not count toward the merge-failure
+   limit. It counts one gate failure under that task's key instead: the first warns, a
+   repeat stops the loop rather than retrying a close that can never succeed, and a forge
+   rate limit is not counted. A linked issue the forge reports as deleted counts as
+   already closed. Scan, review, and
    `--inspect` tasks need no marker because investigation normally produces no commits:
    one without new commits takes the same `no-change` path, closing its linked issues
    directly, since there is no merge commit to carry their closing text. A merge that
