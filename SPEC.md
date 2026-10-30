@@ -701,7 +701,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     A shell whose runner exited first is outside that tree, so on Windows every removal of
     a task worktree (stop recovery, merge, and `cleanup`) first terminates the tree of each
     live process whose command line or executable path contains the worktree's absolute
-    path, compared case-insensitively in either slash direction. Each holder whose tree
+    path, compared case-insensitively in either slash direction, with a Git Bash or
+    Cygwin drive path (`/c/...` or `/cygdrive/c/...`) read as `c:\...`. The match must
+    be followed by a separator, a quote, whitespace, `;`, `,`, or the end of the text, so
+    a sibling such as `task-10` never holds `task-1`. Each holder whose tree
     is terminated is logged once, with its PID, executable name, and the worktree path, in
     the log of the removal: the merge output, `cleanup`, or the loop log. A process that
     survives keeps holding the worktree: its removal fails and the task state is retained.
