@@ -42,9 +42,11 @@ const INHERITED_ENV = Object.fromEntries(
 // hidden-console launcher marks its tree with ORCHESTRATION_WINDOWS_PROCESS_ROOT_PID, a
 // daemon running the merge gate passes it down, and a CLI started by these tests then
 // took the daemon for its own process-tree root and refused the PID lock it should have
-// won. Every merge failed until the variable was noticed.
+// won. Every merge failed until the variable was noticed. INIT_CWD belongs here too: npm
+// sets it to the checkout running the suite, the CLI searches for a fleet from it, and a
+// fleet's own project checkouts sit inside that fleet.
 function isLoopSetting(name: string): boolean {
-  return name === 'PROJECT' || name === 'PROJECT_ADAPTER' || name === 'FORGE'
+  return name === 'PROJECT' || name === 'PROJECT_ADAPTER' || name === 'FORGE' || name === 'INIT_CWD'
     || name === 'RUNNER' || name === 'UPSTREAM_REMOTE' || name === 'UPSTREAM_BRANCH'
     || /^(CORE_|MAX_|SCAN_|TASK_|REVIEW_|ISSUE_|CI_|AUTO_|POLL_|ORCHESTRATION_)/.test(name)
 }
@@ -570,7 +572,25 @@ describe('fleet project selection', () => {
     const result = runCli(['loop-status', '--project', 'first'])
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('no fleet.json found at or above')
+    expect(result.stderr).toContain(`no fleet.json found at or above ${repoRoot}`)
+  })
+
+  it('finds the fleet for --project from the caller\'s directory', () => {
+    const fleet = fleetFixture()
+    const caller = join(fleet, 'projects')
+    mkdirSync(caller)
+
+    const result = spawnSync(process.execPath, [CLI, 'queue', '--project', 'first'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, INIT_CWD: caller },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
   })
 })
 
