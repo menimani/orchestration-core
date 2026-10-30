@@ -237,6 +237,20 @@ describe('shared skill sync', () => {
     expect(readFileSync(installed, 'utf8')).toBe('upstream version\n')
   })
 
+  it('treats a CRLF checkout of an unchanged managed skill as current', () => {
+    syncSharedSkills(repoRoot, packageRoot, skillAdapters(), projectRoot)
+    const installed = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
+    const crlf = readFileSync(installed, 'utf8').replaceAll('\n', '\r\n')
+    writeFileSync(installed, crlf)
+
+    const result = syncSharedSkills(repoRoot, packageRoot, skillAdapters(), projectRoot)
+
+    expect(result.updated).toEqual([])
+    expect(result.conflicts).toEqual([])
+    expect(result.changedPaths).toEqual([])
+    expect(readFileSync(installed, 'utf8')).toBe(crlf)
+  })
+
   it('leaves a manifest skill untouched when the managed index does not record it', () => {
     const localSkill = join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md')
     mkdirSync(dirname(localSkill), { recursive: true })

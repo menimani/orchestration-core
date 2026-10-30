@@ -218,12 +218,24 @@ function skillTargets(
   return targets
 }
 
+/**
+ * Text contents with CRLF folded to LF. Rendered skills are written with LF, but a
+ * consumer checkout under `core.autocrlf=true` holds them with CRLF, and nothing in the
+ * consumer marks the skill roots `eol=lf`. Comparing raw bytes would report every skill
+ * as changed and rewrite it on each sync. A file holding a NUL byte is treated as binary
+ * and hashed as is.
+ */
+function lineEndingNormalized(contents: Buffer): Buffer {
+  if (contents.includes(0) || !contents.includes('\r\n')) return contents
+  return Buffer.from(contents.toString('latin1').replaceAll('\r\n', '\n'), 'latin1')
+}
+
 function hashFiles(files: readonly RenderedFile[]): string {
   const hash = createHash('sha256')
   for (const file of files) {
     hash.update(file.path)
     hash.update('\0')
-    hash.update(file.contents)
+    hash.update(lineEndingNormalized(file.contents))
     hash.update('\0')
   }
   return hash.digest('hex')
