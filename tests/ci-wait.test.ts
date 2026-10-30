@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { CheckConclusion, PrStatus } from '../src/adapters/forge.ts'
+import { ForgeRateLimitError, type CheckConclusion, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import { waitForCi } from '../src/ciWait.ts'
 import { makeFakeForge } from './fakeForge.ts'
@@ -200,5 +200,89 @@ describe('CI wait', () => {
     })).resolves.toBe(1)
     expect(forge.prStatusCalls).toBe(2)
     expect(sleeps).toEqual([10_000])
+  })
+
+  function failingWait(outcomes: Array<PrStatus | Error>, timeoutSeconds: number): {
+    run: () => Promise<number>
+    output: string[]
+    warnings: string[]
+    sleeps: number[]
+    polls: () => number
+  } {
+    const forge = makeFakeForge()
+    let polls = 0
+    forge.prStatus = async () => {
+      const outcome = outcomes[Math.min(polls, outcomes.length - 1)]!
+      polls++
+      if (outcome instanceof Error) throw outcome
+      return outcome
+    }
+    const output: string[] = []
+    const warnings: string[] = []
+    const sleeps: number[] = []
+    let time = 0
+    return {
+      output,
+      warnings,
+      sleeps,
+      polls: () => polls,
+      run: () => waitForCi(forge, 42, {
+        timeoutSeconds,
+        expectedHead: 'head',
+        now: () => time,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds)
+          time += milliseconds
+        },
+        print: (line) => output.push(line),
+        warn: (line) => warnings.push(line),
+      }),
+    }
+  }
+
+  it('keeps polling past a failed forge call and needs two stable polls after it', async () => {
+    const checks = status([['test', 'success', '2026-08-09T01:00:00Z']])
+    const wait = failingWait([checks, new Error('HTTP 502'), checks, checks], 900)
+
+    await expect(wait.run()).resolves.toBe(0)
+    expect(wait.polls()).toBe(4)
+    expect(wait.sleeps).toEqual([30_000, 30_000, 30_000])
+    expect(wait.output).toEqual(['test: success'])
+    expect(wait.warnings).toEqual(['ci-wait: forge poll failed: HTTP 502'])
+  })
+
+  it('sleeps until the rate limit resets before polling again', async () => {
+    const checks = status([['test', 'success', '2026-08-09T01:00:00Z']])
+    const wait = failingWait([new ForgeRateLimitError(new Date(120_000)), checks, checks], 900)
+
+    await expect(wait.run()).resolves.toBe(0)
+    expect(wait.polls()).toBe(3)
+    expect(wait.sleeps).toEqual([120_000, 30_000])
+  })
+
+  it('exits 3 without waiting when the rate limit resets past the deadline', async () => {
+    const wait = failingWait([new ForgeRateLimitError(new Date(900_000))], 900)
+
+    await expect(wait.run()).resolves.toBe(3)
+    expect(wait.polls()).toBe(1)
+    expect(wait.sleeps).toEqual([])
+  })
+
+  it('exits 3 when the budget runs out after a failed last poll', async () => {
+    const pending = status([['test', 'pending', '2026-08-09T01:00:00Z']])
+    const wait = failingWait([pending, pending, new Error('socket hang up')], 45)
+
+    await expect(wait.run()).resolves.toBe(3)
+    expect(wait.polls()).toBe(3)
+    expect(wait.sleeps).toEqual([30_000, 15_000])
+    expect(wait.output).toEqual([])
+  })
+
+  it('exits 2 when the last poll succeeds after an earlier failure', async () => {
+    const pending = status([['test', 'pending', '2026-08-09T01:00:00Z']])
+    const wait = failingWait([new Error('HTTP 503'), pending, pending], 45)
+
+    await expect(wait.run()).resolves.toBe(2)
+    expect(wait.polls()).toBe(3)
   })
 })

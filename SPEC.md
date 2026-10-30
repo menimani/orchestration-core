@@ -834,7 +834,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     more, so a result settling in that window, or a timeout shorter than one interval,
     still reaches a verdict. On a verdict it prints `<name>: <conclusion>` per kept check
     and exits 0, or 1 when any kept check failed; it exits 2 once the budget is spent
-    without one. A missing or non-positive PR number, an unknown option, or an option
+    without one. A forge call that fails is reported on stderr as
+    `ci-wait: forge poll failed: <message>` and polling continues; such a poll does not
+    count as the previous poll for the name comparison. After a rate-limit failure the
+    next poll waits until the reported reset, or one interval if that is later; a reset
+    at or past the deadline exits 3 at once. A budget spent with a failed last poll also
+    exits 3, so a forge outage is never read as a failed check. A missing or non-positive PR number, an unknown option, or an option
     without a value prints usage and exits 1. A `--timeout` that is not a non-negative
     whole number prints `ERROR: --timeout must be a non-negative number of seconds`, and
     a `--head` that is not a full SHA prints `ERROR: --head must be a full commit SHA`;
