@@ -1473,10 +1473,9 @@ export function createLoop(deps: LoopDeps) {
 
     if (rounds >= maxRounds) {
       if (isFinal || missingVerdict) {
-        // Promoting here would ship findings nobody resolved — the failure the round
-        // cap used to allow — or trust a review that never produced a verdict. Rounds
-        // this persistent signal something structural, which is a person's call, so
-        // the loop stops instead of promoting.
+        // Promoting here would ship findings nobody resolved or trust a review that
+        // never produced a verdict. Rounds this persistent signal something
+        // structural, which is a person's call, so the loop stops instead of promoting.
         // Ending at the cap is the run's normal handoff to a person, not a malfunction,
         // so it closes the log as a first-class event rather than a bare ERROR.
         event('Stopped', 'Loop', `review-cap rounds ${rounds}/${maxRounds}`)
@@ -2760,8 +2759,8 @@ export function createLoop(deps: LoopDeps) {
         }
       }
 
-      // A task whose process is gone without the completion marker used to pass in
-      // silence. Say so, once per task, and keep the count for the gate to report.
+      // A task whose process is gone without the completion marker is reported once
+      // per task, and the count is kept for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
       if (status === 'failed' && !existsSync(failedFlag) && !wasStoppedByLoop) {
