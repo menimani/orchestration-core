@@ -169,15 +169,27 @@ are not parsed by `loadConfig` and are not operator-file settings.
 |----------|---------|----------|
 | `AUTO_MERGE` | `true` | Merge completed local task worktrees automatically. `false` leaves them completed and eligible for an explicit or later merge. |
 | `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
+| `CI_GATE_ENABLED` | `false` | Poll the pull request's checks at the cycle gate and generate ci-fix tasks for failures (item 16). `false` skips the CI gate. |
 | `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
 | `SCAN_PARALLEL` | `2` | Requested scan processes per cycle. It must be at least 1 and is reduced at launch when the scan template has fewer numbered sections. |
+| `MAX_SCAN_CYCLES` | `3` | Cycle number at which the cycle is final and the run promotes its pull request (item 13). |
 | `MAX_EMPTY_SCANS` | `2` | Consecutive empty scan cycles that end the run early (item 12). |
+| `MAX_GROWTH_DEPTH` | `2` | Depth bound on `NEXT_TASK:` growth chains (item 6). |
+| `MAX_TOTAL_TASKS` | `50` | Bound on the total tasks `NEXT_TASK:` growth may create (item 6). |
 | `REVIEW_ENABLED` | `true` | Retain the review boundary in the cycle gate. Without `AUTO_REVIEW`, that boundary records resumable state and continues on the next poll; `false` skips it. If `AUTO_PR` is also `false`, disabling this setting bypasses the cycle gate entirely. |
+| `AUTO_REVIEW` | `false` | Dispatch an automatic review task at the review boundary and queue its findings as fixes (item 17). |
 | `REVIEW_EFFORT` | `medium` | Reasoning effort for automatic review tasks. Accepted values are `minimal`, `low`, `medium`, and `high`. |
 | `REVIEW_EVERY_N_CYCLES` | `1` | With automatic review, review every Nth cycle; the final cycle is always reviewed. It must be at least 1. |
 | `MAX_REVIEW_ROUNDS` | `2` | Automatic review rounds per ordinary cycle. |
 | `MAX_FINAL_REVIEW_ROUNDS` | `4` | Automatic review rounds for the final cycle; exceeding it stops the loop instead of promoting the pull request. |
 | `MAX_CI_FIX_ATTEMPTS` | `2` | ci-fix tasks generated for a failing CI gate before the loop stops (item 16). |
+| `MAX_BURST_FAILURES` | `3` | Task failures observed in one poll that stop the loop (item 19). |
+| `MAX_CONSECUTIVE_MERGE_FAILURES` | `3` | Merge failures in a row that stop the loop (item 10). |
+| `SCAN_EFFORT` | `medium` | Reasoning effort for scans. Accepted values are `minimal`, `low`, `medium`, and `high` (item 14). |
+| `TASK_EFFORT` | `medium` | Reasoning effort for queued tasks without a per-task override; it does not replace the high effort of review-spawned fixes (item 14). |
+| `SCAN_MODEL` | empty | When non-empty, the runner model for scans (item 14). |
+| `TASK_MODEL` | empty | When non-empty, the runner model for queued tasks (item 14). |
+| `FORGE` | `github` | Select the bundled `github` forge adapter or an external adapter module (item 29). |
 | `RUNNER` | `codex` | Select the bundled `codex` or `claude` runner adapter, or an external adapter module. |
 | `RUNNER_CLAUDE_MODEL` | `claude-opus-5` | Base model for the Claude runner when no task-specific model override applies. |
 | `RUNNER_CLAUDE_MODEL_MINIMAL`, `RUNNER_CLAUDE_MODEL_LOW`, `RUNNER_CLAUDE_MODEL_MEDIUM`, `RUNNER_CLAUDE_MODEL_HIGH` | `RUNNER_CLAUDE_MODEL` | Optional Claude model mapping for each runner-neutral reasoning effort. |
@@ -185,7 +197,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
 | `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
 | `SKIP_AUTO_TEST` | `false` | When `true` and no `TEST_CMD` or `--test-cmd` is set, skip the project adapter's automatic merge checks. It does not skip the explicit test command. |
+| `TASK_GATE` | `full` | `full` asks the project adapter for its full merge checks; `light` asks for reduced merge checks and runs the whole cycle suite at each cycle gate (item 9). Any other value is rejected. |
 | `INTEGRATION_BRANCH` | empty | Empty retains the direct layout where the daemon checkout is also the run branch. A non-empty branch uses a separate integration worktree as the task base, merge and cycle-gate target, and pull-request source. |
+| `ISSUE_QUEUE_ENABLED` | `false` | Keep the backlog in forge issues instead of local queue entries (item 33). |
+| `WORKER_MODE` | `false` | Run an execution-only daemon that claims and executes shared issues (item 36). `true` requires `ISSUE_QUEUE_ENABLED=true`. |
+| `MAX_ISSUE_RETRIES` | `3` | Consecutive failed tasks allowed per issue before it is parked as `loop:retry-exhausted` (item 19a). |
+| `ISSUE_LEASE_HOURS` | `3` | Hours without heartbeats after which an in-progress issue is reaped back to ready (item 34). |
+| `CORE_AUTO_UPDATE` | `true` | Check and pull the shared-core subtree before each cycle. `false` skips the check and the shared skill sync. |
+| `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL or path, or GitHub `owner/repository` to fetch and subtree-pull. |
+| `UPSTREAM_BRANCH` | `main` | Shared-core branch to compare and pull. |
 
 ## Task lifecycle
 
