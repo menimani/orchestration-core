@@ -3122,6 +3122,9 @@ export function createLoop(deps: LoopDeps) {
           const issueNumbers = issueNumbersForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumbers.length > 0) {
             recordIssueFailure(paths, entry.taskId)
+            // The status sweep counts a failed task that has no flag. A release that fails
+            // here leaves the task behind for later polls, so mark the failure as counted.
+            writeFileSync(join(scannedDir, `${entry.taskId}.failed`), '')
             let released = false
             if (remoteOperationsAvailable) {
               recordIssueReleaseIntent(paths, entry.taskId, issueNumbers)
