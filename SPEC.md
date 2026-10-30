@@ -497,9 +497,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
     served once. The renderer supplies one named
     `{{ORCHESTRATION_PROJECT_GUIDANCE}}` injection point at the end of every shared
-    `SKILL.md`. For skill `<name>`, it reads the repository-owned fragment
-    `orchestration/project/skills/<name>.md`, outside a consumer's vendored package
-    subtree, and inserts it with Markdown separation. An absent fragment renders the point
+    `SKILL.md`. For skill `<name>`, it reads the project-owned fragment
+    `project/skills/<name>.md` under the project's asset directory —
+    `orchestration/project/skills/<name>.md` in a repository, outside a consumer's
+    vendored package subtree, or `projects/<project>/project/skills/<name>.md` in a
+    fleet — and inserts it with Markdown separation. An absent fragment renders the point
     to no bytes, preserving the prior output exactly. The sync replaces only a tree
     recorded in its
     `.orchestration-core-sync.json` managed index is core-owned, and a clean sync overwrites

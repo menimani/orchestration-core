@@ -154,7 +154,7 @@ function buildFixture(root: string): void {
 
   syncSharedSkills(repoRoot, packageRoot, [
     fakeRunnerSharedSkills, ...(stubProject.sharedSkills ?? []),
-  ])
+  ], join(repoRoot, 'orchestration'))
   commit(repoRoot, 'chore: install shared skills')
 }
 
@@ -389,7 +389,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     }
     syncSharedSkills(repoRoot, packageRoot, [
       formerRunner.sharedSkills, ...(stubProject.sharedSkills ?? []),
-    ])
+    ], join(repoRoot, 'orchestration'))
     commit(repoRoot, 'chore: adopt the former arrangement')
     const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
     const loop = makeLoop(config())
