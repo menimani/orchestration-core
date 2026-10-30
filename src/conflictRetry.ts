@@ -29,7 +29,7 @@ export function issueConflictKey(issueNumber: number): string {
 
 // A chain of conflicted attempts is retried from its kept commits at most this many
 // times. Each retry races the same sibling merges, so a third conflict is left for a person.
-export const MAX_CONFLICT_RETRIES = 2
+const MAX_CONFLICT_RETRIES = 2
 
 /** Whether a chain of conflicted attempts has used every retry it is allowed. */
 export function conflictRetriesExhausted(attempts: readonly ConflictedAttempt[]): boolean {
