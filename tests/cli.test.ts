@@ -836,6 +836,22 @@ describe('manually promoted run ending', () => {
       .toBe('LOOP_DONE: #322\n')
   })
 
+  it('normalizes a zero-padded pull request number', () => {
+    const paths = orchPaths(repoRoot)
+
+    const result = spawnSync(process.execPath, [CLI, 'shipped', '007'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('Recorded: Completed Loop PR #7')
+    expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
+      .toBe('LOOP_DONE: #7\n')
+  })
+
   it('falls back to its configured cycle cap when no daemon cap was recorded', () => {
     const paths = orchPaths(repoRoot)
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '5\n')
