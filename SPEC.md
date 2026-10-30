@@ -812,7 +812,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     become pull-request sections, area labels, and risk bullets — lives in the project
     adapter (`adapters/project.ts`; with neither selection variable set, the single
     `../project/project-*.ts` file is discovered; `PROJECT=<name>` selects
-    `../project/project-<name>.ts`; `PROJECT_ADAPTER` overrides the path). The
+    `../project/project-<name>.ts`; `PROJECT_ADAPTER` overrides the path, and a relative
+    `PROJECT_ADAPTER` resolves against the project directory that holds `project/`, not
+    the repository root). The
     core executes the declarations and owns the generic behavior: Git history and diff
     collection, pull-request formatting, output capture, failure attribution, and stop
     decisions. Porting the orchestration to another repository means writing a project

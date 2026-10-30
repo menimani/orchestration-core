@@ -123,7 +123,10 @@ your-repo/
 With neither variable set, the core uses the single `project-*.ts` file in
 `orchestration/project/`. If that directory has multiple adapters, set `PROJECT=<name>`
 to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explicit path;
-it overrides the conventional path selected by `PROJECT`.
+it overrides the conventional path selected by `PROJECT`. A relative `PROJECT_ADAPTER`
+resolves against the project directory (`orchestration/` in a subtree consumer,
+`projects/<name>/` in a fleet), not the repository root: write
+`PROJECT_ADAPTER=project/project-custom.ts`, not `orchestration/project/project-custom.ts`.
 
 An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, absolute
 path, or path relative to the consumer repository root. A repository-relative selector
