@@ -3661,6 +3661,30 @@ describe('completion marker output', () => {
     expect(prStatusCalls).toBe(0)
   })
 
+  it('defers a cycle gate whose suite waited out the test lock without stopping the loop', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Locked suite', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n'); process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+      }],
+    }
+    const loop = makeLoop({ taskGate: 'light' }, suiteProject)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    // Each gate entry runs the suite again rather than keeping a verdict it never had.
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\nrun\n')
+    expect(logText()).toContain('WARN cycle suite deferred: the repository test lock stayed busy')
+    expect(logText()).not.toContain('ERROR cycle suite failed')
+    expect(logText()).not.toContain('CYCLE_COMPLETE:')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+  })
+
   it('retains a suite verdict only while PR retries use the same branch tip', async () => {
     configureLocalRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
