@@ -435,6 +435,33 @@ export function createLoop(deps: LoopDeps) {
     }
   }
 
+  // Exit 1 is the only answer that means "not contained". Any other failure, such as a
+  // merged head that was pushed outside the loop and never fetched, would otherwise leave
+  // the promoted issue open on every poll while the bookkeeping reported success.
+  function promotedCommitContained(ancestor: string, descendant: string): boolean {
+    const compare = (): { status: number | null, detail: string } => {
+      try {
+        git(['merge-base', '--is-ancestor', ancestor, descendant])
+        return { status: 0, detail: '' }
+      } catch (error) {
+        const failure = error as { status?: number | null, stderr?: string, message?: string }
+        return {
+          status: failure.status ?? null,
+          detail: (failure.stderr ?? failure.message ?? '').trim(),
+        }
+      }
+    }
+    let result = compare()
+    if (result.status !== 0 && result.status !== 1) {
+      git(['fetch', '--quiet', currentBranchPushRemote(paths.repoRoot), descendant])
+      result = compare()
+    }
+    if (result.status === 0) return true
+    if (result.status === 1) return false
+    throw new Error(`could not tell whether ${descendant} contains ${ancestor}`
+      + (result.detail === '' ? '' : `: ${result.detail}`))
+  }
+
   function gitIn(cwd: string, args: string[]): string {
     return execFileSync('git', args, {
       cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
@@ -2968,8 +2995,7 @@ export function createLoop(deps: LoopDeps) {
             // Closing promoted issues is bookkeeping a later poll can finish; it must not
             // cost this poll its claims.
             try {
-              const closed = await closePromotedIssues(forge, paths, (ancestor, descendant) =>
-                optionalGit(['merge-base', '--is-ancestor', ancestor, descendant], 'yes') === 'yes')
+              const closed = await closePromotedIssues(forge, paths, promotedCommitContained)
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
               }
