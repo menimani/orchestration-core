@@ -521,9 +521,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     pending issue set changes and every ten minutes while unchanged. A light-gate cycle
     suite logs its `Started Suite` event before invoking the blocking commands. Its
     passing verdict is retained for that commit while PR setup retries, and is discarded
-    as soon as the branch tip changes. Repeated gate failures remain visible with a
-    count; any repeated non-rate-limit PR-setup failure logs `ERROR`, writes the stop
-    file, and stops retrying.
+    as soon as the branch tip changes. A suite step that exits 75 (the test lock wait
+    timeout, see Runtime) never ran: the gate logs a WARN that the repository test lock
+    stayed busy, writes no stop file, and a later poll runs the suite again. Repeated
+    gate failures remain visible with a count; any repeated non-rate-limit PR-setup
+    failure logs `ERROR`, writes the stop file, and stops retrying.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot

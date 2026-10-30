@@ -17,8 +17,8 @@ import {
 } from './ids.ts'
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
-  NoChangeReconciliationError, RebaseConflictError, TestLockBusyError, UnverifiedRunnerError,
-  OrchestrationDepsInstallError,
+  NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
+  UnverifiedRunnerError, OrchestrationDepsInstallError,
   type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
@@ -1966,18 +1966,19 @@ export function createLoop(deps: LoopDeps) {
     const suiteLog = join(paths.logsDir, `cycle-suite-${cycle}.log`)
     writeFileSync(suiteLog, '')
 
-    const runStep = (cwd: string, command: string, timeout?: number): boolean => {
+    /** Run one command into the suite log; answers 0, its exit status, or null if killed. */
+    const runStep = (cwd: string, command: string, timeout?: number): number | null => {
       try {
         const out = execShellSync(command, {
           cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true, timeout,
         })
         appendFileSync(suiteLog, out)
-        return true
+        return 0
       } catch (error) {
-        const failed = error as { stdout?: string; stderr?: string }
+        const failed = error as { status?: unknown; stdout?: string; stderr?: string }
         appendFileSync(suiteLog, `${failed.stdout ?? ''}${failed.stderr ?? ''}`)
-        return false
+        return typeof failed.status === 'number' && failed.status !== 0 ? failed.status : null
       }
     }
 
@@ -1990,7 +1991,7 @@ export function createLoop(deps: LoopDeps) {
         writeFileSync(stopFile, '')
         return false
       }
-      if (!runStep(paths.repoRoot, probe.command, probe.timeoutMs)) {
+      if (runStep(paths.repoRoot, probe.command, probe.timeoutMs) !== 0) {
         event('ERROR', probe.remediation)
         writeFileSync(stopFile, '')
         return false
@@ -2003,13 +2004,22 @@ export function createLoop(deps: LoopDeps) {
       // branch; the repair keeps the suite's verdict about the code.
       const repair = step.repairWhenMissing
       if (repair !== undefined && !existsSync(join(paths.repoRoot, repair.path))) {
-        if (!runStep(join(paths.repoRoot, step.cwd), repair.command)) {
+        if (runStep(join(paths.repoRoot, step.cwd), repair.command) !== 0) {
           event('ERROR', repair.message)
           writeFileSync(stopFile, '')
           return false
         }
       }
-      ok = runStep(join(paths.repoRoot, step.cwd), step.command)
+      const status = runStep(join(paths.repoRoot, step.cwd), step.command)
+      // The suite never ran: other worktrees held the repository test lock past its wait
+      // limit. Nothing is known about the tip, so the gate waits and a later poll runs the
+      // suite again, rather than stopping the loop and blaming the branch for a long queue.
+      if (status === TEST_LOCK_BUSY_EXIT_CODE) {
+        event('WARN', `cycle suite deferred: the repository test lock stayed busy (log: ${shortLogPath(suiteLog)})`)
+        gateWaitTarget = 'test lock'
+        return false
+      }
+      ok = status === 0
       if (!ok) break
     }
 
