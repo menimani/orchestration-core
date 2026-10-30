@@ -85,7 +85,7 @@ comments and other items cite items by number, so a number is never reused.
   project to this machine's checkout; a relative path resolves from the fleet. Every
   command accepts `--fleet <dir>`, and every command except `install-skills` accepts
   `--project <name>`; without `--fleet`, the nearest
-  directory at or above the working directory that holds `fleet.json` is the fleet. A
+  directory at or above the caller's directory that holds `fleet.json` is the fleet. A
   fleet project keeps its adapter, templates, `accepted-limits.md`, and `config.json`
   under `projects/<name>/`, in the layout `orchestration/` uses, and its tasks,
   worktrees, status, logs, and queue under `state/<name>/`. Combining `--repo` with

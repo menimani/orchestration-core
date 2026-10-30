@@ -1798,9 +1798,9 @@ async function main(): Promise<number> {
       }
       const fleetDir = fleetOption !== undefined
         ? resolve(fleetOption)
-        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(process.cwd())
+        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory)
       if (fleetDir === undefined) {
-        console.error(`ERROR: no ${FLEET_FILE} found at or above ${process.cwd()}; pass --fleet <dir>`)
+        console.error(`ERROR: no ${FLEET_FILE} found at or above ${callerDirectory}; pass --fleet <dir>`)
         return 1
       }
       if (projectOption === undefined) {
