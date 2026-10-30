@@ -8,7 +8,9 @@ import { join, relative, resolve, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge, type Forge } from './adapters/forge.ts'
 import { projectScopeLabel, scopeForgeToProject } from './issueScope.ts'
-import { loadRunner, type ReasoningEffort, type Runner } from './adapters/runner.ts'
+import {
+  loadRunner, type ReasoningEffort, type Runner, type RunnerSharedSkills,
+} from './adapters/runner.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { errorHeadline } from './errorText.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
@@ -995,20 +997,38 @@ function commandConfigValue(name: string, raw: string): unknown {
 }
 
 /**
- * Install the shared skills once per user, for Claude and Codex, rendered to run against
- * this fleet from any of its projects' checkouts.
+ * Install the shared skills once per user, for interactive Claude and for the runner each
+ * fleet project selects, rendered to run against this fleet from any of its checkouts.
  */
 async function installSkillsForFleet(fleetDir: string, args: string[]): Promise<number> {
   if (args.length > 0) {
     console.error(`Usage: install-skills [--fleet <dir>]; unknown: ${args.join(' ')}`)
     return 1
   }
-  readFleet(fleetDir)
+  const fleet = readFleet(fleetDir)
   const { createClaudeSharedSkills } = await import('./adapters/shared-skills-claude.ts')
-  const { createCodexRunner } = await import('./adapters/runner-codex.ts')
-  const result = installUserSkills(
-    fleetDir, packageFile(), [createClaudeSharedSkills(), createCodexRunner().sharedSkills],
-  )
+  const adapters: RunnerSharedSkills[] = [createClaudeSharedSkills()]
+  const runnerFailures: string[] = []
+  for (const project of Object.keys(fleet.projects)) {
+    // A relative external selector resolves against the project's checkout, as the
+    // loop resolves it; a built-in runner needs none, so a missing mapping is not fatal.
+    let repoRoot: string | undefined
+    try {
+      repoRoot = resolveFleetProject(fleetDir, project).checkout
+    } catch {
+      repoRoot = undefined
+    }
+    try {
+      const config = loadConfig(process.env, {
+        filePath: join(fleetDir, 'projects', project, 'config.json'),
+      })
+      adapters.push((await loadRunner(config.runner, { env: process.env, repoRoot })).sharedSkills)
+    } catch (error) {
+      runnerFailures.push(`${project}: ${errorHeadline(error)}`)
+    }
+  }
+  const result = installUserSkills(fleetDir, packageFile(), adapters)
+  result.failures.push(...runnerFailures)
   for (const skill of result.installed) console.log(`Installed: ${skill}`)
   for (const skill of result.updated) console.log(`Updated: ${skill}`)
   for (const skill of result.conflicts) {
