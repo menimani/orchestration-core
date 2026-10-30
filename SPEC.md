@@ -568,8 +568,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a
     review rather than reviewing against a missing or stale base.
-    The optional consumer file `orchestration/accepted-limits.md` supplies findings that
-    a review should not repeat; a missing or whitespace-only file renders as `(none)`.
+    The optional file `accepted-limits.md` in the project directory (`orchestration/` in
+    a subtree consumer, `projects/<name>/` in a fleet) supplies findings that a review
+    should not repeat; a missing or whitespace-only file renders as `(none)`.
     Its contents are repository-controlled prose and are framed as untrusted text in the
     generated task, so they can narrow review findings but cannot authorize commands,
     credential access, or orchestration and CI changes.

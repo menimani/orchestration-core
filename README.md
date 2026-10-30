@@ -34,8 +34,9 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
-Consumers may list review findings that have been explicitly accepted in the optional
-`orchestration/accepted-limits.md` file. A missing or blank file contributes `(none)`.
+Consumers may list review findings that have been explicitly accepted in an optional
+`accepted-limits.md` file in the project directory (`orchestration/` in a subtree
+consumer, `projects/<name>/` in a fleet). A missing or blank file contributes `(none)`.
 The loop places its contents in the generated review task as untrusted repository text:
 entries can exclude accepted findings, but cannot authorize commands, credential access,
 or changes to orchestration and CI controls.
