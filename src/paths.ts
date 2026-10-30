@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, realpathSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // The on-disk layout is shared state with everything the loop leaves behind between
@@ -11,14 +11,22 @@ import { fileURLToPath } from 'node:url'
  * The on-disk spelling of a path: symlinks resolved and, on a case-insensitive
  * filesystem, every component in the case the filesystem stores. Git reports paths that
  * way, so a path an operator typed is canonicalized before it is compared with one. A
- * path that does not exist yet keeps its resolved spelling.
+ * path that does not exist yet is canonical down to its deepest existing ancestor; only
+ * the missing tail keeps its resolved spelling, since nothing on disk spells it yet.
  */
 export function canonicalPath(path: string): string {
   const resolved = resolve(path)
-  try {
-    return realpathSync.native(resolved)
-  } catch {
-    return resolved
+  const missing: string[] = []
+  let existing = resolved
+  for (;;) {
+    try {
+      return join(realpathSync.native(existing), ...missing)
+    } catch {
+      const parent = dirname(existing)
+      if (parent === existing) return resolved
+      missing.unshift(basename(existing))
+      existing = parent
+    }
   }
 }
 
