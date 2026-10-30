@@ -37,8 +37,13 @@ function childOutput(child: ChildProcess): Promise<string> {
   })
 }
 
+// Bounds the children's first observable write. Node startup stretches past five seconds
+// on a host running several suites and task runners at once; the bound guards against a
+// hang, not against slowness.
+const CHILD_START_TIMEOUT_MS = 30_000
+
 async function waitForFiles(files: string[]): Promise<void> {
-  const deadline = Date.now() + 5_000
+  const deadline = Date.now() + CHILD_START_TIMEOUT_MS
   while (!files.every((file) => existsSync(file))) {
     if (Date.now() >= deadline) throw new Error('children did not reach ID allocation')
     await new Promise((resolve) => setTimeout(resolve, 10))

@@ -11,9 +11,13 @@ import { afterEach, expect, it } from 'vitest'
 
 const fixtures: string[] = []
 const processRoots: number[] = []
+// Bounds a spawned child's first observable write. PowerShell and node startup stretches
+// past five seconds on a host running several suites and task runners at once; the bound
+// guards against a hang, not against slowness.
+const CHILD_START_TIMEOUT_MS = 30_000
 
 async function waitForPath(path: string): Promise<void> {
-  const deadline = Date.now() + 5_000
+  const deadline = Date.now() + CHILD_START_TIMEOUT_MS
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`)
     await new Promise((resolve) => setTimeout(resolve, 20))
