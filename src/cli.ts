@@ -1598,8 +1598,8 @@ const cmdShipped: Command = async (paths, args) => {
     console.error('Usage: shipped <pr-number-or-url>')
     return 1
   }
-  const isPositiveNumber = /^#?\d+$/.test(pr) && BigInt(pr.replace(/^#/, '')) > 0n
-  let reference = isPositiveNumber ? `#${pr.replace(/^#/, '')}` : undefined
+  const number = /^#?\d+$/.test(pr) ? BigInt(pr.replace(/^#/, '')) : 0n
+  let reference = number > 0n ? `#${number.toString()}` : undefined
   if (reference === undefined && !/[\u0000-\u001f\u007f]/.test(pr)) {
     try {
       const url = new URL(pr)
