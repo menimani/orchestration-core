@@ -1139,4 +1139,7 @@ The suite drives real git repositories in temporary directories. Its cycle-gate 
 `tests/loop.test.ts` are the load-bearing ones: they pin the gate's state machine — cycle
 flags, CI outcomes, review rounds, final promotion, and stop conditions.
 `tests/documented-defaults.test.ts` holds the configuration tables in this file and in
-`README.md` to the defaults the source resolves.
+`README.md` to the defaults the source resolves. The suite's global setup removes this
+suite's own fixture directories older than six hours from the OS temporary directory,
+writing a `stop` file into any that holds an `orchestration/queue` first, and never
+touches newer or foreign entries.

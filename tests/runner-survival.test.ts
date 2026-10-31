@@ -70,6 +70,13 @@ async function removeFixture(root: string): Promise<void> {
 }
 
 afterEach(async () => {
+  // A daemon whose test failed before its own stop line polls this file and exits on its
+  // own, so its removal does not rest on process-tree termination alone.
+  for (const root of fixtureRoots) {
+    const queueDir = join(root, 'orchestration', 'queue')
+    mkdirSync(queueDir, { recursive: true })
+    writeFileSync(join(queueDir, 'stop'), '')
+  }
   await testProcesses.cleanup()
   for (const root of fixtureRoots.splice(0)) await removeFixture(root)
 })
