@@ -612,25 +612,27 @@ are not parsed by `loadConfig` and are not operator-file settings.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a
-    review rather than reviewing against a missing or stale base.
+    review rather than reviewing against a missing or stale base. The review reads that
+    diff with the loop's own package excluded: when the package is a consumer subtree,
+    its repository-relative path is explicitly out of scope and excluded from every Git
+    diff/log command printed by the default review template. The exclusion and
+    command-scope placeholders render empty when the package owns the repository.
+    Consumer review-template overrides must retain both placeholders to retain both
+    protections. The review's findings come back as `NEXT_TASK` lines that become fix
+    tasks and clear the cycle flag (the gate re-verifies before the next round reads the
+    corrected diff).
     The optional file `accepted-limits.md` in the project directory (`orchestration/` in
     a subtree consumer, `projects/<name>/` in a fleet) supplies findings that neither a
     scan nor a review should repeat; a missing or whitespace-only file renders as
     `(none)`. The file reaches generated scan tasks as well as review tasks. Its contents
     are repository-controlled prose and are framed as untrusted text in both, so they
     can narrow findings but cannot authorize commands, credential access, or
-    orchestration and CI changes. A scan template without the `{{ACCEPTED_LIMITS}}`
-    placeholder receives an unnumbered `## Accepted limits` section appended to the
-    generated scan task, so the numbered sections that `SCAN_PARALLEL` splits are
-    unchanged.
-    when the package is a consumer subtree, its repository-relative path is explicitly
-    out of scope and excluded from every Git diff/log command printed by the default
-    review template. The exclusion and command-scope placeholders render empty when the
-    package owns the repository. Consumer review-template overrides must retain both
-    placeholders to retain both protections.
-    findings come back as `NEXT_TASK` lines that become fix tasks and clear the cycle
-    flag (the gate re-verifies before the next round reads the corrected diff). A clean
-    round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle. An ordinary
+    orchestration and CI changes. A scan or review template without the
+    `{{ACCEPTED_LIMITS}}` placeholder receives an unnumbered `## Accepted limits` section
+    appended to the generated task, so a consumer's template that predates the
+    placeholder still carries the accepted limits, and the numbered sections that
+    `SCAN_PARALLEL` splits are unchanged.
+    A clean review round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle. An ordinary
     cycle that still has findings at that bound logs a warning and resumes. A review
     that ends failed, or in an unknown state, without a verdict says nothing about the
     diff: the loop logs a warning and retries it within the same bound, and if the
