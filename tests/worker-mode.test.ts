@@ -434,7 +434,7 @@ describe('worker mode', () => {
     forge.createIssue = createIssue
   })
 
-  it('re-claims an issue whose task already completed without merging it locally', async () => {
+  it('re-claims a returned issue into a fresh task and publishes it again', async () => {
     const taskId = '20260809_000000_011_auto-claimed-again'
     const description = '[BUG] retry the completed worker task'
     await completedTask(taskId, true)
@@ -454,12 +454,33 @@ describe('worker mode', () => {
 
     await loop.poll()
 
-    expect(logged).toContain(`Claimed 011_auto    #${issueNumber}`)
-    expect(taskClaiming(issueNumber)).toBe(taskId)
-    expect(logged).not.toContain('Merging 011_auto')
+    // The old task was already published: reusing it would leave a claim that nothing
+    // heartbeats and that the sweep never publishes again.
+    const freshTaskId = taskClaiming(issueNumber)!
+    expect(freshTaskId).toBeDefined()
+    expect(freshTaskId).not.toBe(taskId)
+    expect(logged.some((line) =>
+      line.startsWith('Claimed ') && line.endsWith(` #${issueNumber}`))).toBe(true)
+    expect(logged.join('\n')).not.toContain('Merging 011_auto')
     expect(readStatus(paths, taskId)?.status).toBe('completed')
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(baseHead)
     expect(existsSync(join(repoRoot, 'worker-change.txt'))).toBe(false)
     expect(forge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('MERGED:')
+
+    const freshWorktree = worktreeDir(paths, freshTaskId)
+    writeFileSync(join(freshWorktree, 'worker-change.txt'), `${freshTaskId}\n`)
+    git(freshWorktree, ['add', 'worker-change.txt'])
+    git(freshWorktree, ['commit', '-qm', 'feat: worker change'])
+    await writeStatus(paths, freshTaskId, 'completed')
+    await loop.poll()
+
+    const issue = await forge.getIssue(issueNumber)
+    const freshHead = git(freshWorktree, ['rev-parse', 'HEAD']).trim()
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(git(origin, ['rev-parse', `refs/heads/${branchName(freshTaskId)}`]).trim()).toBe(freshHead)
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain(`Branch: ${branchName(freshTaskId)}\nHead commit: ${freshHead}`)
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(baseHead)
   })
 })
