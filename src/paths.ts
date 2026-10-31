@@ -103,7 +103,7 @@ export function absolutePackageScriptCommand(
  * checkout: it names the fleet in the environment, and the CLI finds the project from the
  * directory the command was started in.
  */
-export function fleetCommandPrefix(fleetDir: string, packageRoot = PACKAGE_ROOT): string {
+export function fleetCommandPrefix(fleetDir: string, packageRoot: string): string {
   return `ORCHESTRATION_FLEET=${shellPathArgument(fleetDir)} npm run -C ${shellPathArgument(packageRoot)}`
 }
 
