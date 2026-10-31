@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -74,6 +75,33 @@ describe('enqueueTask', () => {
     const result = enqueueTask(paths, 'failed-task')
     expect(result.outcome).toBe('enqueued')
     expect(queueLines()).toEqual(['failed-task:0'])
+  })
+
+  it('refuses a failed task whose worktree is still there until cleanup', () => {
+    createSpec('failed-task')
+    writeTestStatus('failed-task', 'failed')
+    mkdirSync(worktreeDir(paths, 'failed-task'), { recursive: true })
+    const result = enqueueTask(paths, 'failed-task')
+    expect(result).toEqual({
+      outcome: 'needs-cleanup', taskId: 'failed-task', leftover: worktreeDir(paths, 'failed-task'),
+    })
+    expect(queueLines()).toEqual([])
+  })
+
+  it('refuses a failed task whose branch is still there until cleanup', () => {
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repoRoot, stdio: 'ignore', windowsHide: true })
+    git('init', '--quiet')
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit', '--quiet', '--allow-empty', '-m', 'initial')
+    git('branch', branchName('failed-task'))
+    createSpec('failed-task')
+    writeTestStatus('failed-task', 'failed')
+    const result = enqueueTask(paths, 'failed-task')
+    expect(result).toEqual({
+      outcome: 'needs-cleanup', taskId: 'failed-task', leftover: `branch ${branchName('failed-task')}`,
+    })
+    expect(queueLines()).toEqual([])
   })
 
   it('rejects a task without a specification', () => {

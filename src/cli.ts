@@ -525,6 +525,9 @@ const cmdEnqueue: Command = async (paths, args) => {
     console.log(`WARN: ${taskId} is already in the queue`)
   } else if (result.outcome === 'already-processed') {
     console.log(`WARN: ${taskId} has already been processed or is running (status=${result.status}) — skipping`)
+  } else if (result.outcome === 'needs-cleanup') {
+    console.log(`WARN: ${taskId} failed and ${result.leftover} still exists — run cleanup ${taskId} first; not queued`)
+    return 1
   } else {
     console.log(`Enqueued: ${taskId} (depth=${depth})`)
   }
@@ -588,6 +591,9 @@ const cmdDelegate: Command = async (paths, args) => {
     console.log(`Enqueued: ${result.taskId} (depth=0)`)
   } else if (result.enqueue.outcome === 'already-queued') {
     console.log(`WARN: ${result.taskId} is already in the queue`)
+  } else if (result.enqueue.outcome === 'needs-cleanup') {
+    console.log(`WARN: ${result.taskId} failed and ${result.enqueue.leftover} still exists — run cleanup ${result.taskId} first; not queued`)
+    return 1
   } else {
     // A running or completed task is not waiting in the backlog, so neither of the loop
     // messages below would be true of it.
