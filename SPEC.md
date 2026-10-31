@@ -421,6 +421,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
     ended: its exit status, also in hexadecimal when outside 0-255 as Windows reports a
     crashed process, or the signal that terminated it, so a runtime crash reads differently
     from a failing test.
+10a. A failed merge or rebase is counted or retried only once its abort is confirmed to
+    have left the tree where the attempt found it. A merge into the integration worktree
+    or a prospective merge worktree, for a local task or an adopted worker branch, must
+    leave HEAD, the working-tree status, and the absence of an in-progress merge as they
+    were before it; a pre-merge task rebase must leave the task worktree at its prior tip
+    with no rebase in progress. A merge that finds a merge already in progress, an abort
+    that leaves any of that state changed, or a state check that itself fails stops the
+    loop at once, without consulting `MAX_CONSECUTIVE_MERGE_FAILURES` or retrying, and
+    the error reports what the check found and asks for the worktree to be
+    inspected and restored before orchestration restarts. A later attempt would otherwise
+    merge or test against a tree nobody can describe.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
     The same merge clears the cycle's resume flag, which records that the gate has
