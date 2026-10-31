@@ -135,7 +135,9 @@ must begin with `./` or `../`; for example, use `./custom/runner.mjs`, because
 as its default or `forge` export, or exports `createForge(repoRoot, report, target)`.
 Every forge implements `updateIssueTitle(issueNumber, title)`, which replaces an issue's
 title for project bridges rather than for the loop core. A runner module likewise exports a `Runner` as its default or `runner` export, or exports
-`createRunner(options)`. Factories may be asynchronous.
+`createRunner(options)`. Factories may be asynchronous. A runner starts its agent CLI
+through `operatingSystem.launchAgent` from `adapters/os.ts`, which resolves a Windows
+`.cmd` shim, escapes its arguments, and keeps its console hidden.
 
 A forge factory's `target` names the repositories to act on when they are not the
 checkout's own: `codeRepository` for branches, pull requests, and workflow runs, and

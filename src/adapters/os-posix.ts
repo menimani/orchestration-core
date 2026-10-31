@@ -19,6 +19,7 @@ export interface PosixOperatingSystemRuntime {
   groupHasRunningMember(processGroupId: number): boolean | undefined
   processStartIdentity?(pid: number): string | undefined
   spawnDaemon?: typeof spawn
+  spawnAgent?: typeof spawn
 }
 
 /**
@@ -170,6 +171,60 @@ export function createOperatingSystem(
         offExit: (listener) => { child.off('exit', listener) },
       }
     },
+    launchAgent(options) {
+      // startTask clears the log before setup; append so setup output remains ahead of
+      // the agent transcript instead of being silently truncated here.
+      const logFd = openSync(options.outputFile, 'a')
+      let inputFd: number
+      try {
+        inputFd = openSync(options.inputFile, 'r')
+      } catch (error) {
+        closeSync(logFd)
+        return Promise.reject(error)
+      }
+
+      return new Promise((resolve, reject) => {
+        let descriptorsClosed = false
+        const closeDescriptors = (): void => {
+          if (descriptorsClosed) return
+          descriptorsClosed = true
+          try {
+            closeSync(inputFd)
+          } finally {
+            closeSync(logFd)
+          }
+        }
+
+        let child
+        try {
+          // terminateProcessTree signals a process group, so the agent must lead one.
+          child = (runtime.spawnAgent ?? spawn)(options.program, [...options.args], {
+            cwd: options.cwd,
+            detached: true,
+            stdio: [inputFd, logFd, logFd],
+            windowsHide: true,
+          })
+        } catch (error) {
+          closeDescriptors()
+          reject(error)
+          return
+        }
+        child.once('error', (error) => {
+          closeDescriptors()
+          reject(error)
+        })
+        child.once('spawn', () => {
+          closeDescriptors()
+          child.unref()
+          if (child.pid === undefined) {
+            reject(new Error(`${options.program} spawned without a PID`))
+            return
+          }
+          resolve(child.pid)
+        })
+      })
+    },
+    agentCommand: (program, args) => ({ command: program, args: [...args], verbatimArguments: false }),
     processTreeRootPid: () => process.pid,
     processStartIdentity: runtime.processStartIdentity ?? systemRuntime.processStartIdentity!,
     processIsAlive: (pid) => processIsAlive(runtime, pid),

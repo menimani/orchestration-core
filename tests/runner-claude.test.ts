@@ -4,27 +4,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReasoningEffort, RunnerStartOptions } from '../src/adapters/runner.ts'
 
 const mocks = vi.hoisted(() => ({
-  closeSync: vi.fn(),
-  openSync: vi.fn((path: string) => path === 'task.log' ? 42 : 43),
+  agentCommand: vi.fn(),
+  launchAgent: vi.fn(),
   renameSync: vi.fn(),
   rmSync: vi.fn(),
   spawn: vi.fn(),
-  startWindowsProcess: vi.fn(),
   writeFileSync: vi.fn(),
 }))
 
 vi.mock('node:fs', () => ({
-  closeSync: mocks.closeSync,
-  openSync: mocks.openSync,
   renameSync: mocks.renameSync,
   rmSync: mocks.rmSync,
   writeFileSync: mocks.writeFileSync,
 }))
 
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
-vi.mock('../src/adapters/windows-process.ts', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/adapters/windows-process.ts')>(),
-  startWindowsProcess: mocks.startWindowsProcess,
+vi.mock('../src/adapters/os.ts', () => ({
+  operatingSystem: { agentCommand: mocks.agentCommand, launchAgent: mocks.launchAgent },
 }))
 
 import { createClaudeRunner, runClaudeProcess } from '../src/adapters/runner-claude.ts'
@@ -36,12 +32,6 @@ const options: RunnerStartOptions = {
   logFile: 'task.log',
   specFile: 'task.md',
   worktree: 'worktree',
-}
-
-const originalPlatform = process.platform
-
-function setPlatform(platform: NodeJS.Platform): void {
-  Object.defineProperty(process, 'platform', { configurable: true, value: platform })
 }
 
 function mockChild(pid: number | undefined = 1234): EventEmitter & {
@@ -58,13 +48,13 @@ function mockChild(pid: number | undefined = 1234): EventEmitter & {
 
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset()
-  mocks.openSync.mockImplementation((path: string) => path === 'task.log' ? 42 : 43)
-  mocks.startWindowsProcess.mockResolvedValue(5678)
-  setPlatform('linux')
+  mocks.launchAgent.mockResolvedValue(4321)
+  mocks.agentCommand.mockImplementation((program: string, args: readonly string[]) => ({
+    command: program, args: [...args], verbatimArguments: false,
+  }))
 })
 
 afterEach(() => {
-  setPlatform(originalPlatform)
   vi.restoreAllMocks()
 })
 
@@ -113,8 +103,6 @@ describe('createClaudeRunner', () => {
     effort,
     model,
   ) => {
-    const child = mockChild(4321)
-    mocks.spawn.mockReturnValue(child)
     const runner = createClaudeRunner({
       env: {
         RUNNER_CLAUDE_MODEL: 'claude-base',
@@ -127,107 +115,57 @@ describe('createClaudeRunner', () => {
 
     const started = runner.start({ ...options, effort })
 
-    expect(mocks.openSync).toHaveBeenNthCalledWith(1, 'task.log', 'a')
-    expect(mocks.openSync).toHaveBeenNthCalledWith(2, 'task.md', 'r')
-    expect(mocks.spawn).toHaveBeenCalledWith(process.execPath, [
-      expect.stringMatching(/runner-claude\.ts$/),
-      '--claude-runner-wrapper',
-      'final-message.txt',
-      '-p',
-      '--permission-mode', 'bypassPermissions',
-      '--model', model,
-    ], {
-      cwd: 'worktree',
-      detached: true,
-      stdio: [43, 42, 42],
-      windowsHide: true,
-    })
-    expect((mocks.spawn.mock.calls[0]?.[1] as string[])).not.toContain('--effort')
-
-    child.emit('spawn')
-    await expect(started).resolves.toBe(4321)
-    expect(child.unref).toHaveBeenCalledOnce()
-  })
-
-  it('prefers a task-specific model over the configured effort model', async () => {
-    const child = mockChild()
-    mocks.spawn.mockReturnValue(child)
-
-    const started = createClaudeRunner({
-      env: { RUNNER_CLAUDE_MODEL_HIGH: 'claude-high' },
-    }).start({ ...options, model: 'task-model' })
-
-    expect(mocks.spawn.mock.calls[0]?.[1]).toContain('task-model')
-    expect(mocks.spawn.mock.calls[0]?.[1]).not.toContain('claude-high')
-    child.emit('spawn')
-    await expect(started).resolves.toBe(1234)
-  })
-
-  it('uses the configured base model for missing and empty effort variants', async () => {
-    const child = mockChild()
-    mocks.spawn.mockReturnValue(child)
-
-    const started = createClaudeRunner({
-      env: {
-        RUNNER_CLAUDE_MODEL: 'claude-base',
-        RUNNER_CLAUDE_MODEL_HIGH: '',
-      },
-    }).start(options)
-
-    expect(mocks.spawn.mock.calls[0]?.[1]).toContain('claude-base')
-    child.emit('spawn')
-    await expect(started).resolves.toBe(1234)
-  })
-
-  it('uses the hidden process launcher on Windows with the default Opus model', async () => {
-    setPlatform('win32')
-
-    // An empty environment pins the default: the suite also runs as a loop's merge gate,
-    // where RUNNER_CLAUDE_MODEL is set and would otherwise leak into this assertion.
-    const started = createClaudeRunner({ env: {} }).start(options)
-
-    expect(mocks.startWindowsProcess).toHaveBeenCalledWith({
+    expect(mocks.launchAgent).toHaveBeenCalledWith({
       args: [
         expect.stringMatching(/runner-claude\.ts$/),
         '--claude-runner-wrapper',
         'final-message.txt',
         '-p',
         '--permission-mode', 'bypassPermissions',
-        '--model', 'claude-opus-5',
+        '--model', model,
       ],
-      command: process.execPath,
       cwd: 'worktree',
       inputFile: 'task.md',
       outputFile: 'task.log',
+      program: process.execPath,
     })
-    await expect(started).resolves.toBe(5678)
-    expect(mocks.spawn).not.toHaveBeenCalled()
+    expect(mocks.launchAgent.mock.calls[0]?.[0].args).not.toContain('--effort')
+    await expect(started).resolves.toBe(4321)
   })
 
-  it('closes inherited descriptors and rejects when the detached wrapper has no PID', async () => {
-    const child = mockChild()
-    child.pid = undefined
-    mocks.spawn.mockReturnValue(child)
+  it('prefers a task-specific model over the configured effort model', async () => {
+    await createClaudeRunner({
+      env: { RUNNER_CLAUDE_MODEL_HIGH: 'claude-high' },
+    }).start({ ...options, model: 'task-model' })
 
-    const started = createClaudeRunner().start(options)
-    child.emit('spawn')
-
-    await expect(started).rejects.toThrow('claude runner spawned without a PID')
-    expect(mocks.closeSync).toHaveBeenNthCalledWith(1, 43)
-    expect(mocks.closeSync).toHaveBeenNthCalledWith(2, 42)
-    expect(child.unref).toHaveBeenCalledOnce()
+    expect(mocks.launchAgent.mock.calls[0]?.[0].args).toContain('task-model')
+    expect(mocks.launchAgent.mock.calls[0]?.[0].args).not.toContain('claude-high')
   })
 
-  it('closes the log and rejects when the prompt file cannot be opened', async () => {
+  it('uses the configured base model for missing and empty effort variants', async () => {
+    await createClaudeRunner({
+      env: {
+        RUNNER_CLAUDE_MODEL: 'claude-base',
+        RUNNER_CLAUDE_MODEL_HIGH: '',
+      },
+    }).start(options)
+
+    expect(mocks.launchAgent.mock.calls[0]?.[0].args).toContain('claude-base')
+  })
+
+  it('falls back to the default Opus model', async () => {
+    // An empty environment pins the default: the suite also runs as a loop's merge gate,
+    // where RUNNER_CLAUDE_MODEL is set and would otherwise leak into this assertion.
+    await createClaudeRunner({ env: {} }).start(options)
+
+    expect(mocks.launchAgent.mock.calls[0]?.[0].args).toContain('claude-opus-5')
+  })
+
+  it('rejects when the operating-system adapter cannot start the wrapper', async () => {
     const error = new Error('prompt open failed')
-    mocks.openSync.mockImplementation((path: string) => {
-      if (path === 'task.log') return 42
-      throw error
-    })
+    mocks.launchAgent.mockRejectedValue(error)
 
     await expect(createClaudeRunner().start(options)).rejects.toBe(error)
-    expect(mocks.closeSync).toHaveBeenCalledWith(42)
-    expect(mocks.spawn).not.toHaveBeenCalled()
   })
 })
 
@@ -262,8 +200,10 @@ describe('Claude process wrapper', () => {
     )
   })
 
-  it('routes the fake claude executable through cmd.exe on Windows', async () => {
-    setPlatform('win32')
+  it('spawns claude the way the operating-system adapter commands', async () => {
+    mocks.agentCommand.mockReturnValue({
+      command: 'cmd.exe', args: ['/d /v:off /s /c "claude ^"-p^""'], verbatimArguments: true,
+    })
     const child = mockChild()
     mocks.spawn.mockReturnValue(child)
 
@@ -271,27 +211,16 @@ describe('Claude process wrapper', () => {
     child.emit('close', 7)
 
     await expect(completed).resolves.toBe(7)
+    expect(mocks.agentCommand).toHaveBeenCalledWith('claude', ['-p'])
     expect(mocks.spawn).toHaveBeenCalledWith('cmd.exe', [
       '/d /v:off /s /c "claude ^"-p^""',
     ], expect.objectContaining({ windowsVerbatimArguments: true }))
   })
 
-  it('escapes cmd metacharacters in a Windows model name', async () => {
-    setPlatform('win32')
-    const child = mockChild()
-    mocks.spawn.mockReturnValue(child)
-
-    const completed = runClaudeProcess('final-message.txt', ['--model', 'opus&50%^x'])
-    child.emit('close', 0)
-
-    await expect(completed).resolves.toBe(0)
-    expect(mocks.spawn).toHaveBeenCalledWith('cmd.exe', [
-      '/d /v:off /s /c "claude ^"--model^" ^"opus^&50^%^^x^""',
-    ], expect.any(Object))
-  })
-
-  it('rejects on Windows an argument cmd.exe cannot pass literally', async () => {
-    setPlatform('win32')
+  it('rejects an argument the operating-system adapter cannot pass', async () => {
+    mocks.agentCommand.mockImplementation(() => {
+      throw new Error('cmd.exe cannot pass an argument containing a quote or line break')
+    })
 
     await expect(runClaudeProcess('final-message.txt', ['--model', 'two\nlines']))
       .rejects.toThrow('quote or line break')

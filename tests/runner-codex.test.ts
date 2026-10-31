@@ -1,28 +1,20 @@
-import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RunnerStartOptions } from '../src/adapters/runner.ts'
 
 const mocks = vi.hoisted(() => ({
-  closeSync: vi.fn(),
   existsSync: vi.fn((_path: string) => false),
-  openSync: vi.fn((path: string) => path === 'task.log' ? 42 : 43),
+  launchAgent: vi.fn(),
   readFileSync: vi.fn((_path: string, _encoding: string) => 'task specification'),
-  spawn: vi.fn(),
-  startWindowsProcess: vi.fn(),
 }))
 
 vi.mock('node:fs', () => ({
-  closeSync: mocks.closeSync,
   existsSync: mocks.existsSync,
-  openSync: mocks.openSync,
   readFileSync: mocks.readFileSync,
 }))
 
-vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
-vi.mock('../src/adapters/windows-process.ts', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/adapters/windows-process.ts')>(),
-  startWindowsProcess: mocks.startWindowsProcess,
+vi.mock('../src/adapters/os.ts', () => ({
+  operatingSystem: { launchAgent: mocks.launchAgent },
 }))
 
 import { createCodexRunner } from '../src/adapters/runner-codex.ts'
@@ -35,32 +27,10 @@ const options: RunnerStartOptions = {
   worktree: 'worktree',
 }
 
-const originalPlatform = process.platform
-
-function setPlatform(platform: NodeJS.Platform): void {
-  Object.defineProperty(process, 'platform', { configurable: true, value: platform })
-}
-
-function mockChild(pid: number | undefined = 1234): EventEmitter & {
-  pid: number | undefined
-  unref: ReturnType<typeof vi.fn>
-} {
-  return Object.assign(new EventEmitter(), { pid, unref: vi.fn() })
-}
-
 beforeEach(() => {
-  mocks.closeSync.mockReset()
   mocks.existsSync.mockReset().mockReturnValue(false)
-  mocks.openSync.mockReset().mockImplementation((path: string) =>
-    path === 'task.log' ? 42 : 43)
+  mocks.launchAgent.mockReset().mockResolvedValue(4321)
   mocks.readFileSync.mockReset().mockReturnValue('task specification')
-  mocks.spawn.mockReset()
-  mocks.startWindowsProcess.mockReset().mockResolvedValue(5678)
-  setPlatform('linux')
-})
-
-afterEach(() => {
-  setPlatform(originalPlatform)
 })
 
 describe('createCodexRunner', () => {
@@ -220,167 +190,53 @@ describe('createCodexRunner', () => {
     expect(rendered).toMatchSnapshot()
   })
 
-  it('spawns codex directly on POSIX with the spec as standard input', async () => {
-    setPlatform('linux')
-    const child = mockChild(4321)
-    mocks.spawn.mockReturnValue(child)
-
+  it('launches codex through the operating-system adapter with the spec as standard input', async () => {
     const started = createCodexRunner().start({
       ...options,
       effort: 'low',
       model: 'gpt-5-codex',
     })
 
-    expect(mocks.openSync).toHaveBeenNthCalledWith(1, 'task.log', 'a')
-    expect(mocks.openSync).toHaveBeenNthCalledWith(2, 'task.md', 'r')
-    expect(mocks.spawn).toHaveBeenCalledWith('codex', [
-      'exec',
-      '--dangerously-bypass-approvals-and-sandbox',
-      '--disable', 'multi_agent',
-      '--output-last-message', 'final-message.txt',
-      '--model', 'gpt-5-codex',
-      '--config', 'model_reasoning_effort=low',
-      '-',
-    ], {
-      cwd: 'worktree',
-      detached: true,
-      stdio: [43, 42, 42],
-      windowsHide: true,
-    })
-
-    child.emit('spawn')
-    await expect(started).resolves.toBe(4321)
-  })
-
-  it('routes through cmd.exe on Windows without adding an empty model argument', async () => {
-    setPlatform('win32')
-    const started = createCodexRunner().start({ ...options, model: '' })
-
-    expect(mocks.startWindowsProcess).toHaveBeenCalledWith({
+    expect(mocks.launchAgent).toHaveBeenCalledWith({
       args: [
-        '/d /v:off /s /c "codex'
-        + ' ^"exec^"'
-        + ' ^"--dangerously-bypass-approvals-and-sandbox^"'
-        + ' ^"--disable^" ^"multi_agent^"'
-        + ' ^"--output-last-message^" ^"final-message.txt^"'
-        + ' ^"--config^" ^"model_reasoning_effort=high^"'
-        + ' ^"-^""',
+        'exec',
+        '--dangerously-bypass-approvals-and-sandbox',
+        '--disable', 'multi_agent',
+        '--output-last-message', 'final-message.txt',
+        '--model', 'gpt-5-codex',
+        '--config', 'model_reasoning_effort=low',
+        '-',
       ],
-      command: 'cmd.exe',
       cwd: 'worktree',
       inputFile: 'task.md',
       outputFile: 'task.log',
-      verbatimArguments: true,
+      program: 'codex',
     })
-
-    await expect(started).resolves.toBe(5678)
-    expect(mocks.spawn).not.toHaveBeenCalled()
-    expect(mocks.openSync).not.toHaveBeenCalled()
+    await expect(started).resolves.toBe(4321)
   })
 
-  it('escapes cmd metacharacters in a Windows final-message path and model', async () => {
-    setPlatform('win32')
-    const started = createCodexRunner().start({
-      ...options,
-      finalMessageFile: 'C:\\Users\\AT&T\\final-message.txt',
-      model: 'gpt%5^x',
-    })
+  it('omits an empty model argument', async () => {
+    await createCodexRunner().start({ ...options, model: '' })
 
-    const [argumentLine] = mocks.startWindowsProcess.mock.calls[0]![0].args as string[]
-    expect(argumentLine).toContain(' ^"C:\\Users\\AT^&T\\final-message.txt^" ')
-    expect(argumentLine).toContain(' ^"--model^" ^"gpt^%5^^x^" ')
-    expect(argumentLine).not.toMatch(/[^^]&/)
-    await expect(started).resolves.toBe(5678)
+    expect(mocks.launchAgent.mock.calls[0]?.[0].args).not.toContain('--model')
   })
 
-  it('rejects on Windows an argument cmd.exe cannot pass literally', async () => {
-    setPlatform('win32')
+  it('rejects when the operating-system adapter cannot start codex', async () => {
+    const error = new Error('spawn failed')
+    mocks.launchAgent.mockRejectedValue(error)
 
-    await expect(createCodexRunner().start({ ...options, model: 'say "hi"' }))
-      .rejects.toThrow('quote or line break')
-    expect(mocks.startWindowsProcess).not.toHaveBeenCalled()
+    await expect(createCodexRunner().start(options)).rejects.toBe(error)
   })
 
   it('never passes the specification as an argument regardless of its size', async () => {
     const specification = 'non-ASCII specification \u65e5\u672c\u8a9e\n'.repeat(1_000)
     mocks.readFileSync.mockReturnValue(specification)
-    const child = mockChild()
-    mocks.spawn.mockReturnValue(child)
 
-    const started = createCodexRunner().start(options)
+    await createCodexRunner().start(options)
 
-    const commandArgs = mocks.spawn.mock.calls[0]?.[1] as string[]
+    const commandArgs = mocks.launchAgent.mock.calls[0]?.[0].args as string[]
     expect(commandArgs).not.toContain(specification)
     expect(commandArgs.at(-1)).toBe('-')
     expect(mocks.readFileSync).not.toHaveBeenCalledWith('task.md', 'utf8')
-
-    child.emit('spawn')
-    await expect(started).resolves.toBe(1234)
-  })
-
-  it('closes the parent spec and log descriptors after the child inherits them', async () => {
-    const child = mockChild()
-    mocks.spawn.mockReturnValue(child)
-
-    const started = createCodexRunner().start(options)
-    child.emit('spawn')
-
-    await expect(started).resolves.toBe(1234)
-    expect(mocks.closeSync).toHaveBeenCalledTimes(2)
-    expect(mocks.closeSync).toHaveBeenNthCalledWith(1, 43)
-    expect(mocks.closeSync).toHaveBeenNthCalledWith(2, 42)
-    expect(child.unref).toHaveBeenCalledOnce()
-  })
-
-  it('closes the parent spec and log descriptors when spawning fails', async () => {
-    const child = mockChild()
-    const error = new Error('spawn failed')
-    mocks.spawn.mockReturnValue(child)
-
-    const started = createCodexRunner().start(options)
-    child.emit('error', error)
-
-    await expect(started).rejects.toBe(error)
-    expect(mocks.closeSync).toHaveBeenCalledTimes(2)
-    expect(mocks.closeSync).toHaveBeenNthCalledWith(1, 43)
-    expect(mocks.closeSync).toHaveBeenNthCalledWith(2, 42)
-  })
-
-  it('closes the parent spec and log descriptors when spawn throws synchronously', async () => {
-    const error = new Error('spawn threw')
-    mocks.spawn.mockImplementation(() => {
-      throw error
-    })
-
-    await expect(createCodexRunner().start(options)).rejects.toBe(error)
-    expect(mocks.closeSync).toHaveBeenCalledTimes(2)
-    expect(mocks.closeSync).toHaveBeenNthCalledWith(1, 43)
-    expect(mocks.closeSync).toHaveBeenNthCalledWith(2, 42)
-  })
-
-  it('closes the log descriptor and rejects when the spec cannot be opened', async () => {
-    const error = new Error('spec open failed')
-    mocks.openSync.mockImplementation((path: string) => {
-      if (path === 'task.log') return 42
-      throw error
-    })
-
-    await expect(createCodexRunner().start(options)).rejects.toBe(error)
-    expect(mocks.closeSync).toHaveBeenCalledOnce()
-    expect(mocks.closeSync).toHaveBeenCalledWith(42)
-    expect(mocks.spawn).not.toHaveBeenCalled()
-  })
-
-  it('rejects and detaches a spawned child that has no PID', async () => {
-    const child = mockChild()
-    child.pid = undefined
-    mocks.spawn.mockReturnValue(child)
-
-    const started = createCodexRunner().start(options)
-    child.emit('spawn')
-
-    await expect(started).rejects.toThrow('codex spawned without a PID')
-    expect(child.unref).toHaveBeenCalledOnce()
-    expect(mocks.closeSync).toHaveBeenCalledTimes(2)
   })
 })
