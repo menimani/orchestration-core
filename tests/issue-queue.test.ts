@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ForgeIssue } from '../src/adapters/forge.ts'
 import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels, closePromotedIssues,
-  commentOnIssueMerge, fingerprintOf, issueMergeComment, groupReadyFindings, heartbeatIssueForTask,
+  commentOnIssueMerge, fingerprintOf, issueMergeComment, issueUnpromotedComment, groupReadyFindings,
+  heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   issueFailureCount, issueReleaseIntentForTask, issueReleasePreparationForTask,
   IssueReleaseReconciliationError,
@@ -2602,5 +2603,29 @@ describe('closePromotedIssues', () => {
     expect(issueNumbersForTask(paths, 'task-abandoned')).toEqual([])
     expect(standingMergeMarkers(await forge.listIssueComments(issueNumber))).toEqual([])
     expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [], returned: [] })
+  })
+
+  it('posts the withdrawal once while returning the issue to ready keeps failing', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'task-stuck', body: buildIssueBody('[BUG] task-stuck', 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-stuck', [issueNumber])
+    recordIssuePromotions(paths, 'task-stuck', 'a'.repeat(40), 'run/closed')
+    forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
+    const addLabel = forge.addLabel
+    forge.addLabel = async () => { throw new Error('rate limited') }
+    const withdrawal = issueUnpromotedComment('task-stuck', 'a'.repeat(40), 'run/closed', 'pr-url')
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toThrow('rate limited')
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toThrow('rate limited')
+    expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-stuck')
+
+    forge.addLabel = addLabel
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: [], returned: [issueNumber] })
+    expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
   })
 })

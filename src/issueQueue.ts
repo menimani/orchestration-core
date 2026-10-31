@@ -1522,11 +1522,17 @@ export async function closePromotedIssues(
     if (pr.state === 'closed') {
       for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
         // The withdrawal lands before the issue is claimable again, and the record
-        // stays until it is ready, so an interrupted return is retried next poll.
+        // stays until it is ready, so an interrupted return is retried next poll. A retry
+        // finds its own withdrawal already posted and does not post it again.
         try {
-          await forge.commentIssue(promotion.issueNumber, issueUnpromotedComment(
+          const withdrawal = issueUnpromotedComment(
             promotion.taskId, promotion.mergeCommit, runBranch, pr.url,
-          ))
+          )
+          const comments = await forge.listIssueComments(promotion.issueNumber)
+          if (!comments.some((comment) =>
+            comment.author.hasWriteAccess && comment.body === withdrawal)) {
+            await forge.commentIssue(promotion.issueNumber, withdrawal)
+          }
           await returnIssueToReady(forge, promotion.issueNumber)
         } catch (error) {
           if (!(error instanceof ForgeIssueNotFoundError)) throw error
