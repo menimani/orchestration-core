@@ -1490,7 +1490,7 @@ describe('loop daemon ownership', () => {
     expect(result.stdout).toMatch(/Installed\s+orchestration deps\s+at startup/)
   })
 
-  it('refuses startup while a task status names a foreign live PID', async () => {
+  it('refuses startup while the task process registry names a foreign live PID', async () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260812_010203_040_auto-foreign-task'
     const foreignProcess = testProcesses.spawn(process.execPath, [
