@@ -344,8 +344,9 @@ commit closes the original issue in the project's repository.
 
 Shared skills such as `git-commit` and `loop-start` are installed once per user rather
 than into each repository: `install-skills --fleet <dir>` writes them to
-`~/.claude/skills` and wherever each project's runner discovers a user's skills
-(`~/.agents/skills` for Codex). Their commands set `ORCHESTRATION_FLEET`, and
+`~/.claude/skills` for interactive Claude by default, wherever each project's runner
+discovers a user's skills (`~/.agents/skills` for Codex), and wherever each additional
+agent a project adapter declares in `sharedSkills` discovers them. Their commands set `ORCHESTRATION_FLEET`, and
 the CLI then picks the project whose checkout you run them from, so they work in every
 project of the fleet without `--project`.
 

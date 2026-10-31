@@ -547,6 +547,63 @@ describe('fleet project selection', () => {
     expect(existsSync(join(home, '.agents', 'skills'))).toBe(false)
   })
 
+  it('installs the shared skills for every agent a fleet project adapter declares', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+    const projectDirectory = join(fleet, 'projects', 'first', 'project')
+    mkdirSync(projectDirectory, { recursive: true })
+    writeFileSync(join(projectDirectory, 'project-first.ts'), [
+      "import { join } from 'node:path'",
+      'export const project = {',
+      "  name: 'first',",
+      '  sharedSkills: [{',
+      "    destinationRoot: (root) => join(root, '.declared', 'skills'),",
+      "    userDestinationRoot: (home) => join(home, '.declared', 'skills'),",
+      '    renderFile: (contents) => contents,',
+      '  }],',
+      '  preCommitChecks: [],',
+      "  pullRequest: { categories: [{ label: 'Changes' }], titleFallback: 'changes',",
+      "    classifyCommit: () => ({ category: 'Changes' }), detectRisks: () => [] },",
+      '  mergeChecks: () => [],',
+      '  cycleSuite: () => [],',
+      '}',
+      '',
+    ].join('\n'))
+
+    const result = spawnSync(process.execPath, [CLI, 'install-skills', '--fleet', fleet], {
+      cwd: fleet,
+      env: { ...CORE_ENV, HOME: home, USERPROFILE: home, PROJECT: 'unrelated' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
+    expect(result.stdout).toContain('Installed: .declared/skills/git-commit')
+    expect(existsSync(join(home, '.declared', 'skills', 'loop-start', 'SKILL.md'))).toBe(true)
+  })
+
+  it('reports a fleet project adapter that fails to load and installs the others', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+    mkdirSync(join(fleet, 'projects', 'first', 'project'), { recursive: true })
+
+    const result = spawnSync(process.execPath, [CLI, 'install-skills', '--fleet', fleet], {
+      cwd: fleet,
+      env: { ...CORE_ENV, HOME: home, USERPROFILE: home },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('FAIL: first: Could not discover project adapter')
+    expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
+  })
+
   it('refuses --repo and --project for install-skills before installing', () => {
     const fleet = fleetFixture()
     const home = join(fleet, 'home')
