@@ -84,9 +84,9 @@ type QueueMode = 'local' | 'issue'
 
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high'])
 
-async function loadProject(pathsRoot: string) {
+async function loadProject(pathsRoot: string, env: NodeJS.ProcessEnv = process.env) {
   const projectModule = await import('./adapters/project.ts')
-  return projectModule.loadProject(pathsRoot)
+  return projectModule.loadProject(pathsRoot, env)
 }
 
 /** A fleet project's paths, rooted at this machine's checkout of its repository. */
@@ -997,8 +997,9 @@ function commandConfigValue(name: string, raw: string): unknown {
 }
 
 /**
- * Install the shared skills once per user, for interactive Claude and for the runner each
- * fleet project selects, rendered to run against this fleet from any of its checkouts.
+ * Install the shared skills once per user, rendered to run against this fleet from any of
+ * its checkouts: for interactive Claude by default, for the runner each fleet project
+ * selects, and for every additional agent its project adapter declares.
  */
 async function installSkillsForFleet(fleetDir: string, args: string[]): Promise<number> {
   if (args.length > 0) {
@@ -1007,9 +1008,11 @@ async function installSkillsForFleet(fleetDir: string, args: string[]): Promise<
   }
   const fleet = readFleet(fleetDir)
   const { createClaudeSharedSkills } = await import('./adapters/shared-skills-claude.ts')
+  // Interactive Claude is the default agent, installed whatever the projects declare.
   const adapters: RunnerSharedSkills[] = [createClaudeSharedSkills()]
   const runnerFailures: string[] = []
   for (const project of Object.keys(fleet.projects)) {
+    const projectRoot = join(fleetDir, 'projects', project)
     // A relative external selector resolves against the project's checkout, as the
     // loop resolves it; a built-in runner needs none, so a missing mapping is not fatal.
     let repoRoot: string | undefined
@@ -1019,10 +1022,19 @@ async function installSkillsForFleet(fleetDir: string, args: string[]): Promise<
       repoRoot = undefined
     }
     try {
-      const config = loadConfig(process.env, {
-        filePath: join(fleetDir, 'projects', project, 'config.json'),
-      })
+      const config = loadConfig(process.env, { filePath: join(projectRoot, 'config.json') })
       adapters.push((await loadRunner(config.runner, { env: process.env, repoRoot })).sharedSkills)
+    } catch (error) {
+      runnerFailures.push(`${project}: ${errorHeadline(error)}`)
+    }
+    // A project without an adapter directory declares no further agents. The caller's
+    // PROJECT and PROJECT_ADAPTER select within one project, so no project here sees them.
+    if (!existsSync(join(projectRoot, 'project'))) continue
+    try {
+      const env = { ...process.env }
+      delete env['PROJECT']
+      delete env['PROJECT_ADAPTER']
+      adapters.push(...((await loadProject(projectRoot, env)).sharedSkills ?? []))
     } catch (error) {
       runnerFailures.push(`${project}: ${errorHeadline(error)}`)
     }
