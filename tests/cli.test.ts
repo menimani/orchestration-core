@@ -5,7 +5,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
@@ -253,6 +253,32 @@ describe('repository selection', () => {
       .toBe(false)
   })
 
+  it('resolves a relative repository from the caller\'s directory rather than the package', () => {
+    const otherRepo = join(repoRoot, 'other-repository')
+    mkdirSync(otherRepo)
+    expect(spawnSync('git', ['init'], { cwd: otherRepo, windowsHide: true }).status).toBe(0)
+    mkdirSync(join(otherRepo, 'orchestration'))
+    // npm run -C moves the working directory to the package and keeps the caller's in INIT_CWD.
+    const packageDirectory = join(repoRoot, 'package')
+    mkdirSync(packageDirectory)
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'new', 'relative-repository-task', '--repo', 'other-repository'],
+      {
+        cwd: packageDirectory,
+        env: { ...INHERITED_ENV, INIT_CWD: repoRoot },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(otherRepo, 'orchestration', 'tasks', 'relative-repository-task.md')))
+      .toBe(true)
+  })
+
   it('continues to resolve the repository from the working directory without the option', () => {
     const result = spawnSync(process.execPath, [CLI, 'new', 'working-directory-task'], {
       cwd: repoRoot,
@@ -420,6 +446,25 @@ describe('fleet project selection', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
     expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
+  })
+
+  it('resolves a relative --fleet from the caller\'s directory rather than the package', () => {
+    const fleet = fleetFixture()
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'queue', '--fleet', basename(fleet), '--project', 'first'],
+      {
+        cwd: repoRoot,
+        env: { ...CORE_ENV, INIT_CWD: dirname(fleet) },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
   })
 
   it('treats --project=<name> as a project option rather than an argument', () => {
