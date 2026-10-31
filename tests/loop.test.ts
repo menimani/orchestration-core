@@ -562,6 +562,33 @@ describe('forge poll budget', () => {
     }
   })
 
+  it('gives a single claimed test finding the tests pitfall list', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates', 'pitfalls'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'pitfalls', 'code.md'), 'Stale async responses.\n')
+    writeFileSync(
+      join(paths.root, 'templates', 'pitfalls', 'tests.md'), 'clearAllMocks keeps implementations.\n',
+    )
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const requirement = '[TEST] `src/shared.ts` lacks coverage for the empty input'
+    await fakeForge.createIssue({
+      title: requirement,
+      body: buildIssueBody(requirement, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(1)
+    const spec = readFileSync(runnerStarts[0]!, 'utf8')
+    expect(spec).toContain(requirement)
+    expect(spec).toContain('clearAllMocks keeps implementations.')
+    expect(spec).not.toContain('Stale async responses.')
+  })
+
   it('does not claim from a poll whose duplicate re-read cannot be verified', async () => {
     initializeGitRepo()
     const loop = makeLoop({
