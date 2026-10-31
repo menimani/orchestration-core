@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { appendBacklogUnless } from './backlog.ts'
 import { loadConfig } from './config.ts'
 import { pitfallsFileForDesc } from './gates.ts'
-import { taskIdForDesc } from './ids.ts'
+import { descSlug, newTaskId, recordTaskIdForDesc, taskIdForDesc } from './ids.ts'
 import { statusFile, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
 import { readTemplate } from './templates.ts'
@@ -199,10 +199,21 @@ export function delegateTask(
 
 function materializeDelegatedTask(
   paths: OrchPaths,
-  taskId: string,
+  indexedTaskId: string,
   description: string,
   options: DelegateOptions,
 ): MaterializedDelegateResult {
+  // The index can still name a task that has already landed. Delegating the same words
+  // again is then a new request, so it gets a fresh task rather than being dropped as
+  // already processed.
+  const indexedStatus = existsSync(statusFile(paths, indexedTaskId))
+    ? readStatus(paths, indexedTaskId)?.status
+    : undefined
+  const needsFreshTask = indexedStatus === 'merged' || indexedStatus === 'no-change'
+  const taskId = needsFreshTask
+    ? newTaskId(paths, `user-${descSlug(description)}`)
+    : indexedTaskId
+  if (needsFreshTask) recordTaskIdForDesc(paths, 'user', description, taskId)
   const spec = specFile(paths, taskId)
   const specReused = existsSync(spec)
   if (!specReused) {

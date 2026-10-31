@@ -727,6 +727,67 @@ describe('delegate arguments', () => {
   })
 })
 
+describe('delegate outcomes', () => {
+  const description = 'Repeat a decision that was already delegated once.'
+
+  function delegate(): ReturnType<typeof spawnSync> & { stdout: string } {
+    return spawnSync(process.execPath, [CLI, 'delegate', description], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+  }
+
+  function enqueuedId(stdout: string): string {
+    const match = /^Enqueued: (\S+) \(depth=0\)$/m.exec(stdout)
+    expect(match).not.toBeNull()
+    return match![1]!
+  }
+
+  it('queues a fresh task when the indexed task already finished with no change', async () => {
+    const paths = orchPaths(repoRoot)
+    const first = delegate()
+    expect(first.status).toBe(0)
+    const firstId = enqueuedId(first.stdout)
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    await writeStatus(paths, firstId, 'no-change')
+
+    const second = delegate()
+
+    expect(second.status).toBe(0)
+    const secondId = enqueuedId(second.stdout)
+    expect(secondId).not.toBe(firstId)
+    expect(secondId).toMatch(/_user-repeat-a-decision/)
+    expect(second.stdout).toContain('Created: ')
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${secondId}:0\n`)
+
+    // The index now names the fresh task, so a third request while it is queued is a duplicate.
+    const third = delegate()
+    expect(third.stdout).toContain(`WARN: ${secondId} is already in the queue`)
+  })
+
+  it('warns instead of promising a start when the indexed task is running', async () => {
+    const paths = orchPaths(repoRoot)
+    const first = delegate()
+    expect(first.status).toBe(0)
+    const taskId = enqueuedId(first.stdout)
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    await writeStatus(paths, taskId, 'running')
+    writeFileSync(join(paths.queueDir, 'loop.pid'), processMarkerText(processMarker(process.pid)))
+
+    const second = delegate()
+
+    expect(second.status).toBe(0)
+    expect(second.stdout).toContain(`WARN: ${taskId} has already been processed or is running (status=running)`)
+    expect(second.stdout).not.toContain('Enqueued:')
+    expect(second.stdout).not.toContain('starts this task')
+    expect(second.stdout).not.toContain('waits in the backlog')
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe('')
+  })
+})
+
 describe('logs', () => {
   it('returns a failure when a log follower cannot read a regular file', () => {
     const paths = orchPaths(repoRoot)

@@ -588,6 +588,11 @@ const cmdDelegate: Command = async (paths, args) => {
     console.log(`Enqueued: ${result.taskId} (depth=0)`)
   } else if (result.enqueue.outcome === 'already-queued') {
     console.log(`WARN: ${result.taskId} is already in the queue`)
+  } else {
+    // A running or completed task is not waiting in the backlog, so neither of the loop
+    // messages below would be true of it.
+    console.log(`WARN: ${result.taskId} has already been processed or is running (status=${result.enqueue.status}) — not queued again`)
+    return 0
   }
   if (isLoopRunning(paths)) {
     console.log('The loop is running and starts this task on its next poll.')
