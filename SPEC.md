@@ -230,7 +230,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
 2. Task ids are `YYYYMMDD_HHMMSS_nnn_<slug>` with `nnn` a per-day sequence; slugs end in
    `scan` for scans, are `review-c<n>` for automatic reviews of cycle `<n>`, and start
    with `ci-fix`, `auto-`, `fix-`, or `user-` for CI fixes, scan findings, review-origin
-   fixes, and delegated work. Listings sort chronologically.
+   fixes, and delegated work. A task claimed from forge issues takes its prefix from the
+   issue's parent: `fix-` when the parent is a review task, otherwise `auto-`. Work
+   delegated in issue mode publishes its reserved `user-` id only as the issue's parent,
+   so the claimed task is `auto-` and can share a claim group with scan findings that
+   name the same file. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
    task is queued, running, completed, or retryable after failure. If an identical
