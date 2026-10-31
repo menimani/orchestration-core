@@ -20,6 +20,7 @@ import { existingTaskIdForDesc, recordTaskIdForDesc, shortTaskId } from '../src/
 import {
   issueConflictKey, readConflictedAttempts, writeConflictedAttempts,
 } from '../src/conflictRetry.ts'
+import { cleanupTask } from '../src/cleanup.ts'
 import { runCleanupCommand } from '../src/cleanupCommand.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
@@ -6449,8 +6450,9 @@ describe('scanForNextTasks', () => {
     expect(logText()).toContain('WARN task limit 1 ignored findings from remote-scan')
   })
 
-  it('re-admits a review finding whose indexed task failed or already merged', async () => {
-    const loop = makeLoop()
+  it('holds a review finding whose task failed until cleanup, and re-admits it after a merge', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({ scanEnabled: false, maxParallel: 1 })
     const finding = '[BUG] a defect whose first fix crashed'
 
     writeFinal('20250101_000000_020_review-c1', `NEXT_TASK: ${finding}\n`)
@@ -6459,21 +6461,34 @@ describe('scanForNextTasks', () => {
     expect(specs).toHaveLength(1)
     const taskId = (specs[0] as string).replace(/\.md$/, '')
 
-    // The first attempt failed: the finding must come back as retryable work.
+    // The first attempt failed and kept its worktree: re-queueing it would only be
+    // refused at startup, so the finding waits for the operator's cleanup.
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
     writeRawStatus(taskId, 'failed')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     logged = []
     writeFinal('20250101_000000_021_review-c1', `NEXT_TASK: ${finding}\n`)
     await loop.scanForNextTasks('20250101_000000_021_review-c1', 0)
-    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(taskId)
-    expect(logText()).not.toContain('Duplicate finding')
+    expect(backlogEntries()).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toHaveLength(1)
+
+    // After cleanup the same finding re-admits the task, and it actually starts.
+    cleanupTask(paths, taskId, undefined, false, () => {})
+    writeFinal('20250101_000000_022_review-c1', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_022_review-c1', 0)
+    expect(backlogEntries()).toEqual([`${taskId}:1`])
+    loop.initializeSessionStateForBranch()
+    expect(await loop.poll()).toBe('continue')
+    expect(runnerStarts).toEqual([specFile(paths, taskId)])
+    expect(readStatus(paths, taskId)?.status).toBe('running')
+    expect(logText()).not.toContain('startup failed')
 
     // Once the fix landed, a later review saw the post-fix tree and must create new work.
     writeRawStatus(taskId, 'merged')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     logged = []
-    writeFinal('20250101_000000_022_review-c1', `NEXT_TASK: ${finding}\n`)
-    await loop.scanForNextTasks('20250101_000000_022_review-c1', 0)
+    writeFinal('20250101_000000_023_review-c1', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_023_review-c1', 0)
     const freshTaskId = readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim().split(':')[0]
     expect(freshTaskId).not.toBe(taskId)
     expect(readdirSync(paths.tasksDir)).toHaveLength(2)

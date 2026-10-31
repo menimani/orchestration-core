@@ -1121,16 +1121,19 @@ export function createLoop(deps: LoopDeps) {
       ? [...new Set(findings)].filter((finding) => {
         const existing = existingFindingTask(finding)
         if (existing !== undefined) {
-          // A failed task is retryable by design — enqueueTask re-admits it — so only
-          // queued, active or landed work suppresses the finding. Suppressing on the
-          // bare existence of the spec blocked that supported retry path.
+          // A failed task is never retried automatically: it keeps its worktree until
+          // the operator's cleanup, and startTask refuses that worktree, so re-queueing
+          // it would only be dropped at startup. Cleanup removes the status, after which
+          // the same finding re-admits the task; suppressing on the bare existence of
+          // the spec blocked that retry path.
           const status = readStatus(paths, existing)?.status
           const queued = existsSync(queueFile)
             && readFileSync(queueFile, 'utf8').split(/\r?\n/)
               .some((line) => line.startsWith(`${existing}:`))
           const mergedAdvisory = (status === 'merged' || status === 'no-change')
             && fingerprintOf(finding).startsWith('advisory:')
-          if (queued || status === 'running' || status === 'completed' || mergedAdvisory) {
+          if (queued || status === 'running' || status === 'completed' || status === 'failed'
+            || mergedAdvisory) {
             destinations.push(shortTaskId(existing))
             return false
           }
