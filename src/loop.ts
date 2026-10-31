@@ -2708,7 +2708,7 @@ export function createLoop(deps: LoopDeps) {
           event('WARN', `${shortTaskId(taskId)} merge gate deferred: the repository test lock stayed busy`)
           return
         }
-        if (error instanceof MergeError) appendFileSync(mergeLog, `${error.message}\n`)
+        appendFileSync(mergeLog, `${errorSummary(error)}\n`)
         if (error instanceof OrchestrationDepsInstallError || error instanceof MergeRecoveryError) {
           throw error
         }
