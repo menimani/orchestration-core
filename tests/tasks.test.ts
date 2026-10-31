@@ -154,8 +154,16 @@ describe('delegateTask', () => {
     expect(existsSync(join(paths.queueDir, 'inspect', result.taskId))).toBe(true)
   })
 
-  it('rejects a blank description', () => {
-    expect(() => delegateTask(paths, '   ')).toThrow(/description/i)
+  it('rejects a blank description before loading the forge or enqueueing', async () => {
+    const loadForge = vi.fn(async () => makeFakeForge('delegator'))
+    await expect(delegateTaskVisible(paths, '   ', {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge,
+      warn: () => {},
+    })).rejects.toThrow('A non-empty description is required')
+
+    expect(loadForge).not.toHaveBeenCalled()
+    expect(queueLines()).toEqual([])
   })
 
   it('publishes delegated work as ready for the daemon when its marker enables issues', async () => {

@@ -11,7 +11,7 @@ import { operatingSystem } from '../src/adapters/os.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
-  issueReleaseIntentForTask, issueReleasePreparationForTask, prepareIssueReleaseIntent,
+  issueReleaseIntentForTask, prepareIssueReleaseIntent,
   recordIssuePromotions, recordIssueReleaseIntent, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_READY,
   LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
@@ -42,6 +42,7 @@ import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
+import { releasePreparationForTask } from './releasePreparation.ts'
 import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
 import { TestProcessRegistry } from './testProcess.ts'
@@ -3045,7 +3046,7 @@ describe('remote issue queue idle detection', () => {
 
     await loop.poll()
 
-    expect(issueReleasePreparationForTask(paths, 'task-release')).toEqual([])
+    expect(releasePreparationForTask(paths, 'task-release')).toEqual([])
     expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([])
     await expect(fakeForge.getIssue(issueNumber)).resolves.toMatchObject({
       state: 'open',
@@ -4928,7 +4929,7 @@ describe('completed task merge recovery', () => {
     )
     expect(readStatus(paths, taskId)?.status).toBe('failed')
     expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
-    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+    expect(releasePreparationForTask(paths, taskId)).toEqual([])
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
   })
 
