@@ -1088,6 +1088,21 @@ account with write access withdraws every `MERGED:` comment before it.
     `Task=0`, `Queue=0`, the idle duration, and `Waiting=open finding`; because workers
     never scan, their loop-log prefix
     carries cycle zero rather than a worker-specific replacement for the cycle.
+36a. `worker <base-ref>` starts that daemon and takes exactly one argument; anything else
+    prints its usage and exits 1. It first brings the checkout to the base ref: it fetches
+    the remote the ref names (`<remote>/...` or `refs/remotes/<remote>/...`, the longest
+    matching remote name winning) or, for any other ref, the current branch's tracking
+    remote, and requires the ref to name a commit. A checkout behind the base ref is
+    fast-forwarded and one already at it is left alone. One ahead of it is refused, since
+    its local commits would fork into every task branch and reach the merger unreviewed,
+    and one diverged from it is refused. With `ISSUE_QUEUE_ENABLED=true` and
+    `WORKER_MODE=true` added to its environment, it then loads the updated checkout's own
+    configuration code against the project's `config.json`, which overrides the
+    environment, and refuses to start when that code predates worker mode or the
+    configuration does not resolve it on. Only then does it launch
+    `loop --approve-mode issue --daemon` through the updated checkout's CLI — for a fleet
+    project, the fleet's package, naming the fleet and project again — and exit with that
+    launch's status.
 37. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts `loop:merge-ready`
     issues from that poll's shared finding snapshot: it reads the reported branch and head, fetches that branch
