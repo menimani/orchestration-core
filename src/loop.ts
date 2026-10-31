@@ -865,19 +865,9 @@ export function createLoop(deps: LoopDeps) {
 
   function reportsNothing(text: string): boolean {
     const trimmed = text.trim()
-    const ideographicFullStop = String.fromCodePoint(0x3002)
-    const normalized = trimmed.replace(/[.!]+$/, '')
-      .replace(new RegExp(`${ideographicFullStop}+$`), '').toLowerCase()
+    const normalized = trimmed.replace(/[.!]+$/, '').toLowerCase()
     if (['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
       .includes(normalized)) return true
-    const noFindingPhrases = [
-      [0x6307, 0x6458, 0x306a, 0x3057],
-      [0x554f, 0x984c, 0x306a, 0x3057],
-      [0x8a72, 0x5f53, 0x306a, 0x3057],
-      [0x7279, 0x306b, 0x306a, 0x3057],
-      [0x306a, 0x3057],
-    ].map((points) => String.fromCodePoint(...points))
-    if (noFindingPhrases.includes(normalized)) return true
     const firstSentence = (trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? '')
       .replace(/[.!]+$/, '').toLowerCase()
     return /^none\b/.test(firstSentence)
