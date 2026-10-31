@@ -241,6 +241,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
    `cleanup` has removed it, the repeated finding re-admits that task. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
    creates a fresh task and updates the index; completed advisories remain deduplicated.
+   A decision delegated again after its task merged or completed with no change likewise
+   gets a fresh task; while that task is running or completed, `delegate` warns with its
+   status and does not report it as queued.
    When generating a task specification, the description's leading category selects a
    project pitfall list: `[TEST]` selects `templates/pitfalls/tests.md`, `[DOCS]` selects
    `templates/pitfalls/docs.md`, and every other description selects
