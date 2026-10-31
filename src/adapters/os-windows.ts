@@ -326,6 +326,8 @@ export function createOperatingSystem(
     processIsAlive: (pid) => isAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree,
+    // terminateProcessTree follows parent links, and a detached child would get its own console.
+    terminableSpawnOptions: () => ({ detached: false }),
     terminateWorktreeProcesses,
     removeDirectory(path): void {
       if (path.startsWith('\\\\?\\')) {

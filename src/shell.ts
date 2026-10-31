@@ -70,11 +70,10 @@ function execTimedShellSync(
 }
 
 function superviseTimedShell(timeout: number, command: string): void {
-  // A detached POSIX shell leads its own process group, which is the tree the os adapter
-  // stops. Windows follows parent links instead, while the shell is still alive.
+  // The os adapter supplies the spawn options its process-tree termination relies on.
   const child = spawn(command, {
+    ...operatingSystem.terminableSpawnOptions(),
     shell: true,
-    detached: process.platform !== 'win32',
     stdio: ['inherit', 'inherit', 'inherit'],
     windowsHide: true,
   })

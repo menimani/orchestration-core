@@ -175,6 +175,8 @@ export function createOperatingSystem(
     processIsAlive: (pid) => processIsAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree,
+    // terminateProcessTree signals a process group, so the child must lead one.
+    terminableSpawnOptions: () => ({ detached: true }),
     // Runners stop as a detached process group, which their shells cannot leave.
     terminateWorktreeProcesses: () => {},
     removeDirectory(path): void {
