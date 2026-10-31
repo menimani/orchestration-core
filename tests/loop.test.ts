@@ -13,7 +13,7 @@ import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
   issueReleaseIntentForTask, issueReleasePreparationForTask, prepareIssueReleaseIntent,
   recordIssuePromotions, recordIssueReleaseIntent, recordIssuesForTask,
-  LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
+  LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_READY,
   LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc, recordTaskIdForDesc, shortTaskId } from '../src/ids.ts'
@@ -4623,6 +4623,102 @@ describe('completed task merge recovery', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('stops without recording a failure when a failed rebase leaves the task worktree mid-rebase', async () => {
+    const taskId = '20260815_181909_195_auto-stuck-rebase'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    const taskTip = git(['rev-parse', 'HEAD'], worktree)
+    writeFileSync(join(repoRoot, 'run.txt'), 'newer run work\n')
+    git(['add', 'run.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+    const runHead = git(['rev-parse', 'HEAD'])
+    // Rebase state without a head-name: the rebase refuses to start and the abort fails.
+    const rebaseState = git(['rev-parse', '--path-format=absolute', '--git-path', 'rebase-merge'], worktree)
+    mkdirSync(rebaseState, { recursive: true })
+    writeFileSync(join(rebaseState, 'interactive'), '')
+    const loop = makeLoop({ autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '1\n')
+
+    await expect(loop.poll()).rejects.toThrow(
+      /^Rebasing the task onto main failed and the abort did not restore the task worktree: .*rebase is still in progress; rebase abort failed: /,
+    )
+
+    // A failed record would let the next poll merge into a worktree still mid-rebase.
+    expect(logged).toContain('Merging 195_auto')
+    expect(logged.some((line) => line.startsWith('Failed 195_auto'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(readFileSync(join(paths.logsDir, `${taskId}.merge.log`), 'utf8')).toMatch(
+      /Rebasing the task onto main failed and the abort did not restore the task worktree/,
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(git(['rev-parse', branchName(taskId)])).toBe(taskTip)
+  })
+
+  it('stops without recording a failure when the run checkout already has a merge in progress', async () => {
+    const taskId = '20260815_181910_196_auto-merge-in-progress'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const runHead = git(['rev-parse', 'HEAD'])
+    const mergeHead = git(['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'])
+    writeFileSync(mergeHead, `${runHead}\n`)
+    const loop = makeLoop({ autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '1\n')
+
+    await expect(loop.poll()).rejects.toThrow(
+      'The integration worktree already has a merge in progress. '
+      + 'Inspect and restore it before restarting orchestration.',
+    )
+
+    expect(logged).toContain('Merging 196_auto')
+    expect(logged.some((line) => line.startsWith('Failed 196_auto'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(existsSync(mergeHead)).toBe(true)
+  })
+
+  it('stops a remote adoption without relabelling when the run checkout has a merge in progress', async () => {
+    const taskId = '20260815_181911_197_auto-remote-merge-in-progress'
+    initializeGitRepoWithRemote()
+    git(['switch', '-c', branchName(taskId)])
+    writeFileSync(join(repoRoot, 'remote.txt'), 'remote work\n')
+    git(['add', 'remote.txt'])
+    git(['commit', '-m', 'fix: add remote work'])
+    const taskHead = git(['rev-parse', 'HEAD'])
+    git(['push', 'origin', branchName(taskId)])
+    git(['switch', 'main'])
+    const runHead = git(['rev-parse', 'HEAD'])
+    const loop = makeLoop({ autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'remote work', body: '', labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })
+    await fakeForge.commentIssue(
+      issueNumber, `Branch: ${branchName(taskId)}\nHead commit: ${taskHead}`,
+    )
+    const commentsBefore = fakeForge.issueComments.get(issueNumber)?.length
+    const mergeHead = git(['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'])
+    writeFileSync(mergeHead, `${runHead}\n`)
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '1\n')
+
+    await expect(loop.poll()).rejects.toThrow(
+      'The integration worktree already has a merge in progress. '
+      + 'Inspect and restore it before restarting orchestration.',
+    )
+
+    // A failed adoption would relabel the issue and let the next one merge into this state.
+    expect(logged).toContain('Merging 197_auto')
+    expect(logged.some((line) => line.startsWith('Failed 197_auto'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(fakeForge.issueComments.get(issueNumber)?.length).toBe(commentsBefore)
+    expect(fakeForge.issues.get(issueNumber)?.labels).toEqual([LABEL_FINDING, LABEL_MERGE_READY])
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
   })
 
   it('releases an issue task after its first conflicting rebase and keeps its commits', async () => {

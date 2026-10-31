@@ -1297,6 +1297,36 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
+  it('stops the loop when the state after a failed rebase cannot be read', async () => {
+    const taskId = '20260808_000000_019_user-unreadable-rebase'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repoRoot, 'run.txt'), 'newer run work\n')
+    git(repoRoot, ['add', 'run.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add newer run work'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    // The hook refuses the rebase and points the task worktree at a missing git directory,
+    // so the abort and every check after it fail.
+    const hooksDir = git(repoRoot, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']).trim()
+    mkdirSync(hooksDir, { recursive: true })
+    writeFileSync(
+      join(hooksDir, 'pre-rebase'),
+      '#!/bin/sh\necho "gitdir: missing-gitdir" > .git\nexit 1\n',
+      { mode: 0o755 },
+    )
+
+    const failure = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    }).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(MergeRecoveryError)
+    expect((failure as MergeRecoveryError).message).toMatch(
+      /^Rebasing the task onto main failed and recovery could not be verified: .*not a git repository.*; rebase abort failed: .*Inspect and restore the task worktree before restarting orchestration\.$/s,
+    )
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(git(repoRoot, ['rev-parse', `task/${taskId}`]).trim()).toBe(taskHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
   it('throws MergeError instances so callers can count merge failures', async () => {
     const taskId = '20260808_000000_007_user-error-type'
     await makeCompletedTask(taskId)
@@ -1542,6 +1572,71 @@ describe('mergeTask', () => {
     await expect(failure).rejects.toThrow('merge is still in progress; merge abort failed')
 
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expectNoTemporaryWorktree('.merge-')
+  })
+
+  it('refuses to merge into a checkout that already has a merge in progress', async () => {
+    const taskId = '20260824_084607_020_auto-merge-in-progress'
+    await makeCompletedTask(taskId, { commit: true })
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const mergeHead = git(repoRoot, ['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'])
+      .trim()
+    writeFileSync(mergeHead, `${runHead}\n`)
+    const mergeCommands: string[] = []
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string => {
+        if (args[0] === 'merge' && cwd === repoRoot) mergeCommands.push(args[1]!)
+        return git(cwd, args)
+      },
+    }
+
+    const failure = mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+    })
+    await expect(failure).rejects.toThrow(MergeRecoveryError)
+    await expect(failure).rejects.toThrow(
+      'The integration worktree already has a merge in progress. '
+      + 'Inspect and restore it before restarting orchestration.',
+    )
+
+    // Neither a merge nor an abort may touch the merge someone else left there.
+    expect(mergeCommands).toEqual([])
+    expect(readFileSync(mergeHead, 'utf8')).toBe(`${runHead}\n`)
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expectNoTemporaryWorktree('.merge-')
+  })
+
+  it('stops when the state after a failed local merge cannot be read', async () => {
+    const taskId = '20260824_084607_021_auto-unreadable-merge'
+    await makeCompletedTask(taskId, { commit: true })
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    let mergeFailed = false
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string => {
+        if (args[0] === 'merge' && args[1] === '--quiet' && cwd === repoRoot) {
+          mergeFailed = true
+          throw new Error('merge was interrupted')
+        }
+        if (args[0] === 'merge' && args[1] === '--abort') return ''
+        if (mergeFailed && args[0] === 'status') throw new Error('index is unreadable')
+        return git(cwd, args)
+      },
+    }
+
+    const failure = mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+    })
+    await expect(failure).rejects.toThrow(MergeRecoveryError)
+    await expect(failure).rejects.toThrow(
+      'A merge conflict occurred. Rebase the worktree, then retry the merge. '
+      + 'Recovery could not be verified: index is unreadable; merge abort reported success. '
+      + 'Merge failure: merge was interrupted. '
+      + 'Inspect and restore the integration worktree before restarting orchestration.',
+    )
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
     expectNoTemporaryWorktree('.merge-')
   })
 })
