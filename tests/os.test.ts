@@ -1,6 +1,6 @@
 import type { ChildProcess, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -166,6 +166,158 @@ describe('operating-system adapters', () => {
 
     await expect(os.launchDaemon(options)).resolves.toMatchObject({ pid: 43211 })
     expect(startDaemon).toHaveBeenCalledWith(options)
+  })
+
+  it('launches a POSIX agent detached with the input file as standard input', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-os-'))
+    const child = Object.assign(new EventEmitter(), { pid: 43213, unref: vi.fn() })
+    const spawnAgent = vi.fn(() => child) as unknown as typeof spawn
+    const os = createPosixOperatingSystem({
+      signalProcessGroup: () => {}, probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, groupHasRunningMember: () => undefined,
+      spawnAgent,
+    })
+    const inputFile = join(root, 'task.md')
+    writeFileSync(inputFile, 'task specification')
+
+    try {
+      const started = os.launchAgent({
+        args: ['exec', '-'],
+        cwd: root,
+        inputFile,
+        outputFile: join(root, 'task.log'),
+        program: 'codex',
+      })
+      child.emit('spawn')
+
+      await expect(started).resolves.toBe(43213)
+      expect(spawnAgent).toHaveBeenCalledWith('codex', ['exec', '-'], {
+        cwd: root,
+        detached: true,
+        stdio: [expect.any(Number), expect.any(Number), expect.any(Number)],
+        windowsHide: true,
+      })
+      expect(child.unref).toHaveBeenCalledOnce()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a POSIX agent that failed to spawn or received no PID', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-os-'))
+    const children: (EventEmitter & { pid: number | undefined, unref: () => void })[] = []
+    const os = createPosixOperatingSystem({
+      signalProcessGroup: () => {}, probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, groupHasRunningMember: () => undefined,
+      spawnAgent: (() => {
+        const child = Object.assign(new EventEmitter(), { pid: undefined, unref: vi.fn() })
+        children.push(child)
+        return child
+      }) as unknown as typeof spawn,
+    })
+    const options = {
+      args: [], cwd: root, inputFile: join(root, 'task.md'),
+      outputFile: join(root, 'task.log'), program: 'codex',
+    }
+
+    try {
+      await expect(os.launchAgent(options)).rejects.toThrow()
+      expect(children).toHaveLength(0)
+
+      writeFileSync(options.inputFile, 'task specification')
+      const withoutPid = os.launchAgent(options)
+      children[0]!.emit('spawn')
+      await expect(withoutPid).rejects.toThrow('codex spawned without a PID')
+
+      const error = new Error('spawn failed')
+      const failed = os.launchAgent(options)
+      children[1]!.emit('error', error)
+      await expect(failed).rejects.toBe(error)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('spawns a POSIX agent command as named', () => {
+    expect(createPosixOperatingSystem().agentCommand('claude', ['-p'])).toEqual({
+      command: 'claude', args: ['-p'], verbatimArguments: false,
+    })
+  })
+
+  it('routes a Windows agent named by command through cmd.exe and the hidden launcher', async () => {
+    const startAgent = vi.fn(async () => 43214)
+    const os = createWindowsOperatingSystem({
+      spawn: () => {}, listProcesses: () => [], probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, startAgent,
+    })
+
+    await expect(os.launchAgent({
+      args: ['exec', '--output-last-message', 'final-message.txt', '-'],
+      cwd: 'worktree',
+      inputFile: 'task.md',
+      outputFile: 'task.log',
+      program: 'codex',
+    })).resolves.toBe(43214)
+    expect(startAgent).toHaveBeenCalledWith({
+      args: [
+        '/d /v:off /s /c "codex ^"exec^" ^"--output-last-message^" ^"final-message.txt^" ^"-^""',
+      ],
+      command: 'cmd.exe',
+      cwd: 'worktree',
+      inputFile: 'task.md',
+      outputFile: 'task.log',
+      verbatimArguments: true,
+    })
+  })
+
+  it('launches a Windows agent named by absolute path without cmd.exe', async () => {
+    const startAgent = vi.fn(async () => 43215)
+    const os = createWindowsOperatingSystem({
+      spawn: () => {}, listProcesses: () => [], probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, startAgent,
+    })
+
+    await expect(os.launchAgent({
+      args: ['runner-claude.ts', '--model', 'claude-opus-5'],
+      cwd: 'worktree',
+      inputFile: 'task.md',
+      outputFile: 'task.log',
+      program: 'C:\\Program Files\\nodejs\\node.exe',
+    })).resolves.toBe(43215)
+    expect(startAgent).toHaveBeenCalledWith({
+      args: ['runner-claude.ts', '--model', 'claude-opus-5'],
+      command: 'C:\\Program Files\\nodejs\\node.exe',
+      cwd: 'worktree',
+      inputFile: 'task.md',
+      outputFile: 'task.log',
+    })
+  })
+
+  it('escapes cmd metacharacters in a Windows agent command', () => {
+    const { command, args, verbatimArguments } = createWindowsOperatingSystem()
+      .agentCommand('claude', ['--model', 'opus&50%^x', 'C:\\Users\\AT&T\\final.txt'])
+
+    expect(command).toBe('cmd.exe')
+    expect(verbatimArguments).toBe(true)
+    expect(args).toEqual([
+      '/d /v:off /s /c "claude ^"--model^" ^"opus^&50^%^^x^" ^"C:\\Users\\AT^&T\\final.txt^""',
+    ])
+  })
+
+  it('rejects a Windows agent argument cmd.exe cannot pass literally', async () => {
+    const startAgent = vi.fn(async () => 43216)
+    const os = createWindowsOperatingSystem({
+      spawn: () => {}, listProcesses: () => [], probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, startAgent,
+    })
+
+    expect(() => os.agentCommand('claude', ['--model', 'two\nlines']))
+      .toThrow('quote or line break')
+    await expect(os.launchAgent({
+      args: ['--model', 'say "hi"'], cwd: 'worktree', inputFile: 'task.md',
+      outputFile: 'task.log', program: 'codex',
+    })).rejects.toThrow('quote or line break')
+    expect(startAgent).not.toHaveBeenCalled()
   })
 
   it('owns process-tree root selection inside each adapter', () => {

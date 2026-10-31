@@ -1,8 +1,7 @@
-import { spawn } from 'node:child_process'
-import { closeSync, existsSync, openSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { packageCommandPrefix, packagePathPrefix } from '../paths.ts'
-import { cmdArgumentLine, startWindowsProcess } from './windows-process.ts'
+import { operatingSystem } from './os.ts'
 import type {
   Runner, RunnerModelOptions, RunnerSharedSkillRenderOptions, RunnerStartOptions,
 } from './runner.ts'
@@ -110,81 +109,12 @@ export function createCodexRunner(): Runner {
     },
     resolveModel,
     start(options: RunnerStartOptions): Promise<number> {
-      const args = buildArgs(options)
-      // On Windows the `codex` on PATH is an npm .cmd shim, which Node cannot spawn
-      // without a shell. cmd.exe resolves it through PATHEXT from any calling shell;
-      // a bare `bash` resolved to WSL instead of Git Bash when started from PowerShell.
-      // The arguments are paths and settings the loop composed, never forge text, but a
-      // state path may still hold cmd metacharacters, so they are escaped for cmd.exe.
-      if (process.platform === 'win32') {
-        let argumentLine: string
-        try {
-          argumentLine = cmdArgumentLine('codex', args)
-        } catch (error) {
-          return Promise.reject(error)
-        }
-        // Measured on Windows: detached launches gave every console descendant its own
-        // visible window. The hidden launcher gives the task one non-visible console,
-        // inherited by all of its tools, while still surviving the daemon that starts it.
-        return startWindowsProcess({
-          args: [argumentLine],
-          command: 'cmd.exe',
-          cwd: options.worktree,
-          inputFile: options.specFile,
-          outputFile: options.logFile,
-          verbatimArguments: true,
-        })
-      }
-
-      // startTask clears this file before setup; append so setup output remains ahead
-      // of the runner transcript instead of being silently truncated here.
-      const logFd = openSync(options.logFile, 'a')
-      let specFd: number
-      try {
-        specFd = openSync(options.specFile, 'r')
-      } catch (error) {
-        closeSync(logFd)
-        return Promise.reject(error)
-      }
-
-      return new Promise((resolve, reject) => {
-        let descriptorsClosed = false
-        const closeDescriptors = (): void => {
-          if (descriptorsClosed) return
-          descriptorsClosed = true
-          try {
-            closeSync(specFd)
-          } finally {
-            closeSync(logFd)
-          }
-        }
-
-        let child
-        try {
-          child = spawn('codex', args, {
-            cwd: options.worktree,
-            detached: true,
-            stdio: [specFd, logFd, logFd],
-            windowsHide: true,
-          })
-        } catch (error) {
-          closeDescriptors()
-          reject(error)
-          return
-        }
-        child.once('error', (error) => {
-          closeDescriptors()
-          reject(error)
-        })
-        child.once('spawn', () => {
-          closeDescriptors()
-          child.unref()
-          if (child.pid === undefined) {
-            reject(new Error('codex spawned without a PID'))
-            return
-          }
-          resolve(child.pid)
-        })
+      return operatingSystem.launchAgent({
+        args: buildArgs(options),
+        cwd: options.worktree,
+        inputFile: options.specFile,
+        outputFile: options.logFile,
+        program: 'codex',
       })
     },
   }

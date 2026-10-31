@@ -860,9 +860,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `PROJECT_ADAPTER` path is skipped. A skipped check retains its reason and is never
     reported as a pass.
 32. Operating-system behavior is detected once from the running process and exposed
-    through `adapters/os.ts`. Callers receive intent-level process-tree, directory, and
-    worktree-path operations from either `os-windows.ts` or `os-posix.ts`; there is no
-    OS selector or platform field in the contract.
+    through `adapters/os.ts`. Callers receive intent-level process-tree, agent-launch,
+    directory, and worktree-path operations from either `os-windows.ts` or `os-posix.ts`;
+    there is no OS selector or platform field in the contract.
 32a. `deploy` accepts no arguments and uses the current branch, the project adapter's
     deployment workflow and revision URL, and a request-unique dispatch token. It
     dispatches that workflow and identifies only the run returned for the same workflow,
