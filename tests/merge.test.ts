@@ -1319,8 +1319,10 @@ describe('mergeTask', () => {
       taskGate: 'light', project: noCheckProject,
     }).then(() => undefined, (error: unknown) => error)
     expect(failure).toBeInstanceOf(MergeRecoveryError)
+    // Git names the dangling gitfile "not a git repository" or, in newer releases, a gitfile
+    // that "does not point to a valid repository"; both wordings are the same failure.
     expect((failure as MergeRecoveryError).message).toMatch(
-      /^Rebasing the task onto main failed and recovery could not be verified: .*not a git repository.*; rebase abort failed: .*Inspect and restore the task worktree before restarting orchestration\.$/s,
+      /^Rebasing the task onto main failed and recovery could not be verified: .*(not a git repository|does not point to a valid repository).*; rebase abort failed: .*Inspect and restore the task worktree before restarting orchestration\.$/s,
     )
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(git(repoRoot, ['rev-parse', `task/${taskId}`]).trim()).toBe(taskHead)
