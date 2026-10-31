@@ -3,7 +3,7 @@ import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { Forge, ForgeIssue } from './adapters/forge.ts'
+import type { Forge, ForgeIssue, ForgeIssueComment } from './adapters/forge.ts'
 import { ForgeIssueNotFoundError } from './adapters/forge.ts'
 import { withBacklogLock } from './backlog.ts'
 import { conflictRetriesExhausted, issueConflictKey, readConflictedAttempts } from './conflictRetry.ts'
@@ -1486,20 +1486,28 @@ async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Pro
   }
 }
 
+export interface PromotedIssueOutcome {
+  /** Issues closed because their run pull request merged with their work. */
+  closed: number[]
+  /** Issues returned to ready because their run pull request closed unmerged. */
+  returned: number[]
+}
+
 /**
  * Close queue issues whose merged work has been promoted, for a queue kept apart from
  * the project's repository where no merge commit can close them. A run branch's pull
  * request that has merged carries every task merged into it up to its head, whichever
  * way the forge merged it, so that is the evidence; a merge commit the head does not
- * contain stays open for a later run.
+ * contain stays open for a later run. A run pull request closed without merging will
+ * never land that work, so its issues go back to ready rather than waiting for good.
  */
 export async function closePromotedIssues(
   forge: Forge,
   paths: OrchPaths,
   contains: (ancestor: string, descendant: string) => boolean,
-): Promise<number[]> {
+): Promise<PromotedIssueOutcome> {
   const dir = promotionDir(paths)
-  if (!existsSync(dir)) return []
+  if (!existsSync(dir)) return { closed: [], returned: [] }
   const promotions: IssuePromotion[] = []
   for (const name of readdirSync(dir)) {
     const match = /^(\d+)\.json$/.exec(name)
@@ -1508,8 +1516,34 @@ export async function closePromotedIssues(
     if (promotion !== undefined) promotions.push(promotion)
   }
   const closed: number[] = []
+  const returned: number[] = []
   for (const runBranch of new Set(promotions.map((promotion) => promotion.runBranch))) {
     const pr = await forge.prStatus({ kind: 'branch', value: runBranch })
+    if (pr.state === 'closed') {
+      for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
+        // The withdrawal lands before the issue is claimable again, and the record
+        // stays until it is ready, so an interrupted return is retried next poll. A retry
+        // finds its own withdrawal already posted and does not post it again.
+        try {
+          const withdrawal = issueUnpromotedComment(
+            promotion.taskId, promotion.mergeCommit, runBranch, pr.url,
+          )
+          const comments = await forge.listIssueComments(promotion.issueNumber)
+          if (!comments.some((comment) =>
+            comment.author.hasWriteAccess && comment.body === withdrawal)) {
+            await forge.commentIssue(promotion.issueNumber, withdrawal)
+          }
+          await returnIssueToReady(forge, promotion.issueNumber)
+        } catch (error) {
+          if (!(error instanceof ForgeIssueNotFoundError)) throw error
+          removePromotionRecord(paths, promotion.issueNumber)
+          continue
+        }
+        removePromotionRecord(paths, promotion.issueNumber)
+        returned.push(promotion.issueNumber)
+      }
+      continue
+    }
     if (pr.state !== 'merged' || pr.headSha === '') continue
     for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
       if (!contains(promotion.mergeCommit, pr.headSha)) continue
@@ -1527,7 +1561,7 @@ export async function closePromotedIssues(
       closed.push(promotion.issueNumber)
     }
   }
-  return closed
+  return { closed, returned }
 }
 
 function heartbeatFile(paths: OrchPaths, taskId: string): string {
@@ -1572,6 +1606,30 @@ export async function commentOnIssueMerge(
 
 export function issueMergeComment(taskId: string, mergeCommit: string, runBranch: string): string {
   return `MERGED: ${taskId}\nMerged as ${mergeCommit} into run branch ${runBranch}. This issue closes on promotion.`
+}
+
+export function issueUnpromotedComment(
+  taskId: string,
+  mergeCommit: string,
+  runBranch: string,
+  prUrl: string,
+): string {
+  return [
+    `UNPROMOTED: ${taskId}`,
+    `Merged as ${mergeCommit} into run branch ${runBranch}, whose pull request ${prUrl} was closed without merging. This issue is ready again.`,
+  ].join('\n')
+}
+
+/**
+ * The write-access `MERGED:` markers still standing in a chronological comment list. A
+ * write-access `UNPROMOTED:` comment withdraws every marker before it, so an issue
+ * returned to ready after its run pull request closed unmerged can be reaped again.
+ */
+export function standingMergeMarkers(comments: readonly ForgeIssueComment[]): ForgeIssueComment[] {
+  const trusted = comments.filter((comment) => comment.author.hasWriteAccess)
+  const standingFrom = trusted.reduce((start, comment, index) =>
+    /^UNPROMOTED: /.test(comment.body) ? index + 1 : start, 0)
+  return trusted.slice(standingFrom).filter((comment) => /^MERGED: /.test(comment.body))
 }
 
 export type ClaimResult
@@ -1913,8 +1971,7 @@ export async function reapStaleLeases(
   locallyRunningIssues: ReadonlySet<number> = new Set(),
   knownOpenFindings?: readonly ForgeIssue[],
   hasMergeMarker: (issue: ForgeIssue) => Promise<boolean> = async (issue) =>
-    (await forge.listIssueComments(issue.number)).some((comment) =>
-      comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
+    standingMergeMarkers(await forge.listIssueComments(issue.number)).length > 0,
   releaseOptions: IssueReleaseOptions = {},
 ): Promise<number[]> {
   const releaseFailures = await reconcileIssueReleaseIntents(forge, paths, releaseOptions)

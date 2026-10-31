@@ -451,13 +451,15 @@ describe('daemon startup', () => {
     // way: the real package's node_modules was reinstalled mid-test-run.
     writeOrchestrationManifests('{"lockfileVersion":3}\n')
     const install = vi.fn(successfulInstall)
+    const packageRoot = mkdtempSync(join(tmpdir(), 'orch-elsewhere-'))
 
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
-      install,
-      packageRoot: mkdtempSync(join(tmpdir(), 'orch-elsewhere-')),
-    })
+    try {
+      syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot })
 
-    expect(install).not.toHaveBeenCalled()
+      expect(install).not.toHaveBeenCalled()
+    } finally {
+      rmSync(packageRoot, { recursive: true, force: true })
+    }
   })
 })
 
@@ -984,23 +986,6 @@ describe('actionable findings', () => {
       'NEXT_TASK: nothing to report',
     ].join('\n'))
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
-  })
-
-  it('ignores Japanese descriptions that only report no findings', () => {
-    const loop = makeLoop()
-    const phrases = [
-      [0x6307, 0x6458, 0x306a, 0x3057],
-      [0x554f, 0x984c, 0x306a, 0x3057],
-      [0x8a72, 0x5f53, 0x306a, 0x3057],
-      [0x7279, 0x306b, 0x306a, 0x3057],
-      [0x306a, 0x3057],
-    ].map((points) => String.fromCodePoint(...points))
-    const fullStop = String.fromCodePoint(0x3002)
-    const findings = phrases.flatMap((phrase) => [phrase, `${phrase}${fullStop}`])
-    writeFinal('t4-ja', findings.map((finding) => `NEXT_TASK: ${finding}`).join('\n'))
-
-    expect(loop.actionableFindings(finalMessageFile(paths, 't4-ja'))).toEqual([])
-    expect(logged).toEqual([])
   })
 
   it('warns and ignores a finding whose description cannot produce a task slug', () => {
@@ -1846,6 +1831,78 @@ describe('cycle gate', () => {
     expect(readFileSync(runnerStarts[0]!, 'utf8'))
       .toContain('Perform the full scan described below.')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('appends framed accepted limits to a scan template without the placeholder', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n\n### 1. First check\n\n### 2. Second check\n',
+    )
+    writeFileSync(
+      join(paths.root, 'accepted-limits.md'),
+      '\n- Backend-mirrored translation keys stay.\n\n### 3. Not a scan section\n',
+    )
+    const loop = makeLoop({ scanParallel: 5, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(2)
+    expect(logText()).toContain(
+      'WARN requested 5 parallel scans but scan-template.md has 2 numbered sections; running 2 scans',
+    )
+    for (const start of runnerStarts) {
+      const spec = readFileSync(start, 'utf8')
+      expect(spec).toContain('## Accepted limits')
+      expect(spec).toContain(
+        'These are accepted limits by decision. Do not report them or propose narrower variants\n'
+        + 'of them as findings. A finding qualitatively beyond an entry is still reportable.',
+      )
+      expect(spec).toContain(
+        '<<<UNTRUSTED_REQUEST_TEXT>>>\n- Backend-mirrored translation keys stay.\n\n'
+        + '### 3. Not a scan section\n<<<END_UNTRUSTED_REQUEST_TEXT>>>',
+      )
+      expect(spec.indexOf('## Accepted limits')).toBeGreaterThan(spec.indexOf('### 2. Second check'))
+    }
+  })
+
+  it('appends accepted limits as none to a scan template when the file is missing', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(1)
+    const spec = readFileSync(runnerStarts[0]!, 'utf8')
+    expect(spec).toContain('## Accepted limits')
+    expect(spec).toContain(
+      '<<<UNTRUSTED_REQUEST_TEXT>>>\n(none)\n<<<END_UNTRUSTED_REQUEST_TEXT>>>',
+    )
+  })
+
+  it('fills the accepted limits placeholder of a scan template without appending', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n\n## Accepted limits\n\n{{ACCEPTED_LIMITS}}\n\n'
+        + '### 1. First check\n',
+    )
+    writeFileSync(join(paths.root, 'accepted-limits.md'), 'Keep the mirrored keys.\n')
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    const spec = readFileSync(runnerStarts[0]!, 'utf8')
+    expect(spec).not.toContain('{{ACCEPTED_LIMITS}}')
+    expect(spec.split('## Accepted limits')).toHaveLength(2)
+    expect(spec).toContain(
+      '<<<UNTRUSTED_REQUEST_TEXT>>>\nKeep the mirrored keys.\n<<<END_UNTRUSTED_REQUEST_TEXT>>>',
+    )
+    expect(spec.indexOf('Keep the mirrored keys.')).toBeLessThan(spec.indexOf('### 1. First check'))
   })
 
   it('ignores numbered headings inside fenced code blocks', async () => {
@@ -2805,6 +2862,66 @@ describe('remote issue queue idle detection', () => {
     expect(logText()).toContain('Recovered closing promoted issues after 0 minutes')
   })
 
+  async function promotedIssueLoop(headSha: string) {
+    paths = {
+      ...paths,
+      fleet: {
+        dir: repoRoot, project: 'example', repository: 'owner/example',
+        issueRepository: 'owner/fleet',
+      },
+    }
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, 'merged-task', [issueNumber])
+    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
+    fakeForge.prStatus = async () => ({
+      state: 'merged',
+      isDraft: false,
+      url: 'https://example.test/pull/9',
+      headSha,
+      checks: [],
+    })
+    return { loop, issueNumber }
+  }
+
+  it('fetches a merged run head that was pushed outside the loop before comparing', async () => {
+    const outside = join(repoRoot, 'outside')
+    execFileSync('git', ['clone', '--quiet', join(repoRoot, 'origin.git'), outside], { windowsHide: true })
+    git(['config', 'user.email', 'outside@example.test'], outside)
+    git(['config', 'user.name', 'Outside'], outside)
+    writeFileSync(join(outside, 'outside.txt'), 'outside\n')
+    git(['add', 'outside.txt'], outside)
+    git(['commit', '--quiet', '-m', 'outside push'], outside)
+    git(['push', '--quiet', 'origin', 'HEAD:refs/heads/run/outside'], outside)
+    const headSha = git(['rev-parse', 'HEAD'], outside).trim()
+    const { loop, issueNumber } = await promotedIssueLoop(headSha)
+
+    await loop.poll()
+
+    expect(logText()).toContain(`Promoted #${issueNumber}`)
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+  })
+
+  it('warns instead of reporting recovery when the merged run head cannot be found', async () => {
+    const { loop, issueNumber } = await promotedIssueLoop('f'.repeat(40))
+
+    await loop.poll()
+
+    expect(logText()).toContain('WARN could not close promoted issues:')
+    expect(logText()).not.toContain('Recovered closing promoted issues')
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('open')
+  })
+
   beforeEach(() => {
     initializeGitRepoWithRemote()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
@@ -3714,6 +3831,49 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(logText()).toContain(
       `ERROR 3 consecutive issue release failures for #${issueNumber}; stopping the loop`,
     )
+  })
+
+  it('counts a startup failure once while its issue release is still pending', async () => {
+    initializeGitRepo()
+    const description = '[BUG] count a startup failure once across release retries'
+    const attemptedTaskIds: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
+        throw new Error('runner spawn failed')
+      },
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, maxParallel: 1 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'single failure count',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const addLabel = fakeForge.addLabel.bind(fakeForge)
+    fakeForge.addLabel = async (number, label) => {
+      if (number === issueNumber && label === LABEL_READY) throw new Error('forge unavailable')
+      await addLabel(number, label)
+    }
+    const failureCountFile = join(paths.queueDir, 'issue-failure-count', String(issueNumber))
+
+    expect(await loop.poll()).toBe('continue')
+
+    const taskId = attemptedTaskIds[0]!
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(readFileSync(failureCountFile, 'utf8')).toBe('1\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(attemptedTaskIds).toEqual([taskId])
+    expect(readFileSync(failureCountFile, 'utf8')).toBe('1\n')
   })
 })
 

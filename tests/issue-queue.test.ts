@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ForgeIssue } from '../src/adapters/forge.ts'
 import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels, closePromotedIssues,
-  commentOnIssueMerge, fingerprintOf, groupReadyFindings, heartbeatIssueForTask,
+  commentOnIssueMerge, fingerprintOf, issueMergeComment, issueUnpromotedComment, groupReadyFindings,
+  heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   issueFailureCount, issueReleaseIntentForTask, issueReleasePreparationForTask,
   IssueReleaseReconciliationError,
@@ -20,7 +21,7 @@ import {
   recordIssueCompletions,
   recordIssueFailure, recordIssueReleaseIntent, recordIssuesForTask,
   recordIssuePromotions,
-  returnIssueToReady, LABEL_FINDING,
+  returnIssueToReady, standingMergeMarkers, LABEL_FINDING,
   LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
   type ClaimedRequirement,
@@ -2205,6 +2206,21 @@ describe('reapStaleLeases', () => {
     expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
+  it('reaps an issue whose merge marker a later unpromoted comment withdrew', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'unpromoted', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    await forge.commentIssue(issueNumber, 'MERGED: old-task\nMerged by an earlier run.')
+    await forge.commentIssue(issueNumber, 'UNPROMOTED: old-task\nIts run pull request closed.')
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([issueNumber])
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
+  })
+
   it('removes persisted merge metadata after promotion closes the issue', async () => {
     const issueNumber = await forge.createIssue({
       title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
@@ -2533,7 +2549,7 @@ describe('closePromotedIssues', () => {
     const issueNumber = await promotedIssue('task-open', 'a'.repeat(40), 'run/open')
     forge.prStatusValue = { state: 'open', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
 
-    expect(await closePromotedIssues(forge, paths, () => true)).toEqual([])
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [], returned: [] })
     expect((await forge.getIssue(issueNumber)).state).toBe('open')
   })
 
@@ -2543,7 +2559,7 @@ describe('closePromotedIssues', () => {
     forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
     const contains = (ancestor: string) => ancestor === 'a'.repeat(40)
 
-    expect(await closePromotedIssues(forge, paths, contains)).toEqual([contained])
+    expect(await closePromotedIssues(forge, paths, contains)).toEqual({ closed: [contained], returned: [] })
     expect((await forge.getIssue(contained)).state).toBe('closed')
     expect((await forge.getIssue(later)).state).toBe('open')
     expect(forge.prStatusRefs).toEqual([{ kind: 'branch', value: 'run/merged' }])
@@ -2555,11 +2571,61 @@ describe('closePromotedIssues', () => {
     forge.issues.delete(deleted)
     forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
 
-    expect(await closePromotedIssues(forge, paths, () => true)).toEqual([closable])
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [closable], returned: [] })
     expect((await forge.getIssue(closable)).state).toBe('closed')
     expect(issuePromotionForIssue(paths, deleted)).toBeUndefined()
     expect(issueNumbersForTask(paths, 'task-deleted')).toEqual([])
     expect(issuePromotionForIssue(paths, closable)?.taskId).toBe('task-closable')
-    expect(await closePromotedIssues(forge, paths, () => true)).toEqual([closable])
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [closable], returned: [] })
+  })
+
+  it('returns the issues of a run pull request closed without merging to ready', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'task-abandoned', body: buildIssueBody('[BUG] task-abandoned', 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-abandoned', [issueNumber])
+    recordIssuePromotions(paths, 'task-abandoned', 'a'.repeat(40), 'run/closed')
+    await forge.commentIssue(issueNumber, issueMergeComment('task-abandoned', 'a'.repeat(40), 'run/closed'))
+    forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: [], returned: [issueNumber] })
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.state).toBe('open')
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(forge.issueComments.get(issueNumber)?.at(-1)).toBe(
+      `UNPROMOTED: task-abandoned\nMerged as ${'a'.repeat(40)} into run branch run/closed, whose pull request pr-url was closed without merging. This issue is ready again.`,
+    )
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    expect(issueNumbersForTask(paths, 'task-abandoned')).toEqual([])
+    expect(standingMergeMarkers(await forge.listIssueComments(issueNumber))).toEqual([])
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [], returned: [] })
+  })
+
+  it('posts the withdrawal once while returning the issue to ready keeps failing', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'task-stuck', body: buildIssueBody('[BUG] task-stuck', 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-stuck', [issueNumber])
+    recordIssuePromotions(paths, 'task-stuck', 'a'.repeat(40), 'run/closed')
+    forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
+    const addLabel = forge.addLabel
+    forge.addLabel = async () => { throw new Error('rate limited') }
+    const withdrawal = issueUnpromotedComment('task-stuck', 'a'.repeat(40), 'run/closed', 'pr-url')
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toThrow('rate limited')
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toThrow('rate limited')
+    expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-stuck')
+
+    forge.addLabel = addLabel
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: [], returned: [issueNumber] })
+    expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
   })
 })

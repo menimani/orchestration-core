@@ -61,6 +61,15 @@ const decodedEscapes = (line: string): string => line.replace(
     const codePoint = Number.parseInt(braced ?? fixed ?? byte!, 16)
     return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : escape
   },
+).replace(
+  // Code points spelled as integer literals name the same text an escape would.
+  /String\.fromCodePoint\(\s*((?:0[xX][\da-fA-F]+|\d+)(?:\s*,\s*(?:0[xX][\da-fA-F]+|\d+))*)\s*\)/g,
+  (call, literals: string) => {
+    const codePoints = literals.split(',').map((literal) => Number(literal.trim()))
+    return codePoints.every((codePoint) => codePoint <= 0x10ffff)
+      ? String.fromCodePoint(...codePoints)
+      : call
+  },
 )
 
 const normalizedPath = (file: string): string => file.replaceAll('\\', '/')

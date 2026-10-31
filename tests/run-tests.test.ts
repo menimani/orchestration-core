@@ -8,9 +8,13 @@ import { performance } from 'node:perf_hooks'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const fixtures: string[] = []
+// Bounds a spawned child's first observable write. The children are node and PowerShell
+// processes whose startup stretches past five seconds on a host running several suites
+// and task runners at once; the bound guards against a hang, not against slowness.
+const CHILD_START_TIMEOUT_MS = 30_000
 
 async function waitForPath(path: string): Promise<void> {
-  const deadline = Date.now() + 5_000
+  const deadline = Date.now() + CHILD_START_TIMEOUT_MS
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`)
     await new Promise((resolve) => setTimeout(resolve, 20))
@@ -24,7 +28,7 @@ function queuedTickets(path: string): string[] {
 // Waits for exactly `count` tickets. The lock owner publishes owner.json before it
 // withdraws its own ticket, so "at least" would count the owner as a waiter.
 async function waitForTicketCount(path: string, count: number): Promise<void> {
-  const deadline = Date.now() + 5_000
+  const deadline = Date.now() + CHILD_START_TIMEOUT_MS
   while (queuedTickets(path).length !== count) {
     if (Date.now() >= deadline) {
       throw new Error(`Timed out waiting for ${count} tickets in ${path}; found ${JSON.stringify(queuedTickets(path))}`)

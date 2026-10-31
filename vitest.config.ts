@@ -18,6 +18,8 @@ export default defineConfig({
       ...uncollectedSuites(),
     ],
     globalSetup: ['tests/globalSetup.ts'],
+    // Isolates every git process from the host's system and global configuration.
+    setupFiles: ['tests/gitIsolation.ts'],
     // Fork IPC times out while the git-heavy suites run on Windows under Node 24;
     // worker threads use the same isolation without that process-channel failure.
     pool: process.platform === 'win32' ? 'threads' : 'forks',

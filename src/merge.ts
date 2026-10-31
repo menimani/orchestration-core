@@ -546,17 +546,95 @@ function rebaseTaskOntoRunTip(
     git(worktree, [
       'rebase', '--quiet', '--reapply-cherry-picks', '--empty=keep', currentBranch,
     ])
-  } catch {
-    const conflict = describeRebaseConflict(worktree, currentBranch, taskTip)
+  } catch (rebaseError) {
+    // Only unmerged paths prove a conflict. A rebase also stops on a held file or a stale
+    // index lock, and abandoning the task for that would discard work a retry can merge.
+    const conflictedFiles = unmergedPaths(worktree)
+    const conflict = conflictedFiles.length > 0
+      ? describeRebaseConflict(worktree, currentBranch, taskTip, conflictedFiles)
+      : undefined
+    let abortError: unknown
     try {
       git(worktree, ['rebase', '--abort'])
-    } catch {
-      // nothing to abort
+    } catch (error) {
+      // A rebase that never started leaves nothing to abort; the state check below decides.
+      abortError = error
+    }
+    verifyRebaseAborted(worktree, currentBranch, taskTip, rebaseError, abortError)
+    if (conflictedFiles.length === 0) {
+      throw new MergeError(
+        `Rebasing the task onto ${currentBranch} failed without a conflict; the rebase was aborted. `
+        + `Rebase failure: ${commandFailureSummary(rebaseError)}`,
+      )
     }
     throw new RebaseConflictError(
       `A conflict occurred while rebasing the task onto ${currentBranch}; the rebase was aborted.`,
       conflict,
     )
+  }
+}
+
+/**
+ * Confirm the abort left the task worktree where the rebase found it. A worktree still
+ * mid-rebase, or on another commit, would be misread by the next merge attempt, so it
+ * stops the loop instead of staying retryable; a failed lookup proves nothing and stops it
+ * too.
+ */
+function verifyRebaseAborted(
+  worktree: string,
+  currentBranch: string,
+  taskTip: string,
+  rebaseError: unknown,
+  abortError: unknown,
+): void {
+  let inProgress: boolean
+  let head: string
+  try {
+    inProgress = gitPathExists(worktree, 'rebase-merge') || gitPathExists(worktree, 'rebase-apply')
+    head = git(worktree, ['rev-parse', 'HEAD']).trim()
+  } catch (verificationError) {
+    throw new MergeRecoveryError(
+      `Rebasing the task onto ${currentBranch} failed and recovery could not be verified: `
+      + `${commandFailureSummary(verificationError)}; `
+      + `rebase abort ${abortError === undefined ? 'reported success' : `failed: ${commandFailureSummary(abortError)}`}. `
+      + `Rebase failure: ${commandFailureSummary(rebaseError)}. `
+      + 'Inspect and restore the task worktree before restarting orchestration.',
+    )
+  }
+  if (inProgress || head !== taskTip) {
+    throw new MergeRecoveryError(
+      `Rebasing the task onto ${currentBranch} failed and the abort did not restore the task worktree: `
+      + `expected HEAD ${taskTip.slice(0, 8)}, found ${head.slice(0, 8)}; `
+      + `rebase ${inProgress ? 'is still in progress' : 'is not in progress'}; `
+      + `rebase abort ${abortError === undefined ? 'reported success' : `failed: ${commandFailureSummary(abortError)}`}. `
+      + `Rebase failure: ${commandFailureSummary(rebaseError)}. `
+      + 'Inspect and restore the task worktree before restarting orchestration.',
+    )
+  }
+}
+
+/** Whether the repository holds the named entry under its git directory. */
+function gitPathExists(cwd: string, name: string): boolean {
+  const gitPath = git(cwd, ['rev-parse', '--git-path', name]).trim()
+  try {
+    statSync(isAbsolute(gitPath) ? gitPath : resolve(cwd, gitPath))
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+/**
+ * Paths a stopped rebase left unmerged. A lookup that fails proves no conflict, so it
+ * answers none and the failure stays retryable rather than abandoning the task.
+ */
+function unmergedPaths(worktree: string): string[] {
+  try {
+    return git(worktree, ['diff', '--name-only', '--diff-filter=U'])
+      .split(/\r?\n/).filter((line) => line !== '')
+  } catch {
+    return []
   }
 }
 
@@ -568,17 +646,14 @@ function describeRebaseConflict(
   worktree: string,
   currentBranch: string,
   taskTip: string,
+  conflictedFiles: string[],
 ): RebaseConflict | undefined {
   try {
     const runTip = git(worktree, ['rev-parse', currentBranch]).trim()
     const base = git(worktree, ['merge-base', currentBranch, taskTip]).trim()
-    const conflictedFiles = git(worktree, ['diff', '--name-only', '--diff-filter=U'])
-      .split(/\r?\n/).filter((line) => line !== '')
-    const conflictingCommits = conflictedFiles.length === 0
-      ? []
-      : git(worktree, [
-        'log', '--reverse', '--format=%H', `${base}..${runTip}`, '--', ...conflictedFiles,
-      ]).split(/\r?\n/).filter((line) => line !== '')
+    const conflictingCommits = git(worktree, [
+      'log', '--reverse', '--format=%H', `${base}..${runTip}`, '--', ...conflictedFiles,
+    ]).split(/\r?\n/).filter((line) => line !== '')
     return {
       runBranch: currentBranch, runTip, base, taskTip, conflictedFiles, conflictingCommits,
     }
@@ -1157,14 +1232,16 @@ function acquireMergeGuard(
 function finishMergeGuard(
   guard: { file: string; owner: MergeGuardOwner },
 ): void {
-  let ownsGuard = false
   try {
-    ownsGuard = readFileSync(join(guard.file, 'owner.json'), 'utf8').trim()
+    const ownsGuard = readFileSync(join(guard.file, 'owner.json'), 'utf8').trim()
       === JSON.stringify(guard.owner)
-  } catch {
-    return
+    if (!ownsGuard) return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    // An unreadable owner (a scanner holding it on Windows) still names this live daemon.
+    // Recording the token lets the next attempt reclaim it even if retirement fails too.
+    if (guard.owner.token !== null) retiredMergeGuardTokens.add(guard.owner.token)
   }
-  if (!ownsGuard) return
   const retiredGuard = `${guard.file}.retired-${randomUUID()}`
   // Publish retirement before the preferred atomic rename. If Windows refuses the
   // directory rename, a waiter can still distinguish this guard from a live operation.

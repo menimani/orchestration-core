@@ -32,6 +32,10 @@ export interface DaemonProcess {
   offExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void
 }
 
+export interface TerminableSpawnOptions {
+  detached: boolean
+}
+
 export interface OperatingSystem {
   /** User-facing label for the environment that exercised local verification. */
   verificationEnvironmentLabel(): string
@@ -40,6 +44,11 @@ export interface OperatingSystem {
   /** Stable identity for this particular use of a PID, or undefined when unverifiable. */
   processStartIdentity(pid: number): string | undefined
   terminateProcessTree(pid: number): boolean
+  /**
+   * Spawn options that keep a child's tree reachable by `terminateProcessTree`. POSIX stops
+   * a process group, so the child must lead one; Windows follows parent links instead.
+   */
+  terminableSpawnOptions(): TerminableSpawnOptions
   /**
    * Whether a process with this identifier is running. Detection asks about the process;
    * termination asks about its tree. Using the tree question to detect a recorded PID

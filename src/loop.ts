@@ -61,7 +61,7 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   isReadyToClaim,
   issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
-  reapStaleLeases, sourceIssueNumbers,
+  reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
@@ -301,8 +301,7 @@ export function createLoop(deps: LoopDeps) {
     issueCommentCache.set(issue.number, {
       updatedAt: issue.updatedAt,
       comments,
-      hasMergeMarker: comments.some((comment) =>
-        comment.author.hasWriteAccess && /^MERGED: /.test(comment.body)),
+      hasMergeMarker: standingMergeMarkers(comments).length > 0,
     })
     return comments
   }
@@ -435,6 +434,33 @@ export function createLoop(deps: LoopDeps) {
     }
   }
 
+  // Exit 1 is the only answer that means "not contained". Any other failure, such as a
+  // merged head that was pushed outside the loop and never fetched, would otherwise leave
+  // the promoted issue open on every poll while the bookkeeping reported success.
+  function promotedCommitContained(ancestor: string, descendant: string): boolean {
+    const compare = (): { status: number | null, detail: string } => {
+      try {
+        git(['merge-base', '--is-ancestor', ancestor, descendant])
+        return { status: 0, detail: '' }
+      } catch (error) {
+        const failure = error as { status?: number | null, stderr?: string, message?: string }
+        return {
+          status: failure.status ?? null,
+          detail: (failure.stderr ?? failure.message ?? '').trim(),
+        }
+      }
+    }
+    let result = compare()
+    if (result.status !== 0 && result.status !== 1) {
+      git(['fetch', '--quiet', currentBranchPushRemote(paths.repoRoot), descendant])
+      result = compare()
+    }
+    if (result.status === 0) return true
+    if (result.status === 1) return false
+    throw new Error(`could not tell whether ${descendant} contains ${ancestor}`
+      + (result.detail === '' ? '' : `: ${result.detail}`))
+  }
+
   function gitIn(cwd: string, args: string[]): string {
     return execFileSync('git', args, {
       cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
@@ -458,6 +484,16 @@ export function createLoop(deps: LoopDeps) {
     const commits = gitIn(worktree, ['log', `${baseSha}..HEAD`, '--format=%H'])
       .trim().split(/\r?\n/).filter((line) => line !== '')
     if (commits.length === 0) {
+      // Re-read every claim right before closing it. An issue an earlier attempt already
+      // closed is finished again harmlessly; an open issue that left loop:in-progress was
+      // reaped, and may since have been handed to another task.
+      const lost: number[] = []
+      for (const issueNumber of issueNumbers) {
+        const issue = await forge.getIssue(issueNumber)
+        if (issue.state === 'open' && (!issue.labels.includes(LABEL_IN_PROGRESS)
+          || issue.labels.includes(LABEL_READY))) lost.push(issueNumber)
+      }
+      if (lost.length > 0) throw new LostWorkerClaimError(lost)
       if (isInspectionTaskId(paths, taskId)) {
         await Promise.all(issueNumbers.map((issueNumber) =>
           closeIssueAndRemoveLifecycleLabels(forge, issueNumber,
@@ -707,6 +743,16 @@ export function createLoop(deps: LoopDeps) {
         if (error instanceof ForgeRateLimitError) return
         const message = error instanceof Error ? error.message : String(error)
         appendFileSync(mergeLog, `${message}\n`)
+        // Not a failure: the gate's tests never ran because other worktrees held the
+        // repository test lock past its wait limit. The issue stays merge-ready, so the
+        // next poll adopts the pushed branch again.
+        if (error instanceof TestLockBusyError) {
+          const subject = adoptionTaskId === undefined
+            ? `issue #${issue.number}`
+            : shortTaskId(adoptionTaskId)
+          event('WARN', `${subject} adoption deferred: the repository test lock stayed busy`)
+          continue
+        }
         if (error instanceof OrchestrationDepsInstallError || error instanceof MergeRecoveryError) {
           throw error
         }
@@ -819,19 +865,9 @@ export function createLoop(deps: LoopDeps) {
 
   function reportsNothing(text: string): boolean {
     const trimmed = text.trim()
-    const ideographicFullStop = String.fromCodePoint(0x3002)
-    const normalized = trimmed.replace(/[.!]+$/, '')
-      .replace(new RegExp(`${ideographicFullStop}+$`), '').toLowerCase()
+    const normalized = trimmed.replace(/[.!]+$/, '').toLowerCase()
     if (['none', 'n/a', 'nothing', 'no findings', 'no finding', 'nothing to report', 'nothing found']
       .includes(normalized)) return true
-    const noFindingPhrases = [
-      [0x6307, 0x6458, 0x306a, 0x3057],
-      [0x554f, 0x984c, 0x306a, 0x3057],
-      [0x8a72, 0x5f53, 0x306a, 0x3057],
-      [0x7279, 0x306b, 0x306a, 0x3057],
-      [0x306a, 0x3057],
-    ].map((points) => String.fromCodePoint(...points))
-    if (noFindingPhrases.includes(normalized)) return true
     const firstSentence = (trimmed.split(/(?<=[.!?])\s/, 1)[0] ?? '')
       .replace(/[.!]+$/, '').toLowerCase()
     return /^none\b/.test(firstSentence)
@@ -1341,9 +1377,34 @@ export function createLoop(deps: LoopDeps) {
     return text
   }
 
-  function scanSpecification(scanId: string, scope: string): string {
-    return repositoryInspectionPreamble()
-      + renderTemplate('scan-template.md', { SCAN_ID: scanId, SCAN_SCOPE: scope })
+  function acceptedLimitsSection(): string {
+    const acceptedLimitsFile = join(paths.projectRoot, 'accepted-limits.md')
+    const acceptedLimits = existsSync(acceptedLimitsFile)
+      ? readFileSync(acceptedLimitsFile, 'utf8').trim() || '(none)'
+      : '(none)'
+    return frameUntrustedText(acceptedLimits)
+  }
+
+  function scanSpecification(
+    scanId: string,
+    scope: string,
+    acceptedLimits: string = acceptedLimitsSection(),
+  ): string {
+    const hasPlaceholder = readTemplate(paths, 'scan-template.md').includes('{{ACCEPTED_LIMITS}}')
+    let specification = renderTemplate('scan-template.md', {
+      SCAN_ID: scanId,
+      SCAN_SCOPE: scope,
+      ACCEPTED_LIMITS: acceptedLimits,
+    })
+    // A consumer's own scan template may predate the placeholder. The appended heading
+    // is unnumbered, so it never changes the sections that SCAN_PARALLEL splits.
+    if (!hasPlaceholder) {
+      specification = `${specification.trimEnd()}\n\n## Accepted limits\n\n`
+        + 'These are accepted limits by decision. Do not report them or propose narrower variants\n'
+        + 'of them as findings. A finding qualitatively beyond an entry is still reportable.\n\n'
+        + `${acceptedLimits}\n`
+    }
+    return repositoryInspectionPreamble() + specification
   }
 
   function numberedScanSections(specification: string): number[] {
@@ -1416,16 +1477,12 @@ export function createLoop(deps: LoopDeps) {
       event('WARN', `could not resolve a valid default branch for ${remote}`)
       return false
     }
-    const acceptedLimitsFile = join(paths.projectRoot, 'accepted-limits.md')
-    const acceptedLimits = existsSync(acceptedLimitsFile)
-      ? readFileSync(acceptedLimitsFile, 'utf8').trim() || '(none)'
-      : '(none)'
     const text = repositoryInspectionPreamble() + renderTemplate('review-template.md', {
       REVIEW_ID: reviewId,
       CYCLE: String(cycle),
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       BASE_BRANCH: baseBranch,
-      ACCEPTED_LIMITS: frameUntrustedText(acceptedLimits),
+      ACCEPTED_LIMITS: acceptedLimitsSection(),
       ...reviewScopeTemplateValues(
         paths.repoRoot,
         config.integrationBranch === '' || paths.fleet !== undefined
@@ -2085,8 +2142,7 @@ export function createLoop(deps: LoopDeps) {
           if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
           try {
             const comments = await commentsForIssue(issue)
-            const mergeSha = comments
-              .filter((comment) => comment.author.hasWriteAccess)
+            const mergeSha = standingMergeMarkers(comments)
               .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment.body)?.[1])
               .find((sha) => sha !== undefined
                 && optionalGit(['merge-base', '--is-ancestor', sha, 'HEAD'], 'ancestor') === 'ancestor')
@@ -2329,7 +2385,9 @@ export function createLoop(deps: LoopDeps) {
     if (nScans > 1) {
       let sections: number[]
       try {
-        sections = numberedScanSections(scanSpecification('scan', ''))
+        // The owner's limits are prose, not sections; leave them out so a numbered
+        // heading inside them cannot change how the scans are split.
+        sections = numberedScanSections(scanSpecification('scan', '', ''))
       } catch (error) {
         event('ERROR', `scan-template.md is unusable: it must contain unique numbered Markdown headings outside fenced code blocks (${errorSummary(error)})`)
         writeFileSync(stopFile, '')
@@ -2968,10 +3026,12 @@ export function createLoop(deps: LoopDeps) {
             // Closing promoted issues is bookkeeping a later poll can finish; it must not
             // cost this poll its claims.
             try {
-              const closed = await closePromotedIssues(forge, paths, (ancestor, descendant) =>
-                optionalGit(['merge-base', '--is-ancestor', ancestor, descendant], 'yes') === 'yes')
+              const { closed, returned } = await closePromotedIssues(forge, paths, promotedCommitContained)
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
+              }
+              for (const issueNumber of returned) {
+                event('Released', `#${issueNumber}`, 'run pull request closed without merging')
               }
               warningLog.recovered('promoted-issues')
             } catch (error) {
@@ -3086,6 +3146,9 @@ export function createLoop(deps: LoopDeps) {
           const issueNumbers = issueNumbersForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumbers.length > 0) {
             recordIssueFailure(paths, entry.taskId)
+            // The status sweep counts a failed task that has no flag. A release that fails
+            // here leaves the task behind for later polls, so mark the failure as counted.
+            writeFileSync(join(scannedDir, `${entry.taskId}.failed`), '')
             let released = false
             if (remoteOperationsAvailable) {
               recordIssueReleaseIntent(paths, entry.taskId, issueNumbers)

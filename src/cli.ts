@@ -8,7 +8,9 @@ import { join, relative, resolve, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { loadForge, type Forge } from './adapters/forge.ts'
 import { projectScopeLabel, scopeForgeToProject } from './issueScope.ts'
-import { loadRunner, type ReasoningEffort, type Runner } from './adapters/runner.ts'
+import {
+  loadRunner, type ReasoningEffort, type Runner, type RunnerSharedSkills,
+} from './adapters/runner.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { errorHeadline } from './errorText.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
@@ -82,9 +84,9 @@ type QueueMode = 'local' | 'issue'
 
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high'])
 
-async function loadProject(pathsRoot: string) {
+async function loadProject(pathsRoot: string, env: NodeJS.ProcessEnv = process.env) {
   const projectModule = await import('./adapters/project.ts')
-  return projectModule.loadProject(pathsRoot)
+  return projectModule.loadProject(pathsRoot, env)
 }
 
 /** A fleet project's paths, rooted at this machine's checkout of its repository. */
@@ -995,20 +997,50 @@ function commandConfigValue(name: string, raw: string): unknown {
 }
 
 /**
- * Install the shared skills once per user, for Claude and Codex, rendered to run against
- * this fleet from any of its projects' checkouts.
+ * Install the shared skills once per user, rendered to run against this fleet from any of
+ * its checkouts: for interactive Claude by default, for the runner each fleet project
+ * selects, and for every additional agent its project adapter declares.
  */
 async function installSkillsForFleet(fleetDir: string, args: string[]): Promise<number> {
   if (args.length > 0) {
     console.error(`Usage: install-skills [--fleet <dir>]; unknown: ${args.join(' ')}`)
     return 1
   }
-  readFleet(fleetDir)
+  const fleet = readFleet(fleetDir)
   const { createClaudeSharedSkills } = await import('./adapters/shared-skills-claude.ts')
-  const { createCodexRunner } = await import('./adapters/runner-codex.ts')
-  const result = installUserSkills(
-    fleetDir, packageFile(), [createClaudeSharedSkills(), createCodexRunner().sharedSkills],
-  )
+  // Interactive Claude is the default agent, installed whatever the projects declare.
+  const adapters: RunnerSharedSkills[] = [createClaudeSharedSkills()]
+  const runnerFailures: string[] = []
+  for (const project of Object.keys(fleet.projects)) {
+    const projectRoot = join(fleetDir, 'projects', project)
+    // A relative external selector resolves against the project's checkout, as the
+    // loop resolves it; a built-in runner needs none, so a missing mapping is not fatal.
+    let repoRoot: string | undefined
+    try {
+      repoRoot = resolveFleetProject(fleetDir, project).checkout
+    } catch {
+      repoRoot = undefined
+    }
+    try {
+      const config = loadConfig(process.env, { filePath: join(projectRoot, 'config.json') })
+      adapters.push((await loadRunner(config.runner, { env: process.env, repoRoot })).sharedSkills)
+    } catch (error) {
+      runnerFailures.push(`${project}: ${errorHeadline(error)}`)
+    }
+    // A project without an adapter directory declares no further agents. The caller's
+    // PROJECT and PROJECT_ADAPTER select within one project, so no project here sees them.
+    if (!existsSync(join(projectRoot, 'project'))) continue
+    try {
+      const env = { ...process.env }
+      delete env['PROJECT']
+      delete env['PROJECT_ADAPTER']
+      adapters.push(...((await loadProject(projectRoot, env)).sharedSkills ?? []))
+    } catch (error) {
+      runnerFailures.push(`${project}: ${errorHeadline(error)}`)
+    }
+  }
+  const result = installUserSkills(fleetDir, packageFile(), adapters)
+  result.failures.push(...runnerFailures)
   for (const skill of result.installed) console.log(`Installed: ${skill}`)
   for (const skill of result.updated) console.log(`Updated: ${skill}`)
   for (const skill of result.conflicts) {
@@ -1778,9 +1810,9 @@ async function main(): Promise<number> {
       }
       const fleetDir = fleetOption !== undefined
         ? resolve(fleetOption)
-        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(process.cwd())
+        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory)
       if (fleetDir === undefined) {
-        console.error(`ERROR: no ${FLEET_FILE} found at or above ${process.cwd()}; pass --fleet <dir>`)
+        console.error(`ERROR: no ${FLEET_FILE} found at or above ${callerDirectory}; pass --fleet <dir>`)
         return 1
       }
       if (projectOption === undefined) {

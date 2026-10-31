@@ -131,7 +131,7 @@ describe('integration branch topology', () => {
     }, taskId, { effort: 'medium' })
 
     const taskRoot = worktreeDir(paths, taskId)
-    expect(readFileSync(join(taskRoot, 'integration.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(taskRoot, 'integration.txt'), 'utf8'))
       .toBe('available to tasks\n')
     expect(git(taskRoot, ['merge-base', branchName(taskId), integrationBase])).toBe(integrationBase)
     commit(taskRoot, 'task.txt', 'task result\n', 'feat: task result')
@@ -228,8 +228,8 @@ describe('integration branch topology', () => {
         return 'continue'
       },
       prepareIntegrationWorktree: () => {
-        expect(readFileSync(join(topology.paths.repoRoot, 'default-change.txt'), 'utf8')
-          .replaceAll('\r', '')).toBe('default work\n')
+        expect(readFileSync(join(topology.paths.repoRoot, 'default-change.txt'), 'utf8'))
+          .toBe('default work\n')
         lifecycle.push('prepare integration')
       },
     })
@@ -403,8 +403,7 @@ describe('integration branch topology', () => {
     expect(git(topology.paths.repoRoot, [
       'merge-base', '--is-ancestor', remoteHead, 'HEAD',
     ])).toBe('')
-    expect(readFileSync(join(topology.paths.repoRoot, 'default-change.txt'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(topology.paths.repoRoot, 'default-change.txt'), 'utf8'))
       .toBe('default work\n')
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(daemonHead)
     expect(existsSync(join(repoRoot, 'default-change.txt'))).toBe(false)
@@ -425,8 +424,8 @@ describe('integration branch topology', () => {
 
     expect(git(topology.paths.repoRoot, ['rev-parse', 'HEAD'])).toBe(integrationHead)
     expect(git(topology.paths.repoRoot, ['status', '--porcelain'])).toBe('')
-    expect(readFileSync(join(topology.paths.repoRoot, 'tracked.txt'), 'utf8')
-      .replaceAll('\r', '')).toBe('integration version\n')
+    expect(readFileSync(join(topology.paths.repoRoot, 'tracked.txt'), 'utf8'))
+      .toBe('integration version\n')
     expect(events.some((line) => line.startsWith(
       'WARN default branch merge conflicted; continuing:',
     ))).toBe(true)

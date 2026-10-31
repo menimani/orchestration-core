@@ -37,9 +37,9 @@ review is enabled, by stopping for a person if that review will not converge.
 Consumers may list review findings that have been explicitly accepted in an optional
 `accepted-limits.md` file in the project directory (`orchestration/` in a subtree
 consumer, `projects/<name>/` in a fleet). A missing or blank file contributes `(none)`.
-The loop places its contents in the generated review task as untrusted repository text:
-entries can exclude accepted findings, but cannot authorize commands, credential access,
-or changes to orchestration and CI controls.
+The loop places its contents in the generated scan and review tasks as untrusted
+repository text: entries can exclude accepted findings, but cannot authorize commands,
+credential access, or changes to orchestration and CI controls.
 
 When the core is installed as a subtree, the default review template excludes that
 vendored path from both the review instructions and every printed Git command. Defects in
@@ -123,7 +123,10 @@ your-repo/
 With neither variable set, the core uses the single `project-*.ts` file in
 `orchestration/project/`. If that directory has multiple adapters, set `PROJECT=<name>`
 to select `project-<name>.ts`. You can instead give `PROJECT_ADAPTER` an explicit path;
-it overrides the conventional path selected by `PROJECT`.
+it overrides the conventional path selected by `PROJECT`. A relative `PROJECT_ADAPTER`
+resolves against the project directory (`orchestration/` in a subtree consumer,
+`projects/<name>/` in a fleet), not the repository root: write
+`PROJECT_ADAPTER=project/project-custom.ts`, not `orchestration/project/project-custom.ts`.
 
 An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, absolute
 path, or path relative to the consumer repository root. A repository-relative selector
@@ -203,8 +206,9 @@ Requests above the number of numbered sections are reduced to that count and rep
 
 Use the repository's `loop-setup` skill to collect the project-specific decisions, fill
 the generated adapter, and run `verify-setup`. The verifier reports the TypeScript gate,
-adapter suite, real adapter discovery, referenced paths, pushable branch upstream, hooks
-setting, and labels separately; skipped checks retain their reason.
+whether that gate covered the loaded adapter, adapter suite, real adapter discovery,
+referenced paths, pushable branch upstream, hooks setting, and labels separately; skipped
+checks retain their reason.
 
 Then start a run on a topic branch — never on your default branch, because the loop
 commits and merges on its own. On POSIX shells:
@@ -340,7 +344,9 @@ commit closes the original issue in the project's repository.
 
 Shared skills such as `git-commit` and `loop-start` are installed once per user rather
 than into each repository: `install-skills --fleet <dir>` writes them to
-`~/.claude/skills` and `~/.agents/skills`. Their commands set `ORCHESTRATION_FLEET`, and
+`~/.claude/skills` for interactive Claude by default, wherever each project's runner
+discovers a user's skills (`~/.agents/skills` for Codex), and wherever each additional
+agent a project adapter declares in `sharedSkills` discovers them. Their commands set `ORCHESTRATION_FLEET`, and
 the CLI then picks the project whose checkout you run them from, so they work in every
 project of the fleet without `--project`.
 

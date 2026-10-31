@@ -82,6 +82,7 @@ function repositoryPaths(repoRoot: string, paths: string[]): string[] {
 function syncSkills(
   repoRoot: string,
   packageRoot: string,
+  guidanceRoot: string,
   runner: Runner,
   project: ProjectAdapter,
   isConsumer: boolean,
@@ -108,7 +109,7 @@ function syncSkills(
     }
   }
 
-  const result = syncSharedSkills(repoRoot, packageRoot, sharedSkills)
+  const result = syncSharedSkills(repoRoot, packageRoot, sharedSkills, guidanceRoot)
   if (result.failures.length > 0) {
     throw new Error(`shared skill sync failed: ${result.failures.join('; ')}`)
   }
@@ -186,17 +187,22 @@ export async function updateCoreBeforeCycle(
   const packageRoot = runtime.packageRoot ?? (config.integrationBranch === '' || paths.fleet !== undefined
     ? PACKAGE_ROOT
     : join(paths.repoRoot, relative(stateRepoRoot, PACKAGE_ROOT)))
+  // Guidance follows the project's assets: the fleet's project directory, or the
+  // checkout being synced when those assets live inside the repository.
+  const guidanceRoot = paths.fleet !== undefined
+    ? paths.projectRoot
+    : join(paths.repoRoot, relative(stateRepoRoot, paths.projectRoot))
   const prefix = packageSubtreePrefix(paths.repoRoot, packageRoot)
   // The core repository itself and a CLI aimed at another checkout are not subtree
   // consumers. Only the owning repository receives local, ignored generated copies.
   if (prefix === undefined) {
     if (relative(paths.repoRoot, packageRoot) === '') {
-      syncSkills(paths.repoRoot, packageRoot, runner, project, false, event, runtime)
+      syncSkills(paths.repoRoot, packageRoot, guidanceRoot, runner, project, false, event, runtime)
     }
     return 'continue'
   }
   const finish = (outcome: CoreUpdateOutcome): CoreUpdateOutcome => {
-    syncSkills(paths.repoRoot, packageRoot, runner, project, true, event, runtime)
+    syncSkills(paths.repoRoot, packageRoot, guidanceRoot, runner, project, true, event, runtime)
     return outcome
   }
   if (config.upstreamRemote.trim() === '') {
@@ -322,7 +328,7 @@ export async function updateCoreBeforeCycle(
     return finish('continue')
   }
 
-  syncSkills(paths.repoRoot, packageRoot, runner, project, true, event, runtime)
+  syncSkills(paths.repoRoot, packageRoot, guidanceRoot, runner, project, true, event, runtime)
   const newHead = runtime.git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   const changed = runtime.git(paths.repoRoot, [
     'diff', '--name-only', oldHead, newHead, '--', prefix,

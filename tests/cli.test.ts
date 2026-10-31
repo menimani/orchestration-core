@@ -42,9 +42,11 @@ const INHERITED_ENV = Object.fromEntries(
 // hidden-console launcher marks its tree with ORCHESTRATION_WINDOWS_PROCESS_ROOT_PID, a
 // daemon running the merge gate passes it down, and a CLI started by these tests then
 // took the daemon for its own process-tree root and refused the PID lock it should have
-// won. Every merge failed until the variable was noticed.
+// won. Every merge failed until the variable was noticed. INIT_CWD belongs here too: npm
+// sets it to the checkout running the suite, the CLI searches for a fleet from it, and a
+// fleet's own project checkouts sit inside that fleet.
 function isLoopSetting(name: string): boolean {
-  return name === 'PROJECT' || name === 'PROJECT_ADAPTER' || name === 'FORGE'
+  return name === 'PROJECT' || name === 'PROJECT_ADAPTER' || name === 'FORGE' || name === 'INIT_CWD'
     || name === 'RUNNER' || name === 'UPSTREAM_REMOTE' || name === 'UPSTREAM_BRANCH'
     || /^(CORE_|MAX_|SCAN_|TASK_|REVIEW_|ISSUE_|CI_|AUTO_|POLL_|ORCHESTRATION_)/.test(name)
 }
@@ -509,6 +511,99 @@ describe('fleet project selection', () => {
       .toContain(`ORCHESTRATION_FLEET='${fleet.replaceAll('\\', '/')}' npm run -C `)
   })
 
+  it('installs the shared skills where each fleet project runner discovers them', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+    writeFileSync(join(repoRoot, 'external-runner.mjs'), [
+      "import { join } from 'node:path'",
+      'export const runner = {',
+      '  sharedSkills: {',
+      "    destinationRoot: (root) => join(root, '.external', 'skills'),",
+      "    userDestinationRoot: (home) => join(home, '.external', 'skills'),",
+      '    renderFile: (contents) => contents,',
+      '  },',
+      '  start: async () => process.pid,',
+      '}',
+      '',
+    ].join('\n'))
+    const runners = [['first', './external-runner.mjs'], ['second', 'claude']] as const
+    for (const [project, runner] of runners) {
+      mkdirSync(join(fleet, 'projects', project), { recursive: true })
+      writeFileSync(join(fleet, 'projects', project, 'config.json'), JSON.stringify({ RUNNER: runner }))
+    }
+
+    const result = spawnSync(process.execPath, [CLI, 'install-skills', '--fleet', fleet], {
+      cwd: fleet,
+      env: { ...CORE_ENV, HOME: home, USERPROFILE: home },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
+    expect(result.stdout).toContain('Installed: .external/skills/git-commit')
+    expect(existsSync(join(home, '.agents', 'skills'))).toBe(false)
+  })
+
+  it('installs the shared skills for every agent a fleet project adapter declares', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+    const projectDirectory = join(fleet, 'projects', 'first', 'project')
+    mkdirSync(projectDirectory, { recursive: true })
+    writeFileSync(join(projectDirectory, 'project-first.ts'), [
+      "import { join } from 'node:path'",
+      'export const project = {',
+      "  name: 'first',",
+      '  sharedSkills: [{',
+      "    destinationRoot: (root) => join(root, '.declared', 'skills'),",
+      "    userDestinationRoot: (home) => join(home, '.declared', 'skills'),",
+      '    renderFile: (contents) => contents,',
+      '  }],',
+      '  preCommitChecks: [],',
+      "  pullRequest: { categories: [{ label: 'Changes' }], titleFallback: 'changes',",
+      "    classifyCommit: () => ({ category: 'Changes' }), detectRisks: () => [] },",
+      '  mergeChecks: () => [],',
+      '  cycleSuite: () => [],',
+      '}',
+      '',
+    ].join('\n'))
+
+    const result = spawnSync(process.execPath, [CLI, 'install-skills', '--fleet', fleet], {
+      cwd: fleet,
+      env: { ...CORE_ENV, HOME: home, USERPROFILE: home, PROJECT: 'unrelated' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
+    expect(result.stdout).toContain('Installed: .declared/skills/git-commit')
+    expect(existsSync(join(home, '.declared', 'skills', 'loop-start', 'SKILL.md'))).toBe(true)
+  })
+
+  it('reports a fleet project adapter that fails to load and installs the others', () => {
+    const fleet = fleetFixture()
+    const home = join(fleet, 'home')
+    mkdirSync(home)
+    mkdirSync(join(fleet, 'projects', 'first', 'project'), { recursive: true })
+
+    const result = spawnSync(process.execPath, [CLI, 'install-skills', '--fleet', fleet], {
+      cwd: fleet,
+      env: { ...CORE_ENV, HOME: home, USERPROFILE: home },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('FAIL: first: Could not discover project adapter')
+    expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
+  })
+
   it('refuses --repo and --project for install-skills before installing', () => {
     const fleet = fleetFixture()
     const home = join(fleet, 'home')
@@ -534,7 +629,25 @@ describe('fleet project selection', () => {
     const result = runCli(['loop-status', '--project', 'first'])
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('no fleet.json found at or above')
+    expect(result.stderr).toContain(`no fleet.json found at or above ${repoRoot}`)
+  })
+
+  it('finds the fleet for --project from the caller\'s directory', () => {
+    const fleet = fleetFixture()
+    const caller = join(fleet, 'projects')
+    mkdirSync(caller)
+
+    const result = spawnSync(process.execPath, [CLI, 'queue', '--project', 'first'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, INIT_CWD: caller },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
   })
 })
 
@@ -1377,7 +1490,7 @@ describe('loop daemon ownership', () => {
     expect(result.stdout).toMatch(/Installed\s+orchestration deps\s+at startup/)
   })
 
-  it('refuses startup while a task status names a foreign live PID', async () => {
+  it('refuses startup while the task process registry names a foreign live PID', async () => {
     const paths = orchPaths(repoRoot)
     const taskId = '20260812_010203_040_auto-foreign-task'
     const foreignProcess = testProcesses.spawn(process.execPath, [

@@ -1240,6 +1240,63 @@ describe('mergeTask', () => {
     expectNoTemporaryWorktree('.merge-')
   })
 
+  it('keeps a rebase that fails without a conflict retryable', async () => {
+    const taskId = '20260808_000000_017_user-locked-rebase'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repoRoot, 'run.txt'), 'newer run work\n')
+    git(repoRoot, ['add', 'run.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add newer run work'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const indexLock = git(worktree, ['rev-parse', '--path-format=absolute', '--git-path', 'index.lock'])
+      .trim()
+    writeFileSync(indexLock, '')
+
+    const failure = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    }).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(MergeError)
+    expect(failure).not.toBeInstanceOf(RebaseConflictError)
+    expect((failure as MergeError).message).toMatch(
+      /^Rebasing the task onto main failed without a conflict; the rebase was aborted\. Rebase failure: .*index\.lock/,
+    )
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(worktree)).toBe(true)
+    expect(git(worktree, ['rev-parse', 'HEAD']).trim()).toBe(taskHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+
+    rmSync(indexLock)
+    await mergeTask(paths, taskId, { taskGate: 'light', project: noCheckProject })
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('stops the loop when a failed rebase cannot be aborted', async () => {
+    const taskId = '20260808_000000_018_user-stuck-rebase'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repoRoot, 'run.txt'), 'newer run work\n')
+    git(repoRoot, ['add', 'run.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add newer run work'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    // Rebase state without a head-name: the rebase refuses to start and the abort fails.
+    const rebaseState = git(worktree, ['rev-parse', '--path-format=absolute', '--git-path', 'rebase-merge'])
+      .trim()
+    mkdirSync(rebaseState, { recursive: true })
+    writeFileSync(join(rebaseState, 'interactive'), '')
+
+    const failure = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    }).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(MergeRecoveryError)
+    expect((failure as MergeRecoveryError).message).toMatch(
+      /^Rebasing the task onto main failed and the abort did not restore the task worktree: .*rebase is still in progress; rebase abort failed: /,
+    )
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(worktree)).toBe(true)
+    expect(git(worktree, ['rev-parse', `task/${taskId}`]).trim()).toBe(taskHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
   it('throws MergeError instances so callers can count merge failures', async () => {
     const taskId = '20260808_000000_007_user-error-type'
     await makeCompletedTask(taskId)

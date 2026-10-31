@@ -154,7 +154,7 @@ function buildFixture(root: string): void {
 
   syncSharedSkills(repoRoot, packageRoot, [
     fakeRunnerSharedSkills, ...(stubProject.sharedSkills ?? []),
-  ])
+  ], join(repoRoot, 'orchestration'))
   commit(repoRoot, 'chore: install shared skills')
 }
 
@@ -222,7 +222,7 @@ describe('pre-cycle core update', () => {
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
     expect(loop.restartSubject()).toBe('core')
-    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
       .toBe('version two\n')
     expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
     expect(runnerStarts).toHaveLength(0)
@@ -245,7 +245,7 @@ describe('pre-cycle core update', () => {
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
-    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
       .toBe('version three\n')
     expect(events).toContain(
       `Updated core ${importedCore.slice(0, 8)}..${newCore.slice(0, 8)}`,
@@ -269,7 +269,7 @@ describe('pre-cycle core update', () => {
     )
 
     expect(outcome).toBe('continue')
-    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
       .toBe('version two\n')
     expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
     expect(events.some((line) => line.startsWith('Restarting core'))).toBe(false)
@@ -326,7 +326,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
     expect(forge.resolveGitRemote).toHaveBeenCalledWith('example/shared-core')
-    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
       .toBe('version two\n')
   })
 
@@ -347,8 +347,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
@@ -356,8 +355,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     // The interactive agent's directory is served in the same boundary, or a person
     // driving it loses every shared workflow the moment a runner is selected.
     expect(events).toContain('Updated skill installed .claude/skills/loop-start')
-    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe("version one: npm run -C 'orchestration/ts' loop\n")
   })
 
@@ -367,8 +365,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
-    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe("version two: npm run -C 'orchestration/ts' loop-status\n")
     expect(existsSync(join(packageRoot, '.agents', 'skills', 'loop-start'))).toBe(false)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
@@ -389,17 +386,15 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     }
     syncSharedSkills(repoRoot, packageRoot, [
       formerRunner.sharedSkills, ...(stubProject.sharedSkills ?? []),
-    ])
+    ], join(repoRoot, 'orchestration'))
     commit(repoRoot, 'chore: adopt the former arrangement')
     const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe("version one: npm run -C 'orchestration/ts' loop\n")
-    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
@@ -412,7 +407,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(readFileSync(interactiveSkill, 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(interactiveSkill, 'utf8'))
       .toBe("version one: npm run -C 'orchestration/ts' loop\n")
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
     expect(events).toContain('Updated skill refreshed .claude/skills/loop-start')
@@ -446,7 +441,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('restart')
-    expect(readFileSync(installed, 'utf8').replaceAll('\r', '')).toBe('upstream command\n')
+    expect(readFileSync(installed, 'utf8')).toBe('upstream command\n')
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
     expect(events).toContain('Updated skill refreshed .agents/skills/loop-start')
   })
@@ -464,13 +459,11 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     await expect(loop.poll()).rejects.toThrow(
       'shared skill sync requires a clean managed index',
     )
-    expect(readFileSync(installed, 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(installed, 'utf8'))
       .toBe("version one: npm run -C 'orchestration/ts' loop\n")
-    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe("version one: npm run -C 'orchestration/ts' loop\n")
-    expect(git(repoRoot, ['show', ':.agents/skills/loop-start/SKILL.md'])
-      .replaceAll('\r', ''))
+    expect(git(repoRoot, ['show', ':.agents/skills/loop-start/SKILL.md']))
       .toBe('staged consumer command')
     expect(git(repoRoot, ['status', '--short']))
       .toBe('MM .agents/skills/loop-start/SKILL.md')
@@ -513,12 +506,10 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     const loop = makeLoop(config())
 
     expect(await loop.poll(), events.join('\n')).toBe('continue')
-    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(repoRoot, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe("version two: npm run -C 'orchestration/ts' loop-status\n")
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).not.toBe(oldHead)
-    expect(git(repoRoot, ['show', ':.claude/skills/verify-changes/SKILL.md'])
-      .replaceAll('\r', ''))
+    expect(git(repoRoot, ['show', ':.claude/skills/verify-changes/SKILL.md']))
       .toBe('repository-owned skill')
     expect(git(repoRoot, ['status', '--short']))
       .toBe('A  .claude/skills/verify-changes/SKILL.md')
@@ -533,7 +524,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
 
     expect(await loop.poll()).toBe('continue')
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(oldHead)
-    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
       .toBe('version one\n')
     expect(runnerStarts).toHaveLength(1)
     expect(events, events.join('\n')).toContain('WARN core update skipped: working tree is dirty')
@@ -555,7 +546,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     expect(await loop.poll()).toBe('continue')
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(oldHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
-    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
       .toBe('consumer version\n')
     expect(runnerStarts).toHaveLength(1)
     expect(events.some((line) => line.startsWith(
@@ -593,7 +584,7 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     expect(await loop.poll()).toBe('continue')
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(oldHead)
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
-    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
       .toBe('version two\n')
     expect(failingGit).not.toHaveBeenCalledWith(repoRoot, ['merge', '--abort'])
     expect(runnerStarts).toHaveLength(1)
@@ -636,10 +627,9 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     expect(await loop.poll()).toBe('continue')
     expect(runtime.git).not.toHaveBeenCalled()
     expect(runnerStarts).toHaveLength(1)
-    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8').replaceAll('\r', ''))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
       .toBe('version one\n')
-    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8')
-      .replaceAll('\r', ''))
+    expect(readFileSync(join(repoRoot, '.agents', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toBe("version one: npm run -C 'orchestration/ts' loop\n")
   })
 })
