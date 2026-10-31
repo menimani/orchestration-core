@@ -2,10 +2,11 @@ import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
+import { operatingSystem } from './adapters/os.ts'
 import { loadProject, projectAdapterPath, type ProjectAdapter, type SuiteStep } from './adapters/project.ts'
 import { QUEUE_LABELS } from './issueQueue.ts'
 import { projectScopeLabel } from './issueScope.ts'
-import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
+import { canonicalPath, PACKAGE_ROOT, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
 
 interface VerifyOptions {
@@ -72,9 +73,15 @@ function safeRepositoryPath(repoRoot: string, referencedPath: string): string | 
 
 // tsconfig.project.json includes only `../project/project-*.ts`, the adapter beside a core
 // installed under `orchestration/ts`; any other adapter is outside `npm run typecheck`.
+// The package root can spell the repository another way than the root Git reports for the
+// adapter (case on Windows, a link anywhere), so both sides are compared canonically.
 function typecheckCoversAdapter(packageRoot: string, adapterPath: string): boolean {
-  return dirname(adapterPath) === resolve(packageRoot, '..', 'project')
+  return directoryKey(dirname(adapterPath)) === directoryKey(resolve(packageRoot, '..', 'project'))
     && /^project-.+\.ts$/.test(basename(adapterPath))
+}
+
+function directoryKey(path: string): string {
+  return operatingSystem.worktreePathFor(canonicalPath(path)).comparisonKey
 }
 
 function runSuiteStep(

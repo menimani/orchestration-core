@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -57,6 +57,39 @@ describe('setup verification', () => {
       'PASS: core.hooksPath is orchestration/ts/.githooks',
       'PASS: all 8 loop labels exist',
     ])
+  })
+
+  // The package root an operator launches from can spell the repository another way than
+  // the root Git reports for the adapter; a link stands in for a case change on Windows.
+  it('typechecks the adapter beside a package root reached through an aliased repository', async () => {
+    const repository = mkdtempSync(join(tmpdir(), 'orchestration-verify-'))
+    repositories.push(repository)
+    mkdirSync(join(repository, 'orchestration', 'ts', '.githooks'), { recursive: true })
+    const projectDirectory = join(repository, 'orchestration', 'project')
+    mkdirSync(projectDirectory, { recursive: true })
+    writeFileSync(join(projectDirectory, 'project-consumer.ts'),
+      renderProjectAdapter('consumer', '../ts/src/adapters/project.ts'))
+    const linkDirectory = mkdtempSync(join(tmpdir(), 'orchestration-verify-alias-'))
+    repositories.push(linkDirectory)
+    const alias = join(linkDirectory, 'alias')
+    symlinkSync(repository, alias, 'junction')
+    const reports: string[] = []
+    const git = (args: string[]): string => {
+      if (args.includes('@{upstream}')) return 'origin/topic'
+      if (args.includes('core.hooksPath')) return 'orchestration/ts/.githooks'
+      if (args.includes('--dry-run')) return ''
+      throw new Error(`unexpected git call: ${args.join(' ')}`)
+    }
+
+    await verifyRepositorySetup(orchPaths(repository), makeFakeForge(), {
+      packageRoot: join(alias, 'orchestration', 'ts'),
+      env: {},
+      report: (line) => reports.push(line),
+      git,
+      run: () => true,
+    })
+
+    expect(reports).toContain('PASS: adapter TypeScript typecheck')
   })
 
   it('allows optional absence markers and repairs a missing suite dependency', async () => {
