@@ -187,7 +187,7 @@ export interface OrchestrationDepsRuntime {
 }
 
 export type OrchestrationDepsEvent = (
-  name: 'Installed' | 'Skipped' | 'WARN', subject: string,
+  name: 'Installed' | 'Skipped', subject: string,
 ) => void
 
 const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
