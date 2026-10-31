@@ -774,7 +774,12 @@ function runMergeChecks(
     if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
     const install = check.installWhenMissing
     if (install !== undefined && !existsSync(join(worktree, install.path))) {
-      ok = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`) === 'passed' && ok
+      const installed = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`)
+      if (installed === 'lock-busy') {
+        lockBusy = true
+        continue
+      }
+      ok = installed === 'passed' && ok
     }
     const directory = join(worktree, check.cwd)
     const outcome = io.tryRun(directory, check.command, check.label)

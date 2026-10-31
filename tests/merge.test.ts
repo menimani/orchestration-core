@@ -1136,6 +1136,35 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
+  it('defers a check whose install waited out the test lock without running the check', async () => {
+    const taskId = '20260808_000000_093_user-test-lock-busy-install'
+    await makeCompletedTask(taskId, { commit: true })
+    const head = git(repoRoot, ['rev-parse', 'HEAD'])
+    const outputFile = join(repoRoot, 'test-lock-busy-install.log')
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'lock-busy-install',
+      mergeChecks: () => [{
+        label: 'Installed check',
+        cwd: '',
+        command: 'node -e "console.log(\'installed check ran\')"',
+        installWhenMissing: {
+          path: 'dependency-ready',
+          command: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+        },
+      }],
+    }
+
+    const result = mergeTask(paths, taskId, { taskGate: 'light', project, outputFile })
+
+    await expect(result).rejects.toBeInstanceOf(TestLockBusyError)
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain('=== Installed check install failed: exit status 75 ===')
+    expect(output).not.toContain('=== Installed check: ')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(head)
+  })
+
   it.each([
     [{ status: 1, signal: null }, 'exit status 1'],
     [{ status: 3221226505, signal: null }, 'exit status 3221226505 (0xC0000409)'],
