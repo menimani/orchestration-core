@@ -5553,6 +5553,25 @@ describe('completed task merge recovery', () => {
     expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
   })
 
+  it('records a git failure in the merge log when the task worktree is missing', async () => {
+    const taskId = '20260811_120000_066_auto-missing-worktree'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    rmSync(worktreeDir(paths, taskId), { recursive: true, force: true })
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    await loop.poll()
+
+    // The failure is not a MergeError, yet the log the Failed line points at must still
+    // name its cause, or the failure count stops the loop with the reason recorded nowhere.
+    expect(logged).toContain(`Failed 066_auto    log logs/${taskId}.merge.log`)
+    expect(readFileSync(join(paths.logsDir, `${taskId}.merge.log`), 'utf8')).toMatch(/git.*ENOENT/)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
   it('rebuilds a lost promotion record from merged status before stale-lease reaping', async () => {
     const taskId = '20260811_120000_065_auto-reconcile-merge'
     initializeGitRepo()
