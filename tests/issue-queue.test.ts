@@ -2217,6 +2217,34 @@ describe('reapStaleLeases', () => {
     expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
   })
 
+  it('does not reap an issue whose merge marker only an outsider claimed to withdraw', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'forged unpromotion', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    await forge.commentIssue(issueNumber, 'MERGED: old-task\nMerged by an earlier run.')
+    await forge.commentIssue(issueNumber, 'UNPROMOTED: old-task\nIts run pull request closed.')
+    forge.issueCommentAuthors.set(issueNumber, [
+      { login: 'collaborator-user', hasWriteAccess: true },
+      { login: 'outside-user', hasWriteAccess: false },
+    ])
+
+    expect(standingMergeMarkers(await forge.listIssueComments(issueNumber))).toEqual([
+      {
+        body: 'MERGED: old-task\nMerged by an earlier run.',
+        author: { login: 'collaborator-user', hasWriteAccess: true },
+      },
+    ])
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.labels).not.toContain(LABEL_READY)
+  })
+
   it('removes persisted merge metadata after promotion closes the issue', async () => {
     const issueNumber = await forge.createIssue({
       title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
