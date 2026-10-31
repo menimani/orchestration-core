@@ -451,13 +451,15 @@ describe('daemon startup', () => {
     // way: the real package's node_modules was reinstalled mid-test-run.
     writeOrchestrationManifests('{"lockfileVersion":3}\n')
     const install = vi.fn(successfulInstall)
+    const packageRoot = mkdtempSync(join(tmpdir(), 'orch-elsewhere-'))
 
-    syncOrchestrationDepsAtStartup(paths, vi.fn(), {
-      install,
-      packageRoot: mkdtempSync(join(tmpdir(), 'orch-elsewhere-')),
-    })
+    try {
+      syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot })
 
-    expect(install).not.toHaveBeenCalled()
+      expect(install).not.toHaveBeenCalled()
+    } finally {
+      rmSync(packageRoot, { recursive: true, force: true })
+    }
   })
 })
 
