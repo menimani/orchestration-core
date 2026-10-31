@@ -3063,7 +3063,7 @@ export function createLoop(deps: LoopDeps) {
               if (result.outcome === 'claimed') {
                 event('Claimed', shortTaskId(result.taskId),
                   result.issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' '))
-                if (result.pendingMerge) await mergeCompletedTask(result.taskId)
+                if (result.pendingMerge && !config.workerMode) await mergeCompletedTask(result.taskId)
                 capacity -= 1
               } else if (result.outcome === 'already-processed') {
                 event('Deduplicated',
