@@ -778,8 +778,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the intentional termination as a missing scan yield.
 26. The daemon holds the code it started with; `loop`, once it has launched the daemon in
     the background, prints where the log lives and how to stop.
-27. `prune --days N` deletes logs/status/generated specs/queue markers of tasks finished
-    more than N days ago; it accepts merged and no-change tasks and never touches an
+27. `prune [--days N]` deletes logs/status/generated specs/queue markers of tasks finished
+    more than N days ago, 14 when `--days` is omitted; it accepts merged and no-change tasks and never touches an
     unfinished or failed task, a worktree still on disk, or a spec tracked by git.
     `--dry-run` lists without deleting.
 
