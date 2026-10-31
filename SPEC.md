@@ -538,8 +538,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     becomes executable only in a later run, as specified in 4b. It then absorbs the default
     branch and compares the adapter again before integration setup or scan dispatch. A daemon
     otherwise runs the core code it started with. Neither check ever runs mid-cycle. A dirty
-    working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
-    the cycle proceed unchanged so local divergence is resolved by the consumer.
+    working tree logs `WARN` and lets the cycle proceed unchanged so local divergence is
+    resolved by the consumer. A failed pull aborts any in-progress merge and then verifies
+    that `HEAD` is the pre-pull commit and the working tree is clean; only when the abort
+    succeeded and that verification passes does it log `WARN` and let the cycle proceed on
+    the old core. A failed abort, a verification that cannot run, or a repository left at
+    another `HEAD` or with a dirty working tree throws, and the daemon stops before the
+    cycle begins.
     At the same boundary, the package manifest's skills are rendered into every
     directory selected by an agent adapter. The runner supplies its target, and the
     project adapter supplies targets for additional interactive agents. The Codex adapter

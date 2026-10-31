@@ -64,7 +64,10 @@ replacement loads the adapter afresh, so gate and presentation behavior cannot r
 silently pinned to an adapter the repository has replaced.
 The daemon otherwise runs the core code it started with. A dirty working tree or
 conflicting pull is left for the consumer to resolve: the daemon warns and starts the
-cycle on the old core instead of merging local divergence.
+cycle on the old core instead of merging local divergence. That holds only when a failed
+pull's merge is cleanly aborted and the checkout is verified back at its previous commit
+with a clean working tree; if the abort fails or that state cannot be confirmed, the
+daemon stops rather than run a cycle on a repository it cannot vouch for.
 
 That same boundary syncs the skills declared in `skills/manifest.json` into every
 directory an agent working in the repository reads them from. The selected runner adapter
