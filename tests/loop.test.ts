@@ -6576,6 +6576,33 @@ describe('scanForNextTasks', () => {
     expect(readFileSync(join(paths.tasksDir, `${testId}.md`), 'utf8')).toContain('clearAllMocks keeps implementations')
   })
 
+  it('gives a scan-spawned docs task the docs pitfall list alone', async () => {
+    const loop = makeLoop()
+    writeFinal('20250101_000000_016_scan', 'NEXT_TASK: [DOCS] a stale README section a scan found\n')
+    await loop.scanForNextTasks('20250101_000000_016_scan', 0)
+
+    const specs = readdirSync(paths.tasksDir)
+    expect(specs).toHaveLength(1)
+    const spec = readFileSync(join(paths.tasksDir, specs[0] as string), 'utf8')
+    expect(spec).toContain('Shared requirements.\n\nProject documentation pitfalls.\n')
+    expect(spec).not.toContain('Stale async responses')
+    expect(spec).not.toContain('clearAllMocks keeps implementations')
+  })
+
+  it('adds no pitfall list when the selected file is missing', async () => {
+    rmSync(join(paths.root, 'templates', 'pitfalls', 'docs.md'))
+    const loop = makeLoop()
+    writeFinal('20250101_000000_017_scan', 'NEXT_TASK: [DOCS] a stale README section a scan found\n')
+    await loop.scanForNextTasks('20250101_000000_017_scan', 0)
+
+    const specs = readdirSync(paths.tasksDir)
+    expect(specs).toHaveLength(1)
+    const spec = readFileSync(join(paths.tasksDir, specs[0] as string), 'utf8')
+    expect(spec.endsWith('\nShared requirements.\n')).toBe(true)
+    expect(spec).not.toContain('Project documentation pitfalls')
+    expect(spec).not.toContain('Stale async responses')
+  })
+
   it('bounds growth by depth and by total task count', async () => {
     const loop = makeLoop({ maxGrowthDepth: 1 })
     writeFinal('deep-parent', 'NEXT_TASK: [BUG] too deep\n')
