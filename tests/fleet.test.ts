@@ -1,10 +1,10 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { findFleetDir, projectForDirectory, readFleet, resolveFleetProject } from '../src/fleet.ts'
 import {
-  absolutePackageScriptCommand, fleetPaths, locationArgs, orchPaths,
+  absolutePackageScriptCommand, fleetPaths, locationArgs, orchPaths, shellPathSpelling,
 } from '../src/paths.ts'
 
 const roots: string[] = []
@@ -124,7 +124,7 @@ describe('fleet paths', () => {
     expect(locationArgs(repository)).toEqual(['--repo', join(dir, 'repository')])
   })
 
-  it('quotes path arguments but not flags in a copyable command', () => {
+  it.runIf(sep === '\\')('quotes path arguments but not flags in a copyable command', () => {
     const command = absolutePackageScriptCommand(
       ['--fleet', 'C:\\fleet dir', '--project', 'example'],
       'stop',
@@ -132,6 +132,23 @@ describe('fleet paths', () => {
     )
 
     expect(command).toBe("npm run -C 'C:/pkg' stop -- --fleet 'C:/fleet dir' --project 'example'")
+  })
+
+  it.runIf(sep === '/')('keeps a POSIX backslash as part of the name in a copyable command', () => {
+    const command = absolutePackageScriptCommand(
+      ['--fleet', '/srv/fleet\\v2', '--project', 'example'],
+      'stop',
+      '/srv/core\\v2',
+    )
+
+    expect(command).toBe(
+      "npm run -C '/srv/core\\v2' stop -- --fleet '/srv/fleet\\v2' --project 'example'",
+    )
+  })
+
+  it('rewrites backslashes only where they separate path components', () => {
+    expect(shellPathSpelling('C:\\fleet\\core', '\\')).toBe('C:/fleet/core')
+    expect(shellPathSpelling('/srv/core\\v2', '/')).toBe('/srv/core\\v2')
   })
 })
 
