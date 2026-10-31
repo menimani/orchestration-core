@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
+import { recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop } from '../src/loop.ts'
 import {
   buildIssueBody, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY,
@@ -431,5 +432,34 @@ describe('worker mode', () => {
     expect(readFileSync(logFile(paths, taskId), 'utf8'))
       .toContain('Worker publication failed 5 times: could not file finding')
     forge.createIssue = createIssue
+  })
+
+  it('re-claims an issue whose task already completed without merging it locally', async () => {
+    const taskId = '20260809_000000_011_auto-claimed-again'
+    const description = '[BUG] retry the completed worker task'
+    await completedTask(taskId, true)
+    mkdirSync(paths.tasksDir, { recursive: true })
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    const scannedDir = join(paths.queueDir, 'scanned')
+    mkdirSync(scannedDir, { recursive: true })
+    writeFileSync(join(scannedDir, taskId), '')
+    recordTaskIdForDesc(paths, 'auto', description, taskId)
+    const issueNumber = await forge.createIssue({
+      title: 'retry completed work',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const baseHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const loop = makeWorkerLoop({ AUTO_MERGE: 'true' })
+
+    await loop.poll()
+
+    expect(logged).toContain(`Claimed 011_auto    #${issueNumber}`)
+    expect(taskClaiming(issueNumber)).toBe(taskId)
+    expect(logged).not.toContain('Merging 011_auto')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(baseHead)
+    expect(existsSync(join(repoRoot, 'worker-change.txt'))).toBe(false)
+    expect(forge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('MERGED:')
   })
 })
