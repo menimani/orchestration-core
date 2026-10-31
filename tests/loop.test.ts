@@ -1833,6 +1833,78 @@ describe('cycle gate', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
+  it('appends framed accepted limits to a scan template without the placeholder', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n\n### 1. First check\n\n### 2. Second check\n',
+    )
+    writeFileSync(
+      join(paths.root, 'accepted-limits.md'),
+      '\n- Backend-mirrored translation keys stay.\n\n### 3. Not a scan section\n',
+    )
+    const loop = makeLoop({ scanParallel: 5, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(2)
+    expect(logText()).toContain(
+      'WARN requested 5 parallel scans but scan-template.md has 2 numbered sections; running 2 scans',
+    )
+    for (const start of runnerStarts) {
+      const spec = readFileSync(start, 'utf8')
+      expect(spec).toContain('## Accepted limits')
+      expect(spec).toContain(
+        'These are accepted limits by decision. Do not report them or propose narrower variants\n'
+        + 'of them as findings. A finding qualitatively beyond an entry is still reportable.',
+      )
+      expect(spec).toContain(
+        '<<<UNTRUSTED_REQUEST_TEXT>>>\n- Backend-mirrored translation keys stay.\n\n'
+        + '### 3. Not a scan section\n<<<END_UNTRUSTED_REQUEST_TEXT>>>',
+      )
+      expect(spec.indexOf('## Accepted limits')).toBeGreaterThan(spec.indexOf('### 2. Second check'))
+    }
+  })
+
+  it('appends accepted limits as none to a scan template when the file is missing', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(runnerStarts).toHaveLength(1)
+    const spec = readFileSync(runnerStarts[0]!, 'utf8')
+    expect(spec).toContain('## Accepted limits')
+    expect(spec).toContain(
+      '<<<UNTRUSTED_REQUEST_TEXT>>>\n(none)\n<<<END_UNTRUSTED_REQUEST_TEXT>>>',
+    )
+  })
+
+  it('fills the accepted limits placeholder of a scan template without appending', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n\n## Accepted limits\n\n{{ACCEPTED_LIMITS}}\n\n'
+        + '### 1. First check\n',
+    )
+    writeFileSync(join(paths.root, 'accepted-limits.md'), 'Keep the mirrored keys.\n')
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    const spec = readFileSync(runnerStarts[0]!, 'utf8')
+    expect(spec).not.toContain('{{ACCEPTED_LIMITS}}')
+    expect(spec.split('## Accepted limits')).toHaveLength(2)
+    expect(spec).toContain(
+      '<<<UNTRUSTED_REQUEST_TEXT>>>\nKeep the mirrored keys.\n<<<END_UNTRUSTED_REQUEST_TEXT>>>',
+    )
+    expect(spec.indexOf('Keep the mirrored keys.')).toBeLessThan(spec.indexOf('### 1. First check'))
+  })
+
   it('ignores numbered headings inside fenced code blocks', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
