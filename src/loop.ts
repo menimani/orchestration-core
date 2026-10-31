@@ -906,11 +906,12 @@ export function createLoop(deps: LoopDeps) {
     parentId: string,
     desc: string,
     includeDescription = true,
+    pitfallKey = desc,
   ): void {
     const parts = [`\n## Auto-generated task (parent: ${parentId})\n`]
     if (includeDescription) parts.push(`\n${desc}\n`)
     parts.push(`\n${readTemplate(paths, 'task-requirements.md')}`)
-    const pitfalls = pitfallsFileForDesc(paths, desc)
+    const pitfalls = pitfallsFileForDesc(paths, pitfallKey)
     if (existsSync(pitfalls)) parts.push(`\n${readFileSync(pitfalls, 'utf8')}`)
     appendFileSync(specFile(paths, newId), parts.join(''))
   }
@@ -925,6 +926,8 @@ export function createLoop(deps: LoopDeps) {
         taskId,
         `issue-${requirement.issueNumber}`,
         frameVerifiedRequirement(requirement.requirement),
+        true,
+        requirement.requirement,
       )
       return
     }
