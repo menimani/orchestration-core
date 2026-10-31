@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { OperatingSystem } from '../src/adapters/os.ts'
 import {
@@ -11,10 +11,11 @@ import {
   createOperatingSystem as createWindowsOperatingSystem,
   type WindowsOperatingSystemRuntime,
 } from '../src/adapters/os-windows.ts'
-import { orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
+import { fleetPaths, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
 import {
-  orphanedWorktreeDirectories, terminateLiveTaskProcesses, worktreeHolderHint,
+  orphanedWorktreeDirectories, orphanedWorktreeReport, terminateLiveTaskProcesses,
+  worktreeHolderHint,
 } from '../src/taskProcesses.ts'
 
 let repoRoot: string
@@ -184,6 +185,29 @@ describe('orphanedWorktreeDirectories', () => {
     expect(worktreeHolderHint(orphan, createWindowsOperatingSystem())).toContain('handle.exe')
     expect(worktreeHolderHint("/tmp/orphan's worktree", createPosixOperatingSystem()))
       .toBe("Find holder: lsof +D -- '/tmp/orphan'\\''s worktree'")
+  })
+
+  it('gives the holder lookup the absolute path of a fleet worktree outside the checkout', () => {
+    const fleet = fleetPaths(
+      { dir: join(repoRoot, 'fleet'), project: 'example', repository: 'owner/example' },
+      join(repoRoot, 'checkout'),
+    )
+    const orphan = join(fleet.worktreesDir, 'orphan-task')
+    mkdirSync(orphan)
+    const looked: string[] = []
+    const os = {
+      worktreePathFor(path: string) {
+        looked.push(path)
+        return { holderHint: `Find holder: ${path}` }
+      },
+    } as unknown as OperatingSystem
+
+    const report = orphanedWorktreeReport(fleet, orphan, os)
+
+    expect(report.displayed).toBe(join('..', 'fleet', 'state', 'example', 'worktrees', 'orphan-task'))
+    expect(looked).toEqual([orphan])
+    expect(isAbsolute(orphan)).toBe(true)
+    expect(report.holderHint).toContain(orphan)
   })
 })
 

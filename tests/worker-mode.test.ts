@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
+import { recordTaskIdForDesc } from '../src/ids.ts'
 import { createLoop } from '../src/loop.ts'
 import {
   buildIssueBody, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY,
@@ -431,5 +432,55 @@ describe('worker mode', () => {
     expect(readFileSync(logFile(paths, taskId), 'utf8'))
       .toContain('Worker publication failed 5 times: could not file finding')
     forge.createIssue = createIssue
+  })
+
+  it('re-claims a returned issue into a fresh task and publishes it again', async () => {
+    const taskId = '20260809_000000_011_auto-claimed-again'
+    const description = '[BUG] retry the completed worker task'
+    await completedTask(taskId, true)
+    mkdirSync(paths.tasksDir, { recursive: true })
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    const scannedDir = join(paths.queueDir, 'scanned')
+    mkdirSync(scannedDir, { recursive: true })
+    writeFileSync(join(scannedDir, taskId), '')
+    recordTaskIdForDesc(paths, 'auto', description, taskId)
+    const issueNumber = await forge.createIssue({
+      title: 'retry completed work',
+      body: buildIssueBody(description, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const baseHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const loop = makeWorkerLoop({ AUTO_MERGE: 'true' })
+
+    await loop.poll()
+
+    // The old task was already published: reusing it would leave a claim that nothing
+    // heartbeats and that the sweep never publishes again.
+    const freshTaskId = taskClaiming(issueNumber)!
+    expect(freshTaskId).toBeDefined()
+    expect(freshTaskId).not.toBe(taskId)
+    expect(logged.some((line) =>
+      line.startsWith('Claimed ') && line.endsWith(` #${issueNumber}`))).toBe(true)
+    expect(logged.join('\n')).not.toContain('Merging 011_auto')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(baseHead)
+    expect(existsSync(join(repoRoot, 'worker-change.txt'))).toBe(false)
+    expect(forge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('MERGED:')
+
+    const freshWorktree = worktreeDir(paths, freshTaskId)
+    writeFileSync(join(freshWorktree, 'worker-change.txt'), `${freshTaskId}\n`)
+    git(freshWorktree, ['add', 'worker-change.txt'])
+    git(freshWorktree, ['commit', '-qm', 'feat: worker change'])
+    await writeStatus(paths, freshTaskId, 'completed')
+    await loop.poll()
+
+    const issue = await forge.getIssue(issueNumber)
+    const freshHead = git(freshWorktree, ['rev-parse', 'HEAD']).trim()
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(git(origin, ['rev-parse', `refs/heads/${branchName(freshTaskId)}`]).trim()).toBe(freshHead)
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain(`Branch: ${branchName(freshTaskId)}\nHead commit: ${freshHead}`)
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(baseHead)
   })
 })

@@ -57,8 +57,17 @@ export function packageFile(...segments: string[]): string {
   return join(PACKAGE_ROOT, ...segments)
 }
 
+/**
+ * A path as rendered Bash instructions spell it. Git Bash on Windows takes forward
+ * slashes, and there a backslash is only ever a separator; on POSIX a backslash is an
+ * ordinary filename character, so rewriting it would name a different directory.
+ */
+export function shellPathSpelling(path: string, separator = sep): string {
+  return separator === '\\' ? path.replaceAll('\\', '/') : path
+}
+
 export function packageCommandPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT): string {
-  const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
+  const packageDirectory = shellPathSpelling(relative(repoRoot, packageRoot))
   // These commands are rendered into Bash instructions (including Git Bash on
   // Windows). Quote every directory so shell metacharacters are always data; a
   // literal apostrophe is represented by ending the quote, escaping it, and
@@ -69,12 +78,12 @@ export function packageCommandPrefix(repoRoot: string, packageRoot = PACKAGE_ROO
 
 /** Prefix a repository-relative package file, including its separator when needed. */
 export function packagePathPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT): string {
-  const packageDirectory = relative(repoRoot, packageRoot).replaceAll('\\', '/')
+  const packageDirectory = shellPathSpelling(relative(repoRoot, packageRoot))
   return packageDirectory === '' ? '' : `${packageDirectory}/`
 }
 
 function shellPathArgument(path: string): string {
-  return `'${path.replaceAll('\\', '/').replaceAll("'", "'\\''")}'`
+  return `'${shellPathSpelling(path).replaceAll("'", "'\\''")}'`
 }
 
 /** Render a package command that can be copied and run from any working directory. */

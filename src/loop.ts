@@ -181,6 +181,7 @@ export function createLoop(deps: LoopDeps) {
   const prUrlFile = join(paths.queueDir, 'pr-url.txt')
   const totalTaskCountFile = join(paths.queueDir, 'total-task-count.txt')
   let emptyRun = false
+  let finalGateReopened = false
 
   mkdirSync(scannedDir, { recursive: true })
   ensureBacklog(queueFile)
@@ -337,11 +338,8 @@ export function createLoop(deps: LoopDeps) {
     return true
   }
 
-  function orchestrationDepsEvent(
-    name: 'Installed' | 'Skipped' | 'WARN', subject: string,
-  ): void {
-    if (name === 'Installed' || name === 'Skipped') event(name, 'orchestration deps', subject)
-    else event(name, subject)
+  function orchestrationDepsEvent(name: 'Installed' | 'Skipped', subject: string): void {
+    event(name, 'orchestration deps', subject)
   }
 
   function stopTaskProcessesBeforeDependencyInstall(): boolean {
@@ -905,11 +903,12 @@ export function createLoop(deps: LoopDeps) {
     parentId: string,
     desc: string,
     includeDescription = true,
+    pitfallKey = desc,
   ): void {
     const parts = [`\n## Auto-generated task (parent: ${parentId})\n`]
     if (includeDescription) parts.push(`\n${desc}\n`)
     parts.push(`\n${readTemplate(paths, 'task-requirements.md')}`)
-    const pitfalls = pitfallsFileForDesc(paths, desc)
+    const pitfalls = pitfallsFileForDesc(paths, pitfallKey)
     if (existsSync(pitfalls)) parts.push(`\n${readFileSync(pitfalls, 'utf8')}`)
     appendFileSync(specFile(paths, newId), parts.join(''))
   }
@@ -924,6 +923,8 @@ export function createLoop(deps: LoopDeps) {
         taskId,
         `issue-${requirement.issueNumber}`,
         frameVerifiedRequirement(requirement.requirement),
+        true,
+        requirement.requirement,
       )
       return
     }
@@ -1121,16 +1122,19 @@ export function createLoop(deps: LoopDeps) {
       ? [...new Set(findings)].filter((finding) => {
         const existing = existingFindingTask(finding)
         if (existing !== undefined) {
-          // A failed task is retryable by design — enqueueTask re-admits it — so only
-          // queued, active or landed work suppresses the finding. Suppressing on the
-          // bare existence of the spec blocked that supported retry path.
+          // A failed task is never retried automatically: it keeps its worktree until
+          // the operator's cleanup, and startTask refuses that worktree, so re-queueing
+          // it would only be dropped at startup. Cleanup removes the status, after which
+          // the same finding re-admits the task; suppressing on the bare existence of
+          // the spec blocked that retry path.
           const status = readStatus(paths, existing)?.status
           const queued = existsSync(queueFile)
             && readFileSync(queueFile, 'utf8').split(/\r?\n/)
               .some((line) => line.startsWith(`${existing}:`))
           const mergedAdvisory = (status === 'merged' || status === 'no-change')
             && fingerprintOf(finding).startsWith('advisory:')
-          if (queued || status === 'running' || status === 'completed' || mergedAdvisory) {
+          if (queued || status === 'running' || status === 'completed' || status === 'failed'
+            || mergedAdvisory) {
             destinations.push(shortTaskId(existing))
             return false
           }
@@ -1398,13 +1402,15 @@ export function createLoop(deps: LoopDeps) {
     })
     // A consumer's own scan template may predate the placeholder. The appended heading
     // is unnumbered, so it never changes the sections that SCAN_PARALLEL splits.
-    if (!hasPlaceholder) {
-      specification = `${specification.trimEnd()}\n\n## Accepted limits\n\n`
-        + 'These are accepted limits by decision. Do not report them or propose narrower variants\n'
-        + 'of them as findings. A finding qualitatively beyond an entry is still reportable.\n\n'
-        + `${acceptedLimits}\n`
-    }
+    if (!hasPlaceholder) specification = appendAcceptedLimits(specification, acceptedLimits)
     return repositoryInspectionPreamble() + specification
+  }
+
+  function appendAcceptedLimits(specification: string, acceptedLimits: string): string {
+    return `${specification.trimEnd()}\n\n## Accepted limits\n\n`
+      + 'These are accepted limits by decision. Do not report them or propose narrower variants\n'
+      + 'of them as findings. A finding qualitatively beyond an entry is still reportable.\n\n'
+      + `${acceptedLimits}\n`
   }
 
   function numberedScanSections(specification: string): number[] {
@@ -1477,12 +1483,14 @@ export function createLoop(deps: LoopDeps) {
       event('WARN', `could not resolve a valid default branch for ${remote}`)
       return false
     }
-    const text = repositoryInspectionPreamble() + renderTemplate('review-template.md', {
+    const acceptedLimits = acceptedLimitsSection()
+    const hasPlaceholder = readTemplate(paths, 'review-template.md').includes('{{ACCEPTED_LIMITS}}')
+    let review = renderTemplate('review-template.md', {
       REVIEW_ID: reviewId,
       CYCLE: String(cycle),
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       BASE_BRANCH: baseBranch,
-      ACCEPTED_LIMITS: acceptedLimitsSection(),
+      ACCEPTED_LIMITS: acceptedLimits,
       ...reviewScopeTemplateValues(
         paths.repoRoot,
         config.integrationBranch === '' || paths.fleet !== undefined
@@ -1490,7 +1498,9 @@ export function createLoop(deps: LoopDeps) {
           : join(paths.repoRoot, relative(dirname(paths.root), PACKAGE_ROOT)),
       ),
     })
-    writeFileSync(specFile(paths, reviewId), text)
+    // A consumer's own review template may predate the placeholder.
+    if (!hasPlaceholder) review = appendAcceptedLimits(review, acceptedLimits)
+    writeFileSync(specFile(paths, reviewId), repositoryInspectionPreamble() + review)
     return true
   }
 
@@ -1811,8 +1821,24 @@ export function createLoop(deps: LoopDeps) {
 
     // The PR can be completed or closed by a person between the final gate and
     // promotion. Let postLoopPr interpret that terminal state instead of trying to
-    // create another PR for the same branch on every poll.
-    if (mode === 'final' && (status.state === 'merged' || status.state === 'closed')) {
+    // create another PR for the same branch on every poll. A merged PR that lacks
+    // commits landed after its merge is not that state: those commits need a PR of
+    // their own, exactly as a cycle opens one.
+    if (mode === 'final' && status.state === 'merged') {
+      let complete: boolean
+      try {
+        complete = mergedPrHoldsLocalHead(status.headSha)
+      } catch (error) {
+        reportGateFailure(`could not compare merged PR head with HEAD: ${errorSummary(error)}`, true)
+        return false
+      }
+      if (complete) {
+        if (status.url !== '') writeFileSync(prUrlFile, `${status.url}\n`)
+        previousGateFailures.delete('draft-pr')
+        return true
+      }
+    }
+    if (mode === 'final' && status.state === 'closed') {
       if (status.url !== '') writeFileSync(prUrlFile, `${status.url}\n`)
       previousGateFailures.delete('draft-pr')
       return true
@@ -1843,6 +1869,13 @@ export function createLoop(deps: LoopDeps) {
       })
       writeFileSync(prUrlFile, `${url}\n`)
       previousGateFailures.delete('draft-pr')
+      // Commits that missed the merged PR have passed neither CI nor review on any PR,
+      // so the cycle gate runs again for the new PR before postLoopPr may promote it.
+      if (mode === 'final' && status.state === 'merged' && cycle > 0) {
+        rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
+        rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+        finalGateReopened = true
+      }
       return true
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
@@ -1892,6 +1925,15 @@ export function createLoop(deps: LoopDeps) {
     return headSha !== '' && headSha === localHead
   }
 
+  // Someone can merge the draft PR while later tasks still land on the run branch. The
+  // run is finished only when the merged head contains every commit the branch holds;
+  // throws when containment cannot be determined.
+  function mergedPrHoldsLocalHead(headSha: string): boolean {
+    const localHead = optionalGit(['rev-parse', 'HEAD']).trim()
+    if (headSha === '' || localHead === '') return false
+    return promotedCommitContained(localHead, headSha)
+  }
+
   function generateCiFixTask(cycle: number, prUrl: string, failSummary: string): string {
     const pendingIdFile = join(paths.queueDir, `ci-fix-pending-id-${cycle}`)
     const pendingId = existsSync(pendingIdFile)
@@ -1914,7 +1956,14 @@ export function createLoop(deps: LoopDeps) {
 
   /** After the final gate: promote the draft PR and print LOOP_DONE. */
   async function postLoopPr(): Promise<boolean> {
+    finalGateReopened = false
     if (!(await ensureDraftPr('final'))) return false
+    if (finalGateReopened) {
+      finalGateReopened = false
+      const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
+      event('WARN', `PR merged without the newest commits; gating them again in ${prUrl}`)
+      return false
+    }
     if (emptyRun) {
       marker('LOOP_DONE: no changes')
       event('Completed', 'Loop', 'no changes')
@@ -1995,6 +2044,20 @@ export function createLoop(deps: LoopDeps) {
       return false
     }
     if (status.state !== 'open' && status.state !== 'merged') return false
+    if (status.state === 'merged') {
+      // A merge observed after ensureDraftPr may predate the newest commits; the next
+      // poll's ensureDraftPr then opens a PR for them.
+      try {
+        if (!mergedPrHoldsLocalHead(status.headSha)) return false
+      } catch (error) {
+        reportGateFailure(
+          `could not compare merged PR head with HEAD: ${errorSummary(error)}`,
+          true,
+          'pr-promotion-state',
+        )
+        return false
+      }
+    }
     previousGateFailures.delete('pr-promotion-state')
     const gateEnvironment = os.verificationEnvironmentLabel()
     event(
@@ -3056,11 +3119,12 @@ export function createLoop(deps: LoopDeps) {
               if (capacity <= 0) break
               const result = await claimIssueGroup(
                 forge, paths, issues, cachedUser, appendClaimedRequirementsWithConflicts,
+                config.workerMode,
               )
               if (result.outcome === 'claimed') {
                 event('Claimed', shortTaskId(result.taskId),
                   result.issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' '))
-                if (result.pendingMerge) await mergeCompletedTask(result.taskId)
+                if (result.pendingMerge && !config.workerMode) await mergeCompletedTask(result.taskId)
                 capacity -= 1
               } else if (result.outcome === 'already-processed') {
                 event('Deduplicated',

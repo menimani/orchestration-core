@@ -12,7 +12,7 @@ import {
   commentOnIssueMerge, fingerprintOf, issueMergeComment, issueUnpromotedComment, groupReadyFindings,
   heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
-  issueFailureCount, issueReleaseIntentForTask, issueReleasePreparationForTask,
+  issueFailureCount, issueReleaseIntentForTask,
   IssueReleaseReconciliationError,
   missingRequirementCompletionMarkers, parseIssueBody,
   publishDelegatedTask, publishFinding, reapStaleLeases,
@@ -33,6 +33,7 @@ import { specFile } from '../src/tasks.ts'
 import { frameVerifiedRequirement } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
+import { releasePreparationForTask } from './releasePreparation.ts'
 import { stubProject } from './stubProject.ts'
 
 let repoRoot: string
@@ -1610,19 +1611,14 @@ describe('issue claim release', () => {
     const taskId = 'malformed-lists'
     recordIssuesForTask(paths, taskId, [41, 42])
     recordIssueReleaseIntent(paths, taskId, [41, 42])
-    prepareIssueReleaseIntent(paths, taskId, [41, 42])
     const files = [
       join(paths.queueDir, 'issue-map', taskId),
       join(paths.queueDir, 'issue-release-intent', taskId),
-      join(paths.queueDir, 'issue-release-preparation', taskId),
     ]
     for (const file of files) writeFileSync(file, '41\nmalformed\n42\n')
 
     expect(() => issueNumbersForTask(paths, taskId)).toThrow(/one positive safe integer per line/)
     expect(() => issueReleaseIntentForTask(paths, taskId)).toThrow(
-      /one positive safe integer per line/,
-    )
-    expect(() => issueReleasePreparationForTask(paths, taskId)).toThrow(
       /one positive safe integer per line/,
     )
   })
@@ -1635,7 +1631,7 @@ describe('issue claim release', () => {
 
     expect(issueNumbersForTask(paths, taskId)).toEqual([])
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
-    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+    expect(releasePreparationForTask(paths, taskId)).toEqual([])
   })
 
   it('keeps malformed release reconciliation state for operator repair', async () => {

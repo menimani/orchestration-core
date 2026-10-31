@@ -7,7 +7,7 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import type { SharedSkillRenderOptions, SharedSkillsAdapter } from './adapters/shared-skills.ts'
-import { fleetCommandPrefix } from './paths.ts'
+import { fleetCommandPrefix, shellPathSpelling } from './paths.ts'
 
 const STATE_FILE = '.orchestration-core-sync.json'
 
@@ -434,7 +434,7 @@ export function installUserSkills(
     removedPaths: [], changedPaths: [], managedPaths: [], failures: [],
   }
   const commandPrefix = fleetCommandPrefix(fleetDir, packageRoot)
-  const packagePrefix = `${packageRoot.replaceAll('\\', '/')}/`
+  const packagePrefix = `${shellPathSpelling(packageRoot)}/`
   const destinations: string[] = []
   for (const adapter of adapters) {
     const destinationRoot = adapter.userDestinationRoot?.(home)

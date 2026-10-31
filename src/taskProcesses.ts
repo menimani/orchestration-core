@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { type OrchPaths } from './paths.ts'
 import {
@@ -92,4 +92,24 @@ export function worktreeHolderHint(
   os: OperatingSystem = operatingSystem,
 ): string {
   return os.worktreePathFor(worktree).holderHint
+}
+
+export interface OrphanedWorktreeReport {
+  displayed: string
+  holderHint: string
+}
+
+// The display path is relative to the checkout for readability, but the holder lookup
+// takes the absolute path: in the fleet layout worktrees live outside the checkout, so
+// the relative form climbs out with `..`, which handle.exe never matches against its
+// absolute handle names and lsof resolves against the operator's shell directory.
+export function orphanedWorktreeReport(
+  paths: OrchPaths,
+  worktree: string,
+  os: OperatingSystem = operatingSystem,
+): OrphanedWorktreeReport {
+  return {
+    displayed: relative(paths.repoRoot, worktree),
+    holderHint: worktreeHolderHint(worktree, os),
+  }
 }

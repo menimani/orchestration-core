@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process'
 import { rmSync } from 'node:fs'
 import { win32 } from 'node:path'
-import type { OperatingSystem } from './os.ts'
-import { processTreeRootPid, startWindowsProcess } from './windows-process.ts'
+import type { AgentCommand, OperatingSystem } from './os.ts'
+import { cmdArgumentLine, processTreeRootPid, startWindowsProcess } from './windows-process.ts'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
@@ -22,6 +22,7 @@ export interface WindowsOperatingSystemRuntime {
   sleep(milliseconds: number): void
   processStartIdentity?(pid: number): string | undefined
   startDaemon?: typeof startWindowsProcess
+  startAgent?: typeof startWindowsProcess
 }
 
 export interface WindowsProcess {
@@ -136,6 +137,20 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
   },
   processStartIdentity: windowsProcessStartIdentity,
+}
+
+/**
+ * An agent named by a bare command may be a native executable or an npm .cmd shim, which
+ * Node cannot spawn without a shell; cmd.exe resolves either through PATHEXT whichever
+ * shell started the loop, where a bare `bash` once resolved to WSL instead of Git Bash.
+ * An argument may still hold cmd metacharacters, so the line is escaped for cmd.exe and
+ * passed verbatim. An absolute path already names the executable and is spawned as is.
+ */
+function agentCommand(program: string, args: readonly string[]): AgentCommand {
+  if (win32.isAbsolute(program)) {
+    return { command: program, args: [...args], verbatimArguments: false }
+  }
+  return { command: 'cmd.exe', args: [cmdArgumentLine(program, args)], verbatimArguments: true }
 }
 
 function extendedLengthPath(path: string): string {
@@ -321,6 +336,21 @@ export function createOperatingSystem(
         offExit: () => {},
       }
     },
+    async launchAgent(options) {
+      const { command, args, verbatimArguments } = agentCommand(options.program, options.args)
+      // Measured on Windows: detached launches gave every console descendant its own
+      // visible window. The hidden launcher gives the task one non-visible console,
+      // inherited by all of its tools, while still surviving the daemon that starts it.
+      return (runtime.startAgent ?? startWindowsProcess)({
+        args,
+        command,
+        cwd: options.cwd,
+        inputFile: options.inputFile,
+        outputFile: options.outputFile,
+        ...(verbatimArguments ? { verbatimArguments: true } : {}),
+      })
+    },
+    agentCommand,
     processTreeRootPid,
     processStartIdentity: runtime.processStartIdentity ?? systemRuntime.processStartIdentity!,
     processIsAlive: (pid) => isAlive(runtime, pid),

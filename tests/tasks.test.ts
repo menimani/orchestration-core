@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -76,6 +77,33 @@ describe('enqueueTask', () => {
     expect(queueLines()).toEqual(['failed-task:0'])
   })
 
+  it('refuses a failed task whose worktree is still there until cleanup', () => {
+    createSpec('failed-task')
+    writeTestStatus('failed-task', 'failed')
+    mkdirSync(worktreeDir(paths, 'failed-task'), { recursive: true })
+    const result = enqueueTask(paths, 'failed-task')
+    expect(result).toEqual({
+      outcome: 'needs-cleanup', taskId: 'failed-task', leftover: worktreeDir(paths, 'failed-task'),
+    })
+    expect(queueLines()).toEqual([])
+  })
+
+  it('refuses a failed task whose branch is still there until cleanup', () => {
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repoRoot, stdio: 'ignore', windowsHide: true })
+    git('init', '--quiet')
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit', '--quiet', '--allow-empty', '-m', 'initial')
+    git('branch', branchName('failed-task'))
+    createSpec('failed-task')
+    writeTestStatus('failed-task', 'failed')
+    const result = enqueueTask(paths, 'failed-task')
+    expect(result).toEqual({
+      outcome: 'needs-cleanup', taskId: 'failed-task', leftover: `branch ${branchName('failed-task')}`,
+    })
+    expect(queueLines()).toEqual([])
+  })
+
   it('rejects a task without a specification', () => {
     expect(() => enqueueTask(paths, 'missing-task')).toThrow(/specification not found/i)
   })
@@ -126,8 +154,16 @@ describe('delegateTask', () => {
     expect(existsSync(join(paths.queueDir, 'inspect', result.taskId))).toBe(true)
   })
 
-  it('rejects a blank description', () => {
-    expect(() => delegateTask(paths, '   ')).toThrow(/description/i)
+  it('rejects a blank description before loading the forge or enqueueing', async () => {
+    const loadForge = vi.fn(async () => makeFakeForge('delegator'))
+    await expect(delegateTaskVisible(paths, '   ', {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge,
+      warn: () => {},
+    })).rejects.toThrow('A non-empty description is required')
+
+    expect(loadForge).not.toHaveBeenCalled()
+    expect(queueLines()).toEqual([])
   })
 
   it('publishes delegated work as ready for the daemon when its marker enables issues', async () => {

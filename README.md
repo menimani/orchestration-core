@@ -135,7 +135,9 @@ must begin with `./` or `../`; for example, use `./custom/runner.mjs`, because
 as its default or `forge` export, or exports `createForge(repoRoot, report, target)`.
 Every forge implements `updateIssueTitle(issueNumber, title)`, which replaces an issue's
 title for project bridges rather than for the loop core. A runner module likewise exports a `Runner` as its default or `runner` export, or exports
-`createRunner(options)`. Factories may be asynchronous.
+`createRunner(options)`. Factories may be asynchronous. A runner starts its agent CLI
+through `operatingSystem.launchAgent` from `adapters/os.ts`, which resolves a Windows
+`.cmd` shim, escapes its arguments, and keeps its console hidden.
 
 A forge factory's `target` names the repositories to act on when they are not the
 checkout's own: `codeRepository` for branches, pull requests, and workflow runs, and
@@ -359,9 +361,11 @@ standalone `LOOP_DONE:` marker to `logs/loop-markers.log` carrying the normalize
 reference: `#<n>` for a number, and for a URL its parsed form, with the scheme and host
 lowercased and a default port dropped.
 An active loop that observes the PR already ready or merged records its normal ending
-itself, so `shipped` is only needed when that ending is absent. If the PR is closed rather
-than ready or merged, the loop warns once and retries; observing the same closed state on
-the next poll logs an error, writes the stop file, and stops without emitting `LOOP_DONE`.
+itself, so `shipped` is only needed when that ending is absent. A PR merged before later
+commits reached the run branch does not end the run; the loop opens a new PR for them. If
+the PR is closed rather than ready or merged, the loop warns once and retries; observing the
+same closed state on the next poll logs an error, writes the stop file, and stops without
+emitting `LOOP_DONE`.
 
 Automatic pulls are enabled by default. To pull later improvements manually, or when
 `CORE_AUTO_UPDATE=false` pins the consumed version, use:

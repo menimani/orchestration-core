@@ -55,8 +55,8 @@ import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import {
-  liveTaskProcesses, orphanedWorktreeDirectories, terminateLiveTaskProcesses,
-  worktreeHolderHint, type TaskProcessTermination,
+  liveTaskProcesses, orphanedWorktreeDirectories, orphanedWorktreeReport,
+  terminateLiveTaskProcesses, type TaskProcessTermination,
 } from './taskProcesses.ts'
 import { recordInterruptedScans } from './scanRecovery.ts'
 import {
@@ -525,6 +525,9 @@ const cmdEnqueue: Command = async (paths, args) => {
     console.log(`WARN: ${taskId} is already in the queue`)
   } else if (result.outcome === 'already-processed') {
     console.log(`WARN: ${taskId} has already been processed or is running (status=${result.status}) — skipping`)
+  } else if (result.outcome === 'needs-cleanup') {
+    console.log(`WARN: ${taskId} failed and ${result.leftover} still exists — run cleanup ${taskId} first; not queued`)
+    return 1
   } else {
     console.log(`Enqueued: ${taskId} (depth=${depth})`)
   }
@@ -588,6 +591,14 @@ const cmdDelegate: Command = async (paths, args) => {
     console.log(`Enqueued: ${result.taskId} (depth=0)`)
   } else if (result.enqueue.outcome === 'already-queued') {
     console.log(`WARN: ${result.taskId} is already in the queue`)
+  } else if (result.enqueue.outcome === 'needs-cleanup') {
+    console.log(`WARN: ${result.taskId} failed and ${result.enqueue.leftover} still exists — run cleanup ${result.taskId} first; not queued`)
+    return 1
+  } else {
+    // A running or completed task is not waiting in the backlog, so neither of the loop
+    // messages below would be true of it.
+    console.log(`WARN: ${result.taskId} has already been processed or is running (status=${result.enqueue.status}) — not queued again`)
+    return 0
   }
   if (isLoopRunning(paths)) {
     console.log('The loop is running and starts this task on its next poll.')
@@ -1458,16 +1469,16 @@ async function runLoopDaemon(
         ))
       }
       for (const worktree of orphanedWorktrees) {
-        const displayedWorktree = relative(paths.repoRoot, worktree)
+        const report = orphanedWorktreeReport(paths, worktree)
         log(formatEventLine(
-          'ERROR', 'orphan', displayedWorktree,
+          'ERROR', 'orphan', report.displayed,
         ))
         log(formatEventLine(
           'ERROR', 'worktree', 'has no task status; something may still hold it',
         ))
         log(formatEventLine(
           'ERROR', 'diagnose',
-          worktreeHolderHint(displayedWorktree),
+          report.holderHint,
         ))
       }
       return 1
@@ -1779,15 +1790,17 @@ async function main(): Promise<number> {
   // caller's directory in INIT_CWD, and that is where the project is found.
   const environmentFleet = process.env['ORCHESTRATION_FLEET'] || undefined
   const callerDirectory = process.env['INIT_CWD'] || process.cwd()
+  // A relative --repo or --fleet names a place from that same directory, not the package.
+  const fleetPath = fleetOption === undefined ? undefined : resolve(callerDirectory, fleetOption)
+  const repositoryPaths = repositories.map((repository) => resolve(callerDirectory, repository))
   try {
     if (commandName === 'install-skills') {
       if (repositories.length > 0 || projectOption !== undefined) {
         console.error('ERROR: install-skills takes only --fleet <dir>')
         return 1
       }
-      const fleetDir = fleetOption !== undefined
-        ? resolve(fleetOption)
-        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory)
+      const fleetDir = fleetPath
+        ?? (environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory))
       if (fleetDir === undefined) {
         console.error(`ERROR: no ${FLEET_FILE} found at or above ${callerDirectory}; pass --fleet <dir>`)
         return 1
@@ -1808,9 +1821,8 @@ async function main(): Promise<number> {
         console.error('ERROR: --repo cannot be combined with --fleet or --project')
         return 1
       }
-      const fleetDir = fleetOption !== undefined
-        ? resolve(fleetOption)
-        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory)
+      const fleetDir = fleetPath
+        ?? (environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory))
       if (fleetDir === undefined) {
         console.error(`ERROR: no ${FLEET_FILE} found at or above ${callerDirectory}; pass --fleet <dir>`)
         return 1
@@ -1829,9 +1841,9 @@ async function main(): Promise<number> {
       return 1
     }
     if (commandName === 'loop-status' && repositories.length > 1) {
-      return await cmdMultiLoopStatus(repositories.map((repository) => repoRoot(repository)))
+      return await cmdMultiLoopStatus(repositoryPaths.map((repository) => repoRoot(repository)))
     }
-    const paths = orchPaths(repoRoot(repositories[0]), commandName !== 'loop')
+    const paths = orchPaths(repoRoot(repositoryPaths[0]), commandName !== 'loop')
     return await command(paths, args)
   } catch (error) {
     console.error((error as Error).message)

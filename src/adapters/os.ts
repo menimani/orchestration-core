@@ -21,6 +21,28 @@ export interface DaemonLaunchOptions {
   outputFile: string
 }
 
+/**
+ * An agent is either a bare command name, resolved as the user's shell would resolve it
+ * (an npm .cmd shim included), or the absolute path of an executable.
+ */
+export interface AgentLaunchOptions {
+  args: readonly string[]
+  cwd: string
+  /** Read as the agent's standard input. */
+  inputFile: string
+  /** Receives the agent's standard output and error, appended after what it holds. */
+  outputFile: string
+  program: string
+}
+
+/** The spawn arguments that run an agent program with exactly the given arguments. */
+export interface AgentCommand {
+  args: string[]
+  command: string
+  /** Pass `args` to the command line unquoted; they are already escaped for it. */
+  verbatimArguments: boolean
+}
+
 export interface DaemonProcess {
   pid: number
   isAlive(): boolean
@@ -40,6 +62,13 @@ export interface OperatingSystem {
   /** User-facing label for the environment that exercised local verification. */
   verificationEnvironmentLabel(): string
   launchDaemon(options: DaemonLaunchOptions): Promise<DaemonProcess>
+  /**
+   * Start an agent that outlives this process and resolve with the PID whose tree
+   * `terminateProcessTree` stops. Rejects when the agent could not be started.
+   */
+  launchAgent(options: AgentLaunchOptions): Promise<number>
+  /** How to spawn an agent program as an attached child of this process. */
+  agentCommand(program: string, args: readonly string[]): AgentCommand
   processTreeRootPid(env?: NodeJS.ProcessEnv): number
   /** Stable identity for this particular use of a PID, or undefined when unverifiable. */
   processStartIdentity(pid: number): string | undefined

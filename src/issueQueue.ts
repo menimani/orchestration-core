@@ -1096,12 +1096,6 @@ export function issueReleaseIntentForTask(paths: OrchPaths, taskId: string): num
   return readPersistedIssueNumbers(file)
 }
 
-export function issueReleasePreparationForTask(paths: OrchPaths, taskId: string): number[] {
-  const file = releasePreparationFile(paths, taskId)
-  if (!existsSync(file)) return []
-  return readPersistedIssueNumbers(file)
-}
-
 /** Cancel a release preparation that did not reach completed local cleanup. */
 export function removeIssueReleasePreparation(paths: OrchPaths, taskId: string): void {
   rmSync(releasePreparationFile(paths, taskId), { force: true })
@@ -1827,13 +1821,18 @@ export interface ClaimedRequirement {
   requirement: string
 }
 
-/** Claim and materialize a bounded set of findings as one task, or compensate all members. */
+/**
+ * Claim and materialize a bounded set of findings as one task, or compensate all members.
+ * A worker never merges, so its completed task is as final as a merged one: an issue that
+ * returns to ready after the task was published needs a fresh task, not the old one.
+ */
 export async function claimIssueGroup(
   forge: Forge,
   paths: OrchPaths,
   issues: readonly ForgeIssue[],
   me: string,
   appendRequirements: (taskId: string, requirements: ClaimedRequirement[]) => void,
+  workerMode = false,
 ): Promise<ClaimResult> {
   if (issues.length === 0 || issues.length > MAX_CLAIM_GROUP_SIZE) {
     throw new Error(`A claim group must contain between 1 and ${MAX_CLAIM_GROUP_SIZE} issues.`)
@@ -1865,8 +1864,10 @@ export async function claimIssueGroup(
         findingTaskOrigin(parsed.parentTaskId) === 'fix') ? 'fix' : 'auto'
       const existing = existingTaskIdForDesc(paths, origin, description)
       const existingStatus = existing === undefined ? undefined : readStatus(paths, existing)?.status
+      const existingFinished = existingStatus === 'merged' || existingStatus === 'no-change'
+        || (workerMode && existingStatus === 'completed')
       const terminalAdvisory = existing !== undefined
-        && (existingStatus === 'merged' || existingStatus === 'no-change')
+        && existingFinished
         && requirements.every(({ requirement }) =>
           fingerprintOf(requirement).startsWith('advisory:'))
       if (terminalAdvisory) {
@@ -1887,7 +1888,7 @@ export async function claimIssueGroup(
         }
       }
       const needsFreshTask = existing !== undefined
-        && (existingStatus === 'merged' || existingStatus === 'no-change')
+        && existingFinished
         && !requirements.every(({ requirement }) =>
           fingerprintOf(requirement).startsWith('advisory:'))
       const taskId = needsFreshTask

@@ -5,7 +5,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
@@ -253,6 +253,32 @@ describe('repository selection', () => {
       .toBe(false)
   })
 
+  it('resolves a relative repository from the caller\'s directory rather than the package', () => {
+    const otherRepo = join(repoRoot, 'other-repository')
+    mkdirSync(otherRepo)
+    expect(spawnSync('git', ['init'], { cwd: otherRepo, windowsHide: true }).status).toBe(0)
+    mkdirSync(join(otherRepo, 'orchestration'))
+    // npm run -C moves the working directory to the package and keeps the caller's in INIT_CWD.
+    const packageDirectory = join(repoRoot, 'package')
+    mkdirSync(packageDirectory)
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'new', 'relative-repository-task', '--repo', 'other-repository'],
+      {
+        cwd: packageDirectory,
+        env: { ...INHERITED_ENV, INIT_CWD: repoRoot },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(otherRepo, 'orchestration', 'tasks', 'relative-repository-task.md')))
+      .toBe(true)
+  })
+
   it('continues to resolve the repository from the working directory without the option', () => {
     const result = spawnSync(process.execPath, [CLI, 'new', 'working-directory-task'], {
       cwd: repoRoot,
@@ -420,6 +446,25 @@ describe('fleet project selection', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
     expect(existsSync(join(repoRoot, 'orchestration'))).toBe(false)
+  })
+
+  it('resolves a relative --fleet from the caller\'s directory rather than the package', () => {
+    const fleet = fleetFixture()
+
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'queue', '--fleet', basename(fleet), '--project', 'first'],
+      {
+        cwd: repoRoot,
+        env: { ...CORE_ENV, INIT_CWD: dirname(fleet) },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: CLI_TIMEOUT_MS,
+      },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(join(fleet, 'state', 'first', 'queue'))).toBe(true)
   })
 
   it('treats --project=<name> as a project option rather than an argument', () => {
@@ -724,6 +769,67 @@ describe('delegate arguments', () => {
     const paths = orchPaths(repoRoot, false)
     expect(readdirSync(paths.tasksDir)).toEqual([])
     expect(readdirSync(paths.queueDir)).toEqual([])
+  })
+})
+
+describe('delegate outcomes', () => {
+  const description = 'Repeat a decision that was already delegated once.'
+
+  function delegate(): ReturnType<typeof spawnSync> & { stdout: string } {
+    return spawnSync(process.execPath, [CLI, 'delegate', description], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, ISSUE_QUEUE_ENABLED: 'false' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+  }
+
+  function enqueuedId(stdout: string): string {
+    const match = /^Enqueued: (\S+) \(depth=0\)$/m.exec(stdout)
+    expect(match).not.toBeNull()
+    return match![1]!
+  }
+
+  it('queues a fresh task when the indexed task already finished with no change', async () => {
+    const paths = orchPaths(repoRoot)
+    const first = delegate()
+    expect(first.status).toBe(0)
+    const firstId = enqueuedId(first.stdout)
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    await writeStatus(paths, firstId, 'no-change')
+
+    const second = delegate()
+
+    expect(second.status).toBe(0)
+    const secondId = enqueuedId(second.stdout)
+    expect(secondId).not.toBe(firstId)
+    expect(secondId).toMatch(/_user-repeat-a-decision/)
+    expect(second.stdout).toContain('Created: ')
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${secondId}:0\n`)
+
+    // The index now names the fresh task, so a third request while it is queued is a duplicate.
+    const third = delegate()
+    expect(third.stdout).toContain(`WARN: ${secondId} is already in the queue`)
+  })
+
+  it('warns instead of promising a start when the indexed task is running', async () => {
+    const paths = orchPaths(repoRoot)
+    const first = delegate()
+    expect(first.status).toBe(0)
+    const taskId = enqueuedId(first.stdout)
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    await writeStatus(paths, taskId, 'running')
+    writeFileSync(join(paths.queueDir, 'loop.pid'), processMarkerText(processMarker(process.pid)))
+
+    const second = delegate()
+
+    expect(second.status).toBe(0)
+    expect(second.stdout).toContain(`WARN: ${taskId} has already been processed or is running (status=running)`)
+    expect(second.stdout).not.toContain('Enqueued:')
+    expect(second.stdout).not.toContain('starts this task')
+    expect(second.stdout).not.toContain('waits in the backlog')
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe('')
   })
 })
 

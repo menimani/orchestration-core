@@ -71,7 +71,9 @@ comments and other items cite items by number, so a number is never reused.
 - Every command except `install-skills`, whose own item below states its single option,
   accepts a global `--repo <path>` option. When present, Git resolves the
   named path to its repository root and the CLI verifies both that it is a Git repository
-  and that its root contains an `orchestration/` directory before dispatch. Without the
+  and that its root contains an `orchestration/` directory before dispatch. A relative
+  `--repo` or `--fleet` path resolves from the caller's directory, npm's `INIT_CWD` when
+  present, since `npm run -C` moves the working directory. Without the
   option, repository discovery from the working directory is unchanged. Each of those
   commands accepts one repository; `loop-status` additionally accepts repeated `--repo` options.
   For two or more repositories it emits one line per repository naming the root, loop
@@ -237,9 +239,16 @@ are not parsed by `loadConfig` and are not operator-file settings.
    name the same file. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
-   task is queued, running, completed, or retryable after failure. If an identical
+   task is queued, running, completed, or failed. A failed task is not re-queued; once
+   `cleanup` has removed it, the repeated finding re-admits that task. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
    creates a fresh task and updates the index; completed advisories remain deduplicated.
+   A worker never merges, so in worker mode a completed task counts as finished here: a
+   finding that returns to ready after it was published claims a fresh task, and a
+   returning advisory is closed as a duplicate.
+   A decision delegated again after its task merged or completed with no change likewise
+   gets a fresh task; while that task is running or completed, `delegate` warns with its
+   status and does not report it as queued.
    When generating a task specification, the description's leading category selects a
    project pitfall list: `[TEST]` selects `templates/pitfalls/tests.md`, `[DOCS]` selects
    `templates/pitfalls/docs.md`, and every other description selects
@@ -415,6 +424,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
     ended: its exit status, also in hexadecimal when outside 0-255 as Windows reports a
     crashed process, or the signal that terminated it, so a runtime crash reads differently
     from a failing test.
+10a. A failed merge or rebase is counted or retried only once its abort is confirmed to
+    have left the tree where the attempt found it. A merge into the integration worktree
+    or a prospective merge worktree, for a local task or an adopted worker branch, must
+    leave HEAD, the working-tree status, and the absence of an in-progress merge as they
+    were before it; a pre-merge task rebase must leave the task worktree at its prior tip
+    with no rebase in progress. A merge that finds a merge already in progress, an abort
+    that leaves any of that state changed, or a state check that itself fails stops the
+    loop at once, without consulting `MAX_CONSECUTIVE_MERGE_FAILURES` or retrying, and
+    the error reports what the check found and asks for the worktree to be
+    inspected and restored before orchestration restarts. A later attempt would otherwise
+    merge or test against a tree nobody can describe.
 11. A task that merges while a cycle gate is already waiting clears that cycle's
     complete flag, so the gate pushes and verifies again with the new commits included.
     The same merge clears the cycle's resume flag, which records that the gate has
@@ -428,8 +448,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     same install runs when that recorded hash does not match or a declared dependency is
     missing. Startup synchronization is limited to the package copy inside the repository
     being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
-    it is running from. Install output is captured; a failure logs a summarized `WARN`
-    and stops the loop or startup without undoing an already persisted merge. The next
+    it is running from. Install output is captured; a failure stops the loop or startup
+    with an error that names the package root and the `npm ci --no-audit --no-fund`
+    repair command, without undoing an already persisted merge. The next
     daemon restart retries synchronization, and work resumes only after dependencies are
     repaired and the install succeeds.
 
@@ -469,9 +490,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop). A missing persisted counter reads as zero; an existing
     counter must contain base-10 digits representing a non-negative safe integer.
-    Invalid contents, including an empty file, log the affected repository-relative
-    state path, write the stop file, and stop the loop without resetting or overwriting
-    the counter, retaining it for operator repair.
+    Invalid contents, including an empty file, log the state path relative to the
+    orchestration state root (for example, `queue/scan-count.txt`), write the stop file,
+    and stop the loop without resetting or overwriting the counter, retaining it for
+    operator repair.
     The cap those cycles count towards is persisted separately, in
     `queue/cycle-cap.txt`, rewritten from `MAX_SCAN_CYCLES` once a startup holds the PID
     lock and owns the task lifecycle — a startup refused before that point leaves no cap
@@ -608,25 +630,27 @@ are not parsed by `loadConfig` and are not operator-file settings.
 17. Review: `AUTO_REVIEW=true` dispatches a review task reading the whole branch diff;
     before dispatch, the loop resolves the tracked remote's default branch and refreshes
     its remote ref. If either operation fails, the loop stops without dispatching a
-    review rather than reviewing against a missing or stale base.
+    review rather than reviewing against a missing or stale base. The review reads that
+    diff with the loop's own package excluded: when the package is a consumer subtree,
+    its repository-relative path is explicitly out of scope and excluded from every Git
+    diff/log command printed by the default review template. The exclusion and
+    command-scope placeholders render empty when the package owns the repository.
+    Consumer review-template overrides must retain both placeholders to retain both
+    protections. The review's findings come back as `NEXT_TASK` lines that become fix
+    tasks and clear the cycle flag (the gate re-verifies before the next round reads the
+    corrected diff).
     The optional file `accepted-limits.md` in the project directory (`orchestration/` in
     a subtree consumer, `projects/<name>/` in a fleet) supplies findings that neither a
     scan nor a review should repeat; a missing or whitespace-only file renders as
     `(none)`. The file reaches generated scan tasks as well as review tasks. Its contents
     are repository-controlled prose and are framed as untrusted text in both, so they
     can narrow findings but cannot authorize commands, credential access, or
-    orchestration and CI changes. A scan template without the `{{ACCEPTED_LIMITS}}`
-    placeholder receives an unnumbered `## Accepted limits` section appended to the
-    generated scan task, so the numbered sections that `SCAN_PARALLEL` splits are
-    unchanged.
-    when the package is a consumer subtree, its repository-relative path is explicitly
-    out of scope and excluded from every Git diff/log command printed by the default
-    review template. The exclusion and command-scope placeholders render empty when the
-    package owns the repository. Consumer review-template overrides must retain both
-    placeholders to retain both protections.
-    findings come back as `NEXT_TASK` lines that become fix tasks and clear the cycle
-    flag (the gate re-verifies before the next round reads the corrected diff). A clean
-    round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle. An ordinary
+    orchestration and CI changes. A scan or review template without the
+    `{{ACCEPTED_LIMITS}}` placeholder receives an unnumbered `## Accepted limits` section
+    appended to the generated task, so a consumer's template that predates the
+    placeholder still carries the accepted limits, and the numbered sections that
+    `SCAN_PARALLEL` splits are unchanged.
+    A clean review round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle. An ordinary
     cycle that still has findings at that bound logs a warning and resumes. A review
     that ends failed, or in an unknown state, without a verdict says nothing about the
     diff: the loop logs a warning and retries it within the same bound, and if the
@@ -650,8 +674,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     unless it is already open and ready. While an open PR reports a head commit other
     than the local `HEAD`, the loop neither promotes it nor emits `LOOP_DONE`, and
     retries on the next poll. A PR found merged before promotion, or merged
-    while the ready operation is being confirmed, is also a successful terminal state;
-    both paths emit the normal completion records without another ready operation.
+    while the ready operation is being confirmed, is also a successful terminal state
+    when its head contains the local `HEAD`; both paths emit the normal completion
+    records without another ready operation. A merged PR whose head lacks later commits
+    of the run branch is not success: the loop opens a new draft PR for them, as a cycle
+    does, and reopens the current cycle's gate so CI and review judge that PR before it
+    is promoted. A containment check that cannot be answered is a gate failure.
     A PR found closed before or during promotion is not success: the first observation
     warns and leaves the final gate resumable, while the same closed-state failure on the
     next poll logs `ERROR`, writes the stop file, and ends the retry. Promotion errors,
@@ -759,8 +787,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the intentional termination as a missing scan yield.
 26. The daemon holds the code it started with; `loop`, once it has launched the daemon in
     the background, prints where the log lives and how to stop.
-27. `prune --days N` deletes logs/status/generated specs/queue markers of tasks finished
-    more than N days ago; it accepts merged and no-change tasks and never touches an
+27. `prune [--days N]` deletes logs/status/generated specs/queue markers of tasks finished
+    more than N days ago, 14 when `--days` is omitted; it accepts merged and no-change tasks and never touches an
     unfinished or failed task, a worktree still on disk, or a spec tracked by git.
     `--dry-run` lists without deleting.
 
@@ -859,9 +887,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `PROJECT_ADAPTER` path is skipped. A skipped check retains its reason and is never
     reported as a pass.
 32. Operating-system behavior is detected once from the running process and exposed
-    through `adapters/os.ts`. Callers receive intent-level process-tree, directory, and
-    worktree-path operations from either `os-windows.ts` or `os-posix.ts`; there is no
-    OS selector or platform field in the contract.
+    through `adapters/os.ts`. Callers receive intent-level process-tree, agent-launch,
+    directory, and worktree-path operations from either `os-windows.ts` or `os-posix.ts`;
+    there is no OS selector or platform field in the contract.
 32a. `deploy` accepts no arguments and uses the current branch, the project adapter's
     deployment workflow and revision URL, and a request-unique dispatch token. It
     dispatches that workflow and identifies only the run returned for the same workflow,

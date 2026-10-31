@@ -1,10 +1,8 @@
 import { spawn } from 'node:child_process'
-import {
-  closeSync, openSync, renameSync, rmSync, writeFileSync,
-} from 'node:fs'
+import { renameSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createClaudeSharedSkills } from './shared-skills-claude.ts'
-import { cmdArgumentLine, startWindowsProcess } from './windows-process.ts'
+import { operatingSystem } from './os.ts'
 import type {
   ReasoningEffort, Runner, RunnerLoadOptions, RunnerModelOptions, RunnerStartOptions,
 } from './runner.ts'
@@ -48,18 +46,16 @@ export function runClaudeProcess(
   finalMessageFile: string,
   args: readonly string[],
 ): Promise<number> {
-  // Claude may be a native executable or an npm .cmd shim; cmd.exe launches either
-  // through PATHEXT, whichever shell started the loop. A model name may still hold cmd
-  // metacharacters, so the line is escaped for cmd.exe and passed verbatim.
-  const viaCmd = process.platform === 'win32'
-
   return new Promise((resolve, reject) => {
     let child
     try {
-      const command = viaCmd ? 'cmd.exe' : 'claude'
-      const commandArgs = viaCmd ? [cmdArgumentLine('claude', args)] : [...args]
+      // Claude may be a native executable or an npm .cmd shim; the operating-system
+      // adapter decides how either is spawned.
+      const { command, args: commandArgs, verbatimArguments } = operatingSystem.agentCommand(
+        'claude', args,
+      )
       child = spawn(command, commandArgs, {
-        ...(viaCmd ? { windowsVerbatimArguments: true } : {}),
+        ...(verbatimArguments ? { windowsVerbatimArguments: true } : {}),
         detached: false,
         // `claude -p` exits when its turn ends, killing anything it left running in
         // the background. Tasks that started the suite that way ended with "I'll commit
@@ -107,64 +103,12 @@ export function createClaudeRunner(
         startOptions.finalMessageFile,
         ...buildArgs(resolveModel(startOptions)),
       ]
-
-      if (process.platform === 'win32') {
-        return startWindowsProcess({
-          args: wrapperArgs,
-          command: process.execPath,
-          cwd: startOptions.worktree,
-          inputFile: startOptions.specFile,
-          outputFile: startOptions.logFile,
-        })
-      }
-
-      const logFd = openSync(startOptions.logFile, 'a')
-      let specFd: number
-      try {
-        specFd = openSync(startOptions.specFile, 'r')
-      } catch (error) {
-        closeSync(logFd)
-        return Promise.reject(error)
-      }
-
-      return new Promise((resolve, reject) => {
-        let descriptorsClosed = false
-        const closeDescriptors = (): void => {
-          if (descriptorsClosed) return
-          descriptorsClosed = true
-          try {
-            closeSync(specFd)
-          } finally {
-            closeSync(logFd)
-          }
-        }
-
-        let child
-        try {
-          child = spawn(process.execPath, wrapperArgs, {
-            cwd: startOptions.worktree,
-            detached: true,
-            stdio: [specFd, logFd, logFd],
-            windowsHide: true,
-          })
-        } catch (error) {
-          closeDescriptors()
-          reject(error)
-          return
-        }
-        child.once('error', (error) => {
-          closeDescriptors()
-          reject(error)
-        })
-        child.once('spawn', () => {
-          closeDescriptors()
-          child.unref()
-          if (child.pid === undefined) {
-            reject(new Error('claude runner spawned without a PID'))
-            return
-          }
-          resolve(child.pid)
-        })
+      return operatingSystem.launchAgent({
+        args: wrapperArgs,
+        cwd: startOptions.worktree,
+        inputFile: startOptions.specFile,
+        outputFile: startOptions.logFile,
+        program: process.execPath,
       })
     },
   }

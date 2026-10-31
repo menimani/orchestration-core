@@ -11,15 +11,16 @@ import { operatingSystem } from '../src/adapters/os.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
-  issueReleaseIntentForTask, issueReleasePreparationForTask, prepareIssueReleaseIntent,
+  issueReleaseIntentForTask, prepareIssueReleaseIntent,
   recordIssuePromotions, recordIssueReleaseIntent, recordIssuesForTask,
-  LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
+  LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_READY,
   LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
 import { existingTaskIdForDesc, recordTaskIdForDesc, shortTaskId } from '../src/ids.ts'
 import {
   issueConflictKey, readConflictedAttempts, writeConflictedAttempts,
 } from '../src/conflictRetry.ts'
+import { cleanupTask } from '../src/cleanup.ts'
 import { runCleanupCommand } from '../src/cleanupCommand.ts'
 import { createLoop, formatEventLine, type Loop, type LoopDeps } from '../src/loop.ts'
 import {
@@ -41,6 +42,7 @@ import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
+import { releasePreparationForTask } from './releasePreparation.ts'
 import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
 import { TestProcessRegistry } from './testProcess.ts'
@@ -558,6 +560,33 @@ describe('forge poll budget', () => {
     for (const issueNumber of issueNumbers) {
       expect((await fakeForge.getIssue(issueNumber)).labels).toContain(LABEL_IN_PROGRESS)
     }
+  })
+
+  it('gives a single claimed test finding the tests pitfall list', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates', 'pitfalls'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'pitfalls', 'code.md'), 'Stale async responses.\n')
+    writeFileSync(
+      join(paths.root, 'templates', 'pitfalls', 'tests.md'), 'clearAllMocks keeps implementations.\n',
+    )
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const requirement = '[TEST] `src/shared.ts` lacks coverage for the empty input'
+    await fakeForge.createIssue({
+      title: requirement,
+      body: buildIssueBody(requirement, 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(1)
+    const spec = readFileSync(runnerStarts[0]!, 'utf8')
+    expect(spec).toContain(requirement)
+    expect(spec).toContain('clearAllMocks keeps implementations.')
+    expect(spec).not.toContain('Stale async responses.')
   })
 
   it('does not claim from a poll whose duplicate re-read cannot be verified', async () => {
@@ -1394,6 +1423,22 @@ describe('runAutoReview', () => {
     expect(spec).not.toContain('{{REVIEW_SCOPE_EXCLUSION}}')
     expect(spec).not.toContain('{{REVIEW_DIFF_SCOPE}}')
     expect(spec).not.toContain('vendored core repository')
+  })
+
+  it('appends framed accepted limits to a review template without the placeholder', () => {
+    writeFileSync(join(paths.root, 'accepted-limits.md'), '- Keep the accepted fixture limit.\n')
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+    expect(spec).toContain('## Accepted limits')
+    expect(spec).toContain(
+      'These are accepted limits by decision. Do not report them or propose narrower variants\n'
+      + 'of them as findings. A finding qualitatively beyond an entry is still reportable.',
+    )
+    expect(spec).toContain(
+      '<<<UNTRUSTED_REQUEST_TEXT>>>\n- Keep the accepted fixture limit.\n<<<END_UNTRUSTED_REQUEST_TEXT>>>',
+    )
+    expect(spec.indexOf('## Accepted limits')).toBeGreaterThan(spec.indexOf(' review of cycle 7 '))
   })
 
   it('marks accepted limits as none when the file is missing', () => {
@@ -3028,7 +3073,7 @@ describe('remote issue queue idle detection', () => {
 
     await loop.poll()
 
-    expect(issueReleasePreparationForTask(paths, 'task-release')).toEqual([])
+    expect(releasePreparationForTask(paths, 'task-release')).toEqual([])
     expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([])
     await expect(fakeForge.getIssue(issueNumber)).resolves.toMatchObject({
       state: 'open',
@@ -4274,13 +4319,73 @@ describe('completion marker output', () => {
     initializeGitRepoWithRemote()
     const loop = makeLoop()
     fakeForge.markPrReady = async () => {
-      forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false }
+      forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false, headSha: git(['rev-parse', 'HEAD']).trim() }
     }
 
     expect(await loop.postLoopPr()).toBe(true)
 
     expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
     expect(logged).toContain('Completed Loop        PR https://example.test/pull/1')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('opens a new PR and reopens the cycle gate when a merged PR head is behind HEAD', async () => {
+    initializeGitRepoWithRemote()
+    git(['switch', '-c', 'feature/run-merged-early'])
+    writeFileSync(join(repoRoot, 'early.txt'), 'early\n')
+    git(['add', 'early.txt'])
+    git(['commit', '-m', 'feat: merged with the draft'])
+    const mergedHead = git(['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repoRoot, 'late.txt'), 'late\n')
+    git(['add', 'late.txt'])
+    git(['commit', '-m', 'feat: landed after the merge'])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
+    forgeStatus = {
+      state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha: mergedHead, checks: [],
+    }
+    const loop = makeLoop()
+    const createPr = vi.fn(async () => {
+      forgeStatus = { state: 'open', isDraft: true, url: 'https://example.test/pull/2', headSha: '', checks: [] }
+      return 'https://example.test/pull/2'
+    })
+    fakeForge.createPr = createPr
+    const markPrReady = vi.fn(async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.postLoopPr()).toBe(false)
+
+    expect(createPr).toHaveBeenCalledOnce()
+    expect(markPrReady).not.toHaveBeenCalled()
+    expect(logText()).not.toContain('LOOP_DONE')
+    expect(logText()).toContain('PR merged without the newest commits; gating them again in https://example.test/pull/2')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    // Once the reopened gate has passed again, the new PR is promoted as usual.
+    expect(await loop.postLoopPr()).toBe(true)
+    expect(createPr).toHaveBeenCalledOnce()
+    expect(markPrReady).toHaveBeenCalledOnce()
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/2')
+  })
+
+  it('does not finish on a PR merged during promotion whose head is behind HEAD', async () => {
+    const headSha = initializeGitRepoWithRemote()
+    writeFileSync(join(repoRoot, 'late.txt'), 'late\n')
+    git(['add', 'late.txt'])
+    git(['commit', '-m', 'feat: landed after the merge'])
+    const loop = makeLoop()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false, headSha }
+    }
+
+    expect(await loop.postLoopPr()).toBe(false)
+
+    expect(logText()).not.toContain('LOOP_DONE')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
@@ -4608,6 +4713,102 @@ describe('completed task merge recovery', () => {
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('stops without recording a failure when a failed rebase leaves the task worktree mid-rebase', async () => {
+    const taskId = '20260815_181909_195_auto-stuck-rebase'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    const taskTip = git(['rev-parse', 'HEAD'], worktree)
+    writeFileSync(join(repoRoot, 'run.txt'), 'newer run work\n')
+    git(['add', 'run.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+    const runHead = git(['rev-parse', 'HEAD'])
+    // Rebase state without a head-name: the rebase refuses to start and the abort fails.
+    const rebaseState = git(['rev-parse', '--path-format=absolute', '--git-path', 'rebase-merge'], worktree)
+    mkdirSync(rebaseState, { recursive: true })
+    writeFileSync(join(rebaseState, 'interactive'), '')
+    const loop = makeLoop({ autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '1\n')
+
+    await expect(loop.poll()).rejects.toThrow(
+      /^Rebasing the task onto main failed and the abort did not restore the task worktree: .*rebase is still in progress; rebase abort failed: /,
+    )
+
+    // A failed record would let the next poll merge into a worktree still mid-rebase.
+    expect(logged).toContain('Merging 195_auto')
+    expect(logged.some((line) => line.startsWith('Failed 195_auto'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(readFileSync(join(paths.logsDir, `${taskId}.merge.log`), 'utf8')).toMatch(
+      /Rebasing the task onto main failed and the abort did not restore the task worktree/,
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(git(['rev-parse', branchName(taskId)])).toBe(taskTip)
+  })
+
+  it('stops without recording a failure when the run checkout already has a merge in progress', async () => {
+    const taskId = '20260815_181910_196_auto-merge-in-progress'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const runHead = git(['rev-parse', 'HEAD'])
+    const mergeHead = git(['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'])
+    writeFileSync(mergeHead, `${runHead}\n`)
+    const loop = makeLoop({ autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 })
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '1\n')
+
+    await expect(loop.poll()).rejects.toThrow(
+      'The integration worktree already has a merge in progress. '
+      + 'Inspect and restore it before restarting orchestration.',
+    )
+
+    expect(logged).toContain('Merging 196_auto')
+    expect(logged.some((line) => line.startsWith('Failed 196_auto'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(existsSync(mergeHead)).toBe(true)
+  })
+
+  it('stops a remote adoption without relabelling when the run checkout has a merge in progress', async () => {
+    const taskId = '20260815_181911_197_auto-remote-merge-in-progress'
+    initializeGitRepoWithRemote()
+    git(['switch', '-c', branchName(taskId)])
+    writeFileSync(join(repoRoot, 'remote.txt'), 'remote work\n')
+    git(['add', 'remote.txt'])
+    git(['commit', '-m', 'fix: add remote work'])
+    const taskHead = git(['rev-parse', 'HEAD'])
+    git(['push', 'origin', branchName(taskId)])
+    git(['switch', 'main'])
+    const runHead = git(['rev-parse', 'HEAD'])
+    const loop = makeLoop({ autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'remote work', body: '', labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })
+    await fakeForge.commentIssue(
+      issueNumber, `Branch: ${branchName(taskId)}\nHead commit: ${taskHead}`,
+    )
+    const commentsBefore = fakeForge.issueComments.get(issueNumber)?.length
+    const mergeHead = git(['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'])
+    writeFileSync(mergeHead, `${runHead}\n`)
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '1\n')
+
+    await expect(loop.poll()).rejects.toThrow(
+      'The integration worktree already has a merge in progress. '
+      + 'Inspect and restore it before restarting orchestration.',
+    )
+
+    // A failed adoption would relabel the issue and let the next one merge into this state.
+    expect(logged).toContain('Merging 197_auto')
+    expect(logged.some((line) => line.startsWith('Failed 197_auto'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('1\n')
+    expect(fakeForge.issueComments.get(issueNumber)?.length).toBe(commentsBefore)
+    expect(fakeForge.issues.get(issueNumber)?.labels).toEqual([LABEL_FINDING, LABEL_MERGE_READY])
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+  })
+
   it('releases an issue task after its first conflicting rebase and keeps its commits', async () => {
     const taskId = '20260815_181908_194_auto-rebase-conflict'
     const initialHead = initializeGitRepo()
@@ -4755,7 +4956,7 @@ describe('completed task merge recovery', () => {
     )
     expect(readStatus(paths, taskId)?.status).toBe('failed')
     expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
-    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+    expect(releasePreparationForTask(paths, taskId)).toEqual([])
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
   })
 
@@ -6402,6 +6603,33 @@ describe('scanForNextTasks', () => {
     expect(readFileSync(join(paths.tasksDir, `${testId}.md`), 'utf8')).toContain('clearAllMocks keeps implementations')
   })
 
+  it('gives a scan-spawned docs task the docs pitfall list alone', async () => {
+    const loop = makeLoop()
+    writeFinal('20250101_000000_016_scan', 'NEXT_TASK: [DOCS] a stale README section a scan found\n')
+    await loop.scanForNextTasks('20250101_000000_016_scan', 0)
+
+    const specs = readdirSync(paths.tasksDir)
+    expect(specs).toHaveLength(1)
+    const spec = readFileSync(join(paths.tasksDir, specs[0] as string), 'utf8')
+    expect(spec).toContain('Shared requirements.\n\nProject documentation pitfalls.\n')
+    expect(spec).not.toContain('Stale async responses')
+    expect(spec).not.toContain('clearAllMocks keeps implementations')
+  })
+
+  it('adds no pitfall list when the selected file is missing', async () => {
+    rmSync(join(paths.root, 'templates', 'pitfalls', 'docs.md'))
+    const loop = makeLoop()
+    writeFinal('20250101_000000_017_scan', 'NEXT_TASK: [DOCS] a stale README section a scan found\n')
+    await loop.scanForNextTasks('20250101_000000_017_scan', 0)
+
+    const specs = readdirSync(paths.tasksDir)
+    expect(specs).toHaveLength(1)
+    const spec = readFileSync(join(paths.tasksDir, specs[0] as string), 'utf8')
+    expect(spec.endsWith('\nShared requirements.\n')).toBe(true)
+    expect(spec).not.toContain('Project documentation pitfalls')
+    expect(spec).not.toContain('Stale async responses')
+  })
+
   it('bounds growth by depth and by total task count', async () => {
     const loop = makeLoop({ maxGrowthDepth: 1 })
     writeFinal('deep-parent', 'NEXT_TASK: [BUG] too deep\n')
@@ -6449,8 +6677,9 @@ describe('scanForNextTasks', () => {
     expect(logText()).toContain('WARN task limit 1 ignored findings from remote-scan')
   })
 
-  it('re-admits a review finding whose indexed task failed or already merged', async () => {
-    const loop = makeLoop()
+  it('holds a review finding whose task failed until cleanup, and re-admits it after a merge', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({ scanEnabled: false, maxParallel: 1 })
     const finding = '[BUG] a defect whose first fix crashed'
 
     writeFinal('20250101_000000_020_review-c1', `NEXT_TASK: ${finding}\n`)
@@ -6459,21 +6688,34 @@ describe('scanForNextTasks', () => {
     expect(specs).toHaveLength(1)
     const taskId = (specs[0] as string).replace(/\.md$/, '')
 
-    // The first attempt failed: the finding must come back as retryable work.
+    // The first attempt failed and kept its worktree: re-queueing it would only be
+    // refused at startup, so the finding waits for the operator's cleanup.
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
     writeRawStatus(taskId, 'failed')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     logged = []
     writeFinal('20250101_000000_021_review-c1', `NEXT_TASK: ${finding}\n`)
     await loop.scanForNextTasks('20250101_000000_021_review-c1', 0)
-    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toContain(taskId)
-    expect(logText()).not.toContain('Duplicate finding')
+    expect(backlogEntries()).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toHaveLength(1)
+
+    // After cleanup the same finding re-admits the task, and it actually starts.
+    cleanupTask(paths, taskId, undefined, false, () => {})
+    writeFinal('20250101_000000_022_review-c1', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_022_review-c1', 0)
+    expect(backlogEntries()).toEqual([`${taskId}:1`])
+    loop.initializeSessionStateForBranch()
+    expect(await loop.poll()).toBe('continue')
+    expect(runnerStarts).toEqual([specFile(paths, taskId)])
+    expect(readStatus(paths, taskId)?.status).toBe('running')
+    expect(logText()).not.toContain('startup failed')
 
     // Once the fix landed, a later review saw the post-fix tree and must create new work.
     writeRawStatus(taskId, 'merged')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     logged = []
-    writeFinal('20250101_000000_022_review-c1', `NEXT_TASK: ${finding}\n`)
-    await loop.scanForNextTasks('20250101_000000_022_review-c1', 0)
+    writeFinal('20250101_000000_023_review-c1', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_023_review-c1', 0)
     const freshTaskId = readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim().split(':')[0]
     expect(freshTaskId).not.toBe(taskId)
     expect(readdirSync(paths.tasksDir)).toHaveLength(2)
