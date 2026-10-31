@@ -627,15 +627,15 @@ export function createLoop(deps: LoopDeps) {
         // The worker publishes each member of a group in parallel, so a poll can see one
         // member reported while another is still claimed with no report yet. That member is
         // still being published, not contradicting the group: releasing it here would make
-        // the worker's next attempt lose its claim and discard pushed work.
+        // the worker's next attempt lose its claim and discard pushed work. A claimed member
+        // can still carry a report from an earlier task, so the claim decides, not the report.
         let stillPublishing = false
         for (const candidate of adoptionIssues) {
-          const candidateReport = workerBranchReport(await commentsForIssue(candidate))
-          if (candidateReport === undefined && candidate.labels.includes(LABEL_IN_PROGRESS)
-            && !candidate.labels.includes(LABEL_READY)) {
+          if (candidate.labels.includes(LABEL_IN_PROGRESS) && !candidate.labels.includes(LABEL_READY)) {
             stillPublishing = true
             break
           }
+          const candidateReport = workerBranchReport(await commentsForIssue(candidate))
           if (candidateReport?.branch !== report.branch || candidateReport.head !== report.head) {
             throw new MergeError(`Grouped issue #${candidate.number} does not report the same worker branch.`)
           }
