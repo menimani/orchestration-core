@@ -1096,12 +1096,6 @@ export function issueReleaseIntentForTask(paths: OrchPaths, taskId: string): num
   return readPersistedIssueNumbers(file)
 }
 
-export function issueReleasePreparationForTask(paths: OrchPaths, taskId: string): number[] {
-  const file = releasePreparationFile(paths, taskId)
-  if (!existsSync(file)) return []
-  return readPersistedIssueNumbers(file)
-}
-
 /** Cancel a release preparation that did not reach completed local cleanup. */
 export function removeIssueReleasePreparation(paths: OrchPaths, taskId: string): void {
   rmSync(releasePreparationFile(paths, taskId), { force: true })

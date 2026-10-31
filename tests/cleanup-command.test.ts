@@ -8,8 +8,7 @@ import {
   CLEANUP_USAGE, runCleanupCommand, type CleanupCommandRuntime,
 } from '../src/cleanupCommand.ts'
 import {
-  completeIssueReleaseIntent, issueNumbersForTask, issueReleaseIntentForTask,
-  issueReleasePreparationForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
+  completeIssueReleaseIntent, issueNumbersForTask, issueReleaseIntentForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY, prepareIssueReleaseIntent,
   reapStaleLeases, reconcileIssueReleaseIntents, recordIssueReleaseIntent, recordIssuesForTask,
 } from '../src/issueQueue.ts'
@@ -18,6 +17,7 @@ import {
 } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
 import { makeFakeForge } from './fakeForge.ts'
+import { releasePreparationForTask } from './releasePreparation.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -83,7 +83,7 @@ describe('cleanup command', () => {
     recordIssuesForTask(paths, taskId, [41, 42])
     const commandRuntime = runtime({
       cleanup: vi.fn(() => {
-        expect(issueReleasePreparationForTask(paths, taskId)).toEqual([41, 42])
+        expect(releasePreparationForTask(paths, taskId)).toEqual([41, 42])
         expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
       }),
     })
@@ -124,7 +124,7 @@ describe('cleanup command', () => {
     const cleanupError = new Error('cleanup failed')
     const commandRuntime = runtime({
       cleanup: vi.fn(() => {
-        expect(issueReleasePreparationForTask(paths, taskId)).toEqual([41, 42])
+        expect(releasePreparationForTask(paths, taskId)).toEqual([41, 42])
         expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
         throw cleanupError
       }),
@@ -133,7 +133,7 @@ describe('cleanup command', () => {
     await expect(runCleanupCommand(paths, [taskId], commandRuntime)).rejects.toBe(cleanupError)
 
     expect(issueNumbersForTask(paths, taskId)).toEqual([41, 42])
-    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+    expect(releasePreparationForTask(paths, taskId)).toEqual([])
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
     expect(commandRuntime.loadForge).not.toHaveBeenCalled()
   })
@@ -147,7 +147,7 @@ describe('cleanup command', () => {
     await expect(runCleanupCommand(paths, [taskId], commandRuntime)).rejects.toBe(cleanupError)
 
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([41])
-    expect(issueReleasePreparationForTask(paths, taskId)).toEqual([])
+    expect(releasePreparationForTask(paths, taskId)).toEqual([])
     expect(commandRuntime.loadForge).not.toHaveBeenCalled()
   })
 

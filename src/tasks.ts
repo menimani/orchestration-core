@@ -215,9 +215,6 @@ export function delegateTask(
   description: string,
   options: DelegateOptions = {},
 ): DelegateResult {
-  if (description.trim() === '') {
-    throw new Error('A non-empty description is required')
-  }
   const taskId = taskIdForDesc(paths, 'user', description)
   return materializeDelegatedTask(paths, taskId, description, options)
 }
