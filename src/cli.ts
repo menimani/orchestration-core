@@ -1784,15 +1784,17 @@ async function main(): Promise<number> {
   // caller's directory in INIT_CWD, and that is where the project is found.
   const environmentFleet = process.env['ORCHESTRATION_FLEET'] || undefined
   const callerDirectory = process.env['INIT_CWD'] || process.cwd()
+  // A relative --repo or --fleet names a place from that same directory, not the package.
+  const fleetPath = fleetOption === undefined ? undefined : resolve(callerDirectory, fleetOption)
+  const repositoryPaths = repositories.map((repository) => resolve(callerDirectory, repository))
   try {
     if (commandName === 'install-skills') {
       if (repositories.length > 0 || projectOption !== undefined) {
         console.error('ERROR: install-skills takes only --fleet <dir>')
         return 1
       }
-      const fleetDir = fleetOption !== undefined
-        ? resolve(fleetOption)
-        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory)
+      const fleetDir = fleetPath
+        ?? (environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory))
       if (fleetDir === undefined) {
         console.error(`ERROR: no ${FLEET_FILE} found at or above ${callerDirectory}; pass --fleet <dir>`)
         return 1
@@ -1813,9 +1815,8 @@ async function main(): Promise<number> {
         console.error('ERROR: --repo cannot be combined with --fleet or --project')
         return 1
       }
-      const fleetDir = fleetOption !== undefined
-        ? resolve(fleetOption)
-        : environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory)
+      const fleetDir = fleetPath
+        ?? (environmentFleet !== undefined ? resolve(environmentFleet) : findFleetDir(callerDirectory))
       if (fleetDir === undefined) {
         console.error(`ERROR: no ${FLEET_FILE} found at or above ${callerDirectory}; pass --fleet <dir>`)
         return 1
@@ -1834,9 +1835,9 @@ async function main(): Promise<number> {
       return 1
     }
     if (commandName === 'loop-status' && repositories.length > 1) {
-      return await cmdMultiLoopStatus(repositories.map((repository) => repoRoot(repository)))
+      return await cmdMultiLoopStatus(repositoryPaths.map((repository) => repoRoot(repository)))
     }
-    const paths = orchPaths(repoRoot(repositories[0]), commandName !== 'loop')
+    const paths = orchPaths(repoRoot(repositoryPaths[0]), commandName !== 'loop')
     return await command(paths, args)
   } catch (error) {
     console.error((error as Error).message)

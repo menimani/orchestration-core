@@ -71,7 +71,9 @@ comments and other items cite items by number, so a number is never reused.
 - Every command except `install-skills`, whose own item below states its single option,
   accepts a global `--repo <path>` option. When present, Git resolves the
   named path to its repository root and the CLI verifies both that it is a Git repository
-  and that its root contains an `orchestration/` directory before dispatch. Without the
+  and that its root contains an `orchestration/` directory before dispatch. A relative
+  `--repo` or `--fleet` path resolves from the caller's directory, npm's `INIT_CWD` when
+  present, since `npm run -C` moves the working directory. Without the
   option, repository discovery from the working directory is unchanged. Each of those
   commands accepts one repository; `loop-status` additionally accepts repeated `--repo` options.
   For two or more repositories it emits one line per repository naming the root, loop
