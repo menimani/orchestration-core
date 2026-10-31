@@ -3119,6 +3119,7 @@ export function createLoop(deps: LoopDeps) {
               if (capacity <= 0) break
               const result = await claimIssueGroup(
                 forge, paths, issues, cachedUser, appendClaimedRequirementsWithConflicts,
+                config.workerMode,
               )
               if (result.outcome === 'claimed') {
                 event('Claimed', shortTaskId(result.taskId),
