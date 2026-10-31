@@ -16,6 +16,9 @@ import { TestProcessRegistry } from './testProcess.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'src', 'cli.ts')
 const PROJECT_ADAPTER = join(HERE, 'fixtures', 'project-loader-fixture.ts')
+// The launcher starts PowerShell and a hidden daemon, which is slow on a loaded host;
+// this bound only guards against a hang.
+const LAUNCHER_TIMEOUT_MS = 60_000
 const fixtureRoots: string[] = []
 const testProcesses = new TestProcessRegistry()
 
@@ -148,7 +151,7 @@ it('launches the real CLI daemon through the independent hidden-console wrapper'
       REVIEW_ENABLED: 'false',
       SCAN_ENABLED: 'false',
     },
-    timeout: 10_000,
+    timeout: LAUNCHER_TIMEOUT_MS,
     windowsHide: true,
   })
   expect(launcher.status, launcher.stderr).toBe(0)
