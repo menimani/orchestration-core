@@ -489,9 +489,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop). A missing persisted counter reads as zero; an existing
     counter must contain base-10 digits representing a non-negative safe integer.
-    Invalid contents, including an empty file, log the affected repository-relative
-    state path, write the stop file, and stop the loop without resetting or overwriting
-    the counter, retaining it for operator repair.
+    Invalid contents, including an empty file, log the state path relative to the
+    orchestration state root (for example, `queue/scan-count.txt`), write the stop file,
+    and stop the loop without resetting or overwriting the counter, retaining it for
+    operator repair.
     The cap those cycles count towards is persisted separately, in
     `queue/cycle-cap.txt`, rewritten from `MAX_SCAN_CYCLES` once a startup holds the PID
     lock and owns the task lifecycle — a startup refused before that point leaves no cap
