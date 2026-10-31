@@ -32,6 +32,11 @@ describe('operating-system adapters', () => {
     )
   })
 
+  it('spawns terminable children the way each adapter stops their tree', () => {
+    expect(createWindowsOperatingSystem().terminableSpawnOptions()).toEqual({ detached: false })
+    expect(createPosixOperatingSystem().terminableSpawnOptions()).toEqual({ detached: true })
+  })
+
   it('launches a POSIX daemon without exposing the platform choice to callers', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-os-'))
     const child = Object.assign(new EventEmitter(), {
