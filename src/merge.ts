@@ -1232,14 +1232,16 @@ function acquireMergeGuard(
 function finishMergeGuard(
   guard: { file: string; owner: MergeGuardOwner },
 ): void {
-  let ownsGuard = false
   try {
-    ownsGuard = readFileSync(join(guard.file, 'owner.json'), 'utf8').trim()
+    const ownsGuard = readFileSync(join(guard.file, 'owner.json'), 'utf8').trim()
       === JSON.stringify(guard.owner)
-  } catch {
-    return
+    if (!ownsGuard) return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    // An unreadable owner (a scanner holding it on Windows) still names this live daemon.
+    // Recording the token lets the next attempt reclaim it even if retirement fails too.
+    if (guard.owner.token !== null) retiredMergeGuardTokens.add(guard.owner.token)
   }
-  if (!ownsGuard) return
   const retiredGuard = `${guard.file}.retired-${randomUUID()}`
   // Publish retirement before the preferred atomic rename. If Windows refuses the
   // directory rename, a waiter can still distinguish this guard from a live operation.
