@@ -181,6 +181,7 @@ export function createLoop(deps: LoopDeps) {
   const prUrlFile = join(paths.queueDir, 'pr-url.txt')
   const totalTaskCountFile = join(paths.queueDir, 'total-task-count.txt')
   let emptyRun = false
+  let finalGateReopened = false
 
   mkdirSync(scannedDir, { recursive: true })
   ensureBacklog(queueFile)
@@ -1820,8 +1821,24 @@ export function createLoop(deps: LoopDeps) {
 
     // The PR can be completed or closed by a person between the final gate and
     // promotion. Let postLoopPr interpret that terminal state instead of trying to
-    // create another PR for the same branch on every poll.
-    if (mode === 'final' && (status.state === 'merged' || status.state === 'closed')) {
+    // create another PR for the same branch on every poll. A merged PR that lacks
+    // commits landed after its merge is not that state: those commits need a PR of
+    // their own, exactly as a cycle opens one.
+    if (mode === 'final' && status.state === 'merged') {
+      let complete: boolean
+      try {
+        complete = mergedPrHoldsLocalHead(status.headSha)
+      } catch (error) {
+        reportGateFailure(`could not compare merged PR head with HEAD: ${errorSummary(error)}`, true)
+        return false
+      }
+      if (complete) {
+        if (status.url !== '') writeFileSync(prUrlFile, `${status.url}\n`)
+        previousGateFailures.delete('draft-pr')
+        return true
+      }
+    }
+    if (mode === 'final' && status.state === 'closed') {
       if (status.url !== '') writeFileSync(prUrlFile, `${status.url}\n`)
       previousGateFailures.delete('draft-pr')
       return true
@@ -1852,6 +1869,13 @@ export function createLoop(deps: LoopDeps) {
       })
       writeFileSync(prUrlFile, `${url}\n`)
       previousGateFailures.delete('draft-pr')
+      // Commits that missed the merged PR have passed neither CI nor review on any PR,
+      // so the cycle gate runs again for the new PR before postLoopPr may promote it.
+      if (mode === 'final' && status.state === 'merged' && cycle > 0) {
+        rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
+        rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+        finalGateReopened = true
+      }
       return true
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
@@ -1901,6 +1925,15 @@ export function createLoop(deps: LoopDeps) {
     return headSha !== '' && headSha === localHead
   }
 
+  // Someone can merge the draft PR while later tasks still land on the run branch. The
+  // run is finished only when the merged head contains every commit the branch holds;
+  // throws when containment cannot be determined.
+  function mergedPrHoldsLocalHead(headSha: string): boolean {
+    const localHead = optionalGit(['rev-parse', 'HEAD']).trim()
+    if (headSha === '' || localHead === '') return false
+    return promotedCommitContained(localHead, headSha)
+  }
+
   function generateCiFixTask(cycle: number, prUrl: string, failSummary: string): string {
     const pendingIdFile = join(paths.queueDir, `ci-fix-pending-id-${cycle}`)
     const pendingId = existsSync(pendingIdFile)
@@ -1923,7 +1956,14 @@ export function createLoop(deps: LoopDeps) {
 
   /** After the final gate: promote the draft PR and print LOOP_DONE. */
   async function postLoopPr(): Promise<boolean> {
+    finalGateReopened = false
     if (!(await ensureDraftPr('final'))) return false
+    if (finalGateReopened) {
+      finalGateReopened = false
+      const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
+      event('WARN', `PR merged without the newest commits; gating them again in ${prUrl}`)
+      return false
+    }
     if (emptyRun) {
       marker('LOOP_DONE: no changes')
       event('Completed', 'Loop', 'no changes')
@@ -2004,6 +2044,20 @@ export function createLoop(deps: LoopDeps) {
       return false
     }
     if (status.state !== 'open' && status.state !== 'merged') return false
+    if (status.state === 'merged') {
+      // A merge observed after ensureDraftPr may predate the newest commits; the next
+      // poll's ensureDraftPr then opens a PR for them.
+      try {
+        if (!mergedPrHoldsLocalHead(status.headSha)) return false
+      } catch (error) {
+        reportGateFailure(
+          `could not compare merged PR head with HEAD: ${errorSummary(error)}`,
+          true,
+          'pr-promotion-state',
+        )
+        return false
+      }
+    }
     previousGateFailures.delete('pr-promotion-state')
     const gateEnvironment = os.verificationEnvironmentLabel()
     event(

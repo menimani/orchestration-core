@@ -4291,13 +4291,73 @@ describe('completion marker output', () => {
     initializeGitRepoWithRemote()
     const loop = makeLoop()
     fakeForge.markPrReady = async () => {
-      forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false }
+      forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false, headSha: git(['rev-parse', 'HEAD']).trim() }
     }
 
     expect(await loop.postLoopPr()).toBe(true)
 
     expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
     expect(logged).toContain('Completed Loop        PR https://example.test/pull/1')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('opens a new PR and reopens the cycle gate when a merged PR head is behind HEAD', async () => {
+    initializeGitRepoWithRemote()
+    git(['switch', '-c', 'feature/run-merged-early'])
+    writeFileSync(join(repoRoot, 'early.txt'), 'early\n')
+    git(['add', 'early.txt'])
+    git(['commit', '-m', 'feat: merged with the draft'])
+    const mergedHead = git(['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repoRoot, 'late.txt'), 'late\n')
+    git(['add', 'late.txt'])
+    git(['commit', '-m', 'feat: landed after the merge'])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
+    forgeStatus = {
+      state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha: mergedHead, checks: [],
+    }
+    const loop = makeLoop()
+    const createPr = vi.fn(async () => {
+      forgeStatus = { state: 'open', isDraft: true, url: 'https://example.test/pull/2', headSha: '', checks: [] }
+      return 'https://example.test/pull/2'
+    })
+    fakeForge.createPr = createPr
+    const markPrReady = vi.fn(async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.postLoopPr()).toBe(false)
+
+    expect(createPr).toHaveBeenCalledOnce()
+    expect(markPrReady).not.toHaveBeenCalled()
+    expect(logText()).not.toContain('LOOP_DONE')
+    expect(logText()).toContain('PR merged without the newest commits; gating them again in https://example.test/pull/2')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    // Once the reopened gate has passed again, the new PR is promoted as usual.
+    expect(await loop.postLoopPr()).toBe(true)
+    expect(createPr).toHaveBeenCalledOnce()
+    expect(markPrReady).toHaveBeenCalledOnce()
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/2')
+  })
+
+  it('does not finish on a PR merged during promotion whose head is behind HEAD', async () => {
+    const headSha = initializeGitRepoWithRemote()
+    writeFileSync(join(repoRoot, 'late.txt'), 'late\n')
+    git(['add', 'late.txt'])
+    git(['commit', '-m', 'feat: landed after the merge'])
+    const loop = makeLoop()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, state: 'merged', isDraft: false, headSha }
+    }
+
+    expect(await loop.postLoopPr()).toBe(false)
+
+    expect(logText()).not.toContain('LOOP_DONE')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
