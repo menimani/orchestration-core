@@ -1397,6 +1397,22 @@ describe('runAutoReview', () => {
     expect(spec).not.toContain('vendored core repository')
   })
 
+  it('appends framed accepted limits to a review template without the placeholder', () => {
+    writeFileSync(join(paths.root, 'accepted-limits.md'), '- Keep the accepted fixture limit.\n')
+
+    expect(makeLoop().runAutoReview(7, false)).toBe(false)
+    const spec = readFileSync(join(paths.tasksDir, `${lastReviewId(7)}.md`), 'utf8')
+    expect(spec).toContain('## Accepted limits')
+    expect(spec).toContain(
+      'These are accepted limits by decision. Do not report them or propose narrower variants\n'
+      + 'of them as findings. A finding qualitatively beyond an entry is still reportable.',
+    )
+    expect(spec).toContain(
+      '<<<UNTRUSTED_REQUEST_TEXT>>>\n- Keep the accepted fixture limit.\n<<<END_UNTRUSTED_REQUEST_TEXT>>>',
+    )
+    expect(spec.indexOf('## Accepted limits')).toBeGreaterThan(spec.indexOf(' review of cycle 7 '))
+  })
+
   it('marks accepted limits as none when the file is missing', () => {
     rmSync(join(paths.root, 'templates', 'review-template.md'))
 
