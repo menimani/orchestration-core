@@ -338,11 +338,8 @@ export function createLoop(deps: LoopDeps) {
     return true
   }
 
-  function orchestrationDepsEvent(
-    name: 'Installed' | 'Skipped' | 'WARN', subject: string,
-  ): void {
-    if (name === 'Installed' || name === 'Skipped') event(name, 'orchestration deps', subject)
-    else event(name, subject)
+  function orchestrationDepsEvent(name: 'Installed' | 'Skipped', subject: string): void {
+    event(name, 'orchestration deps', subject)
   }
 
   function stopTaskProcessesBeforeDependencyInstall(): boolean {

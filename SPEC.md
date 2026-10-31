@@ -448,8 +448,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     same install runs when that recorded hash does not match or a declared dependency is
     missing. Startup synchronization is limited to the package copy inside the repository
     being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
-    it is running from. Install output is captured; a failure logs a summarized `WARN`
-    and stops the loop or startup without undoing an already persisted merge. The next
+    it is running from. Install output is captured; a failure stops the loop or startup
+    with an error that names the package root and the `npm ci --no-audit --no-fund`
+    repair command, without undoing an already persisted merge. The next
     daemon restart retries synchronization, and work resumes only after dependencies are
     repaired and the install succeeds.
 
