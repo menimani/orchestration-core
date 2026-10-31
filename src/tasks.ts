@@ -1,10 +1,11 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { appendBacklogUnless } from './backlog.ts'
 import { loadConfig } from './config.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { descSlug, newTaskId, recordTaskIdForDesc, taskIdForDesc } from './ids.ts'
-import { statusFile, type OrchPaths } from './paths.ts'
+import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
 import { readTemplate } from './templates.ts'
 import { signalWake } from './wake.ts'
@@ -67,10 +68,26 @@ export type EnqueueResult
   = { outcome: 'enqueued'; taskId: string; depth: number }
     | { outcome: 'already-queued'; taskId: string }
     | { outcome: 'already-processed'; taskId: string; status: string }
+    | { outcome: 'needs-cleanup'; taskId: string; leftover: string }
+
+function localBranchExists(paths: OrchPaths, branch: string): boolean {
+  try {
+    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      cwd: paths.repoRoot,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    return true
+  } catch {
+    return false
+  }
+}
 
 /**
  * Append a task to the backlog unless it is already queued, running, or done.
- * Failed tasks may be re-enqueued — that is the manual retry path.
+ * Failed tasks may be re-enqueued — that is the manual retry path — but only once
+ * cleanup has removed their worktree and branch: the start step refuses to reuse
+ * either, so a retry queued before then would be dropped on the next poll.
  */
 export function enqueueTask(paths: OrchPaths, taskId: string, depth = 0): EnqueueResult {
   if (!existsSync(specFile(paths, taskId))) {
@@ -83,6 +100,14 @@ export function enqueueTask(paths: OrchPaths, taskId: string, depth = 0): Enqueu
   if (status === 'merged' || status === 'no-change'
     || status === 'running' || status === 'completed') {
     return { outcome: 'already-processed', taskId, status }
+  }
+  if (status === 'failed') {
+    const worktree = worktreeDir(paths, taskId)
+    if (existsSync(worktree)) return { outcome: 'needs-cleanup', taskId, leftover: worktree }
+    const branch = branchName(taskId)
+    if (localBranchExists(paths, branch)) {
+      return { outcome: 'needs-cleanup', taskId, leftover: `branch ${branch}` }
+    }
   }
   const appended = appendBacklogUnless(
     backlog,
