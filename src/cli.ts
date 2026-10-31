@@ -55,8 +55,8 @@ import { listTaskIds, refreshAll, refreshTask } from './refresh.ts'
 import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import {
-  liveTaskProcesses, orphanedWorktreeDirectories, terminateLiveTaskProcesses,
-  worktreeHolderHint, type TaskProcessTermination,
+  liveTaskProcesses, orphanedWorktreeDirectories, orphanedWorktreeReport,
+  terminateLiveTaskProcesses, type TaskProcessTermination,
 } from './taskProcesses.ts'
 import { recordInterruptedScans } from './scanRecovery.ts'
 import {
@@ -1458,16 +1458,16 @@ async function runLoopDaemon(
         ))
       }
       for (const worktree of orphanedWorktrees) {
-        const displayedWorktree = relative(paths.repoRoot, worktree)
+        const report = orphanedWorktreeReport(paths, worktree)
         log(formatEventLine(
-          'ERROR', 'orphan', displayedWorktree,
+          'ERROR', 'orphan', report.displayed,
         ))
         log(formatEventLine(
           'ERROR', 'worktree', 'has no task status; something may still hold it',
         ))
         log(formatEventLine(
           'ERROR', 'diagnose',
-          worktreeHolderHint(displayedWorktree),
+          report.holderHint,
         ))
       }
       return 1
