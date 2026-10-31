@@ -719,7 +719,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 24. A PID lock (`queue/loop.pid`) keeps the loop single-instance per repository; a stale
     stop file is cleared on startup, after the PID lock is taken (never before — it may
     be another instance's signal). Before task or issue work begins, startup refuses any
-    live PID left in task status by an earlier daemon. A worktree with no corresponding
+    live PID an earlier daemon left in the task process registry (item 24a). A worktree with no corresponding
     task status also blocks startup and is reported with an OS-specific handle diagnostic.
     A run which publishes work also refuses to start when its branch has no unambiguous
     push target, logging `ERROR` and writing the stop file before task or issue work.
