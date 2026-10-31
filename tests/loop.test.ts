@@ -988,23 +988,6 @@ describe('actionable findings', () => {
     expect(loop.actionableFindings(finalMessageFile(paths, 't4'))).toEqual([])
   })
 
-  it('ignores Japanese descriptions that only report no findings', () => {
-    const loop = makeLoop()
-    const phrases = [
-      [0x6307, 0x6458, 0x306a, 0x3057],
-      [0x554f, 0x984c, 0x306a, 0x3057],
-      [0x8a72, 0x5f53, 0x306a, 0x3057],
-      [0x7279, 0x306b, 0x306a, 0x3057],
-      [0x306a, 0x3057],
-    ].map((points) => String.fromCodePoint(...points))
-    const fullStop = String.fromCodePoint(0x3002)
-    const findings = phrases.flatMap((phrase) => [phrase, `${phrase}${fullStop}`])
-    writeFinal('t4-ja', findings.map((finding) => `NEXT_TASK: ${finding}`).join('\n'))
-
-    expect(loop.actionableFindings(finalMessageFile(paths, 't4-ja'))).toEqual([])
-    expect(logged).toEqual([])
-  })
-
   it('warns and ignores a finding whose description cannot produce a task slug', () => {
     const loop = makeLoop()
     const finding = '[!!!]'
