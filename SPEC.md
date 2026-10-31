@@ -669,8 +669,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     unless it is already open and ready. While an open PR reports a head commit other
     than the local `HEAD`, the loop neither promotes it nor emits `LOOP_DONE`, and
     retries on the next poll. A PR found merged before promotion, or merged
-    while the ready operation is being confirmed, is also a successful terminal state;
-    both paths emit the normal completion records without another ready operation.
+    while the ready operation is being confirmed, is also a successful terminal state
+    when its head contains the local `HEAD`; both paths emit the normal completion
+    records without another ready operation. A merged PR whose head lacks later commits
+    of the run branch is not success: the loop opens a new draft PR for them, as a cycle
+    does, and reopens the current cycle's gate so CI and review judge that PR before it
+    is promoted. A containment check that cannot be answered is a gate failure.
     A PR found closed before or during promotion is not success: the first observation
     warns and leaves the final gate resumable, while the same closed-state failure on the
     next poll logs `ERROR`, writes the stop file, and ends the retry. Promotion errors,
