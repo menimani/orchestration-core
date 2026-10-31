@@ -370,16 +370,12 @@ export function createLoop(deps: LoopDeps) {
     return message.trim() || 'unknown error'
   }
 
-  function reportGateFailure(
-    message: string,
-    stopWhenRepeated = false,
-    gate = 'draft-pr',
-  ): void {
+  function reportGateFailure(message: string, gate = 'draft-pr'): void {
     const previous = previousGateFailures.get(gate)
     const count = (previous?.count ?? 0) + 1
     previousGateFailures.set(gate, { message, count })
     const detail = count === 1 ? message : `${message} (repeated ${count} times)`
-    if (stopWhenRepeated && count > 1) {
+    if (count > 1) {
       event('ERROR', detail)
       writeFileSync(stopFile, '')
     } else {
@@ -396,7 +392,7 @@ export function createLoop(deps: LoopDeps) {
       writeFileSync(stopFile, '')
       return
     }
-    reportGateFailure(failure, true, `task-startup-${taskId}`)
+    reportGateFailure(failure, `task-startup-${taskId}`)
   }
 
   function readCount(file: string): number {
@@ -1113,7 +1109,7 @@ export function createLoop(deps: LoopDeps) {
       // once; a rejection that survives the retry stops the loop instead of holding the
       // completion scan open forever. A worker counts it against its publication limit.
       if (publishFailure !== undefined && !config.workerMode) {
-        reportGateFailure(publishFailure, true, `completion-scan-${taskId}`)
+        reportGateFailure(publishFailure, `completion-scan-${taskId}`)
       }
       return { findings, destinations, reconciled, failure: publishFailure }
     }
@@ -1195,7 +1191,6 @@ export function createLoop(deps: LoopDeps) {
         reconciled = false
         reportGateFailure(
           `could not enqueue finding from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
-          true,
           `completion-scan-${taskId}`,
         )
       }
@@ -1588,7 +1583,6 @@ export function createLoop(deps: LoopDeps) {
       // repeated failure stops the loop as the CI-fix enqueue does.
       reportGateFailure(
         `could not enqueue review: ${errorSummary(error)}`,
-        true,
         'review-enqueue',
       )
       return false
@@ -1738,7 +1732,7 @@ export function createLoop(deps: LoopDeps) {
     emptyRun = false
     const branch = optionalGit(['branch', '--show-current']).trim()
     if (branch === '') {
-      reportGateFailure('could not get branch name; PR skipped', true)
+      reportGateFailure('could not get branch name; PR skipped')
       return false
     }
     let pushRemote: string
@@ -1757,7 +1751,7 @@ export function createLoop(deps: LoopDeps) {
         windowsHide: true,
       })
     } catch (error) {
-      reportGateFailure(`could not push branch: ${errorSummary(error)}`, true)
+      reportGateFailure(`could not push branch: ${errorSummary(error)}`)
       return false
     }
 
@@ -1765,14 +1759,14 @@ export function createLoop(deps: LoopDeps) {
       'symbolic-ref', '--quiet', '--short', `refs/remotes/${baseRemote}/HEAD`,
     ]).trim()
     if (!baseRef.startsWith(`${baseRemote}/`)) {
-      reportGateFailure(`could not get ${baseRemote} default branch; PR skipped`, true)
+      reportGateFailure(`could not get ${baseRemote} default branch; PR skipped`)
       return false
     }
     const baseBranch = baseRef.slice(baseRemote.length + 1)
     try {
       gitIn(paths.repoRoot, ['fetch', baseRemote, baseBranch, '--quiet'])
     } catch (error) {
-      reportGateFailure(`could not fetch ${baseRef}: ${errorSummary(error)}`, true)
+      reportGateFailure(`could not fetch ${baseRef}: ${errorSummary(error)}`)
       return false
     }
     const cycle = readCount(scanCountFile)
@@ -1784,7 +1778,7 @@ export function createLoop(deps: LoopDeps) {
       status = await forge.prStatus({ kind: 'branch', value: branch })
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
-        reportGateFailure(`could not check PR status: ${errorSummary(error)}`, true)
+        reportGateFailure(`could not check PR status: ${errorSummary(error)}`)
       }
       return false
     }
@@ -1796,7 +1790,7 @@ export function createLoop(deps: LoopDeps) {
         body = await forge.prBody(branch)
       } catch (error) {
         if (!(error instanceof ForgeRateLimitError)) {
-          reportGateFailure(`could not read PR body: ${errorSummary(error)}`, true)
+          reportGateFailure(`could not read PR body: ${errorSummary(error)}`)
         }
         return false
       }
@@ -1810,7 +1804,7 @@ export function createLoop(deps: LoopDeps) {
           : { title })
       } catch (error) {
         if (!(error instanceof ForgeRateLimitError)) {
-          reportGateFailure(`could not update PR ${generatedBody ? 'body' : 'title'}: ${errorSummary(error)}`, true)
+          reportGateFailure(`could not update PR ${generatedBody ? 'body' : 'title'}: ${errorSummary(error)}`)
         }
         return false
       }
@@ -1829,7 +1823,7 @@ export function createLoop(deps: LoopDeps) {
       try {
         complete = mergedPrHoldsLocalHead(status.headSha)
       } catch (error) {
-        reportGateFailure(`could not compare merged PR head with HEAD: ${errorSummary(error)}`, true)
+        reportGateFailure(`could not compare merged PR head with HEAD: ${errorSummary(error)}`)
         return false
       }
       if (complete) {
@@ -1855,7 +1849,7 @@ export function createLoop(deps: LoopDeps) {
         return true
       }
     } catch (error) {
-      reportGateFailure(`could not compare branch with ${baseRef}: ${errorSummary(error)}`, true)
+      reportGateFailure(`could not compare branch with ${baseRef}: ${errorSummary(error)}`)
       return false
     }
 
@@ -1879,7 +1873,7 @@ export function createLoop(deps: LoopDeps) {
       return true
     } catch (error) {
       if (!(error instanceof ForgeRateLimitError)) {
-        reportGateFailure(`could not create PR: ${errorSummary(error)}`, true)
+        reportGateFailure(`could not create PR: ${errorSummary(error)}`)
       }
       return false
     }
@@ -1896,7 +1890,6 @@ export function createLoop(deps: LoopDeps) {
       if (!(error instanceof ForgeRateLimitError)) {
         reportGateFailure(
           `could not check PR CI status: ${errorSummary(error)}`,
-          true,
           'ci-status',
         )
       }
@@ -1980,7 +1973,6 @@ export function createLoop(deps: LoopDeps) {
       if (!(error instanceof ForgeRateLimitError)) {
         reportGateFailure(
           `could not check PR status before promotion: ${errorSummary(error)}`,
-          true,
           'pr-status-before-promotion',
         )
       }
@@ -1994,7 +1986,6 @@ export function createLoop(deps: LoopDeps) {
     } else if (status.state === 'closed') {
       reportGateFailure(
         'could not promote PR because it is closed',
-        true,
         'pr-promotion-state',
       )
       return false
@@ -2007,7 +1998,6 @@ export function createLoop(deps: LoopDeps) {
         if (!(error instanceof ForgeRateLimitError)) {
           reportGateFailure(
             `could not promote PR: ${errorSummary(error)}`,
-            true,
             'pr-promotion',
           )
         }
@@ -2020,7 +2010,6 @@ export function createLoop(deps: LoopDeps) {
         if (!(error instanceof ForgeRateLimitError)) {
           reportGateFailure(
             `could not confirm PR status after promotion: ${errorSummary(error)}`,
-            true,
             'pr-status-after-promotion',
           )
         }
@@ -2030,7 +2019,6 @@ export function createLoop(deps: LoopDeps) {
     if (status.state === 'closed') {
       reportGateFailure(
         'could not promote PR because it is closed',
-        true,
         'pr-promotion-state',
       )
       return false
@@ -2038,7 +2026,6 @@ export function createLoop(deps: LoopDeps) {
     if (status.state === 'open' && status.isDraft) {
       reportGateFailure(
         'could not confirm PR promotion; PR is still draft',
-        true,
         'pr-promotion-state',
       )
       return false
@@ -2052,7 +2039,6 @@ export function createLoop(deps: LoopDeps) {
       } catch (error) {
         reportGateFailure(
           `could not compare merged PR head with HEAD: ${errorSummary(error)}`,
-          true,
           'pr-promotion-state',
         )
         return false
@@ -2351,7 +2337,6 @@ export function createLoop(deps: LoopDeps) {
               // loop rather than leaving it to poll a failing PR with nothing queued.
               reportGateFailure(
                 `could not enqueue CI fix: ${errorSummary(error)}`,
-                true,
                 'ci-fix-enqueue',
               )
               return 'continue'
@@ -2596,7 +2581,6 @@ export function createLoop(deps: LoopDeps) {
             : `issues ${linkedIssues.map((number) => `#${number}`).join(' ')}`
           reportGateFailure(
             `could not reconcile ${subject} after merging ${shortTaskId(taskId)}: ${errorSummary(error)}`,
-            true,
             `issue-reconciliation-${taskId}`,
           )
         }
@@ -2700,7 +2684,6 @@ export function createLoop(deps: LoopDeps) {
           if (!(error.cause instanceof ForgeRateLimitError)) {
             reportGateFailure(
               `could not reconcile no-change task ${shortTaskId(taskId)}: ${error.message}`,
-              true,
               `no-change-reconciliation-${taskId}`,
             )
           }
