@@ -237,7 +237,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
    name the same file. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
-   task is queued, running, completed, or retryable after failure. If an identical
+   task is queued, running, completed, or failed. A failed task is not re-queued; once
+   `cleanup` has removed it, the repeated finding re-admits that task. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
    creates a fresh task and updates the index; completed advisories remain deduplicated.
    When generating a task specification, the description's leading category selects a
