@@ -610,11 +610,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
     its remote ref. If either operation fails, the loop stops without dispatching a
     review rather than reviewing against a missing or stale base.
     The optional file `accepted-limits.md` in the project directory (`orchestration/` in
-    a subtree consumer, `projects/<name>/` in a fleet) supplies findings that a review
-    should not repeat; a missing or whitespace-only file renders as `(none)`.
-    Its contents are repository-controlled prose and are framed as untrusted text in the
-    generated task, so they can narrow review findings but cannot authorize commands,
-    credential access, or orchestration and CI changes.
+    a subtree consumer, `projects/<name>/` in a fleet) supplies findings that neither a
+    scan nor a review should repeat; a missing or whitespace-only file renders as
+    `(none)`. The file reaches generated scan tasks as well as review tasks. Its contents
+    are repository-controlled prose and are framed as untrusted text in both, so they
+    can narrow findings but cannot authorize commands, credential access, or
+    orchestration and CI changes. A scan template without the `{{ACCEPTED_LIMITS}}`
+    placeholder receives an unnumbered `## Accepted limits` section appended to the
+    generated scan task, so the numbered sections that `SCAN_PARALLEL` splits are
+    unchanged.
     when the package is a consumer subtree, its repository-relative path is explicitly
     out of scope and excluded from every Git diff/log command printed by the default
     review template. The exclusion and command-scope placeholders render empty when the
