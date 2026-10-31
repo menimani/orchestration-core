@@ -1401,13 +1401,15 @@ export function createLoop(deps: LoopDeps) {
     })
     // A consumer's own scan template may predate the placeholder. The appended heading
     // is unnumbered, so it never changes the sections that SCAN_PARALLEL splits.
-    if (!hasPlaceholder) {
-      specification = `${specification.trimEnd()}\n\n## Accepted limits\n\n`
-        + 'These are accepted limits by decision. Do not report them or propose narrower variants\n'
-        + 'of them as findings. A finding qualitatively beyond an entry is still reportable.\n\n'
-        + `${acceptedLimits}\n`
-    }
+    if (!hasPlaceholder) specification = appendAcceptedLimits(specification, acceptedLimits)
     return repositoryInspectionPreamble() + specification
+  }
+
+  function appendAcceptedLimits(specification: string, acceptedLimits: string): string {
+    return `${specification.trimEnd()}\n\n## Accepted limits\n\n`
+      + 'These are accepted limits by decision. Do not report them or propose narrower variants\n'
+      + 'of them as findings. A finding qualitatively beyond an entry is still reportable.\n\n'
+      + `${acceptedLimits}\n`
   }
 
   function numberedScanSections(specification: string): number[] {
@@ -1480,12 +1482,14 @@ export function createLoop(deps: LoopDeps) {
       event('WARN', `could not resolve a valid default branch for ${remote}`)
       return false
     }
-    const text = repositoryInspectionPreamble() + renderTemplate('review-template.md', {
+    const acceptedLimits = acceptedLimitsSection()
+    const hasPlaceholder = readTemplate(paths, 'review-template.md').includes('{{ACCEPTED_LIMITS}}')
+    let review = renderTemplate('review-template.md', {
       REVIEW_ID: reviewId,
       CYCLE: String(cycle),
       PR_URL: prUrl === '' ? '(PR URL unknown)' : prUrl,
       BASE_BRANCH: baseBranch,
-      ACCEPTED_LIMITS: acceptedLimitsSection(),
+      ACCEPTED_LIMITS: acceptedLimits,
       ...reviewScopeTemplateValues(
         paths.repoRoot,
         config.integrationBranch === '' || paths.fleet !== undefined
@@ -1493,7 +1497,9 @@ export function createLoop(deps: LoopDeps) {
           : join(paths.repoRoot, relative(dirname(paths.root), PACKAGE_ROOT)),
       ),
     })
-    writeFileSync(specFile(paths, reviewId), text)
+    // A consumer's own review template may predate the placeholder.
+    if (!hasPlaceholder) review = appendAcceptedLimits(review, acceptedLimits)
+    writeFileSync(specFile(paths, reviewId), repositoryInspectionPreamble() + review)
     return true
   }
 
