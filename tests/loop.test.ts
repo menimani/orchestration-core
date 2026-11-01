@@ -819,6 +819,40 @@ describe('forge poll budget', () => {
     expect(logText()).not.toContain('Waiting remote')
   })
 
+  it('skips an issue for the poll when its author permission could not be determined', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'maintainer finding',
+      body: buildIssueBody('[BUG] `src/a.ts` asks for a change', 'maintainer'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const stored = fakeForge.issues.get(issueNumber)
+    if (stored === undefined) throw new Error('expected maintainer issue')
+    stored.author = { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true }
+
+    expect(await loop.poll()).toBe('continue')
+
+    let issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).not.toContain(LABEL_UNTRUSTED_AUTHOR)
+    expect(logText()).toContain(
+      `skipped issue #${issueNumber} this poll: write access of @maintainer-one could not be determined`,
+    )
+    expect(logText()).not.toContain('is not trusted for execution')
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+
+    stored.author = { login: 'maintainer-one', hasWriteAccess: true }
+    expect(await loop.poll()).toBe('continue')
+
+    issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.labels).not.toContain(LABEL_UNTRUSTED_AUTHOR)
+    expect(issue.assignees).not.toEqual([])
+  })
+
   it('records an unparseable issue failure and stops with the issue quarantined', async () => {
     initializeGitRepo()
     const loop = makeLoop({

@@ -3169,6 +3169,7 @@ export function createLoop(deps: LoopDeps) {
                 && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR)
                 && candidate.assignees.length === 0
                 && issuePromotionForIssue(paths, candidate.number) === undefined)
+            let permissionUnknown = false
             for (const issues of groupReadyFindings(readyIssues)) {
               if (capacity <= 0) break
               const result = await claimIssueGroup(
@@ -3196,6 +3197,10 @@ export function createLoop(deps: LoopDeps) {
                   'WARN',
                   `issue #${result.issueNumber} by @${result.author} is not trusted for execution; labeled ${LABEL_UNTRUSTED_AUTHOR}`,
                 )
+              } else if (result.outcome === 'permission-unknown') {
+                permissionUnknown = true
+                warning('issue-author-permission', 'checking issue author permission',
+                  `skipped issue #${result.issueNumber} this poll: write access of @${result.author} could not be determined`)
               } else if (result.outcome === 'unparseable') {
                 if (!decisionAlreadyRecorded(result.reason)) {
                   appendFileSync(decisionsFile, `${result.reason}\n`)
@@ -3205,6 +3210,7 @@ export function createLoop(deps: LoopDeps) {
                 break
               }
             }
+            if (!permissionUnknown) warningLog.recovered('issue-author-permission')
           }
           warningLog.recovered('issue-queue-sync')
         } catch (error) {

@@ -1734,6 +1734,7 @@ export type ClaimResult
     }
     | { outcome: 'lost-race'; issueNumber: number }
     | { outcome: 'untrusted-author'; issueNumber: number; author: string }
+    | { outcome: 'permission-unknown'; issueNumber: number; author: string }
     | { outcome: 'unparseable'; issueNumber: number; reason: string }
 
 async function releasePartialClaim(
@@ -1825,6 +1826,15 @@ async function claimRemoteIssue(
     return { outcome: 'lost-race', issueNumber: issue.number }
   }
   if (!current.author.hasWriteAccess) {
+    // Without an answer the gate stays closed for this poll only. The label is never
+    // removed, so it records a definite verdict and nothing less.
+    if (current.author.permissionLookupFailed === true) {
+      return {
+        outcome: 'permission-unknown',
+        issueNumber: issue.number,
+        author: current.author.login,
+      }
+    }
     if (!current.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
       await forge.addLabel(issue.number, LABEL_UNTRUSTED_AUTHOR)
     }

@@ -1104,6 +1104,26 @@ describe('claimIssueGroup', () => {
     expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
   })
 
+  it('skips an issue whose author permission could not be determined without labelling it', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` asks for a change')
+    const stored = forge.issues.get(issueNumber)
+    if (stored === undefined) throw new Error('expected ready issue')
+    stored.author = { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true }
+
+    const result = await claimIssueGroup(
+      forge, paths, [await forge.getIssue(issueNumber)], 'worker-a', appendRequirements,
+    )
+
+    expect(result).toEqual({
+      outcome: 'permission-unknown', issueNumber, author: 'maintainer-one',
+    })
+    const after = await forge.getIssue(issueNumber)
+    expect(after.labels).toContain(LABEL_READY)
+    expect(after.labels).not.toContain(LABEL_UNTRUSTED_AUTHOR)
+    expect(after.assignees).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
   it('preserves a finding issue depth when claiming it', async () => {
     const result = await publishFinding(
       forge, paths, '[BUG] `src/deep.ts` remains broken', 'parent-task',
