@@ -176,7 +176,7 @@ describe('integration branch topology', () => {
     const markers: string[] = []
     const loop = createLoop({
       paths: topology.paths,
-      config: { ...loadConfig({}), integrationBranch: 'integration/run' },
+      config: { ...loadConfig({}, { filePath: false }), integrationBranch: 'integration/run' },
       forge,
       runner: { sharedSkills: fakeRunnerSharedSkills, start: async () => process.pid },
       project: stubProject,
@@ -206,7 +206,7 @@ describe('integration branch topology', () => {
     const loop = createLoop({
       paths: topology.paths,
       config: {
-        ...loadConfig({}),
+        ...loadConfig({}, { filePath: false }),
         integrationBranch: 'integration/run',
         scanParallel: 1,
         autoPr: false,
@@ -252,7 +252,7 @@ describe('integration branch topology', () => {
     const loop = createLoop({
       paths: topology.paths,
       config: {
-        ...loadConfig({}),
+        ...loadConfig({}, { filePath: false }),
         integrationBranch: 'integration/run',
         scanParallel: 1,
         autoPr: false,
@@ -313,7 +313,7 @@ describe('integration branch topology', () => {
     const loop = createLoop({
       paths: topology.paths,
       config: {
-        ...loadConfig({}),
+        ...loadConfig({}, { filePath: false }),
         integrationBranch: 'integration/run',
         scanParallel: 1,
         autoPr: false,

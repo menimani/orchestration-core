@@ -22,7 +22,7 @@ afterEach(() => {
 
 describe('loadConfig', () => {
   it('returns the bash defaults for an empty environment', () => {
-    const config = loadConfig({})
+    const config = loadConfig({}, { filePath: false })
     expect(config).toMatchObject({
       maxParallel: 3,
       pollIntervalSeconds: 30,
@@ -73,7 +73,7 @@ describe('loadConfig', () => {
       UPSTREAM_REMOTE: 'shared-core',
       UPSTREAM_BRANCH: 'stable',
       INTEGRATION_BRANCH: 'integration/run',
-    })
+    }, { filePath: false })
     expect(config.maxParallel).toBe(12)
     expect(config.maxIssueRetries).toBe(5)
     expect(config.reviewEveryNCycles).toBe(3)
@@ -89,7 +89,7 @@ describe('loadConfig', () => {
   })
 
   it('leaves Claude-specific environment variables to the runner adapter', () => {
-    const config = loadConfig({ RUNNER_CLAUDE_MODEL: 'claude-custom' })
+    const config = loadConfig({ RUNNER_CLAUDE_MODEL: 'claude-custom' }, { filePath: false })
 
     expect(config).not.toHaveProperty('runnerClaudeModel')
   })
@@ -106,64 +106,64 @@ describe('loadConfig', () => {
     'AUTO_REVIEW',
     'CORE_AUTO_UPDATE',
   ])('rejects an invalid %s boolean value', (name) => {
-    expect(() => loadConfig({ [name]: 'tru' })).toThrow(
+    expect(() => loadConfig({ [name]: 'tru' }, { filePath: false })).toThrow(
       `${name} must be 'true' or 'false', got 'tru'`,
     )
   })
 
   it('accepts SCAN_PARALLEL above four', () => {
-    expect(loadConfig({ SCAN_PARALLEL: '9' }).scanParallel).toBe(9)
+    expect(loadConfig({ SCAN_PARALLEL: '9' }, { filePath: false }).scanParallel).toBe(9)
   })
 
   it('rejects SCAN_PARALLEL below one', () => {
-    expect(loadConfig({ SCAN_PARALLEL: '1' }).scanParallel).toBe(1)
-    expect(() => loadConfig({ SCAN_PARALLEL: '0' })).toThrow(
+    expect(loadConfig({ SCAN_PARALLEL: '1' }, { filePath: false }).scanParallel).toBe(1)
+    expect(() => loadConfig({ SCAN_PARALLEL: '0' }, { filePath: false })).toThrow(
       /SCAN_PARALLEL must be at least 1/,
     )
   })
 
   it('rejects a TASK_GATE value that is neither full nor light', () => {
-    expect(() => loadConfig({ TASK_GATE: 'fast' })).toThrow(/TASK_GATE/)
+    expect(() => loadConfig({ TASK_GATE: 'fast' }, { filePath: false })).toThrow(/TASK_GATE/)
   })
 
   it('rejects an unsupported reasoning effort', () => {
-    expect(() => loadConfig({ REVIEW_EFFORT: 'maximum' })).toThrow(/REVIEW_EFFORT/)
+    expect(() => loadConfig({ REVIEW_EFFORT: 'maximum' }, { filePath: false })).toThrow(/REVIEW_EFFORT/)
   })
 
   it('rejects a non-integer numeric setting', () => {
-    expect(() => loadConfig({ MAX_PARALLEL: 'many' })).toThrow(/MAX_PARALLEL/)
+    expect(() => loadConfig({ MAX_PARALLEL: 'many' }, { filePath: false })).toThrow(/MAX_PARALLEL/)
   })
 
   it.each(['1e3', '0x10', ' 5 ', '3.0', '+4', '-1', '9007199254740993'])(
     'rejects the numeric form %j, which is not a plain decimal integer',
     (raw) => {
-      expect(() => loadConfig({ MAX_PARALLEL: raw })).toThrow(
+      expect(() => loadConfig({ MAX_PARALLEL: raw }, { filePath: false })).toThrow(
         `MAX_PARALLEL must be a non-negative integer, got '${raw}'`,
       )
     },
   )
 
   it('rejects MAX_PARALLEL below one', () => {
-    expect(() => loadConfig({ MAX_PARALLEL: '0' })).toThrow(/MAX_PARALLEL must be at least 1/)
+    expect(() => loadConfig({ MAX_PARALLEL: '0' }, { filePath: false })).toThrow(/MAX_PARALLEL must be at least 1/)
   })
 
   it('rejects REVIEW_EVERY_N_CYCLES below one', () => {
-    expect(loadConfig({ REVIEW_EVERY_N_CYCLES: '1' }).reviewEveryNCycles).toBe(1)
-    expect(() => loadConfig({ REVIEW_EVERY_N_CYCLES: '0' })).toThrow(
+    expect(loadConfig({ REVIEW_EVERY_N_CYCLES: '1' }, { filePath: false }).reviewEveryNCycles).toBe(1)
+    expect(() => loadConfig({ REVIEW_EVERY_N_CYCLES: '0' }, { filePath: false })).toThrow(
       /REVIEW_EVERY_N_CYCLES must be at least 1/,
     )
   })
 
   it('rejects a poll interval longer than the issue heartbeat interval', () => {
-    expect(loadConfig({ POLL_INTERVAL: '1800' }).pollIntervalSeconds).toBe(1800)
-    expect(() => loadConfig({ POLL_INTERVAL: '1801' })).toThrow(
+    expect(loadConfig({ POLL_INTERVAL: '1800' }, { filePath: false }).pollIntervalSeconds).toBe(1800)
+    expect(() => loadConfig({ POLL_INTERVAL: '1801' }, { filePath: false })).toThrow(
       /POLL_INTERVAL must not exceed 1800 seconds/,
     )
   })
 
   it('enables worker mode only with the issue queue', () => {
-    expect(loadConfig({ ISSUE_QUEUE_ENABLED: 'true', WORKER_MODE: 'true' }).workerMode).toBe(true)
-    expect(() => loadConfig({ WORKER_MODE: 'true' })).toThrow(/requires ISSUE_QUEUE_ENABLED=true/)
+    expect(loadConfig({ ISSUE_QUEUE_ENABLED: 'true', WORKER_MODE: 'true' }, { filePath: false }).workerMode).toBe(true)
+    expect(() => loadConfig({ WORKER_MODE: 'true' }, { filePath: false })).toThrow(/requires ISSUE_QUEUE_ENABLED=true/)
   })
 
   it('resolves file values before environment values and defaults', () => {

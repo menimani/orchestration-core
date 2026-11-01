@@ -24,7 +24,7 @@ let runnerStarts: string[]
 function makeLoop(overrides: Partial<LoopConfig> = {}): Loop {
   return createLoop({
     paths,
-    config: { ...loadConfig({}), ...overrides },
+    config: { ...loadConfig({}, { filePath: false }), ...overrides },
     forge: makeFakeForge(),
     runner: {
       sharedSkills: fakeRunnerSharedSkills,
