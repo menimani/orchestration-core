@@ -4574,6 +4574,41 @@ describe('completion marker output', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
+  it('records a PR merged before the final gate that holds HEAD without opening another', async () => {
+    const headSha = initializeGitRepoWithRemote()
+    forgeStatus = {
+      state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha, checks: [],
+    }
+    const loop = makeLoop()
+    const createPr = vi.fn(async () => 'https://example.test/pull/2')
+    fakeForge.createPr = createPr
+
+    expect(await loop.ensureDraftPr('final')).toBe(true)
+
+    expect(createPr).not.toHaveBeenCalled()
+    expect(readFileSync(join(paths.queueDir, 'pr-url.txt'), 'utf8'))
+      .toBe('https://example.test/pull/1\n')
+    expect(logText()).not.toContain('WARN')
+  })
+
+  it('fails the final gate when a merged PR head cannot be compared with HEAD', async () => {
+    initializeGitRepoWithRemote()
+    forgeStatus = {
+      state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha: 'f'.repeat(40), checks: [],
+    }
+    const loop = makeLoop()
+    const createPr = vi.fn(async () => 'https://example.test/pull/2')
+    fakeForge.createPr = createPr
+
+    expect(await loop.ensureDraftPr('final')).toBe(false)
+
+    expect(createPr).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'pr-url.txt'))).toBe(false)
+    expect(logged.filter((line) => line.startsWith('WARN could not compare merged PR head with HEAD: ')))
+      .toHaveLength(1)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
   it('reports a PR closed while it is being promoted and stops after repetition', async () => {
     initializeGitRepoWithRemote()
     const loop = makeLoop()
