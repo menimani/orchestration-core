@@ -1174,9 +1174,10 @@ account with write access withdraws every `MERGED:` comment before it.
     deferred with a WARN that the repository test lock stayed busy, without the comment,
     the relabel, or a failure count, and every member stays `loop:merge-ready` for the
     next poll to adopt again.
-    A grouped member still `loop:in-progress` with no worker report is still being
-    published, so the poll skips the group and leaves every member as it is; only a
-    different reported branch or head, or an unavailable member, fails the adoption.
+    A grouped member still claimed — `loop:in-progress` and not `loop:ready` — is still
+    being published, even when it carries a report from an earlier task, so the poll
+    skips the group and leaves every member as it is; only an unclaimed member reporting
+    a different branch or head, or an unavailable member, fails the adoption.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
     `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and
