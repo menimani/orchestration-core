@@ -406,11 +406,15 @@ keep their previous rendering, with no warning, until a cycle runs with
 
 ## Settings worth knowing
 
-Runtime settings can be stored in `orchestration/config.json`, using the uppercase names
-below. The loop resolves file values first, then environment variables, then defaults, so
-repositories without the file behave unchanged. A value in `orchestration/config.json`
-overrides the environment: a launch prefix such as `MAX_SCAN_CYCLES=12` is silently
-ignored for any setting the file defines, so change that setting in the file. Manage the
+Runtime settings can be stored in `orchestration/config.json`, keyed by their uppercase
+names. The table below lists only the settings an adopter is most likely to change;
+`SPEC.md` under "Retained runtime configuration" states every setting with its default and
+accepted values, including those referred to here but not listed, such as `FORGE`,
+`WORKER_MODE`, and `POLL_INTERVAL`. The loop resolves file values first, then environment
+variables, then defaults, so repositories without the file behave unchanged. A value in
+`orchestration/config.json` overrides the environment: a launch prefix such as
+`MAX_SCAN_CYCLES=12` is silently ignored for any setting the file defines, so change that
+setting in the file. Manage the
 file with `npm run config -- list`, `npm run config -- get TASK_GATE`,
 `npm run config -- set TASK_GATE light`, and `npm run config -- unset TASK_GATE`; use the
 equivalent package-prefixed command for a subtree installation.
