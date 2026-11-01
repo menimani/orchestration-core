@@ -128,8 +128,9 @@ comments and other items cite items by number, so a number is never reused.
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
   preview and requires confirmation; a declined confirmation never contacts the forge.
-- The manual task commands each take the task id as their first argument and, given
-  none, print their usage and exit non-zero.
+- `new`, `enqueue`, `start`, `logs`, and `merge` each take the task id as their first
+  argument and, given none, print their usage and exit non-zero. `status` given no id
+  lists every task and exits zero, and `queue` takes no id.
   `new <task-id>` writes the task specification template to `tasks/<task-id>.md` and
   prints `Created: <file>`; an existing specification is an error, never overwritten.
   `enqueue <task-id> [depth]` appends `<task-id>:<depth>` to `queue/backlog.txt` and
