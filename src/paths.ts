@@ -50,7 +50,7 @@ export function packageSubtreePrefix(
   const prefix = relative(canonicalPath(repoRoot), canonicalPath(packageRoot))
   if (prefix === '' || prefix === '..' || prefix.startsWith(`..${sep}`)
     || isAbsolute(prefix)) return undefined
-  return prefix.replaceAll('\\', '/')
+  return shellPathSpelling(prefix)
 }
 
 export function packageFile(...segments: string[]): string {
@@ -58,9 +58,10 @@ export function packageFile(...segments: string[]): string {
 }
 
 /**
- * A path as rendered Bash instructions spell it. Git Bash on Windows takes forward
- * slashes, and there a backslash is only ever a separator; on POSIX a backslash is an
- * ordinary filename character, so rewriting it would name a different directory.
+ * A path as rendered Bash instructions and Git configuration spell it. Git Bash on
+ * Windows takes forward slashes, and there a backslash is only ever a separator; on
+ * POSIX a backslash is an ordinary filename character, so rewriting it would name a
+ * different directory.
  */
 export function shellPathSpelling(path: string, separator = sep): string {
   return separator === '\\' ? path.replaceAll('\\', '/') : path

@@ -6,7 +6,7 @@ import { operatingSystem } from './adapters/os.ts'
 import { loadProject, projectAdapterPath, type ProjectAdapter, type SuiteStep } from './adapters/project.ts'
 import { QUEUE_LABELS } from './issueQueue.ts'
 import { projectScopeLabel } from './issueScope.ts'
-import { canonicalPath, PACKAGE_ROOT, type OrchPaths } from './paths.ts'
+import { canonicalPath, PACKAGE_ROOT, shellPathSpelling, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
 
 interface VerifyOptions {
@@ -197,7 +197,7 @@ export async function verifyRepositorySetup(
   if (paths.fleet !== undefined) {
     report('SKIP: core.hooksPath; a fleet project leaves its repository\'s hooks unchanged')
   } else {
-    const expectedHooks = relative(paths.repoRoot, join(packageRoot, '.githooks')).replaceAll('\\', '/') || '.'
+    const expectedHooks = shellPathSpelling(relative(paths.repoRoot, join(packageRoot, '.githooks'))) || '.'
     try {
       const configuredHooks = git(['config', '--local', '--get', 'core.hooksPath'])
       if (configuredHooks !== expectedHooks) throw new Error(`${configuredHooks || '(unset)'} != ${expectedHooks}`)
