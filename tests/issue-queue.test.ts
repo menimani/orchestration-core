@@ -134,6 +134,15 @@ describe('ready finding groups', () => {
     ])
   })
 
+  it('leaves findings naming the same root-level file single', async () => {
+    const first = await finding('[DOCS] `README.md` claims a missing command')
+    const second = await finding('[DOCS] `README.md` names a stale variable')
+
+    expect(groupReadyFindings([first, second]).map((group) =>
+      group.map((issue) => issue.number))).toEqual([[first.number], [second.number]])
+    expect(fingerprintOf(first.title).startsWith('text:')).toBe(true)
+  })
+
   it('does not regroup same-file findings released from a failed group', async () => {
     const first = await finding('[BUG] `src/shared.ts` first retry')
     const second = await finding('[TEST] `src/shared.ts` second retry')
