@@ -473,16 +473,12 @@ export function syncSharedSkills(
   adapters: readonly SharedSkillsAdapter[],
   guidanceRoot: string,
   os: OperatingSystem = operatingSystem,
-  skippedDestinationRoots: readonly string[] = [],
 ): SharedSkillsSyncResult {
   const combined: SharedSkillsSyncResult = {
     installed: [], updated: [], conflicts: [], migrationConflicts: [],
     removedPaths: [], changedPaths: [], managedPaths: [], failures: [],
   }
   for (const target of skillTargets(repoRoot, adapters)) {
-    if (skippedDestinationRoots.some((root) => relative(root, target.destinationRoot) === '')) {
-      continue
-    }
     let result: SharedSkillsSyncResult
     try {
       result = syncTarget(repoRoot, packageRoot, guidanceRoot, target, os)
