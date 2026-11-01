@@ -2155,9 +2155,23 @@ export async function reapStaleLeases(
     const promotion = issuePromotionForIssue(paths, issue.number)
     if (promotion !== undefined) {
       if (promotion.commentConfirmed !== true) {
-        await commentOnIssueMerge(
-          forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
-        )
+        const expectedComment = issueMergeComment(
+          promotion.taskId, promotion.mergeCommit, promotion.runBranch)
+        let present = trustedCommentPresent(
+          await forge.listIssueComments(issue.number), expectedComment)
+        if (present === false) {
+          await commentOnIssueMerge(
+            forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
+          )
+          present = trustedCommentPresent(
+            await forge.listIssueComments(issue.number), expectedComment)
+        }
+        // A marker whose author's permission could not be read is neither confirmed nor
+        // reposted; the promotion record keeps it pending for a later poll.
+        if (present === undefined) continue
+        if (!present) {
+          throw new Error(`Issue #${issue.number} merge comment is not visible after publishing it`)
+        }
         confirmIssuePromotion(paths, issue.number)
       }
       continue

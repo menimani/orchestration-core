@@ -2289,6 +2289,52 @@ describe('reapStaleLeases', () => {
     ])
   })
 
+  it('confirms an existing trusted merge marker instead of posting a duplicate', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-merged', [issueNumber])
+    recordIssuePromotions(paths, 'task-merged', 'abc123', 'feature/run-9')
+    const marker = issueMergeComment('task-merged', 'abc123', 'feature/run-9')
+    await forge.commentIssue(issueNumber, marker)
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+
+    expect(forge.issueComments.get(issueNumber)).toEqual([marker])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
+  })
+
+  it('leaves a promotion pending while its marker author permission is undetermined', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-merged', [issueNumber])
+    recordIssuePromotions(paths, 'task-merged', 'abc123', 'feature/run-9')
+    const marker = issueMergeComment('task-merged', 'abc123', 'feature/run-9')
+    await forge.commentIssue(issueNumber, marker)
+    forge.issueCommentAuthors.set(issueNumber, [
+      { login: 'worker-a', hasWriteAccess: false, permissionLookupFailed: true },
+    ])
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+
+    expect(forge.issueComments.get(issueNumber)).toEqual([marker])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.assignees).toEqual(['worker-a'])
+  })
+
   it('does not reap an issue with a collaborator merge marker when the local issue map is empty', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
