@@ -1,6 +1,6 @@
 import type {
   CreateIssueInRepositoryOptions, CreateIssueOptions, CreatePrOptions, Forge, ForgeIssue,
-  ForgeIssueComment, PrReference, PrStatus,
+  ForgeAuthor, ForgeIssueComment, PrReference, PrStatus,
 } from '../src/adapters/forge.ts'
 import { ForgeIssueNotFoundError } from '../src/adapters/forge.ts'
 
@@ -15,7 +15,7 @@ export interface FakeForge extends Forge {
   prStatusRefs: PrReference[]
   issues: Map<number, ForgeIssue>
   issueComments: Map<number, string[]>
-  issueCommentAuthors: Map<number, Array<{ login: string; hasWriteAccess: boolean }>>
+  issueCommentAuthors: Map<number, ForgeAuthor[]>
   repositoryIssues: Array<CreateIssueInRepositoryOptions & { labels: string[]; url: string }>
   repositoryLabels: Map<string, Set<string>>
   labels: Set<string>

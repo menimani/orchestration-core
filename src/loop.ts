@@ -61,7 +61,8 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   isReadyToClaim,
   issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
-  reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
+  mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
+  trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
   reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
@@ -223,7 +224,6 @@ export function createLoop(deps: LoopDeps) {
   const issueCommentCache = new Map<number, {
     updatedAt: string
     comments: ForgeIssueComment[]
-    hasMergeMarker: boolean
   }>()
   const reconciledCycleGates = new Set<number>()
   let issueQueueInitialized = !config.issueQueueEnabled
@@ -307,17 +307,18 @@ export function createLoop(deps: LoopDeps) {
     const cached = issueCommentCache.get(issue.number)
     if (cached?.updatedAt === issue.updatedAt) return cached.comments
     const comments = await forge.listIssueComments(issue.number)
-    issueCommentCache.set(issue.number, {
-      updatedAt: issue.updatedAt,
-      comments,
-      hasMergeMarker: standingMergeMarkers(comments).length > 0,
-    })
+    // A failed permission lookup is not a verdict. Caching it by updatedAt would hold
+    // that undetermined answer until the issue next changes, so the next poll asks again.
+    if (comments.some((comment) => comment.author.permissionLookupFailed === true)) {
+      issueCommentCache.delete(issue.number)
+    } else {
+      issueCommentCache.set(issue.number, { updatedAt: issue.updatedAt, comments })
+    }
     return comments
   }
 
-  async function issueHasMergeMarker(issue: ForgeIssue): Promise<boolean> {
-    await commentsForIssue(issue)
-    return issueCommentCache.get(issue.number)?.hasMergeMarker ?? false
+  async function issueHasMergeMarker(issue: ForgeIssue): Promise<boolean | undefined> {
+    return mergeMarkerStanding(await commentsForIssue(issue))
   }
 
   async function initializeIssueQueue(): Promise<boolean> {
@@ -572,8 +573,13 @@ export function createLoop(deps: LoopDeps) {
     runBranch: string,
   ): Promise<void> {
     const comment = issueMergeComment(taskId, mergeCommit, runBranch)
-    if (!(await commentsForIssue(issue)).some((candidate) =>
-      candidate.author.hasWriteAccess && candidate.body === comment)) {
+    const present = trustedCommentPresent(await commentsForIssue(issue), comment)
+    // The marker may already stand under an author whose permission could not be read.
+    // Keeping merge-ready retries this next poll instead of posting a duplicate now.
+    if (present === undefined) {
+      throw new Error('merge marker author permission could not be read; deferring')
+    }
+    if (!present) {
       await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
     }
     await forge.removeLabel(issue.number, LABEL_MERGE_READY)
@@ -2573,23 +2579,34 @@ export function createLoop(deps: LoopDeps) {
     ): Promise<boolean> => {
       try {
         recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
+        let deferred = false
         for (const linkedIssue of linkedIssues) {
           const promotion = issuePromotionForIssue(paths, linkedIssue)
           if (promotion === undefined) throw new Error('promotion record was not persisted')
           if (!remoteOperationsAvailable || promotion.commentConfirmed === true) continue
 
           const expectedComment = issueMergeComment(taskId, mergeCommit, runBranch)
-          let comments = await forge.listIssueComments(linkedIssue)
-          if (!comments.some((comment) =>
-            comment.author.hasWriteAccess && comment.body === expectedComment)) {
+          let present = trustedCommentPresent(
+            await forge.listIssueComments(linkedIssue), expectedComment)
+          if (present === false) {
             await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
-            comments = await forge.listIssueComments(linkedIssue)
+            present = trustedCommentPresent(
+              await forge.listIssueComments(linkedIssue), expectedComment)
           }
-          if (!comments.some((comment) =>
-            comment.author.hasWriteAccess && comment.body === expectedComment)) {
+          // A marker whose author's permission could not be read is neither confirmed
+          // nor reposted; the promotion record keeps it pending for a later poll.
+          if (present === undefined) {
+            deferred = true
+            continue
+          }
+          if (!present) {
             throw new Error('merge comment is not visible after publishing it')
           }
           confirmIssuePromotion(paths, linkedIssue)
+        }
+        if (deferred) {
+          issueReconciliationPending = true
+          return false
         }
         previousGateFailures.delete(`issue-reconciliation-${taskId}`)
         return true
