@@ -1558,12 +1558,15 @@ export interface PromotedIssueOutcome {
  * request that has merged carries every task merged into it up to its head, whichever
  * way the forge merged it, so that is the evidence; a merge commit the head does not
  * contain stays open for a later run. A run pull request closed without merging will
- * never land that work, so its issues go back to ready rather than waiting for good.
+ * never land that work once its branch is abandoned, so its issues go back to ready
+ * rather than waiting for good. The branch the loop still holds is not abandoned: its
+ * merges remain on it and a person may reopen the pull request, so those issues wait.
  */
 export async function closePromotedIssues(
   forge: Forge,
   paths: OrchPaths,
   contains: (ancestor: string, descendant: string) => boolean,
+  heldBranch = '',
 ): Promise<PromotedIssueOutcome> {
   const dir = promotionDir(paths)
   if (!existsSync(dir)) return { closed: [], returned: [] }
@@ -1579,6 +1582,7 @@ export async function closePromotedIssues(
   for (const runBranch of new Set(promotions.map((promotion) => promotion.runBranch))) {
     const pr = await forge.prStatus({ kind: 'branch', value: runBranch })
     if (pr.state === 'closed') {
+      if (runBranch === heldBranch) continue
       for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
         // The withdrawal lands before the issue is claimable again, and the record
         // stays until it is ready, so an interrupted return is retried next poll. A retry

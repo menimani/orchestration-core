@@ -2962,6 +2962,63 @@ describe('remote issue queue idle detection', () => {
     expect(logText()).toContain('Recovered closing promoted issues after 0 minutes')
   })
 
+  it('neither releases nor recreates the run pull request a person closed mid-run', async () => {
+    paths = {
+      ...paths,
+      fleet: {
+        dir: repoRoot, project: 'example', repository: 'owner/example',
+        issueRepository: 'owner/fleet',
+      },
+    }
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, 'merged-task', [issueNumber])
+    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
+    fakeForge.prStatus = async () => ({
+      state: 'closed',
+      isDraft: false,
+      url: 'https://example.test/pull/9',
+      headSha: mergeCommit,
+      checks: [],
+    })
+    const createPr = vi.fn(async () => 'https://example.test/pull/10')
+    fakeForge.createPr = createPr
+
+    await loop.poll()
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+
+    // The run branch still holds the merge, so the issue stays promoted to it.
+    expect(createPr).not.toHaveBeenCalled()
+    expect(logText()).toContain('WARN could not update PR because it is closed')
+    expect(logText()).not.toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('merged-task')
+    expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(logText()).toContain('ERROR could not update PR because it is closed (repeated 2 times)')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(createPr).not.toHaveBeenCalled()
+
+    // A later run on another branch has abandoned the closed one, so its issue is ready.
+    git(['switch', '--quiet', '-c', 'feature/next-run'])
+    rmSync(join(paths.queueDir, 'stop'), { force: true })
+    loop.initializeSessionStateForBranch()
+    await loop.poll()
+    expect(logText()).toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    expect((await fakeForge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
+  })
+
   async function promotedIssueLoop(headSha: string) {
     paths = {
       ...paths,

@@ -635,7 +635,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     timeout, see Runtime) never ran: the gate logs a WARN that the repository test lock
     stayed busy, writes no stop file, and a later poll runs the suite again. Repeated
     gate failures remain visible with a count; any repeated non-rate-limit PR-setup
-    failure logs `ERROR`, writes the stop file, and stops retrying.
+    failure logs `ERROR`, writes the stop file, and stops retrying. A run PR a person
+    closed mid-run is such a failure: its branch still holds the run's merges, so the loop
+    never opens a second PR for it.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot
@@ -1122,9 +1124,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     holding back that poll's claims. A promoted issue the forge reports as deleted is no
     longer awaited: its promotion record is dropped, along with the task's issue map once no
     promotion of that task remains, and the promotions after it still close. A run pull
-    request closed without merging will never land its work, so the merger comments
-    `UNPROMOTED: <task-id>` on each issue recorded for that run branch, naming the merge
-    commit, run branch, and pull request, returns the issue to ready and unassigned, drops
+    request closed without merging will never land its work once a later run has left its
+    branch, so the merger then comments `UNPROMOTED: <task-id>` on each issue recorded
+    for that run branch, naming the merge commit, run branch, and pull request, returns the issue to ready and unassigned, drops
     its promotion record the same way, and logs a `Released` event. The comment withdraws
     the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. Workers never
     close promoted issues. Immediately after merging, the worker comments on every linked issue with the
