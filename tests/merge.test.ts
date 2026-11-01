@@ -1916,6 +1916,32 @@ describe('mergeRemoteTask', () => {
     expect(onMerged).toHaveBeenLastCalledWith(appliedCommit)
   })
 
+  it('refuses to record an adoption that left the run branch where it was', async () => {
+    const branch = 'task/remote-merge-without-commit'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    git(repoRoot, ['branch', '-D', branch])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string =>
+        cwd === paths.repoRoot && args[0] === 'merge' && args[1] === '--quiet' ? '' : git(cwd, args),
+    }
+    const onMerged = vi.fn()
+
+    await expect(mergeRemoteTask(paths, 230, 'origin', branch, expectedHead, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime, onMerged,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(`Adopting ${branch} created no commit on main.`)
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(onMerged).not.toHaveBeenCalled()
+  })
+
   it('leaves issue-closing syntax to the forge adapter', async () => {
     const branch = 'task/remote-runner-neutral-message'
     git(repoRoot, ['switch', '-qc', branch])
