@@ -414,6 +414,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     failed, the merge is deferred with a WARN that the repository test lock stayed busy,
     the task stays `completed` for the next poll to merge again, and this count does not
     advance. Every other non-zero exit is still `Tests failed. Aborting merge.`
+    A merge deferred because a linked issue's claim cannot be read (item 34) likewise
+    leaves this count alone, and a lost claim fails the task before its gate runs.
     A conflicting pre-merge rebase is terminal for that task and contributes at most one
     failure to this count; ordinary
     gate failures remain retryable. Re-claiming completed-but-unmerged work
@@ -1043,14 +1045,29 @@ account with write access withdraws every `MERGED:` comment before it.
     issue as a local task through the standard template (completion marker included),
     honoring an `Effort:` field. Daemons sharing an account are indistinguishable
     and may both materialize the issue, so that configuration is unsupported. A
-    running linked task adds a `Heartbeat: <ISO timestamp>` issue comment at least every
+    linked task that is running, or completed and still holding its claim, adds a
+    `Heartbeat: <ISO timestamp>` issue comment at least every
     30 minutes, moving the forge's `updatedAt` lease clock without changing the issue
-    body. Heartbeat timestamps are tracked locally under `queue/heartbeat`; one failed
-    forge attempt logs one warning and never fails the poll. A locally running mapped
-    task is excluded from that poll's reaping even when its heartbeat fails. An in-progress
+    body. Outside worker mode a completed task holds its claim until its status leaves
+    `completed`, which happens only on a merge or a no-change outcome, so a merge
+    deferred across many polls cannot let the lease lapse; item 36 covers worker mode.
+    Heartbeat timestamps are tracked locally under `queue/heartbeat`; one failed
+    forge attempt logs one warning and never fails the poll. A locally mapped task that
+    holds its claim is excluded from that poll's reaping even when its heartbeat fails. An in-progress
     issue without heartbeats for `ISSUE_LEASE_HOURS` (default 3) is reaped back to
     ready, unassigned, so lease expiry identifies a worker that is no longer polling
     rather than a long-running task.
+
+    Immediately before a completed task's merge gate, the merger re-reads every issue
+    linked to it. An issue already closed, or one the forge reports as deleted, is passed
+    over. An open issue that is no longer `loop:in-progress`, or is back to `loop:ready`,
+    was reaped and may since belong to another claimant: only those issues are unlinked
+    from the task, which becomes failed instead of merged, with `Merge refused: #N no
+    longer claimed by this task` in its merge log and a WARN that it cannot be merged;
+    the issues it still holds then take the ordinary failed-task release. A claim that
+    cannot be read defers the merge, with a WARN unless the forge was rate limited, and
+    leaves the task `completed` for a later poll rather than risk closing someone else's
+    issue.
 35. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
     the forge closes all of them when the promotion PR lands the commit on the default
     branch. A queue kept in a fleet's `issueRepository` is the exception: its issue
