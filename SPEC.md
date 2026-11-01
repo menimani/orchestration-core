@@ -128,6 +128,40 @@ comments and other items cite items by number, so a number is never reused.
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
   preview and requires confirmation; a declined confirmation never contacts the forge.
+- The manual task commands each take the task id as their first argument and, given
+  none, print their usage and exit non-zero.
+  `new <task-id>` writes the task specification template to `tasks/<task-id>.md` and
+  prints `Created: <file>`; an existing specification is an error, never overwritten.
+  `enqueue <task-id> [depth]` appends `<task-id>:<depth>` to `queue/backlog.txt` and
+  prints `Enqueued: <task-id> (depth=<depth>)`; a depth that is not a non-negative
+  integer is taken as 0, and a missing specification is an error. A task already in the
+  backlog, or whose status is `running`, `completed`, `merged`, or `no-change`, is
+  reported as a `WARN:` line, not queued, and exits zero. A `failed` task is queued
+  again only once its worktree and branch are gone; while either remains, a `WARN:` line
+  names it and the `cleanup` to run, and the command exits non-zero.
+  `start <task-id> [--effort minimal|low|medium|high] [--model <model>]` creates the
+  task's worktree and branch and hands the specification to the runner at once, without
+  the queue, defaulting to `TASK_EFFORT` and `TASK_MODEL`; an empty model leaves the
+  runner's default, any other option or effort is an error, and a scan task id runs the
+  project adapter's scan worktree setup first. A task whose recorded process is alive is
+  reported as already running and skipped; a worktree without a live owner is an error
+  left for an explicit `cleanup`.
+  `status [<task-id>]` refreshes each running task, deciding completion from its final
+  message as the loop does, then prints one line per task naming its id, status, and
+  PID, or that there are none; a named task without a status record exits non-zero.
+  `queue` prints the backlog with each entry's depth, or `(empty)`, followed by the
+  `status` listing.
+  `logs <task-id> [-f]` prints the task's log; `-f` prints its last ten lines and then
+  each byte appended to it, starting over when the file is replaced or truncated. A
+  missing log is an error.
+  `merge <task-id> [--yes] [--test-cmd "<cmd>"]` merges `task/<task-id>` into the current
+  branch as the loop's merge does (item 8 onwards). Without `--yes` it asks first, and
+  any answer but `y` prints `Aborted.` and exits zero. `--test-cmd` replaces `TEST_CMD`
+  for this merge; any other option is an error. A grouped task missing a requirement's
+  completion marker is refused before the merge. A completed merge resets the
+  consecutive merge-failure count and, for an issue-born task, records the promotion and
+  comments the merge on each linked issue, a failed comment being only a `WARN:`. A
+  merge refusal prints its reason and exits non-zero.
 
 ### Retained runtime configuration
 
