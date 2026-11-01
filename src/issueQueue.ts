@@ -1717,6 +1717,36 @@ export function standingMergeMarkers(comments: readonly ForgeIssueComment[]): Fo
   return trusted.slice(standingFrom).filter((comment) => /^MERGED: /.test(comment.body))
 }
 
+/**
+ * Whether a write-access `MERGED:` marker stands, or `undefined` when the answer turns on
+ * a marker-shaped comment whose author's permission could not be read. That answer is
+ * retried on a later poll, never acted on or remembered.
+ */
+export function mergeMarkerStanding(comments: readonly ForgeIssueComment[]): boolean | undefined {
+  const asIfTrusted = comments.map((comment) =>
+    comment.author.permissionLookupFailed === true && /^(?:MERGED|UNPROMOTED): /.test(comment.body)
+      ? { ...comment, author: { login: comment.author.login, hasWriteAccess: true } }
+      : comment)
+  const standing = standingMergeMarkers(comments).length > 0
+  return standing === standingMergeMarkers(asIfTrusted).length > 0 ? standing : undefined
+}
+
+/**
+ * Whether a write-access comment carries exactly `body`, or `undefined` when only comments
+ * whose author's permission could not be read do, so the caller defers rather than
+ * posting the same comment again.
+ */
+export function trustedCommentPresent(
+  comments: readonly ForgeIssueComment[],
+  body: string,
+): boolean | undefined {
+  const matching = comments.filter((comment) => comment.body === body)
+  if (matching.some((comment) => comment.author.hasWriteAccess)) return true
+  return matching.some((comment) => comment.author.permissionLookupFailed === true)
+    ? undefined
+    : false
+}
+
 export type ClaimResult
   = {
     outcome: 'claimed'
@@ -2072,8 +2102,8 @@ export async function reapStaleLeases(
   now: Date,
   locallyRunningIssues: ReadonlySet<number> = new Set(),
   knownOpenFindings?: readonly ForgeIssue[],
-  hasMergeMarker: (issue: ForgeIssue) => Promise<boolean> = async (issue) =>
-    standingMergeMarkers(await forge.listIssueComments(issue.number)).length > 0,
+  hasMergeMarker: (issue: ForgeIssue) => Promise<boolean | undefined> = async (issue) =>
+    mergeMarkerStanding(await forge.listIssueComments(issue.number)),
   releaseOptions: IssueReleaseOptions = {},
 ): Promise<number[]> {
   const releaseFailures = await reconcileIssueReleaseIntents(forge, paths, releaseOptions)
@@ -2132,7 +2162,9 @@ export async function reapStaleLeases(
       }
       continue
     }
-    if (await hasMergeMarker(issue)) {
+    // An undetermined marker leaves the lease alone for this poll: another checkout may
+    // already have merged the issue, and returning it to ready would hand the work out again.
+    if (await hasMergeMarker(issue) !== false) {
       continue
     }
 

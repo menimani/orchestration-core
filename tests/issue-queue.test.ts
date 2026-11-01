@@ -22,7 +22,8 @@ import {
   recordIssueCompletions,
   recordIssueFailure, recordIssueReleaseIntent, recordIssuesForTask,
   recordIssuePromotions,
-  returnIssueToReady, standingMergeMarkers, LABEL_FINDING,
+  mergeMarkerStanding, returnIssueToReady, standingMergeMarkers, trustedCommentPresent,
+  LABEL_FINDING,
   LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
   type ClaimedRequirement,
@@ -2332,6 +2333,26 @@ describe('reapStaleLeases', () => {
     expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
+  it('does not reap an issue whose merge marker author permission could not be read', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged, lookup failed', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    await forge.commentIssue(issueNumber, 'MERGED: remote-task\nMerged by another checkout.')
+    forge.issueCommentAuthors.set(issueNumber, [
+      { login: 'collaborator-user', hasWriteAccess: false, permissionLookupFailed: true },
+    ])
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.labels).not.toContain(LABEL_READY)
+  })
+
   it('reaps an issue whose merge marker a later unpromoted comment withdrew', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
@@ -2443,6 +2464,39 @@ describe('reapStaleLeases', () => {
     expect(reaped).toEqual([issueNumber])
     expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
     expect(forge.issueComments.has(issueNumber)).toBe(false)
+  })
+})
+
+describe('undetermined comment authors', () => {
+  const trusted = { login: 'collaborator-user', hasWriteAccess: true }
+  const outsider = { login: 'outside-user', hasWriteAccess: false }
+  const unknown = { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true as const }
+
+  it('leaves the merge marker undetermined only when an unread author could change it', () => {
+    expect(mergeMarkerStanding([{ body: 'MERGED: t\nx', author: unknown }])).toBeUndefined()
+    expect(mergeMarkerStanding([
+      { body: 'MERGED: t\nx', author: trusted },
+      { body: 'UNPROMOTED: t\nx', author: unknown },
+    ])).toBeUndefined()
+    expect(mergeMarkerStanding([
+      { body: 'MERGED: t\nx', author: trusted },
+      { body: 'Heartbeat: now', author: unknown },
+    ])).toBe(true)
+    expect(mergeMarkerStanding([
+      { body: 'UNPROMOTED: t\nx', author: unknown },
+      { body: 'MERGED: t\nx', author: trusted },
+    ])).toBe(true)
+    expect(mergeMarkerStanding([{ body: 'MERGED: t\nx', author: outsider }])).toBe(false)
+  })
+
+  it('reports a comment carried only by an unread author as undetermined', () => {
+    const body = 'MERGED: t\nx'
+    expect(trustedCommentPresent([{ body, author: unknown }], body)).toBeUndefined()
+    expect(trustedCommentPresent([
+      { body, author: unknown }, { body, author: trusted },
+    ], body)).toBe(true)
+    expect(trustedCommentPresent([{ body, author: outsider }], body)).toBe(false)
+    expect(trustedCommentPresent([{ body: 'other', author: unknown }], body)).toBe(false)
   })
 })
 

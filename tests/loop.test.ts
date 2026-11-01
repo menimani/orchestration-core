@@ -957,6 +957,26 @@ describe('forge poll budget', () => {
     expect(fakeForge.listIssueCommentsCalls).toEqual([issueNumber])
   })
 
+  it('re-reads comments whose author permission could not be read', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: true, autoMerge: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'pending repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
+    })
+    await fakeForge.commentIssue(issueNumber, 'MERGED: remote-task\nMerged elsewhere.')
+    fakeForge.issueCommentAuthors.set(issueNumber, [
+      { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true },
+    ])
+
+    await loop.poll()
+    await loop.poll()
+
+    expect(fakeForge.listIssueCommentsCalls).toEqual([issueNumber, issueNumber])
+  })
+
   it('defers forge calls until a long reported rate-limit reset and logs one wait', async () => {
     initializeGitRepo()
     let current = new Date(2026, 7, 11, 14, 0, 0)
@@ -5941,6 +5961,50 @@ describe('completed task merge recovery', () => {
     expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
+  })
+
+  it('defers a merge marker whose author permission could not be read instead of reposting it', async () => {
+    const taskId = '20260811_120000_070_auto-lookup-failed'
+    initializeGitRepoWithRemote()
+    makeCompletedTask(taskId)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: true,
+      scanEnabled: true,
+      maxParallel: 0,
+      autoPr: false,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'unreadable marker author', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    const listIssueComments = fakeForge.listIssueComments.bind(fakeForge)
+    let lookupFails = true
+    fakeForge.listIssueComments = async (number) => (await listIssueComments(number))
+      .map((comment) => lookupFails
+        ? { ...comment, author: { login: comment.author.login, hasWriteAccess: false, permissionLookupFailed: true } }
+        : comment)
+
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    const mergedStatus = readStatus(paths, taskId)
+    const expectedMarker = `MERGED: ${taskId}\nMerged as ${mergedStatus?.merge_commit} into run branch main. This issue closes on promotion.`
+    const markers = (): string[] | undefined => fakeForge.issueComments.get(issueNumber)
+      ?.filter((body) => body.startsWith('MERGED: '))
+    expect(markers()).toEqual([expectedMarker])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).not.toContain('could not reconcile')
+
+    lookupFails = false
+    expect(await loop.poll()).toBe('continue')
+
+    expect(markers()).toEqual([expectedMarker])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
   })
 
   it('retries a failed automerge on the next poll and lets the cycle gate proceed', async () => {
