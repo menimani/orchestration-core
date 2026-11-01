@@ -436,9 +436,10 @@ settings update at their next use.
 With `ISSUE_QUEUE_ENABLED=true` the backlog moves to forge issues: findings are filed once
 per fingerprint, workers claim by self-assignment, quiet claims are reaped after a lease,
 and merged work stays open until promotion reaches the default branch and closes the issue.
-Ready titles naming the same primary file — the first path containing a directory separator,
-such as `src/loop.ts` — are claimed in groups of up to four; titles naming only a root-level
-file such as `README.md`, or no path at all, remain singletons, and failed groups retry as
+Ready titles naming the same primary file — the first path containing a `/` separator and
+ending in a file extension, such as `src/loop.ts` — are claimed in groups of up to four; titles
+naming only a root-level file such as `README.md`, an extensionless path such as
+`.githooks/pre-commit`, or no path at all, remain singletons, and failed groups retry as
 individual findings. Each grouped requirement
 needs its own completion marker before the branch can merge; promotion then closes every
 linked issue. When investigation proves an ordinary task needs no implementation, an exact

@@ -998,9 +998,11 @@ account with write access withdraws every `MERGED:` comment before it.
     another project's issues. An issue is filed once per fingerprint: the advisory
     identifier when one is named, else the finding's tag plus the first path it
     names and a digest of normalized finding terms, else that normalized digest alone.
-    Only a path containing a directory separator counts, so a version number such as
-    `23.6` never reads as one; a root-level filename such as `README.md` or
-    `package.json` is not a path here and leaves the finding on the digest alone.
+    Only a path containing a `/` separator and ending in a file extension counts, so a
+    version number such as `23.6` never reads as one; a root-level filename such as
+    `README.md` or `package.json`, an extensionless path such as `.githooks/pre-commit`
+    or `src/adapters/`, and a backslash-separated path are not paths here and leave the
+    finding on the digest alone.
     Normalization ignores case, punctuation, whitespace, word order, grammatical filler,
     plural and selected action-word forms, and issue/commit references; distinct terms
     still distinguish separate requirements in one file. Review findings are checked
@@ -1015,7 +1017,7 @@ account with write access withdraws every `MERGED:` comment before it.
 34. Before claiming, every daemon with the issue queue enabled groups ready findings
     that share a task origin (scan `auto` or review `fix`), a mode (inspection or implementation), and the first path
     their titles name, using the same primary-path convention as fingerprinting (only a
-    path containing a directory separator); a
+    path containing a `/` separator and ending in a file extension); a
     grouped task has one identifier and one mode, so findings differing in either never
     share it. A group contains at most four issues; another batch remains ready for the
     next claim. Titles without such a path, including those naming only a root-level
