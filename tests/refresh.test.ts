@@ -95,6 +95,25 @@ describe('refreshTask', () => {
     expect(after?.status).toBe('completed')
   })
 
+  it('leaves a task without a process record running while no daemon owns the queue', async () => {
+    const file = writeRawStatus('stopped-task', '{"status":"running","pid":null}\n')
+    const before = readFileSync(file, 'utf8')
+
+    const after = await refreshTask(paths, 'stopped-task', { daemonOwnsQueue: false })
+
+    expect(after?.status).toBe('running')
+    expect(readFileSync(file, 'utf8')).toBe(before)
+  })
+
+  it('completes a task without a process record while no daemon owns the queue', async () => {
+    writeRawStatus('stopped-done', '{"status":"running","pid":null}\n')
+    writeFileSync(finalMessageFile(paths, 'stopped-done'), 'TASK_COMPLETE\n')
+
+    const after = await refreshTask(paths, 'stopped-done', { daemonOwnsQueue: false })
+
+    expect(after?.status).toBe('completed')
+  })
+
   it('keeps a live task running while the marker is absent', async () => {
     writeRawStatus('live-task', `{"task_id":"live-task","status":"running","pid":${process.pid}}\n`)
     const after = await refreshTask(paths, 'live-task')

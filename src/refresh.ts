@@ -27,12 +27,27 @@ export function noChangeMarkerPresent(paths: OrchPaths, taskId: string): boolean
     .some((line) => line === 'NO_CHANGE_WARRANTED')
 }
 
+export interface RefreshOptions {
+  /**
+   * False when no daemon holds the queue. A graceful stop removes the PID records of the
+   * trees it terminated and leaves their statuses running, and the next daemon reports
+   * those as dead at startup; failing them here first would turn them into fresh failures
+   * counted against their issues and the burst guard.
+   */
+  daemonOwnsQueue?: boolean
+}
+
 /**
  * Refresh one task: a live process with the marker is completed; a dead process is
- * completed or failed by whether the marker made it into the final message. Returns
- * the status after refresh.
+ * completed or failed by whether the marker made it into the final message. Without a
+ * daemon, a task with no PID record and no marker stays running for the next daemon to
+ * classify. Returns the status after refresh.
  */
-export async function refreshTask(paths: OrchPaths, taskId: string): Promise<TaskStatus | undefined> {
+export async function refreshTask(
+  paths: OrchPaths,
+  taskId: string,
+  { daemonOwnsQueue = true }: RefreshOptions = {},
+): Promise<TaskStatus | undefined> {
   const status = readStatus(paths, taskId)
   if (status === undefined || status.status !== 'running') return status
 
@@ -44,8 +59,10 @@ export async function refreshTask(paths: OrchPaths, taskId: string): Promise<Tas
       next = 'completed'
       nextPid = status.pid ?? undefined
     }
-  } else {
-    next = completionMarkerPresent(paths, taskId) ? 'completed' : 'failed'
+  } else if (completionMarkerPresent(paths, taskId)) {
+    next = 'completed'
+  } else if (daemonOwnsQueue || status.pid !== null) {
+    next = 'failed'
   }
   if (next === undefined) return status
 
@@ -63,7 +80,10 @@ export function listTaskIds(paths: OrchPaths): string[] {
 }
 
 /** Refresh every task and return the listing `status` prints, one line per task. */
-export async function refreshAll(paths: OrchPaths): Promise<string[]> {
+export async function refreshAll(
+  paths: OrchPaths,
+  options: RefreshOptions = {},
+): Promise<string[]> {
   const lines: string[] = []
   for (const taskId of listTaskIds(paths)) {
     const before = readStatus(paths, taskId)
@@ -72,7 +92,7 @@ export async function refreshAll(paths: OrchPaths): Promise<string[]> {
       lines.push(`${taskId.padEnd(20)} ${before.status.padEnd(10)} pid=`)
       continue
     }
-    const after = before.status === 'running' ? await refreshTask(paths, taskId) : before
+    const after = before.status === 'running' ? await refreshTask(paths, taskId, options) : before
     const pid = after?.pid ?? ''
     lines.push(`${taskId.padEnd(20)} ${(after?.status ?? '?').padEnd(10)} pid=${pid}`)
   }

@@ -35,6 +35,7 @@ import {
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
 import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
+import { refreshAll } from '../src/refresh.ts'
 import { readStatus } from '../src/status.ts'
 import { StartupProcessRetainedError, startTask } from '../src/start.ts'
 import { enqueueTask, specFile } from '../src/tasks.ts'
@@ -3636,6 +3637,26 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(await loop.poll()).toBe('continue')
     expect(logText()).toContain('ERROR 3 tasks failed in one poll; stopping for environment repair')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('does not count tasks refreshed by status between a stop and a restart as a burst', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    const taskIds = ['stopped-f1', 'stopped-f2', 'stopped-f3']
+    for (const taskId of taskIds) writeRawStatus(taskId, 'running', null)
+
+    // `status` run while no daemon holds the queue, as after a graceful stop.
+    await refreshAll(paths, { daemonOwnsQueue: false })
+    for (const taskId of taskIds) expect(readStatus(paths, taskId)?.status).toBe('running')
+
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of taskIds) {
+      expect(readStatus(paths, taskId)?.status).toBe('failed')
+      expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`)
+    }
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
   it('neither announces nor counts failures left by a finished run', async () => {

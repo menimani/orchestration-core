@@ -670,8 +670,9 @@ const cmdStart: Command = async (paths, args) => {
 
 const cmdStatus: Command = async (paths, args) => {
   const taskId = args[0]
+  const options = { daemonOwnsQueue: isLoopRunning(paths) }
   if (taskId !== undefined) {
-    const status = await refreshTask(paths, taskId)
+    const status = await refreshTask(paths, taskId, options)
     if (status === undefined) {
       console.error(`Task not found: ${taskId}`)
       return 1
@@ -679,7 +680,7 @@ const cmdStatus: Command = async (paths, args) => {
     console.log(`${taskId.padEnd(20)} ${status.status.padEnd(10)} pid=${status.pid ?? ''}`)
     return 0
   }
-  const lines = await refreshAll(paths)
+  const lines = await refreshAll(paths, options)
   if (lines.length === 0) {
     console.log('There are no running or completed tasks.')
     return 0
