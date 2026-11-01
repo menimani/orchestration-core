@@ -277,8 +277,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    name the same file. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
-   task is queued, running, completed, or failed. A failed task is not re-queued; once
-   `cleanup` has removed it, the repeated finding re-admits that task. If an identical
+   task is queued, running, completed, or failed. A failed task is not re-queued while
+   its worktree or branch remains; once `cleanup` has removed them, the repeated finding
+   re-admits that task. An issue claim cannot wait for that cleanup, so a claimed issue
+   whose indexed task failed and still holds its worktree or branch creates a fresh task
+   and updates the index. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
    creates a fresh task and updates the index; completed advisories remain deduplicated.
    A worker never merges, so in worker mode a completed task counts as finished here: a
