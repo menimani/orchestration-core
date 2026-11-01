@@ -2243,10 +2243,14 @@ export function createLoop(deps: LoopDeps) {
               LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
             ].includes(label)))
         const pendingIssueNumbers: number[] = []
+        const inspectedIssueNumbers = new Set<number>()
         for (const issue of openIssues) {
           if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
           try {
             const comments = await commentsForIssue(issue)
+            if (!comments.some((comment) => comment.author.permissionLookupFailed === true)) {
+              inspectedIssueNumbers.add(issue.number)
+            }
             const mergeSha = standingMergeMarkers(comments)
               .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment.body)?.[1])
               .find((sha) => sha !== undefined
@@ -2261,6 +2265,25 @@ export function createLoop(deps: LoopDeps) {
         pendingIssueNumbers.sort((a, b) => a - b)
         const remoteCount = pendingIssueNumbers.length
         warningLog.recovered('count-remote-issue-work')
+        // A merge-failed issue with no active lifecycle label waits for a person: nothing
+        // in the loop adopts, reaps, or retries it. When such issues are all that remains,
+        // waiting would hold the gate forever, so stop with the repair instead of promoting.
+        // An issue whose comments could not be judged may already be merged elsewhere, so
+        // it keeps the loop waiting for a later poll to ask again.
+        const awaitsRepair = (issueNumber: number): boolean => {
+          if (!inspectedIssueNumbers.has(issueNumber)) return false
+          const labels = openIssues.find((issue) => issue.number === issueNumber)?.labels ?? []
+          return labels.includes(LABEL_MERGE_FAILED)
+            && ![LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY].some((label) => labels.includes(label))
+        }
+        if (remoteCount > 0 && pendingIssueNumbers.every(awaitsRepair)) {
+          const issues = pendingIssueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
+          const reason = `Issues ${issues} are labelled ${LABEL_MERGE_FAILED} and are the only remaining work. Repair each adoption named in its comment, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, and restart the loop.`
+          if (!decisionAlreadyRecorded(reason)) appendFileSync(decisionsFile, `${reason}\n`)
+          event('ERROR', reason)
+          writeFileSync(stopFile, '')
+          return 'continue'
+        }
         if (remoteCount > 0) {
           gateWaitTarget = 'open finding'
           const pending = pendingIssueNumbers.join(' ')

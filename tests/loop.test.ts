@@ -3359,17 +3359,39 @@ describe('remote issue queue idle detection', () => {
     expect(logged).toContain('Running Status      Task=2  Queue=1')
   })
 
-  it('defers the cycle gate and review while a merge-failed issue is open', async () => {
+  it('stops with the repair when merge-failed issues are the only remaining work', async () => {
     const loop = makeReviewLoop(true)
     await fakeForge.createIssue({
       title: 'adoption needs repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
     })
+    const reason = 'Issues #1 are labelled loop:merge-failed and are the only remaining work. Repair each adoption named in its comment, remove loop:merge-failed, add loop:ready, and restart the loop.'
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'decisions.txt'), 'utf8')).toBe(`${reason}\n`)
+    expect(logText()).toContain(`ERROR ${reason}`)
+    expect(logText()).not.toContain('Waiting remote')
+  })
+
+  it('keeps waiting on a merge-failed issue while other remote work is active', async () => {
+    const loop = makeReviewLoop(true)
+    await fakeForge.createIssue({
+      title: 'adoption needs repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
+    })
+    await fakeForge.createIssue({
+      title: 'still running', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toBe('Waiting remote      issues #1')
+    expect(logText()).toBe('Waiting remote      issues #1 #2')
   })
 
   it('defers the cycle gate and review when remote issue listing fails', async () => {
