@@ -705,6 +705,9 @@ export function createLoop(deps: LoopDeps) {
               paths, taskId, adoptionIssues.map((candidate) => candidate.number),
             )
             recordIssuePromotions(paths, taskId, mergedCommit, runBranch)
+            // A local attempt for the same issues may have conflicted earlier; the
+            // adopted branch carries the work its kept commits were waiting to deliver.
+            retireConflictedAttempts(taskId, adoptionIssues.map((candidate) => candidate.number))
             const cycle = readCount(scanCountFile)
             if (cycle > 0) {
               rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })

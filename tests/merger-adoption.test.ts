@@ -8,6 +8,9 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
 import { loadConfig } from '../src/config.ts'
 import {
+  issueConflictKey, readConflictedAttempts, writeConflictedAttempts,
+} from '../src/conflictRetry.ts'
+import {
   buildIssueBody, issuePromotionForIssue, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
 } from '../src/issueQueue.ts'
@@ -204,6 +207,31 @@ describe('remote task adoption', () => {
       expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
     }
     expect(logged.filter((line) => line.startsWith('Merged '))).toHaveLength(1)
+  })
+
+  it('removes the commits an earlier local attempt kept for an adopted issue', async () => {
+    const task = pushWorkerBranch('20260809_000000_011_auto-adopted-after-conflict')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const head = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const earlierId = '20260809_000000_001_auto-adopted-after-conflict'
+    const keptBranch = `conflict/${earlierId}`
+    git(repoRoot, ['branch', keptBranch, head])
+    writeConflictedAttempts(paths, issueConflictKey(issueNumber), [{
+      taskId: earlierId,
+      branch: keptBranch,
+      runBranch: 'main',
+      runTip: head,
+      base: head,
+      taskTip: head,
+      conflictedFiles: ['README.md'],
+      conflictingCommits: [head],
+    }])
+
+    expect(await makeLoop(stubProject).poll()).toBe('continue')
+
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeDefined()
+    expect(git(repoRoot, ['branch', '--list', keptBranch])).toBe('')
+    expect(readConflictedAttempts(paths, issueConflictKey(issueNumber))).toEqual([])
   })
 
   it('quarantines every reporter when a forged group names an unavailable issue', async () => {
