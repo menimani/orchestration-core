@@ -7,7 +7,7 @@ import type { Forge } from './adapters/forge.ts'
 import { renderProjectAdapter, repairProjectAdapterSource } from './adapters/project.ts'
 import { ensureQueueLabels, QUEUE_LABELS } from './issueQueue.ts'
 import { ensureScopeLabel, projectScopeLabel } from './issueScope.ts'
-import { PACKAGE_ROOT, type OrchPaths } from './paths.ts'
+import { PACKAGE_ROOT, shellPathSpelling, type OrchPaths } from './paths.ts'
 
 export interface InitResult {
   ok: boolean
@@ -198,7 +198,7 @@ function repairAdapter(
 
 function coreHooksPath(paths: OrchPaths, packageRoot: string): string {
   const hooksDirectory = join(packageRoot, '.githooks')
-  const hooksPath = relative(paths.repoRoot, hooksDirectory).replaceAll('\\', '/') || '.'
+  const hooksPath = shellPathSpelling(relative(paths.repoRoot, hooksDirectory)) || '.'
   if (isAbsolute(hooksPath)) {
     throw new Error('The orchestration package and repository must be on the same filesystem volume.')
   }
