@@ -13,7 +13,8 @@ import {
 import { finalMessageFile, isReviewTaskId, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
 import {
-  DelegatedTaskMutationError, enqueueTask, newTaskSpec, specFile, type EnqueueResult,
+  DelegatedTaskMutationError, enqueueTask, failedTaskLeftover, newTaskSpec, specFile,
+  type EnqueueResult,
 } from './tasks.ts'
 
 // The issue queue: scan findings become forge issues, workers claim them, and the
@@ -1959,7 +1960,8 @@ export interface ClaimedRequirement {
 /**
  * Claim and materialize a bounded set of findings as one task, or compensate all members.
  * A worker never merges, so its completed task is as final as a merged one: an issue that
- * returns to ready after the task was published needs a fresh task, not the old one.
+ * returns to ready after the task was published needs a fresh task, not the old one. So
+ * does an issue whose indexed task failed and still awaits cleanup.
  */
 export async function claimIssueGroup(
   forge: Forge,
@@ -2022,10 +2024,14 @@ export async function claimIssueGroup(
           issueNumbers,
         }
       }
-      const needsFreshTask = existing !== undefined
+      // A failed task that still holds its worktree or branch cannot be re-enqueued
+      // before cleanup, so reusing it would leave this claim with nothing queued.
+      const existingAwaitsCleanup = existing !== undefined && existingStatus === 'failed'
+        && failedTaskLeftover(paths, existing) !== undefined
+      const needsFreshTask = existingAwaitsCleanup || (existing !== undefined
         && existingFinished
         && !requirements.every(({ requirement }) =>
-          fingerprintOf(requirement).startsWith('advisory:'))
+          fingerprintOf(requirement).startsWith('advisory:')))
       const taskId = needsFreshTask
         ? newTaskId(paths, `${origin}-${descSlug(description)}`)
         : taskIdForDesc(paths, origin, description)
