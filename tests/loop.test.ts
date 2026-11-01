@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
+import { ForgeIssueNotFoundError, ForgeRateLimitError, type Forge, type PrStatus } from '../src/adapters/forge.ts'
 import { normalizeEntry } from '../src/adapters/forge-github.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
@@ -5322,6 +5322,70 @@ describe('completed task merge recovery', () => {
     expect(issue.state).toBe('open')
     expect(issue.labels).toContain(LABEL_READY)
     expect(fakeForge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('MERGED:')
+  })
+
+  it('defers the merge of a completed task whose issue claim cannot be read', async () => {
+    const taskId = '20260815_125258_041_auto-unreadable-claim'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'unreadable claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [fakeForge.user],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    fakeForge.getIssue = async (number) => {
+      if (number === issueNumber) throw new Error('forge unavailable')
+      return getIssue(number)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
+    expect(logText()).toContain(
+      '041_auto merge deferred: its issue claims could not be read: forge unavailable')
+    expect(logText()).not.toContain('041_auto cannot be merged')
+    const issue = await getIssue(issueNumber)
+    expect(issue.state).toBe('open')
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(fakeForge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('MERGED:')
+  })
+
+  it('merges a completed task whose linked issue no longer exists', async () => {
+    const taskId = '20260815_125258_042_auto-deleted-claim'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'deleted claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [fakeForge.user],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    let claimReads = 0
+    fakeForge.getIssue = async (number) => {
+      // Only the claim check sees the issue as deleted; later reads reconcile it normally.
+      if (number === issueNumber && ++claimReads === 1) throw new ForgeIssueNotFoundError(number)
+      return getIssue(number)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(claimReads).toBeGreaterThan(0)
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(git(['rev-parse', 'HEAD'])).not.toBe(initialHead)
+    expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(true)
+    expect(logText()).not.toContain('merge deferred')
+    expect(logText()).not.toContain('042_auto cannot be merged')
   })
 
   it('skips a task whose merge is already active without counting a failure', async () => {
