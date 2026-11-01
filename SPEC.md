@@ -1231,6 +1231,10 @@ account with write access withdraws every `MERGED:` comment before it.
     deferred with a WARN that the repository test lock stayed busy, without the comment,
     the relabel, or a failure count, and every member stays `loop:merge-ready` for the
     next poll to adopt again.
+    A worker report counts only from an author with write access. When the newest
+    report-shaped comment on a member comes from an author whose access is undetermined
+    (see the trust model), the adoption is deferred the same way, with a WARN naming the
+    issue, and that issue's comments are not cached, so the next poll asks again.
     A grouped member still claimed — `loop:in-progress` and not `loop:ready` — is still
     being published, even when it carries a report from an earlier task, so the poll
     skips the group and leaves every member as it is; only an unclaimed member reporting

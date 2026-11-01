@@ -133,6 +133,15 @@ class LostWorkerClaimError extends UnpublishableWorkerTaskError {
   }
 }
 
+// A worker branch report whose author's write access could not be determined. Neither
+// trusting nor ignoring the report is safe, so the step that needed it waits for a later
+// poll.
+class UndeterminedWorkerReportError extends Error {
+  constructor(issueNumber: number) {
+    super(`the worker branch report on issue #${issueNumber} has an author whose write access could not be determined`)
+  }
+}
+
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -535,6 +544,8 @@ export function createLoop(deps: LoopDeps) {
       const report = issue.labels.includes(LABEL_MERGE_READY)
         ? workerBranchReport(await commentsForIssue(issue))
         : undefined
+      // An ordinary failure, so the publication is retried rather than the claim given up.
+      if (report === 'undetermined') throw new UndeterminedWorkerReportError(issueNumber)
       if (report?.branch !== branch || report.head !== head) lost.push(issueNumber)
     }
     if (lost.length > 0) throw new LostWorkerClaimError(lost)
@@ -550,14 +561,18 @@ export function createLoop(deps: LoopDeps) {
     }))
   }
 
+  // The newest report-shaped comment from a write-access author wins. One whose author's
+  // access could not be determined may be that newest trusted report, so the answer is
+  // "undetermined" rather than whatever older report lies beneath it.
   function workerBranchReport(
     comments: ForgeIssueComment[],
-  ): { branch: string; head: string; issueNumbers?: number[] } | undefined {
+  ): { branch: string; head: string; issueNumbers?: number[] } | 'undetermined' | undefined {
     for (const comment of [...comments].reverse()) {
-      if (!comment.author.hasWriteAccess) continue
+      if (!comment.author.hasWriteAccess && comment.author.permissionLookupFailed !== true) continue
       const branch = /^Branch: (task\/[A-Za-z0-9][A-Za-z0-9._-]*)$/m.exec(comment.body)?.[1]
       const head = /^Head commit: ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/m.exec(comment.body)?.[1]
       if (branch !== undefined && head !== undefined) {
+        if (!comment.author.hasWriteAccess) return 'undetermined'
         const issueLine = /^Issues: ((?:#\d+\s*)+)$/m.exec(comment.body)?.[1]
         const issueNumbers = issueLine?.match(/\d+/g)?.map(Number)
         return { branch, head, ...(issueNumbers === undefined ? {} : { issueNumbers }) }
@@ -627,6 +642,7 @@ export function createLoop(deps: LoopDeps) {
       try {
         const remote = currentBranchPushRemote(paths.repoRoot)
         const report = workerBranchReport(await commentsForIssue(issue))
+        if (report === 'undetermined') throw new UndeterminedWorkerReportError(issue.number)
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
         }
@@ -650,6 +666,9 @@ export function createLoop(deps: LoopDeps) {
             break
           }
           const candidateReport = workerBranchReport(await commentsForIssue(candidate))
+          if (candidateReport === 'undetermined') {
+            throw new UndeterminedWorkerReportError(candidate.number)
+          }
           if (candidateReport?.branch !== report.branch || candidateReport.head !== report.head) {
             throw new MergeError(`Grouped issue #${candidate.number} does not report the same worker branch.`)
           }
@@ -759,6 +778,12 @@ export function createLoop(deps: LoopDeps) {
             ? `issue #${issue.number}`
             : shortTaskId(adoptionTaskId)
           event('WARN', `${subject} adoption deferred: the repository test lock stayed busy`)
+          continue
+        }
+        // Not a failure either: a transient permission lookup says nothing about the
+        // report, so every member stays merge-ready for the next poll.
+        if (error instanceof UndeterminedWorkerReportError) {
+          event('WARN', `issue #${issue.number} adoption deferred: ${message}`)
           continue
         }
         if (error instanceof OrchestrationDepsInstallError || error instanceof MergeRecoveryError) {
