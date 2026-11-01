@@ -22,7 +22,8 @@ import {
   recordIssueCompletions,
   recordIssueFailure, recordIssueReleaseIntent, recordIssuesForTask,
   recordIssuePromotions,
-  returnIssueToReady, standingMergeMarkers, LABEL_FINDING,
+  mergeMarkerStanding, returnIssueToReady, standingMergeMarkers, trustedCommentPresent,
+  LABEL_FINDING,
   LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED,
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
   type ClaimedRequirement,
@@ -30,7 +31,7 @@ import {
 import { existingTaskIdForDesc } from '../src/ids.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
-import { specFile } from '../src/tasks.ts'
+import { DelegatedTaskMutationError, specFile } from '../src/tasks.ts'
 import { frameVerifiedRequirement } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -1104,6 +1105,26 @@ describe('claimIssueGroup', () => {
     expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
   })
 
+  it('skips an issue whose author permission could not be determined without labelling it', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` asks for a change')
+    const stored = forge.issues.get(issueNumber)
+    if (stored === undefined) throw new Error('expected ready issue')
+    stored.author = { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true }
+
+    const result = await claimIssueGroup(
+      forge, paths, [await forge.getIssue(issueNumber)], 'worker-a', appendRequirements,
+    )
+
+    expect(result).toEqual({
+      outcome: 'permission-unknown', issueNumber, author: 'maintainer-one',
+    })
+    const after = await forge.getIssue(issueNumber)
+    expect(after.labels).toContain(LABEL_READY)
+    expect(after.labels).not.toContain(LABEL_UNTRUSTED_AUTHOR)
+    expect(after.assignees).toEqual([])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
   it('preserves a finding issue depth when claiming it', async () => {
     const result = await publishFinding(
       forge, paths, '[BUG] `src/deep.ts` remains broken', 'parent-task',
@@ -2099,6 +2120,70 @@ describe('reapStaleLeases', () => {
     expect(repaired.labels).toEqual([LABEL_FINDING, LABEL_READY])
   })
 
+  it('leaves an assigned ready issue alone until its lease window has passed', async () => {
+    forge.clock = () => new Date('2026-08-08T11:30:00Z')
+    const fresh = await forge.createIssue({
+      title: 'freshly assigned ready', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_READY], assignees: ['worker-new'],
+    })
+    const before = await forge.getIssue(fresh)
+    const getIssue = forge.getIssue.bind(forge)
+    const reads: number[] = []
+    forge.getIssue = async (number) => {
+      reads.push(number)
+      return getIssue(number)
+    }
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+    expect(reads).toEqual([])
+    expect(await getIssue(fresh)).toEqual(before)
+  })
+
+  it.each([
+    ['an added assignee', async (number: number) => {
+      await forge.assignIssue(number, 'worker-new')
+    }],
+    ['a replaced assignee', async (number: number) => {
+      await forge.unassignIssue(number, 'worker-gone')
+      await forge.assignIssue(number, 'worker-new')
+    }],
+    ['an added in-progress label', async (number: number) => {
+      await forge.addLabel(number, LABEL_IN_PROGRESS)
+    }],
+    ['a removed ready label', async (number: number) => {
+      await forge.removeLabel(number, LABEL_READY)
+    }],
+    ['a refreshed updatedAt', async (number: number) => {
+      forge.clock = () => new Date('2026-08-08T11:59:00Z')
+      await forge.commentIssue(number, 'heartbeat')
+    }],
+  ])('leaves a stranded ready issue untouched after %s lands past the listing', async (
+    _description, mutate,
+  ) => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const stranded = await forge.createIssue({
+      title: 'stranded ready', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_READY], assignees: ['worker-gone'],
+    })
+    const getIssue = forge.getIssue.bind(forge)
+    let changed: ForgeIssue | undefined
+    forge.getIssue = async (number) => {
+      if (number === stranded && changed === undefined) {
+        await mutate(number)
+        changed = await getIssue(number)
+      }
+      return getIssue(number)
+    }
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+    expect(changed).toBeDefined()
+    expect(await getIssue(stranded)).toEqual(changed)
+  })
+
   it('leaves an unassigned ready issue untouched', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const ready = await forge.createIssue({
@@ -2268,6 +2353,52 @@ describe('reapStaleLeases', () => {
     ])
   })
 
+  it('confirms an existing trusted merge marker instead of posting a duplicate', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-merged', [issueNumber])
+    recordIssuePromotions(paths, 'task-merged', 'abc123', 'feature/run-9')
+    const marker = issueMergeComment('task-merged', 'abc123', 'feature/run-9')
+    await forge.commentIssue(issueNumber, marker)
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+
+    expect(forge.issueComments.get(issueNumber)).toEqual([marker])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
+  })
+
+  it('leaves a promotion pending while its marker author permission is undetermined', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-merged', [issueNumber])
+    recordIssuePromotions(paths, 'task-merged', 'abc123', 'feature/run-9')
+    const marker = issueMergeComment('task-merged', 'abc123', 'feature/run-9')
+    await forge.commentIssue(issueNumber, marker)
+    forge.issueCommentAuthors.set(issueNumber, [
+      { login: 'worker-a', hasWriteAccess: false, permissionLookupFailed: true },
+    ])
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+
+    expect(forge.issueComments.get(issueNumber)).toEqual([marker])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.assignees).toEqual(['worker-a'])
+  })
+
   it('does not reap an issue with a collaborator merge marker when the local issue map is empty', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
@@ -2310,6 +2441,26 @@ describe('reapStaleLeases', () => {
     expect(issue.assignees).toEqual([])
     expect(issue.labels).toContain(LABEL_READY)
     expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('does not reap an issue whose merge marker author permission could not be read', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged, lookup failed', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    await forge.commentIssue(issueNumber, 'MERGED: remote-task\nMerged by another checkout.')
+    forge.issueCommentAuthors.set(issueNumber, [
+      { login: 'collaborator-user', hasWriteAccess: false, permissionLookupFailed: true },
+    ])
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.labels).not.toContain(LABEL_READY)
   })
 
   it('reaps an issue whose merge marker a later unpromoted comment withdrew', async () => {
@@ -2423,6 +2574,39 @@ describe('reapStaleLeases', () => {
     expect(reaped).toEqual([issueNumber])
     expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
     expect(forge.issueComments.has(issueNumber)).toBe(false)
+  })
+})
+
+describe('undetermined comment authors', () => {
+  const trusted = { login: 'collaborator-user', hasWriteAccess: true }
+  const outsider = { login: 'outside-user', hasWriteAccess: false }
+  const unknown = { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true as const }
+
+  it('leaves the merge marker undetermined only when an unread author could change it', () => {
+    expect(mergeMarkerStanding([{ body: 'MERGED: t\nx', author: unknown }])).toBeUndefined()
+    expect(mergeMarkerStanding([
+      { body: 'MERGED: t\nx', author: trusted },
+      { body: 'UNPROMOTED: t\nx', author: unknown },
+    ])).toBeUndefined()
+    expect(mergeMarkerStanding([
+      { body: 'MERGED: t\nx', author: trusted },
+      { body: 'Heartbeat: now', author: unknown },
+    ])).toBe(true)
+    expect(mergeMarkerStanding([
+      { body: 'UNPROMOTED: t\nx', author: unknown },
+      { body: 'MERGED: t\nx', author: trusted },
+    ])).toBe(true)
+    expect(mergeMarkerStanding([{ body: 'MERGED: t\nx', author: outsider }])).toBe(false)
+  })
+
+  it('reports a comment carried only by an unread author as undetermined', () => {
+    const body = 'MERGED: t\nx'
+    expect(trustedCommentPresent([{ body, author: unknown }], body)).toBeUndefined()
+    expect(trustedCommentPresent([
+      { body, author: unknown }, { body, author: trusted },
+    ], body)).toBe(true)
+    expect(trustedCommentPresent([{ body, author: outsider }], body)).toBe(false)
+    expect(trustedCommentPresent([{ body: 'other', author: unknown }], body)).toBe(false)
   })
 })
 
@@ -2555,6 +2739,62 @@ describe('publishDelegatedTask', () => {
     expect(result).toEqual({ outcome: 'duplicate', issueNumber, materialize: false })
     expect(issueNumberForTask(paths, 'user-task')).toBeUndefined()
     expect((await forge.getIssue(issueNumber)).assignees).toEqual(['worker-busy'])
+  })
+
+  it('closes its own issue when a concurrent delegate filed the same fingerprint first', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const createIssue = forge.createIssue.bind(forge)
+    let racer: number | undefined
+    forge.createIssue = async (options) => {
+      // Another delegator's issue lands after the preflight lookup but before ours.
+      racer ??= await createIssue({
+        title: description,
+        body: buildIssueBody(description, 'other-task'),
+        labels: [LABEL_FINDING, LABEL_READY],
+      })
+      return createIssue(options)
+    }
+
+    const result = await publishDelegatedTask(forge, paths, description, 'user-task')
+
+    expect(racer).toBe(1)
+    expect(result).toEqual({ outcome: 'duplicate', issueNumber: 1, materialize: false })
+    const own = await forge.getIssue(2)
+    expect(own.state).toBe('closed')
+    expect(own.labels).toEqual([LABEL_FINDING])
+    expect(forge.issueComments.get(2)).toEqual([
+      'Duplicate of #1; both issues carry the same loop finding fingerprint.',
+    ])
+    const survivor = await forge.getIssue(1)
+    expect(survivor.state).toBe('open')
+    expect(survivor.labels).toEqual([LABEL_FINDING, LABEL_READY])
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprintOf(description)} 1\n`)
+    expect(issueNumberForTask(paths, 'user-task')).toBeUndefined()
+  })
+
+  it('reports the created issue when reconciliation after creation fails', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const getIssue = forge.getIssue.bind(forge)
+    forge.listOpenIssues = async () => []
+    forge.getIssue = async (issueNumber) => {
+      if (issueNumber === 1) throw new Error('created issue re-read unavailable')
+      return getIssue(issueNumber)
+    }
+
+    const failure = await publishDelegatedTask(forge, paths, description, 'user-task')
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(DelegatedTaskMutationError)
+    expect((failure as DelegatedTaskMutationError).issueNumber).toBe(1)
+    expect((failure as DelegatedTaskMutationError).message).toBe(
+      'Could not reconcile issue #1 after delegated work may have been published: '
+        + 'created issue re-read unavailable',
+    )
+    expect((failure as DelegatedTaskMutationError).cause)
+      .toEqual(new Error('created issue re-read unavailable'))
+    expect(forge.issues.size).toBe(1)
+    expect(existsSync(join(paths.queueDir, 'issue-fingerprints'))).toBe(false)
   })
 })
 

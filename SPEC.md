@@ -128,6 +128,40 @@ comments and other items cite items by number, so a number is never reused.
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
   preview and requires confirmation; a declined confirmation never contacts the forge.
+- The manual task commands each take the task id as their first argument and, given
+  none, print their usage and exit non-zero.
+  `new <task-id>` writes the task specification template to `tasks/<task-id>.md` and
+  prints `Created: <file>`; an existing specification is an error, never overwritten.
+  `enqueue <task-id> [depth]` appends `<task-id>:<depth>` to `queue/backlog.txt` and
+  prints `Enqueued: <task-id> (depth=<depth>)`; a depth that is not a non-negative
+  integer is taken as 0, and a missing specification is an error. A task already in the
+  backlog, or whose status is `running`, `completed`, `merged`, or `no-change`, is
+  reported as a `WARN:` line, not queued, and exits zero. A `failed` task is queued
+  again only once its worktree and branch are gone; while either remains, a `WARN:` line
+  names it and the `cleanup` to run, and the command exits non-zero.
+  `start <task-id> [--effort minimal|low|medium|high] [--model <model>]` creates the
+  task's worktree and branch and hands the specification to the runner at once, without
+  the queue, defaulting to `TASK_EFFORT` and `TASK_MODEL`; an empty model leaves the
+  runner's default, any other option or effort is an error, and a scan task id runs the
+  project adapter's scan worktree setup first. A task whose recorded process is alive is
+  reported as already running and skipped; a worktree without a live owner is an error
+  left for an explicit `cleanup`.
+  `status [<task-id>]` refreshes each running task, deciding completion from its final
+  message as the loop does, then prints one line per task naming its id, status, and
+  PID, or that there are none; a named task without a status record exits non-zero.
+  `queue` prints the backlog with each entry's depth, or `(empty)`, followed by the
+  `status` listing.
+  `logs <task-id> [-f]` prints the task's log; `-f` prints its last ten lines and then
+  each byte appended to it, starting over when the file is replaced or truncated. A
+  missing log is an error.
+  `merge <task-id> [--yes] [--test-cmd "<cmd>"]` merges `task/<task-id>` into the current
+  branch as the loop's merge does (item 8 onwards). Without `--yes` it asks first, and
+  any answer but `y` prints `Aborted.` and exits zero. `--test-cmd` replaces `TEST_CMD`
+  for this merge; any other option is an error. A grouped task missing a requirement's
+  completion marker is refused before the merge. A completed merge resets the
+  consecutive merge-failure count and, for an issue-born task, records the promotion and
+  comments the merge on each linked issue, a failed comment being only a `WARN:`. A
+  merge refusal prints its reason and exits non-zero.
 
 ### Retained runtime configuration
 
@@ -414,6 +448,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     failed, the merge is deferred with a WARN that the repository test lock stayed busy,
     the task stays `completed` for the next poll to merge again, and this count does not
     advance. Every other non-zero exit is still `Tests failed. Aborting merge.`
+    A merge deferred because a linked issue's claim cannot be read (item 34) likewise
+    leaves this count alone, and a lost claim fails the task before its gate runs.
     A conflicting pre-merge rebase is terminal for that task and contributes at most one
     failure to this count; ordinary
     gate failures remain retryable. Re-claiming completed-but-unmerged work
@@ -958,7 +994,11 @@ For GitHub, the adapter asks the forge for the author's permission on the queue 
 `write`, `maintain`, and `admin` as the forge-neutral write-access verdict. A permission
 lookup that fails for any reason other than a rate limit answers "no write access", so a
 missing collaborator and an unreachable forge both resolve to untrusted rather than to a
-guess.
+guess. The adapter still tells the two apart: a missing collaborator or a read-level
+permission is a verdict, while any other failure marks the author's access as undetermined.
+A claim that meets an undetermined author skips that issue for the poll without labelling
+it and records a counted warning, so a transient outage never quarantines a trusted
+author's issue for good; the unlabelled issue keeps holding the idle gate open meanwhile.
 
 Authorship is checked both when a ready issue is claimed and when fingerprint ownership
 is reconciled. An untrusted issue remains unassigned and ready, receives
@@ -986,7 +1026,11 @@ the stricter framing, which additionally refuses orchestration and CI changes pr
 it; scan and review prompts apply that rule to the text they inspect or quote. A `MERGED:` comment affects stale-lease reaping or idle detection only when its
 author has write access; idle detection additionally retains the merge-SHA ancestry check,
 so authorship and verified ancestry must both hold. A later `UNPROMOTED:` comment from an
-account with write access withdraws every `MERGED:` comment before it.
+account with write access withdraws every `MERGED:` comment before it. When whether a
+`MERGED:` marker stands turns on a `MERGED:` or `UNPROMOTED:` comment whose author's access
+is undetermined, stale-lease reaping leaves that lease alone for the poll. Likewise, when
+the merge comment the loop would post is carried only by such an author, the adopted
+issue's update and merge reconciliation wait for a later poll instead of posting it again.
 
 33. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
@@ -1039,14 +1083,29 @@ account with write access withdraws every `MERGED:` comment before it.
     issue as a local task through the standard template (completion marker included),
     honoring an `Effort:` field. Daemons sharing an account are indistinguishable
     and may both materialize the issue, so that configuration is unsupported. A
-    running linked task adds a `Heartbeat: <ISO timestamp>` issue comment at least every
+    linked task that is running, or completed and still holding its claim, adds a
+    `Heartbeat: <ISO timestamp>` issue comment at least every
     30 minutes, moving the forge's `updatedAt` lease clock without changing the issue
-    body. Heartbeat timestamps are tracked locally under `queue/heartbeat`; one failed
-    forge attempt logs one warning and never fails the poll. A locally running mapped
-    task is excluded from that poll's reaping even when its heartbeat fails. An in-progress
+    body. Outside worker mode a completed task holds its claim until its status leaves
+    `completed`, which happens only on a merge or a no-change outcome, so a merge
+    deferred across many polls cannot let the lease lapse; item 36 covers worker mode.
+    Heartbeat timestamps are tracked locally under `queue/heartbeat`; one failed
+    forge attempt logs one warning and never fails the poll. A locally mapped task that
+    holds its claim is excluded from that poll's reaping even when its heartbeat fails. An in-progress
     issue without heartbeats for `ISSUE_LEASE_HOURS` (default 3) is reaped back to
     ready, unassigned, so lease expiry identifies a worker that is no longer polling
     rather than a long-running task.
+
+    Immediately before a completed task's merge gate, the merger re-reads every issue
+    linked to it. An issue already closed, or one the forge reports as deleted, is passed
+    over. An open issue that is no longer `loop:in-progress`, or is back to `loop:ready`,
+    was reaped and may since belong to another claimant: only those issues are unlinked
+    from the task, which becomes failed instead of merged, with `Merge refused: #N no
+    longer claimed by this task` in its merge log and a WARN that it cannot be merged;
+    the issues it still holds then take the ordinary failed-task release. A claim that
+    cannot be read defers the merge, with a WARN unless the forge was rate limited, and
+    leaves the task `completed` for a later poll rather than risk closing someone else's
+    issue.
 35. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
     the forge closes all of them when the promotion PR lands the commit on the default
     branch. A queue kept in a fleet's `issueRepository` is the exception: its issue
@@ -1084,7 +1143,9 @@ account with write access withdraws every `MERGED:` comment before it.
     state unchanged for repair, and resumes only after the record is repaired.
     The daemon lists open `loop:finding` issues once per poll and partitions that snapshot
     locally for adoption, reconciliation, lease reaping, claiming, and cycle-gate idle
-    detection. MERGED-marker comment reads are cached by issue number and `updatedAt`.
+    detection. MERGED-marker comment reads are cached by issue number and `updatedAt`,
+    except that an issue whose comments include an author whose access is undetermined
+    (see the trust model) is not cached, so the next poll asks again.
     Closed lifecycle labels are reconciled at startup and once on cycle-gate entry, not on
     every idle poll. A forge rate-limit response pauses further forge calls until its
     reported reset (querying `rate_limit` when needed), logs one aligned `Waiting forge`
@@ -1176,6 +1237,10 @@ account with write access withdraws every `MERGED:` comment before it.
     deferred with a WARN that the repository test lock stayed busy, without the comment,
     the relabel, or a failure count, and every member stays `loop:merge-ready` for the
     next poll to adopt again.
+    A worker report counts only from an author with write access. When the newest
+    report-shaped comment on a member comes from an author whose access is undetermined
+    (see the trust model), the adoption is deferred the same way, with a WARN naming the
+    issue, and that issue's comments are not cached, so the next poll asks again.
     A grouped member still claimed — `loop:in-progress` and not `loop:ready` — is still
     being published, even when it carries a report from an earlier task, so the poll
     skips the group and leaves every member as it is; only an unclaimed member reporting

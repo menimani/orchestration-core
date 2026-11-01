@@ -6,7 +6,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ProjectAdapter } from '../src/adapters/project.ts'
+import type { MergeCheck, ProjectAdapter } from '../src/adapters/project.ts'
 import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
@@ -1193,6 +1193,78 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(head)
   })
 
+  it('hands a check the real name of a changed non-ASCII file', async () => {
+    const taskId = '20260808_000000_094_user-non-ascii-check'
+    const fileName = 'old→new.ts'
+    git(repoRoot, ['config', 'core.quotePath', 'true'])
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, fileName), 'export {}\n')
+    git(worktree, ['add', '-A'])
+    git(worktree, ['commit', '-qm', 'feat: add a non-ASCII file'])
+    const appliesTo = vi.fn((changed: string[]) => changed.some((file) => file.endsWith('.ts')))
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'non-ascii-check',
+      mergeChecks: () => [{
+        label: 'TypeScript check', cwd: '', command: 'node -e "process.exit(1)"', appliesTo,
+      }],
+    }
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project }))
+      .rejects.toThrow(/Tests failed/)
+
+    expect(appliesTo).toHaveBeenCalledWith([fileName])
+  })
+
+  // Each condition is decided by whether the task committed a marker file: appliesTo sees
+  // it among the changed paths, requires needs it, and unless is satisfied by it.
+  const gateConditions: [string, Partial<MergeCheck>, boolean][] = [
+    ['appliesTo', { appliesTo: (changed) => changed.includes('gate-marker.txt') }, true],
+    ['requires', { requires: 'gate-marker.txt' }, true],
+    ['unless', { unless: 'gate-marker.txt' }, false],
+  ]
+
+  async function makeGatedTask(taskId: string, marker: boolean): Promise<void> {
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    if (!marker) return
+    writeFileSync(join(worktree, 'gate-marker.txt'), 'marker\n')
+    git(worktree, ['add', '-A'])
+    git(worktree, ['commit', '-qm', 'feat: add the gate marker'])
+  }
+
+  function gatedProject(condition: Partial<MergeCheck>): ProjectAdapter {
+    return {
+      ...stubProject,
+      name: 'gated-check',
+      mergeChecks: () => [{
+        label: 'Gated check', cwd: '', command: 'node -e "process.exit(1)"', ...condition,
+      }],
+    }
+  }
+
+  it.each(gateConditions)('skips a failing check whose %s condition excludes it', async (name, condition, runsWithMarker) => {
+    const taskId = `20260808_000000_096_user-skips-${name}-check`
+    await makeGatedTask(taskId, !runsWithMarker)
+    const outputFile = join(repoRoot, `skipped-${name}-check.log`)
+
+    await mergeTask(paths, taskId, { taskGate: 'light', project: gatedProject(condition), outputFile })
+
+    expect(readFileSync(outputFile, 'utf8')).not.toContain('Gated check')
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it.each(gateConditions)('fails the merge on a failing check whose %s condition holds', async (name, condition, runsWithMarker) => {
+    const taskId = `20260808_000000_097_user-runs-${name}-check`
+    await makeGatedTask(taskId, runsWithMarker)
+    const outputFile = join(repoRoot, `applied-${name}-check.log`)
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: gatedProject(condition), outputFile }))
+      .rejects.toThrow('Tests failed. Aborting merge.')
+
+    expect(readFileSync(outputFile, 'utf8')).toContain('=== Gated check failed: exit status 1 ===')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
   it.each([
     [{ status: 1, signal: null }, 'exit status 1'],
     [{ status: 3221226505, signal: null }, 'exit status 3221226505 (0xC0000409)'],
@@ -1295,6 +1367,33 @@ describe('mergeTask', () => {
     expect(git(worktree, ['status', '--porcelain'])).toBe('')
     expect(readStatus(paths, taskId)?.status).toBe('completed')
     expectNoTemporaryWorktree('.merge-')
+  })
+
+  it('reports a conflicted non-ASCII file by its real name', async () => {
+    const taskId = '20260808_000000_095_user-non-ascii-conflict'
+    const fileName = 'old→new.md'
+    git(repoRoot, ['config', 'core.quotePath', 'true'])
+    writeFileSync(join(repoRoot, fileName), '# base\n')
+    git(repoRoot, ['add', fileName])
+    git(repoRoot, ['commit', '-qm', 'feat: add a non-ASCII file'])
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, fileName), '# task version\n')
+    git(worktree, ['add', fileName])
+    git(worktree, ['commit', '-qm', 'feat: change the file in task'])
+
+    writeFileSync(join(repoRoot, fileName), '# run version\n')
+    git(repoRoot, ['add', fileName])
+    git(repoRoot, ['commit', '-qm', 'feat: change the file on run branch'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    const failure = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    }).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(RebaseConflictError)
+    expect((failure as RebaseConflictError).conflict).toMatchObject({
+      conflictedFiles: [fileName],
+      conflictingCommits: [runHead],
+    })
   })
 
   it('keeps a rebase that fails without a conflict retryable', async () => {

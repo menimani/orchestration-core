@@ -1,7 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
@@ -97,6 +100,19 @@ describe('timed shell commands', () => {
     }
   }
 
+  /** Write a command that starts a grandchild, records its PID, and never exits. */
+  function hangingCommand(root: string, pidFile: string): string {
+    const script = join(root, 'hang.cjs')
+    writeFileSync(script, `
+const { spawn } = require('node:child_process')
+const { writeFileSync } = require('node:fs')
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+writeFileSync(process.argv[2], String(child.pid))
+setInterval(() => {}, 1000)
+`)
+    return `node "${script}" "${pidFile}"`
+  }
+
   it('returns the output of a command that finishes within its limit', () => {
     expect(execShellSync('node -e "process.stdout.write(\'ready\')"', {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: 30_000,
@@ -119,19 +135,11 @@ describe('timed shell commands', () => {
   it('stops the processes a timed-out command started, not only its shell', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orchestration-shell-'))
     fixtureRoots.push(root)
-    const script = join(root, 'hang.cjs')
     const pidFile = join(root, 'grandchild.pid')
-    writeFileSync(script, `
-const { spawn } = require('node:child_process')
-const { writeFileSync } = require('node:fs')
-const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
-writeFileSync(process.argv[2], String(child.pid))
-setInterval(() => {}, 1000)
-`)
 
     let failure: { code?: unknown; status?: unknown } | undefined
     try {
-      execShellSync(`node "${script}" "${pidFile}"`, {
+      execShellSync(hangingCommand(root, pidFile), {
         cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
         timeout: 3_000,
       })
@@ -144,6 +152,33 @@ setInterval(() => {}, 1000)
     const grandchild = Number(readFileSync(pidFile, 'utf8'))
     try {
       await expect.poll(() => processIsAlive(grandchild), { timeout: 5_000 }).toBe(false)
+    } finally {
+      if (processIsAlive(grandchild)) process.kill(grandchild)
+    }
+  })
+
+  it('stops the command when the process tree running it is stopped first', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orchestration-shell-'))
+    fixtureRoots.push(root)
+    const pidFile = join(root, 'grandchild.pid')
+    const shellModule = pathToFileURL(join(process.cwd(), 'src', 'shell.ts')).href
+    // The caller leads a tree of its own, as a daemon does, and is stopped the way the
+    // loop stops one: on POSIX its process group, supervisor included, receives SIGTERM.
+    const caller = spawn(process.execPath, [
+      '--input-type=module', '--eval',
+      [
+        `const { execShellSync } = await import(${JSON.stringify(shellModule)})`,
+        "execShellSync(process.argv[1], { encoding: 'utf8', stdio: 'ignore', timeout: 120_000 })",
+      ].join('\n'),
+      hangingCommand(root, pidFile),
+    ], { ...operatingSystem.terminableSpawnOptions(), stdio: 'ignore', windowsHide: true })
+
+    const recordedPid = (): string => (existsSync(pidFile) ? readFileSync(pidFile, 'utf8') : '')
+    await expect.poll(recordedPid, { timeout: 15_000 }).not.toBe('')
+    const grandchild = Number(recordedPid())
+    try {
+      expect(operatingSystem.terminateProcessTree(Number(caller.pid))).toBe(true)
+      await expect.poll(() => processIsAlive(grandchild), { timeout: 10_000 }).toBe(false)
     } finally {
       if (processIsAlive(grandchild)) process.kill(grandchild)
     }

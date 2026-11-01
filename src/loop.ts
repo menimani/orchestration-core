@@ -61,7 +61,8 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   isReadyToClaim,
   issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
-  reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
+  mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
+  trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
   reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
@@ -129,6 +130,15 @@ class LostWorkerClaimError extends UnpublishableWorkerTaskError {
   constructor(lostIssues: number[]) {
     super(`${lostIssues.map((number) => `#${number}`).join(', ')} no longer claimed by this task`)
     this.lostIssues = lostIssues
+  }
+}
+
+// A worker branch report whose author's write access could not be determined. Neither
+// trusting nor ignoring the report is safe, so the step that needed it waits for a later
+// poll.
+class UndeterminedWorkerReportError extends Error {
+  constructor(issueNumber: number) {
+    super(`the worker branch report on issue #${issueNumber} has an author whose write access could not be determined`)
   }
 }
 
@@ -223,7 +233,6 @@ export function createLoop(deps: LoopDeps) {
   const issueCommentCache = new Map<number, {
     updatedAt: string
     comments: ForgeIssueComment[]
-    hasMergeMarker: boolean
   }>()
   const reconciledCycleGates = new Set<number>()
   let issueQueueInitialized = !config.issueQueueEnabled
@@ -307,17 +316,18 @@ export function createLoop(deps: LoopDeps) {
     const cached = issueCommentCache.get(issue.number)
     if (cached?.updatedAt === issue.updatedAt) return cached.comments
     const comments = await forge.listIssueComments(issue.number)
-    issueCommentCache.set(issue.number, {
-      updatedAt: issue.updatedAt,
-      comments,
-      hasMergeMarker: standingMergeMarkers(comments).length > 0,
-    })
+    // A failed permission lookup is not a verdict. Caching it by updatedAt would hold
+    // that undetermined answer until the issue next changes, so the next poll asks again.
+    if (comments.some((comment) => comment.author.permissionLookupFailed === true)) {
+      issueCommentCache.delete(issue.number)
+    } else {
+      issueCommentCache.set(issue.number, { updatedAt: issue.updatedAt, comments })
+    }
     return comments
   }
 
-  async function issueHasMergeMarker(issue: ForgeIssue): Promise<boolean> {
-    await commentsForIssue(issue)
-    return issueCommentCache.get(issue.number)?.hasMergeMarker ?? false
+  async function issueHasMergeMarker(issue: ForgeIssue): Promise<boolean | undefined> {
+    return mergeMarkerStanding(await commentsForIssue(issue))
   }
 
   async function initializeIssueQueue(): Promise<boolean> {
@@ -534,6 +544,8 @@ export function createLoop(deps: LoopDeps) {
       const report = issue.labels.includes(LABEL_MERGE_READY)
         ? workerBranchReport(await commentsForIssue(issue))
         : undefined
+      // An ordinary failure, so the publication is retried rather than the claim given up.
+      if (report === 'undetermined') throw new UndeterminedWorkerReportError(issueNumber)
       if (report?.branch !== branch || report.head !== head) lost.push(issueNumber)
     }
     if (lost.length > 0) throw new LostWorkerClaimError(lost)
@@ -549,14 +561,18 @@ export function createLoop(deps: LoopDeps) {
     }))
   }
 
+  // The newest report-shaped comment from a write-access author wins. One whose author's
+  // access could not be determined may be that newest trusted report, so the answer is
+  // "undetermined" rather than whatever older report lies beneath it.
   function workerBranchReport(
     comments: ForgeIssueComment[],
-  ): { branch: string; head: string; issueNumbers?: number[] } | undefined {
+  ): { branch: string; head: string; issueNumbers?: number[] } | 'undetermined' | undefined {
     for (const comment of [...comments].reverse()) {
-      if (!comment.author.hasWriteAccess) continue
+      if (!comment.author.hasWriteAccess && comment.author.permissionLookupFailed !== true) continue
       const branch = /^Branch: (task\/[A-Za-z0-9][A-Za-z0-9._-]*)$/m.exec(comment.body)?.[1]
       const head = /^Head commit: ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/m.exec(comment.body)?.[1]
       if (branch !== undefined && head !== undefined) {
+        if (!comment.author.hasWriteAccess) return 'undetermined'
         const issueLine = /^Issues: ((?:#\d+\s*)+)$/m.exec(comment.body)?.[1]
         const issueNumbers = issueLine?.match(/\d+/g)?.map(Number)
         return { branch, head, ...(issueNumbers === undefined ? {} : { issueNumbers }) }
@@ -572,8 +588,13 @@ export function createLoop(deps: LoopDeps) {
     runBranch: string,
   ): Promise<void> {
     const comment = issueMergeComment(taskId, mergeCommit, runBranch)
-    if (!(await commentsForIssue(issue)).some((candidate) =>
-      candidate.author.hasWriteAccess && candidate.body === comment)) {
+    const present = trustedCommentPresent(await commentsForIssue(issue), comment)
+    // The marker may already stand under an author whose permission could not be read.
+    // Keeping merge-ready retries this next poll instead of posting a duplicate now.
+    if (present === undefined) {
+      throw new Error('merge marker author permission could not be read; deferring')
+    }
+    if (!present) {
       await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
     }
     await forge.removeLabel(issue.number, LABEL_MERGE_READY)
@@ -621,6 +642,7 @@ export function createLoop(deps: LoopDeps) {
       try {
         const remote = currentBranchPushRemote(paths.repoRoot)
         const report = workerBranchReport(await commentsForIssue(issue))
+        if (report === 'undetermined') throw new UndeterminedWorkerReportError(issue.number)
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
         }
@@ -644,6 +666,9 @@ export function createLoop(deps: LoopDeps) {
             break
           }
           const candidateReport = workerBranchReport(await commentsForIssue(candidate))
+          if (candidateReport === 'undetermined') {
+            throw new UndeterminedWorkerReportError(candidate.number)
+          }
           if (candidateReport?.branch !== report.branch || candidateReport.head !== report.head) {
             throw new MergeError(`Grouped issue #${candidate.number} does not report the same worker branch.`)
           }
@@ -753,6 +778,12 @@ export function createLoop(deps: LoopDeps) {
             ? `issue #${issue.number}`
             : shortTaskId(adoptionTaskId)
           event('WARN', `${subject} adoption deferred: the repository test lock stayed busy`)
+          continue
+        }
+        // Not a failure either: a transient permission lookup says nothing about the
+        // report, so every member stays merge-ready for the next poll.
+        if (error instanceof UndeterminedWorkerReportError) {
+          event('WARN', `issue #${issue.number} adoption deferred: ${message}`)
           continue
         }
         if (error instanceof OrchestrationDepsInstallError || error instanceof MergeRecoveryError) {
@@ -2573,23 +2604,34 @@ export function createLoop(deps: LoopDeps) {
     ): Promise<boolean> => {
       try {
         recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
+        let deferred = false
         for (const linkedIssue of linkedIssues) {
           const promotion = issuePromotionForIssue(paths, linkedIssue)
           if (promotion === undefined) throw new Error('promotion record was not persisted')
           if (!remoteOperationsAvailable || promotion.commentConfirmed === true) continue
 
           const expectedComment = issueMergeComment(taskId, mergeCommit, runBranch)
-          let comments = await forge.listIssueComments(linkedIssue)
-          if (!comments.some((comment) =>
-            comment.author.hasWriteAccess && comment.body === expectedComment)) {
+          let present = trustedCommentPresent(
+            await forge.listIssueComments(linkedIssue), expectedComment)
+          if (present === false) {
             await commentOnIssueMerge(forge, linkedIssue, taskId, mergeCommit, runBranch)
-            comments = await forge.listIssueComments(linkedIssue)
+            present = trustedCommentPresent(
+              await forge.listIssueComments(linkedIssue), expectedComment)
           }
-          if (!comments.some((comment) =>
-            comment.author.hasWriteAccess && comment.body === expectedComment)) {
+          // A marker whose author's permission could not be read is neither confirmed
+          // nor reposted; the promotion record keeps it pending for a later poll.
+          if (present === undefined) {
+            deferred = true
+            continue
+          }
+          if (!present) {
             throw new Error('merge comment is not visible after publishing it')
           }
           confirmIssuePromotion(paths, linkedIssue)
+        }
+        if (deferred) {
+          issueReconciliationPending = true
+          return false
         }
         previousGateFailures.delete(`issue-reconciliation-${taskId}`)
         return true
@@ -3169,6 +3211,7 @@ export function createLoop(deps: LoopDeps) {
                 && !candidate.labels.includes(LABEL_UNTRUSTED_AUTHOR)
                 && candidate.assignees.length === 0
                 && issuePromotionForIssue(paths, candidate.number) === undefined)
+            let permissionUnknown = false
             for (const issues of groupReadyFindings(readyIssues)) {
               if (capacity <= 0) break
               const result = await claimIssueGroup(
@@ -3196,6 +3239,10 @@ export function createLoop(deps: LoopDeps) {
                   'WARN',
                   `issue #${result.issueNumber} by @${result.author} is not trusted for execution; labeled ${LABEL_UNTRUSTED_AUTHOR}`,
                 )
+              } else if (result.outcome === 'permission-unknown') {
+                permissionUnknown = true
+                warning('issue-author-permission', 'checking issue author permission',
+                  `skipped issue #${result.issueNumber} this poll: write access of @${result.author} could not be determined`)
               } else if (result.outcome === 'unparseable') {
                 if (!decisionAlreadyRecorded(result.reason)) {
                   appendFileSync(decisionsFile, `${result.reason}\n`)
@@ -3205,6 +3252,7 @@ export function createLoop(deps: LoopDeps) {
                 break
               }
             }
+            if (!permissionUnknown) warningLog.recovered('issue-author-permission')
           }
           warningLog.recovered('issue-queue-sync')
         } catch (error) {

@@ -1717,6 +1717,36 @@ export function standingMergeMarkers(comments: readonly ForgeIssueComment[]): Fo
   return trusted.slice(standingFrom).filter((comment) => /^MERGED: /.test(comment.body))
 }
 
+/**
+ * Whether a write-access `MERGED:` marker stands, or `undefined` when the answer turns on
+ * a marker-shaped comment whose author's permission could not be read. That answer is
+ * retried on a later poll, never acted on or remembered.
+ */
+export function mergeMarkerStanding(comments: readonly ForgeIssueComment[]): boolean | undefined {
+  const asIfTrusted = comments.map((comment) =>
+    comment.author.permissionLookupFailed === true && /^(?:MERGED|UNPROMOTED): /.test(comment.body)
+      ? { ...comment, author: { login: comment.author.login, hasWriteAccess: true } }
+      : comment)
+  const standing = standingMergeMarkers(comments).length > 0
+  return standing === standingMergeMarkers(asIfTrusted).length > 0 ? standing : undefined
+}
+
+/**
+ * Whether a write-access comment carries exactly `body`, or `undefined` when only comments
+ * whose author's permission could not be read do, so the caller defers rather than
+ * posting the same comment again.
+ */
+export function trustedCommentPresent(
+  comments: readonly ForgeIssueComment[],
+  body: string,
+): boolean | undefined {
+  const matching = comments.filter((comment) => comment.body === body)
+  if (matching.some((comment) => comment.author.hasWriteAccess)) return true
+  return matching.some((comment) => comment.author.permissionLookupFailed === true)
+    ? undefined
+    : false
+}
+
 export type ClaimResult
   = {
     outcome: 'claimed'
@@ -1734,6 +1764,7 @@ export type ClaimResult
     }
     | { outcome: 'lost-race'; issueNumber: number }
     | { outcome: 'untrusted-author'; issueNumber: number; author: string }
+    | { outcome: 'permission-unknown'; issueNumber: number; author: string }
     | { outcome: 'unparseable'; issueNumber: number; reason: string }
 
 async function releasePartialClaim(
@@ -1825,6 +1856,15 @@ async function claimRemoteIssue(
     return { outcome: 'lost-race', issueNumber: issue.number }
   }
   if (!current.author.hasWriteAccess) {
+    // Without an answer the gate stays closed for this poll only. The label is never
+    // removed, so it records a definite verdict and nothing less.
+    if (current.author.permissionLookupFailed === true) {
+      return {
+        outcome: 'permission-unknown',
+        issueNumber: issue.number,
+        author: current.author.login,
+      }
+    }
     if (!current.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
       await forge.addLabel(issue.number, LABEL_UNTRUSTED_AUTHOR)
     }
@@ -2062,8 +2102,8 @@ export async function reapStaleLeases(
   now: Date,
   locallyRunningIssues: ReadonlySet<number> = new Set(),
   knownOpenFindings?: readonly ForgeIssue[],
-  hasMergeMarker: (issue: ForgeIssue) => Promise<boolean> = async (issue) =>
-    standingMergeMarkers(await forge.listIssueComments(issue.number)).length > 0,
+  hasMergeMarker: (issue: ForgeIssue) => Promise<boolean | undefined> = async (issue) =>
+    mergeMarkerStanding(await forge.listIssueComments(issue.number)),
   releaseOptions: IssueReleaseOptions = {},
 ): Promise<number[]> {
   const releaseFailures = await reconcileIssueReleaseIntents(forge, paths, releaseOptions)
@@ -2115,14 +2155,30 @@ export async function reapStaleLeases(
     const promotion = issuePromotionForIssue(paths, issue.number)
     if (promotion !== undefined) {
       if (promotion.commentConfirmed !== true) {
-        await commentOnIssueMerge(
-          forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
-        )
+        const expectedComment = issueMergeComment(
+          promotion.taskId, promotion.mergeCommit, promotion.runBranch)
+        let present = trustedCommentPresent(
+          await forge.listIssueComments(issue.number), expectedComment)
+        if (present === false) {
+          await commentOnIssueMerge(
+            forge, issue.number, promotion.taskId, promotion.mergeCommit, promotion.runBranch,
+          )
+          present = trustedCommentPresent(
+            await forge.listIssueComments(issue.number), expectedComment)
+        }
+        // A marker whose author's permission could not be read is neither confirmed nor
+        // reposted; the promotion record keeps it pending for a later poll.
+        if (present === undefined) continue
+        if (!present) {
+          throw new Error(`Issue #${issue.number} merge comment is not visible after publishing it`)
+        }
         confirmIssuePromotion(paths, issue.number)
       }
       continue
     }
-    if (await hasMergeMarker(issue)) {
+    // An undetermined marker leaves the lease alone for this poll: another checkout may
+    // already have merged the issue, and returning it to ready would hand the work out again.
+    if (await hasMergeMarker(issue) !== false) {
       continue
     }
 

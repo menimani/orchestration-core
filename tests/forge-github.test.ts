@@ -614,9 +614,33 @@ describe('GitHub author permissions', () => {
     const forge = createGithubForge('repo-root', command)
 
     expect((await forge.getIssue(357)).author)
-      .toEqual({ login: 'maintainer-one', hasWriteAccess: false })
+      .toEqual({ login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true })
     expect(calls.filter((args) => args[0] === 'api'))
       .toEqual([['api', 'repos/example/repo/collaborators/maintainer-one/permission']])
+  })
+
+  it('treats a missing collaborator as a definite answer of no write access', async () => {
+    const command: GithubCommand = async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'issue') return JSON.stringify(openIssueFixture)
+      throw new Error('gh: maintainer-one is not a user (HTTP 404)')
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    expect((await forge.getIssue(357)).author)
+      .toEqual({ login: 'maintainer-one', hasWriteAccess: false })
+  })
+
+  it('treats a read-level permission as a definite answer of no write access', async () => {
+    const command: GithubCommand = async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args[0] === 'issue') return JSON.stringify(openIssueFixture)
+      return JSON.stringify({ permission: 'read', role_name: 'read' })
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    expect((await forge.getIssue(357)).author)
+      .toEqual({ login: 'maintainer-one', hasWriteAccess: false })
   })
 
   it('propagates a rate-limited permission lookup instead of judging the author', async () => {

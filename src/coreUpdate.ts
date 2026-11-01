@@ -5,7 +5,7 @@ import type { Forge } from './adapters/forge.ts'
 import type { ProjectAdapter } from './adapters/project.ts'
 import type { Runner } from './adapters/runner.ts'
 import { commandFailureSummary } from './errorText.ts'
-import { PACKAGE_ROOT, packageSubtreePrefix, type OrchPaths } from './paths.ts'
+import { PACKAGE_ROOT, packageSubtreePrefix, shellPathSpelling, type OrchPaths } from './paths.ts'
 import { sharedSkillManagedTargets, syncSharedSkills } from './sharedSkills.ts'
 
 export type CoreUpdateOutcome = 'continue' | 'restart'
@@ -75,7 +75,7 @@ function repositoryPaths(repoRoot: string, paths: string[]): string[] {
       || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
       throw new Error(`shared skill output escaped the repository: ${path}`)
     }
-    return repositoryPath.replaceAll('\\', '/')
+    return shellPathSpelling(repositoryPath)
   })
 }
 
@@ -118,7 +118,7 @@ function syncSkills(
   }
   for (const path of result.migrationConflicts) {
     event('WARN',
-      `legacy shared skill ${relative(repoRoot, path).replaceAll('\\', '/')} differs from the last synced copy; left unchanged`)
+      `legacy shared skill ${shellPathSpelling(relative(repoRoot, path))} differs from the last synced copy; left unchanged`)
   }
   if (isConsumer) {
     const managed = repositoryPaths(repoRoot, result.managedPaths)

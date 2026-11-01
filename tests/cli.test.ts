@@ -851,6 +851,174 @@ describe('logs', () => {
   })
 })
 
+describe('manual task commands', () => {
+  function runCli(args: string[], input?: string) {
+    return spawnSync(process.execPath, [CLI, ...args], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      input,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+  }
+
+  it.each([
+    ['new', 'Usage: new <task-id>'],
+    ['enqueue', 'Usage: enqueue <task-id> [depth]'],
+    ['start', 'Usage: start <task-id> [--effort minimal|low|medium|high] [--model <model>]'],
+    ['logs', 'Usage: logs <task-id> [-f]'],
+    ['merge', 'Usage: merge <task-id> [--yes] [--test-cmd "cmd"]'],
+  ])('prints the usage of %s and fails without a task id', (command, usage) => {
+    const result = runCli([command])
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe(usage + '\n')
+  })
+
+  it('creates a specification once and refuses to overwrite it', () => {
+    const taskId = 'manual-new'
+    const file = join(orchPaths(repoRoot).tasksDir, taskId + '.md')
+
+    const created = runCli(['new', taskId])
+
+    expect(created.status).toBe(0)
+    expect(created.stdout).toBe(`Created: ${file}\n`)
+    expect(readFileSync(file, 'utf8')).toMatch(new RegExp(`^# ${taskId}\n\n## Target Files\n`))
+
+    writeFileSync(file, 'edited\n')
+    const repeated = runCli(['new', taskId])
+
+    expect(repeated.status).not.toBe(0)
+    expect(repeated.stderr).toContain(`Task specification already exists: ${file}`)
+    expect(readFileSync(file, 'utf8')).toBe('edited\n')
+  })
+
+  it('enqueues at depth 0 when the depth is not a non-negative integer', () => {
+    const taskId = 'manual-enqueue'
+    expect(runCli(['new', taskId]).status).toBe(0)
+
+    const result = runCli(['enqueue', taskId, 'abc'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(`Enqueued: ${taskId} (depth=0)\n`)
+    expect(readFileSync(join(orchPaths(repoRoot).queueDir, 'backlog.txt'), 'utf8'))
+      .toBe(`${taskId}:0\n`)
+  })
+
+  it('enqueues at the depth given', () => {
+    const taskId = 'manual-enqueue-depth'
+    expect(runCli(['new', taskId]).status).toBe(0)
+
+    const result = runCli(['enqueue', taskId, '2'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(`Enqueued: ${taskId} (depth=2)\n`)
+    expect(readFileSync(join(orchPaths(repoRoot).queueDir, 'backlog.txt'), 'utf8'))
+      .toBe(`${taskId}:2\n`)
+  })
+
+  it('rejects an unknown start option before creating a worktree', () => {
+    const taskId = 'manual-start-option'
+    expect(runCli(['new', taskId]).status).toBe(0)
+
+    const result = runCli(['start', taskId, '--fast'])
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe('Error: unknown option: --fast\n')
+    expect(existsSync(worktreeDir(orchPaths(repoRoot), taskId))).toBe(false)
+  })
+
+  it.each([['extreme'], [undefined]])('rejects the start effort %j before creating a worktree', (effort) => {
+    const taskId = 'manual-start-effort'
+    expect(runCli(['new', taskId]).status).toBe(0)
+
+    const result = runCli(['start', taskId, '--effort', ...(effort === undefined ? [] : [effort])])
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe('Error: --effort must be minimal, low, medium or high\n')
+    expect(existsSync(worktreeDir(orchPaths(repoRoot), taskId))).toBe(false)
+  })
+
+  it('fails the status of a task without a status record', () => {
+    const result = runCli(['status', 'manual-unknown'])
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe('Task not found: manual-unknown\n')
+  })
+
+  it('reports that there are no tasks when none has a status record', () => {
+    const result = runCli(['status'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe('There are no running or completed tasks.\n')
+  })
+
+  it('prints an empty backlog followed by the status listing', () => {
+    const result = runCli(['queue'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe([
+      '=== Queue (backlog) ===',
+      '  (empty)',
+      '',
+      '=== Task Status ===',
+      'There are no running or completed tasks.',
+      '',
+    ].join('\n'))
+  })
+
+  it('prints each backlog entry with its depth', () => {
+    const queueDir = orchPaths(repoRoot).queueDir
+    mkdirSync(queueDir, { recursive: true })
+    writeFileSync(join(queueDir, 'backlog.txt'), 'manual-first:0\nmanual-second:3\n')
+
+    const result = runCli(['queue'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe([
+      '=== Queue (backlog) ===',
+      `  ${'manual-first'.padEnd(30)} depth=0`,
+      `  ${'manual-second'.padEnd(30)} depth=3`,
+      '',
+      '=== Task Status ===',
+      'There are no running or completed tasks.',
+      '',
+    ].join('\n'))
+  })
+
+  it('fails a missing log', () => {
+    const log = join(orchPaths(repoRoot).logsDir, 'manual-no-log.log')
+
+    const result = runCli(['logs', 'manual-no-log'])
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toBe(`Log not found: ${log}\n`)
+  })
+
+  it.each(['n\n', '\n', 'yes\n'])('aborts a merge without --yes on the answer %j', (answer) => {
+    const result = runCli(['merge', 'manual-merge-declined'], answer)
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(
+      'Merge task/manual-merge-declined into the current branch? [y/N] Aborted.\n',
+    )
+    expect(result.stderr).toBe('')
+  })
+
+  it('rejects an unknown merge option before asking', () => {
+    const result = runCli(['merge', 'manual-merge-option', '--force'], 'y\n')
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe('Unknown option: --force\n')
+  })
+})
+
 describe('manual merge', () => {
   it('builds merge options that close the task-linked issue', async () => {
     git(['config', 'user.email', 'test@example.com'])

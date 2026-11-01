@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import path, { basename, dirname, join, relative, resolve } from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import { operatingSystem } from './adapters/os.ts'
 import { loadProject, projectAdapterPath, type ProjectAdapter, type SuiteStep } from './adapters/project.ts'
 import { QUEUE_LABELS } from './issueQueue.ts'
 import { projectScopeLabel } from './issueScope.ts'
-import { canonicalPath, PACKAGE_ROOT, type OrchPaths } from './paths.ts'
+import { canonicalPath, PACKAGE_ROOT, shellPathSpelling, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
 
 interface VerifyOptions {
@@ -62,11 +62,17 @@ function adapterPaths(project: ProjectAdapter): string[] {
   return [...new Set(paths)]
 }
 
-function safeRepositoryPath(repoRoot: string, referencedPath: string): string | undefined {
-  if (isAbsolute(referencedPath)) return undefined
-  const target = resolve(repoRoot, referencedPath)
-  const outside = relative(repoRoot, target)
-  return outside === '..' || outside.startsWith(`..${sep}`)
+// A drive-relative Windows path such as `D:tools` is not absolute, yet it resolves onto
+// another drive, where `relative` answers with an absolute path rather than one under `..`.
+export function safeRepositoryPath(
+  repoRoot: string,
+  referencedPath: string,
+  paths: typeof path = path,
+): string | undefined {
+  if (paths.isAbsolute(referencedPath)) return undefined
+  const target = paths.resolve(repoRoot, referencedPath)
+  const outside = paths.relative(repoRoot, target)
+  return outside === '..' || outside.startsWith(`..${paths.sep}`) || paths.isAbsolute(outside)
     ? undefined
     : target
 }
@@ -197,7 +203,7 @@ export async function verifyRepositorySetup(
   if (paths.fleet !== undefined) {
     report('SKIP: core.hooksPath; a fleet project leaves its repository\'s hooks unchanged')
   } else {
-    const expectedHooks = relative(paths.repoRoot, join(packageRoot, '.githooks')).replaceAll('\\', '/') || '.'
+    const expectedHooks = shellPathSpelling(relative(paths.repoRoot, join(packageRoot, '.githooks'))) || '.'
     try {
       const configuredHooks = git(['config', '--local', '--get', 'core.hooksPath'])
       if (configuredHooks !== expectedHooks) throw new Error(`${configuredHooks || '(unset)'} != ${expectedHooks}`)
