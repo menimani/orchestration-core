@@ -1134,7 +1134,7 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     for that run branch, naming the merge commit, run branch, and pull request, returns the issue to ready and unassigned, drops
     its promotion record the same way, and logs a `Released` event. The comment withdraws
     the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. Workers never
-    close promoted issues. Immediately after merging, the worker comments on every linked issue with the
+    close promoted issues. Immediately after merging, the merger comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
