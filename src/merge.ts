@@ -296,9 +296,7 @@ function syncOrchestrationDepsAfterMerge(
     'rev-list', '--parents', '-n', '1', mergeCommit,
   ]).trim().split(/\s+/)
   if (firstParent === undefined || secondParent === undefined) return
-  const changed = git(paths.repoRoot, [
-    'diff', '--name-only', firstParent, mergeCommit,
-  ]).split(/\r?\n/).filter((path) => path !== '')
+  const changed = gitPaths(paths.repoRoot, ['diff', '--name-only', firstParent, mergeCommit])
   const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
   if (!changed.some((path) => manifests.has(manifestKey(paths.repoRoot, path)))) return
   const root = runtime.packageRoot ?? PACKAGE_ROOT
@@ -445,6 +443,14 @@ function git(cwd: string, args: string[]): string {
     cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+}
+
+/**
+ * Paths a `git diff --name-only` lists, NUL-separated so that `core.quotePath` cannot
+ * hand back a non-ASCII name quoted and octal-escaped.
+ */
+function gitPaths(cwd: string, args: string[]): string[] {
+  return git(cwd, [...args, '-z']).split('\0').filter((path) => path !== '')
 }
 
 interface MergeRepositoryState {
@@ -628,8 +634,7 @@ function gitPathExists(cwd: string, name: string): boolean {
  */
 function unmergedPaths(worktree: string): string[] {
   try {
-    return git(worktree, ['diff', '--name-only', '--diff-filter=U'])
-      .split(/\r?\n/).filter((line) => line !== '')
+    return gitPaths(worktree, ['diff', '--name-only', '--diff-filter=U'])
   } catch {
     return []
   }
@@ -759,8 +764,7 @@ function runMergeChecks(
   }
   if (options.skipAutoTest === true) return
 
-  const changed = git(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
-    .split(/\r?\n/).filter((line) => line !== '')
+  const changed = gitPaths(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
   let ok = true
   // A check that only waited out the test lock defers the merge, unless another check
   // genuinely failed: that failure is known, and deferring would hide it.
