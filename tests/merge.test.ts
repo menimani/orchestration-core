@@ -216,6 +216,34 @@ describe('removeMergedWorktree', () => {
     )
   })
 
+  it('sees a stale registration when the root is not spelled the way Git reports it', () => {
+    const taskId = '20260820_205524_044_auto-aliased-registration'
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-merge-alias-'))
+    try {
+      const aliasPaths = orchPaths(nonCanonicalSpelling(repoRoot, linkDir))
+      const worktree = worktreeDir(aliasPaths, taskId)
+      git(repoRoot, ['worktree', 'add', worktree, '-b', branchName(taskId)])
+      const log = vi.fn()
+
+      const removed = removeMergedWorktree(aliasPaths, worktree, log, {
+        os: operatingSystem,
+        git: (cwd, args) => {
+          if (args[1] === 'remove') throw new Error('Git removal failed')
+          if (args[1] === 'prune') throw new Error('metadata is locked')
+          return git(cwd, args)
+        },
+      })
+
+      expect(removed).toBe(false)
+      expect(log).toHaveBeenCalledWith(
+        `WARN: the removed worktree is still registered and has to be pruned by hand: ${worktree}`,
+      )
+    } finally {
+      git(repoRoot, ['worktree', 'prune', '--expire', 'now'])
+      rmSync(linkDir, { recursive: true, force: true })
+    }
+  })
+
   it('uses the Windows UNC namespace for a UNC worktree fallback', () => {
     const worktree = '\\\\server\\share\\orchestration\\worktrees\\task'
     const remove = vi.fn()
@@ -1134,6 +1162,35 @@ describe('mergeTask', () => {
     await expect(failure).rejects.toThrow('Tests failed. Aborting merge.')
     await expect(failure).rejects.not.toBeInstanceOf(TestLockBusyError)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('defers a check whose install waited out the test lock without running the check', async () => {
+    const taskId = '20260808_000000_093_user-test-lock-busy-install'
+    await makeCompletedTask(taskId, { commit: true })
+    const head = git(repoRoot, ['rev-parse', 'HEAD'])
+    const outputFile = join(repoRoot, 'test-lock-busy-install.log')
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'lock-busy-install',
+      mergeChecks: () => [{
+        label: 'Installed check',
+        cwd: '',
+        command: 'node -e "console.log(\'installed check ran\')"',
+        installWhenMissing: {
+          path: 'dependency-ready',
+          command: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+        },
+      }],
+    }
+
+    const result = mergeTask(paths, taskId, { taskGate: 'light', project, outputFile })
+
+    await expect(result).rejects.toBeInstanceOf(TestLockBusyError)
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain('=== Installed check install failed: exit status 75 ===')
+    expect(output).not.toContain('=== Installed check: ')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(head)
   })
 
   it.each([

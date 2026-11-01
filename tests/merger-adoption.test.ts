@@ -307,6 +307,39 @@ describe('remote task adoption', () => {
     }
   })
 
+  it('waits for a grouped member still claimed under a report from an earlier task', async () => {
+    const earlier = pushWorkerBranch('20260809_000000_014_auto-group-earlier-task')
+    const task = pushWorkerBranch('20260809_000000_015_auto-group-republishing')
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const published = await forge.createIssue({
+      title: 'grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+      assignees: ['worker-a'],
+    })
+    const unpublished = await forge.createIssue({
+      title: 'grouped worker task',
+      body: 'Shared grouped worker task.',
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
+    })
+    await forge.commentIssue(unpublished,
+      `Worker completed the task.\nBranch: ${earlier.branch}\nHead commit: ${earlier.head}\nIssues: #${unpublished}`)
+    const report = `Worker completed the task.\nBranch: ${task.branch}\nHead commit: ${task.head}\nIssues: #${published} #${unpublished}`
+    await forge.commentIssue(published, report)
+
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    expect((await forge.getIssue(published)).labels).toEqual([LABEL_FINDING, LABEL_MERGE_READY])
+    expect((await forge.getIssue(unpublished)).labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+    for (const issueNumber of [published, unpublished]) {
+      expect((await forge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+      expect(forge.issueComments.get(issueNumber)?.join('\n') ?? '')
+        .not.toContain('Remote task adoption failed')
+    }
+  })
+
   it('returns every member of an abandoned remote group as singleton-ready', async () => {
     const branch = 'task/20260809_000000_099_auto-missing-group'
     const head = 'a'.repeat(40)

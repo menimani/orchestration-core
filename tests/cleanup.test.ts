@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,6 +17,7 @@ import {
   branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
+import { nonCanonicalSpelling } from './pathComparison.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -334,6 +336,43 @@ describe('cleanupTask', () => {
     expectTaskStateToExist()
     expect(existsSync(worktree)).toBe(false)
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
+  })
+
+  it('retains task state for a registration Git reports under another spelling of the root', () => {
+    const realGit = (cwd: string, args: readonly string[]) =>
+      execFileSync('git', [...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    realGit(repoRoot, ['init', '-q', '-b', 'main'])
+    realGit(repoRoot, ['-c', 'user.email=test@example.com', '-c', 'user.name=Test',
+      'commit', '-q', '--allow-empty', '-m', 'chore: initial commit'])
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-cleanup-alias-'))
+    try {
+      paths = orchPaths(nonCanonicalSpelling(repoRoot, linkDir))
+      worktree = worktreeDir(paths, taskId)
+      realGit(repoRoot, ['worktree', 'add', '-q', worktree, '-b', branchName(taskId)])
+      seedTask(null)
+      vi.spyOn(console, 'log').mockImplementation(() => {})
+      const runtime: CleanupRuntime = {
+        // Removal and pruning fail to drop the registration, so only the check sees it.
+        execFile: (_command, args, options) => {
+          if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('git failed')
+          if (args[0] === 'worktree' && args[1] === 'prune') return ''
+          return realGit(options.cwd ?? repoRoot, args)
+        },
+        exists: existsSync,
+        os: process.platform === 'win32'
+          ? windowsOperatingSystem({ listProcesses: () => [], remove: rmSync })
+          : posixOperatingSystem({ remove: rmSync }),
+        remove: rmSync,
+      }
+
+      expect(() => cleanupTask(paths, taskId, runtime))
+        .toThrow(`Worktree ${worktree} is still registered; task state was retained.`)
+
+      expectTaskStateToExist()
+    } finally {
+      realGit(repoRoot, ['worktree', 'prune', '--expire', 'now'])
+      rmSync(linkDir, { recursive: true, force: true })
+    }
   })
 
   it('retains task state when the branch remains after deletion fails', () => {

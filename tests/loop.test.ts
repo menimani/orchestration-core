@@ -3584,6 +3584,37 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
+  it('neither announces nor counts failures left by a finished run', async () => {
+    initializeGitRepoWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const finished = makeLoop({
+      scanEnabled: false, autoPr: true, reviewEnabled: false, maxBurstFailures: 4,
+    })
+    finished.initializeSessionStateForBranch()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+    const taskIds = ['old-f1', 'old-f2', 'old-f3']
+    for (const taskId of taskIds) writeRawStatus(taskId, 'failed')
+
+    expect(await finished.poll()).toBe('done')
+    for (const taskId of taskIds) {
+      expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`)
+      expect(readStatus(paths, taskId)?.status).toBe('failed')
+    }
+    expect(existsSync(join(paths.queueDir, 'scanned', 'old-f1.failed'))).toBe(false)
+
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const next = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+    logged = []
+
+    expect(await next.poll()).toBe('continue')
+    expect(logged.some((line) => line.startsWith('FAILED:'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'failed-1'))).toBe(false)
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
   it('records a failed scan in its cycle before entering the cycle gate', async () => {
     const taskId = '20260809_000000_001_scan'
     const loop = makeLoop({
@@ -5200,6 +5231,65 @@ describe('completed task merge recovery', () => {
     expect(logged.some((line) => line.startsWith('Failed 038_auto'))).toBe(false)
   })
 
+  it('heartbeats a completed task while its merge stays deferred', async () => {
+    const taskId = '20260815_125258_039_auto-deferred-heartbeat'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const project: ProjectAdapter = {
+      ...stubProject,
+      mergeChecks: () => [{
+        label: 'Locked suite', cwd: '', command: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+      }],
+    }
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    }, project)
+    loop.initializeSessionStateForBranch()
+    // The claim is older than the lease, so only a heartbeat keeps the reaper from
+    // returning the issue to ready while the merge keeps being deferred.
+    fakeForge.clock = () => new Date(2026, 7, 6, 12, 0, 0)
+    const issueNumber = await fakeForge.createIssue({
+      title: 'deferred merge', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [fakeForge.user],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(fakeForge.issueComments.get(issueNumber)?.join('\n')).toContain('Heartbeat: ')
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.state).toBe('open')
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(issue.labels).not.toContain(LABEL_READY)
+  })
+
+  it('does not merge a completed task whose issue claim was reaped', async () => {
+    const taskId = '20260815_125258_040_auto-reaped-merge'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'reaped claim', body: '', labels: [LABEL_FINDING, LABEL_READY],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).not.toBe('merged')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([])
+    expect(logText()).toContain(`WARN 040_auto cannot be merged: #${issueNumber} no longer claimed by this task`)
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.state).toBe('open')
+    expect(issue.labels).toContain(LABEL_READY)
+    expect(fakeForge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('MERGED:')
+  })
+
   it('skips a task whose merge is already active without counting a failure', async () => {
     const taskId = '20260815_125258_037_auto-merge-race'
     const initialHead = initializeGitRepo()
@@ -5432,12 +5522,10 @@ describe('completed task merge recovery', () => {
     recordIssuesForTask(paths, taskId, [issueNumber])
     writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
     const getIssue = fakeForge.getIssue.bind(fakeForge)
-    let unavailable = true
+    let reads = 0
     fakeForge.getIssue = async (number) => {
-      if (number === issueNumber && unavailable) {
-        unavailable = false
-        throw new Error('forge unavailable')
-      }
+      // The first read is the claim check before the merge; the second is the close.
+      if (number === issueNumber && ++reads === 2) throw new Error('forge unavailable')
       return getIssue(number)
     }
 
@@ -5553,6 +5641,25 @@ describe('completed task merge recovery', () => {
     expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
   })
 
+  it('records a git failure in the merge log when the task worktree is missing', async () => {
+    const taskId = '20260811_120000_066_auto-missing-worktree'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    rmSync(worktreeDir(paths, taskId), { recursive: true, force: true })
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    await loop.poll()
+
+    // The failure is not a MergeError, yet the log the Failed line points at must still
+    // name its cause, or the failure count stops the loop with the reason recorded nowhere.
+    expect(logged).toContain(`Failed 066_auto    log logs/${taskId}.merge.log`)
+    expect(readFileSync(join(paths.logsDir, `${taskId}.merge.log`), 'utf8')).toMatch(/git.*ENOENT/)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
   it('rebuilds a lost promotion record from merged status before stale-lease reaping', async () => {
     const taskId = '20260811_120000_065_auto-reconcile-merge'
     initializeGitRepo()
@@ -5619,8 +5726,12 @@ describe('completed task merge recovery', () => {
     const commentIssue = fakeForge.commentIssue.bind(fakeForge)
     let attempts = 0
     fakeForge.commentIssue = async (...args) => {
-      attempts += 1
-      if (attempts === 1) throw new Error('comment unavailable')
+      // The stale claim is heartbeated while the task waits to merge; only the merge
+      // marker is made to fail.
+      if (args[1].startsWith('MERGED:')) {
+        attempts += 1
+        if (attempts === 1) throw new Error('comment unavailable')
+      }
       await commentIssue(...args)
     }
 
@@ -5714,7 +5825,10 @@ describe('completed task merge recovery', () => {
     const mergedStatus = readStatus(paths, taskId)
     const expectedMarker = `MERGED: ${taskId}\nMerged as ${mergedStatus?.merge_commit} into run branch main. This issue closes on promotion.`
     expect(mergedStatus).toMatchObject({ status: 'merged', run_branch: 'main' })
-    expect(fakeForge.issueComments.get(issueNumber)).toEqual([expectedMarker])
+    // The stale claim is heartbeated while the task waits to merge.
+    const nonHeartbeats = (): string[] | undefined => fakeForge.issueComments.get(issueNumber)
+      ?.filter((body) => !body.startsWith('Heartbeat: '))
+    expect(nonHeartbeats()).toEqual([expectedMarker])
     expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
@@ -5723,10 +5837,9 @@ describe('completed task merge recovery', () => {
     markerVisible = true
     expect(await loop.poll()).toBe('continue')
 
-    expect(fakeForge.issueComments.get(issueNumber)).toEqual([expectedMarker])
-    expect(fakeForge.issueCommentAuthors.get(issueNumber)).toEqual([
-      { login: 'worker-a', hasWriteAccess: true },
-    ])
+    expect(nonHeartbeats()).toEqual([expectedMarker])
+    expect(fakeForge.issueCommentAuthors.get(issueNumber)?.every((author) =>
+      author.login === 'worker-a' && author.hasWriteAccess)).toBe(true)
     expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)

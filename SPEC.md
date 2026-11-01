@@ -538,8 +538,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     becomes executable only in a later run, as specified in 4b. It then absorbs the default
     branch and compares the adapter again before integration setup or scan dispatch. A daemon
     otherwise runs the core code it started with. Neither check ever runs mid-cycle. A dirty
-    working tree or a pull conflict logs `WARN`, aborts any in-progress merge, and lets
-    the cycle proceed unchanged so local divergence is resolved by the consumer.
+    working tree logs `WARN` and lets the cycle proceed unchanged so local divergence is
+    resolved by the consumer. A failed pull aborts any in-progress merge and then verifies
+    that `HEAD` is the pre-pull commit and the working tree is clean; only when the abort
+    succeeded and that verification passes does it log `WARN` and let the cycle proceed on
+    the old core. A failed abort, a verification that cannot run, or a repository left at
+    another `HEAD` or with a dirty working tree throws, and the daemon stops before the
+    cycle begins.
     At the same boundary, the package manifest's skills are rendered into every
     directory selected by an agent adapter. The runner supplies its target, and the
     project adapter supplies targets for additional interactive agents. The Codex adapter
@@ -727,8 +732,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
      parked under the exclusive `loop:retry-exhausted` lifecycle label, and the loop logs
      a `Parked` event before stopping. A completed task clears the counts for its linked
      issues; in worker mode, only once its completion has been published (item 36).
+     Such a release re-reads each issue first and leaves alone one that another account
+     has claimed since, since a lapsed claim may have been reaped and handed elsewhere;
+     an operator cleanup still releases whoever holds the issue. Each issue leaves the
+     persisted release intent as soon as its own release verifies, so retrying a partial
+     release never releases an issue a second time.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
-    cycle, and carried into the PR risks.
+    cycle, and carried into the PR risks. A finished run lists the failures it announced,
+    so the next run neither reports them again nor counts them toward a failure burst.
 
 ## The generated pull request
 
@@ -765,8 +776,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     read back.
 25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
-    /T /F` on Windows and the detached process group on POSIX), retain task state for
-    recovery, and report each terminated task or that no live task processes were found.
+    /T /F` on Windows; on POSIX the detached process group gets SIGTERM, then SIGKILL if it
+    outlives a five-second grace period), retain task state for recovery, and report each
+    terminated task or that no live task processes were found.
     On Windows the tree is one process snapshot of parent links and creation times, and
     a process created before the process now holding its recorded parent PID is an orphan
     of an exited parent: it and its descendants are outside the tree, so a recycled PID
@@ -986,6 +998,11 @@ account with write access withdraws every `MERGED:` comment before it.
     another project's issues. An issue is filed once per fingerprint: the advisory
     identifier when one is named, else the finding's tag plus the first path it
     names and a digest of normalized finding terms, else that normalized digest alone.
+    Only a path containing a `/` separator and ending in a file extension counts, so a
+    version number such as `23.6` never reads as one; a root-level filename such as
+    `README.md` or `package.json`, an extensionless path such as `.githooks/pre-commit`
+    or `src/adapters/`, and a backslash-separated path are not paths here and leave the
+    finding on the digest alone.
     Normalization ignores case, punctuation, whitespace, word order, grammatical filler,
     plural and selected action-word forms, and issue/commit references; distinct terms
     still distinguish separate requirements in one file. Review findings are checked
@@ -999,11 +1016,12 @@ account with write access withdraws every `MERGED:` comment before it.
     ledger entry is replaced when encountered, avoiding a one-time duplicate round.
 34. Before claiming, every daemon with the issue queue enabled groups ready findings
     that share a task origin (scan `auto` or review `fix`), a mode (inspection or implementation), and the first path
-    their titles name, using the same primary-path convention as fingerprinting; a
+    their titles name, using the same primary-path convention as fingerprinting (only a
+    path containing a `/` separator and ending in a file extension); a
     grouped task has one identifier and one mode, so findings differing in either never
     share it. A group contains at most four issues; another batch remains ready for the
-    next claim. Titles without a path and issues labelled `loop:group-singleton` stay
-    singleton tasks. Every grouped requirement appears separately in the task
+    next claim. Titles without such a path, including those naming only a root-level
+    file, and issues labelled `loop:group-singleton` stay singleton tasks. Every grouped requirement appears separately in the task
     specification and requires an exact `REQUIREMENT_COMPLETE: #N` final-response marker.
     The worker refuses to publish or merge the task until all linked issues have markers,
     so partial implementation cannot close an unaddressed finding. A grouped task that
@@ -1158,9 +1176,10 @@ account with write access withdraws every `MERGED:` comment before it.
     deferred with a WARN that the repository test lock stayed busy, without the comment,
     the relabel, or a failure count, and every member stays `loop:merge-ready` for the
     next poll to adopt again.
-    A grouped member still `loop:in-progress` with no worker report is still being
-    published, so the poll skips the group and leaves every member as it is; only a
-    different reported branch or head, or an unavailable member, fails the adoption.
+    A grouped member still claimed — `loop:in-progress` and not `loop:ready` — is still
+    being published, even when it carries a report from an earlier task, so the poll
+    skips the group and leaves every member as it is; only an unclaimed member reporting
+    a different branch or head, or an unavailable member, fails the adoption.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
     `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and

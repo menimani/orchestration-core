@@ -7,7 +7,7 @@ import {
   forgetTaskProcess, taskProcessPid, terminableTaskProcessPid,
 } from './processRegistry.ts'
 import { readStatus } from './status.ts'
-import { removeWorktreeWithFallback } from './worktree.ts'
+import { removeWorktreeWithFallback, worktreeListIncludes } from './worktree.ts'
 
 interface CommandOptions {
   cwd?: string
@@ -43,15 +43,9 @@ function git(runtime: CleanupRuntime, paths: OrchPaths, args: readonly string[])
   })
 }
 
-function samePath(runtime: CleanupRuntime, left: string, right: string): boolean {
-  return runtime.os.worktreePathFor(left).comparisonKey
-    === runtime.os.worktreePathFor(right).comparisonKey
-}
-
 function worktreeIsRegistered(runtime: CleanupRuntime, paths: OrchPaths, worktree: string): boolean {
   const output = git(runtime, paths, ['worktree', 'list', '--porcelain', '-z'])
-  return output.split('\0').some((field) =>
-    field.startsWith('worktree ') && samePath(runtime, field.slice('worktree '.length), worktree))
+  return worktreeListIncludes(runtime.os, output, worktree)
 }
 
 function branchExists(runtime: CleanupRuntime, paths: OrchPaths, branch: string): boolean {

@@ -64,7 +64,10 @@ replacement loads the adapter afresh, so gate and presentation behavior cannot r
 silently pinned to an adapter the repository has replaced.
 The daemon otherwise runs the core code it started with. A dirty working tree or
 conflicting pull is left for the consumer to resolve: the daemon warns and starts the
-cycle on the old core instead of merging local divergence.
+cycle on the old core instead of merging local divergence. That holds only when a failed
+pull's merge is cleanly aborted and the checkout is verified back at its previous commit
+with a clean working tree; if the abort fails or that state cannot be confirmed, the
+daemon stops rather than run a cycle on a repository it cannot vouch for.
 
 That same boundary syncs the skills declared in `skills/manifest.json` into every
 directory an agent working in the repository reads them from. The selected runner adapter
@@ -433,8 +436,11 @@ settings update at their next use.
 With `ISSUE_QUEUE_ENABLED=true` the backlog moves to forge issues: findings are filed once
 per fingerprint, workers claim by self-assignment, quiet claims are reaped after a lease,
 and merged work stays open until promotion reaches the default branch and closes the issue.
-Ready titles naming the same primary file are claimed in groups of up to four; no-path titles
-remain singletons, and failed groups retry as individual findings. Each grouped requirement
+Ready titles naming the same primary file — the first path containing a `/` separator and
+ending in a file extension, such as `src/loop.ts` — are claimed in groups of up to four; titles
+naming only a root-level file such as `README.md`, an extensionless path such as
+`.githooks/pre-commit`, or no path at all, remain singletons, and failed groups retry as
+individual findings. Each grouped requirement
 needs its own completion marker before the branch can merge; promotion then closes every
 linked issue. When investigation proves an ordinary task needs no implementation, an exact
 `NO_CHANGE_WARRANTED` final-message marker terminalizes its clean, commit-free task and closes
