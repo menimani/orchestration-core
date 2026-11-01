@@ -738,7 +738,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
      persisted release intent as soon as its own release verifies, so retrying a partial
      release never releases an issue a second time.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
-    cycle, and carried into the PR risks.
+    cycle, and carried into the PR risks. A finished run lists the failures it announced,
+    so the next run neither reports them again nor counts them toward a failure burst.
 
 ## The generated pull request
 
