@@ -143,6 +143,15 @@ describe('ready finding groups', () => {
     expect(fingerprintOf(first.title).startsWith('text:')).toBe(true)
   })
 
+  it('leaves findings naming the same extensionless path single', async () => {
+    const first = await finding('[BUG] `.githooks/pre-commit` skips the subject check')
+    const second = await finding('[BUG] `.githooks/pre-commit` accepts a commit on main')
+
+    expect(groupReadyFindings([first, second]).map((group) =>
+      group.map((issue) => issue.number))).toEqual([[first.number], [second.number]])
+    expect(fingerprintOf(first.title).startsWith('text:')).toBe(true)
+  })
+
   it('does not regroup same-file findings released from a failed group', async () => {
     const first = await finding('[BUG] `src/shared.ts` first retry')
     const second = await finding('[TEST] `src/shared.ts` second retry')
