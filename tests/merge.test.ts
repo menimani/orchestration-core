@@ -6,7 +6,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ProjectAdapter } from '../src/adapters/project.ts'
+import type { MergeCheck, ProjectAdapter } from '../src/adapters/project.ts'
 import { operatingSystem, type OperatingSystem } from '../src/adapters/os.ts'
 import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
@@ -1214,6 +1214,55 @@ describe('mergeTask', () => {
       .rejects.toThrow(/Tests failed/)
 
     expect(appliesTo).toHaveBeenCalledWith([fileName])
+  })
+
+  // Each condition is decided by whether the task committed a marker file: appliesTo sees
+  // it among the changed paths, requires needs it, and unless is satisfied by it.
+  const gateConditions: [string, Partial<MergeCheck>, boolean][] = [
+    ['appliesTo', { appliesTo: (changed) => changed.includes('gate-marker.txt') }, true],
+    ['requires', { requires: 'gate-marker.txt' }, true],
+    ['unless', { unless: 'gate-marker.txt' }, false],
+  ]
+
+  async function makeGatedTask(taskId: string, marker: boolean): Promise<void> {
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    if (!marker) return
+    writeFileSync(join(worktree, 'gate-marker.txt'), 'marker\n')
+    git(worktree, ['add', '-A'])
+    git(worktree, ['commit', '-qm', 'feat: add the gate marker'])
+  }
+
+  function gatedProject(condition: Partial<MergeCheck>): ProjectAdapter {
+    return {
+      ...stubProject,
+      name: 'gated-check',
+      mergeChecks: () => [{
+        label: 'Gated check', cwd: '', command: 'node -e "process.exit(1)"', ...condition,
+      }],
+    }
+  }
+
+  it.each(gateConditions)('skips a failing check whose %s condition excludes it', async (name, condition, runsWithMarker) => {
+    const taskId = `20260808_000000_096_user-skips-${name}-check`
+    await makeGatedTask(taskId, !runsWithMarker)
+    const outputFile = join(repoRoot, `skipped-${name}-check.log`)
+
+    await mergeTask(paths, taskId, { taskGate: 'light', project: gatedProject(condition), outputFile })
+
+    expect(readFileSync(outputFile, 'utf8')).not.toContain('Gated check')
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it.each(gateConditions)('fails the merge on a failing check whose %s condition holds', async (name, condition, runsWithMarker) => {
+    const taskId = `20260808_000000_097_user-runs-${name}-check`
+    await makeGatedTask(taskId, runsWithMarker)
+    const outputFile = join(repoRoot, `applied-${name}-check.log`)
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: gatedProject(condition), outputFile }))
+      .rejects.toThrow('Tests failed. Aborting merge.')
+
+    expect(readFileSync(outputFile, 'utf8')).toContain('=== Gated check failed: exit status 1 ===')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
   it.each([
