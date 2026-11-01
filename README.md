@@ -145,6 +145,24 @@ title for project bridges rather than for the loop core. A runner module likewis
 through `operatingSystem.launchAgent` from `adapters/os.ts`, which resolves a Windows
 `.cmd` shim, escapes its arguments, and keeps its console hidden.
 
+The export shape only gets a module loaded; the interfaces in `src/adapters/forge.ts` and
+`src/adapters/runner.ts` are the contract it must then satisfy, and they are
+authoritative over this summary. `Forge` has over two dozen required members — pull
+requests, workflow dispatch, and the issue queue — so start from that file, or from
+`src/adapters/forge-github.ts`, rather than from a list here. `Runner` is small:
+
+- `sharedSkills` — how the runner discovers and renders repository skills.
+- `start(options): Promise<number>` — launch the agent detached in `options.worktree`
+  with `options.specFile` as its prompt, and resolve with its PID once spawned.
+- `resolveModel(options)` — optional; the model the runner will pass explicitly, if any.
+
+What makes a runner substitutable is the marker protocol, not its CLI. The agent must
+write `options.finalMessageFile`, and the task counts as completed once that file
+carries `TASK_COMPLETE` on a line of its own, written last. Before it, the file may carry
+`NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, and `DECISION_REQUIRED: <text>`
+lines. Markers that appear only in the transcript log are ignored; the task lifecycle in
+`SPEC.md` states the rule.
+
 A forge factory's `target` names the repositories to act on when they are not the
 checkout's own: `codeRepository` for branches, pull requests, and workflow runs, and
 `issueRepository` for the issue queue, each `owner/name` or absent. An absent name leaves
