@@ -54,7 +54,7 @@ export function newTaskSpec(paths: OrchPaths, taskId: string): string {
 ## Target Files
 (List the target files and directories)
 
-## Requirements
+## Requirement
 -
 
 ## Completion Criteria

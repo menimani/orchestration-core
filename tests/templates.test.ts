@@ -177,6 +177,12 @@ describe('spec requirements', () => {
   })
 
   it('finds nothing in an unfilled template', () => {
-    expect(specRequirements('# task\n\n## Requirements\n-\n\n## Commit\n')).toEqual([])
+    expect(specRequirements('# task\n\n## Requirement\n-\n\n## Commit\n')).toEqual([])
+  })
+
+  it('reads the requirement of a template filled in by hand', () => {
+    const spec = '# task\n\n## Target Files\nsrc/a.ts\n\n## Requirement\n- Rename the flag.\n\n## Completion Criteria\n- Existing tests pass\n'
+
+    expect(specRequirements(spec)).toEqual(['- Rename the flag.'])
   })
 })
