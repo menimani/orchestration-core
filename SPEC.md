@@ -1026,7 +1026,11 @@ the stricter framing, which additionally refuses orchestration and CI changes pr
 it; scan and review prompts apply that rule to the text they inspect or quote. A `MERGED:` comment affects stale-lease reaping or idle detection only when its
 author has write access; idle detection additionally retains the merge-SHA ancestry check,
 so authorship and verified ancestry must both hold. A later `UNPROMOTED:` comment from an
-account with write access withdraws every `MERGED:` comment before it.
+account with write access withdraws every `MERGED:` comment before it. When whether a
+`MERGED:` marker stands turns on a `MERGED:` or `UNPROMOTED:` comment whose author's access
+is undetermined, stale-lease reaping leaves that lease alone for the poll. Likewise, when
+the merge comment the loop would post is carried only by such an author, the adopted
+issue's update and merge reconciliation wait for a later poll instead of posting it again.
 
 33. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
@@ -1139,7 +1143,9 @@ account with write access withdraws every `MERGED:` comment before it.
     state unchanged for repair, and resumes only after the record is repaired.
     The daemon lists open `loop:finding` issues once per poll and partitions that snapshot
     locally for adoption, reconciliation, lease reaping, claiming, and cycle-gate idle
-    detection. MERGED-marker comment reads are cached by issue number and `updatedAt`.
+    detection. MERGED-marker comment reads are cached by issue number and `updatedAt`,
+    except that an issue whose comments include an author whose access is undetermined
+    (see the trust model) is not cached, so the next poll asks again.
     Closed lifecycle labels are reconciled at startup and once on cycle-gate entry, not on
     every idle poll. A forge rate-limit response pauses further forge calls until its
     reported reset (querying `rate_limit` when needed), logs one aligned `Waiting forge`
