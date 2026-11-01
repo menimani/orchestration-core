@@ -63,6 +63,15 @@ comments and other items cite items by number, so a number is never reused.
   are zero-padded, event names occupy a ten-character column, and subjects shorter than
   twelve characters are padded so details align. Events preserve their complete first
   line; multiline traces and command output belong in the referenced task or suite log.
+  A recoverable warning is deduplicated by its call site and full message: the first
+  occurrence writes `WARN <first line>` to `loop.log` and its full text, timestamped, to
+  `logs/warn-detail.log`. Further occurrences are counted, and once ten minutes have
+  passed since the last line for that warning, `loop.log` receives
+  `WARN <first line> repeated <n> times` and the count restarts. Warnings from different
+  call sites are tracked independently. When the call site next succeeds, its warnings
+  are cleared and `loop.log` receives one `Recovered <operation> after <n> minutes`
+  event, the whole minutes since the earliest of them first occurred; a call site with
+  no active warning records nothing.
   The three machine markers
   are the exception to presentation-only output: a foreground loop also prints each
   marker as an exact standalone line, while a background loop writes that exact line to
