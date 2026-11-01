@@ -775,8 +775,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     read back.
 25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
-    /T /F` on Windows and the detached process group on POSIX), retain task state for
-    recovery, and report each terminated task or that no live task processes were found.
+    /T /F` on Windows; on POSIX the detached process group gets SIGTERM, then SIGKILL if it
+    outlives a five-second grace period), retain task state for recovery, and report each
+    terminated task or that no live task processes were found.
     On Windows the tree is one process snapshot of parent links and creation times, and
     a process created before the process now holding its recorded parent PID is an orphan
     of an exited parent: it and its descendants are outside the tree, so a recycled PID

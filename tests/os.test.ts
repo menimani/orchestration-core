@@ -153,6 +153,49 @@ describe('operating-system adapters', () => {
     }
   })
 
+  it('kills a POSIX process group that survives SIGTERM past its grace period', () => {
+    let now = 0
+    let killed = false
+    const signalProcessGroup = vi.fn((_pid: number, signal?: NodeJS.Signals | number) => {
+      // The group traps SIGTERM; only SIGKILL stops it.
+      if (signal === 'SIGKILL') killed = true
+    })
+    const os = createPosixOperatingSystem({
+      signalProcessGroup,
+      probeProcess: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
+      remove: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+      groupHasRunningMember: () => !killed,
+    })
+
+    expect(os.terminateProcessTree(43212)).toBe(true)
+
+    const sent = signalProcessGroup.mock.calls
+      .map(([, signal]) => signal)
+      .filter((signal) => signal !== 0)
+    expect(sent).toEqual([undefined, 'SIGKILL'])
+    expect(now).toBe(5_000)
+  })
+
+  it('reports a POSIX process group that survives SIGKILL as not stopped', () => {
+    let now = 0
+    const signalProcessGroup = vi.fn()
+    const os = createPosixOperatingSystem({
+      signalProcessGroup,
+      probeProcess: () => {},
+      remove: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+      groupHasRunningMember: () => true,
+    })
+
+    expect(() => os.terminateProcessTree(43213)).toThrow('Could not stop process tree 43213.')
+    expect(signalProcessGroup).toHaveBeenCalledWith(43213)
+    expect(signalProcessGroup).toHaveBeenCalledWith(43213, 'SIGKILL')
+    expect(now).toBe(10_000)
+  })
+
   it('uses the hidden process launcher for a Windows daemon', async () => {
     const startDaemon = vi.fn(async () => 43211)
     const os = createWindowsOperatingSystem({
