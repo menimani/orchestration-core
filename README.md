@@ -2,8 +2,8 @@
 
 An autonomous improvement loop for a software repository. It scans the codebase, turns
 what it finds into tasks, runs them through an agent CLI in isolated git worktrees, merges
-what passes the repository's own tests, reviews the accumulated diff when
-`AUTO_REVIEW=true`, and opens the pull request — unattended, for as many cycles as you
+what passes the repository's own tests, reviews the accumulated diff when automatic
+review is enabled, and opens the pull request — unattended, for as many cycles as you
 allow.
 
 It is deliberately made of ordinary parts: git worktrees, a text queue, forge issues, and
@@ -23,13 +23,16 @@ specific failure; the comments in the source name the incident rather than the p
 ## How a run works
 
 ```
-scan → tasks → run in worktrees → test → merge → cycle gate → … → review (AUTO_REVIEW=true only) → promote
+scan → tasks → run in worktrees → test → merge → cycle gate → … → review (REVIEW_ENABLED and AUTO_REVIEW only) → promote
 ```
 
 Each cycle scans the repository, queues what the scan reports, executes queued tasks in
 parallel worktrees, and merges each one only after the tests selected for the paths it
 touched pass against the branch tip. Cycles end at a gate that pushes and updates a draft
-pull request. With `AUTO_REVIEW=true`, the final cycle is reviewed by an agent reading
+pull request when `AUTO_PR` is on, as it is by default. Automatic review needs both
+`REVIEW_ENABLED` (on by default) and `AUTO_REVIEW` (off by default): `REVIEW_ENABLED`
+keeps the review boundary in the cycle gate, and `AUTO_REVIEW` makes that boundary
+dispatch a review. With both on, the final cycle is reviewed by an agent reading
 the whole branch diff; a round that raises findings turns them into fix tasks and reads
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
@@ -416,7 +419,9 @@ settings update at their next use.
 | `MAX_PARALLEL` | 3 | Ordinary task agent processes at once; scan agents use `SCAN_PARALLEL` independently |
 | `SCAN_PARALLEL` | 2 | Requested scan agent processes per cycle; values must be at least 1 and are reduced to the template's numbered section count at launch, independently of `MAX_PARALLEL` |
 | `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
-| `AUTO_REVIEW` | false | Enable agent review of cycle diffs and queue the findings as fixes |
+| `AUTO_PR` | true | Push the run branch and create or update its draft pull request at each cycle gate, then promote it when the run finishes; `false` performs none of these |
+| `REVIEW_ENABLED` | true | Keep the review boundary in the cycle gate; `false` skips review even with `AUTO_REVIEW=true`, and together with `AUTO_PR=false` bypasses the cycle gate entirely |
+| `AUTO_REVIEW` | false | With `REVIEW_ENABLED=true`, have an agent review cycle diffs at the review boundary and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
 | `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
