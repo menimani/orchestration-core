@@ -1033,6 +1033,16 @@ describe('manual task commands', () => {
     expect(result.stderr).toBe('')
   })
 
+  it.each(['y\n', 'Y\n'])('proceeds with a merge without --yes on the answer %j', (answer) => {
+    const result = runCli(['merge', 'manual-merge-accepted'], answer)
+
+    expect(result.stdout).toBe(
+      'Merge task/manual-merge-accepted into the current branch? [y/N] Merging manual-merge-accepted\n',
+    )
+    expect(result.status).toBe(1)
+    expect(result.stderr).toBe('Task not found: manual-merge-accepted\n')
+  })
+
   it('rejects an unknown merge option before asking', () => {
     const result = runCli(['merge', 'manual-merge-option', '--force'], 'y\n')
 
