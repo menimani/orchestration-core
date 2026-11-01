@@ -216,6 +216,34 @@ describe('removeMergedWorktree', () => {
     )
   })
 
+  it('sees a stale registration when the root is not spelled the way Git reports it', () => {
+    const taskId = '20260820_205524_044_auto-aliased-registration'
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-merge-alias-'))
+    try {
+      const aliasPaths = orchPaths(nonCanonicalSpelling(repoRoot, linkDir))
+      const worktree = worktreeDir(aliasPaths, taskId)
+      git(repoRoot, ['worktree', 'add', worktree, '-b', branchName(taskId)])
+      const log = vi.fn()
+
+      const removed = removeMergedWorktree(aliasPaths, worktree, log, {
+        os: operatingSystem,
+        git: (cwd, args) => {
+          if (args[1] === 'remove') throw new Error('Git removal failed')
+          if (args[1] === 'prune') throw new Error('metadata is locked')
+          return git(cwd, args)
+        },
+      })
+
+      expect(removed).toBe(false)
+      expect(log).toHaveBeenCalledWith(
+        `WARN: the removed worktree is still registered and has to be pruned by hand: ${worktree}`,
+      )
+    } finally {
+      git(repoRoot, ['worktree', 'prune', '--expire', 'now'])
+      rmSync(linkDir, { recursive: true, force: true })
+    }
+  })
+
   it('uses the Windows UNC namespace for a UNC worktree fallback', () => {
     const worktree = '\\\\server\\share\\orchestration\\worktrees\\task'
     const remove = vi.fn()
