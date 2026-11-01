@@ -2619,6 +2619,48 @@ export function createLoop(deps: LoopDeps) {
       mergeAttempts.add(taskId)
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
       const linkedIssues = issueNumbersForTask(paths, taskId)
+      if (linkedIssues.length > 0) {
+        // Re-read every claim right before the merge closes it. An issue already closed is
+        // closed again harmlessly; an open issue that left loop:in-progress was reaped, and
+        // may since have been handed to another claimant whose issue this merge must not
+        // close. A claim that cannot be read defers the merge rather than risk that.
+        const lost: number[] = []
+        try {
+          for (const issueNumber of linkedIssues) {
+            let issue: ForgeIssue
+            try {
+              issue = await forge.getIssue(issueNumber)
+            } catch (error) {
+              // A deleted issue cannot be closed, and nothing remains open to close.
+              if (error instanceof ForgeIssueNotFoundError) continue
+              throw error
+            }
+            if (issue.state === 'open' && (!issue.labels.includes(LABEL_IN_PROGRESS)
+              || issue.labels.includes(LABEL_READY))) lost.push(issueNumber)
+          }
+          warningLog.recovered(`merge-claim-${taskId}`)
+        } catch (error) {
+          if (!(error instanceof ForgeRateLimitError)) {
+            warning(`merge-claim-${taskId}`, `merging ${shortTaskId(taskId)}`,
+              `${shortTaskId(taskId)} merge deferred: its issue claims could not be read: `
+              + errorSummary(error))
+          }
+          return
+        }
+        if (lost.length > 0) {
+          // A lost claim is not this task's to close or release: unlink those issues
+          // first, so failing the task cannot return another claimant's issue to ready.
+          // Failed, the next poll counts it and releases or parks the issues it still holds.
+          const reason = `${lost.map((number) => `#${number}`).join(', ')} no longer claimed by this task`
+          recordIssuesForTask(paths, taskId,
+            linkedIssues.filter((issueNumber) => !lost.includes(issueNumber)))
+          if (await transitionStatus(paths, taskId, 'completed', 'failed')) {
+            appendFileSync(mergeLog, `Merge refused: ${reason}\n`)
+            event('WARN', `${shortTaskId(taskId)} cannot be merged: ${reason}`)
+          }
+          return
+        }
+      }
       try {
         const missingMarkers = missingRequirementCompletionMarkers(paths, taskId)
         if (missingMarkers.length > 0) {
@@ -2886,11 +2928,13 @@ export function createLoop(deps: LoopDeps) {
         }
       }
 
-      // A worker's completed task still holds its claim until it is published. Without a
-      // heartbeat, a publication that keeps failing would let the lease lapse and the issue
-      // be reaped back to ready while this task still means to report on it.
-      const holdsClaim = status === 'running' || (status === 'completed' && config.workerMode
-        && !existsSync(join(scannedDir, taskId)))
+      // A completed task still holds its claim until it is published or merged. Without a
+      // heartbeat, a publication or merge that keeps being deferred would let the lease
+      // lapse and the issue be reaped back to ready while this task still means to close
+      // or report on it. Outside worker mode the status itself leaves completed once the
+      // task is merged or found to need no change.
+      const holdsClaim = status === 'running' || (status === 'completed'
+        && (!config.workerMode || !existsSync(join(scannedDir, taskId))))
       const linkedIssues = holdsClaim ? issueNumbersForTask(paths, taskId) : []
       if (linkedIssues.length > 0 && remoteOperationsAvailable) {
         linkedIssues.forEach((issueNumber) => locallyRunningIssues.add(issueNumber))
