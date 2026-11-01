@@ -3012,6 +3012,19 @@ describe('closePromotedIssues', () => {
     expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [], returned: [] })
   })
 
+  it('keeps the issues of a closed run pull request whose branch the loop still holds', async () => {
+    const issueNumber = await promotedIssue('task-held', 'a'.repeat(40), 'run/held')
+    forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held'))
+      .toEqual({ closed: [], returned: [] })
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-held')
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
+
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/next'))
+      .toEqual({ closed: [], returned: [issueNumber] })
+  })
+
   it('posts the withdrawal once while returning the issue to ready keeps failing', async () => {
     const issueNumber = await forge.createIssue({
       title: 'task-stuck', body: buildIssueBody('[BUG] task-stuck', 'scan-1'),

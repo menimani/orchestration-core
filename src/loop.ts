@@ -1886,6 +1886,13 @@ export function createLoop(deps: LoopDeps) {
       previousGateFailures.delete('draft-pr')
       return true
     }
+    // A person closed the run PR mid-run. Its branch still holds every merge of the run,
+    // and those issues stay promoted to it, so a second PR would only bypass that person.
+    // Stop for them on repetition, as the final gate does.
+    if (status.state === 'closed') {
+      reportGateFailure('could not update PR because it is closed')
+      return false
+    }
 
     try {
       const ahead = gitIn(paths.repoRoot, ['rev-list', '--count', `${baseRef}..HEAD`]).trim()
@@ -3185,7 +3192,9 @@ export function createLoop(deps: LoopDeps) {
             // Closing promoted issues is bookkeeping a later poll can finish; it must not
             // cost this poll its claims.
             try {
-              const { closed, returned } = await closePromotedIssues(forge, paths, promotedCommitContained)
+              const { closed, returned } = await closePromotedIssues(
+                forge, paths, promotedCommitContained, optionalGit(['branch', '--show-current']).trim(),
+              )
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
               }
