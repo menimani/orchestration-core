@@ -64,7 +64,8 @@ export function specRequirements(spec: string): string[] {
       .filter((text) => text !== '')
   }
   const section = /^## Requirement\r?\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(spec)?.[1]?.trim()
-  return section === undefined || section === '' ? [] : [section]
+  // A lone `-` is the placeholder an unfilled `new` template leaves behind.
+  return section === undefined || section === '' || section === '-' ? [] : [section]
 }
 
 /** Safety preamble for agents that inspect repository-controlled files, diffs, or history. */

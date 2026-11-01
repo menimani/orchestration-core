@@ -1202,7 +1202,7 @@ export function createLoop(deps: LoopDeps) {
         if (combinesReviewFindings) {
           const file = specFile(paths, newId)
           const spec = readFileSync(file, 'utf8').replace(
-            '## Requirements\n-\n',
+            '## Requirement\n-\n',
             `## Requirement\n\n${desc}\n`,
           )
           writeFileSync(file, spec)

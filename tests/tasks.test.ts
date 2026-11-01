@@ -14,6 +14,7 @@ import {
   delegateTask, delegateTaskVisible, enqueueTask, isIssueModeActive, isLoopRunning, newTaskSpec,
   removeIssueModeMarker, specFile, writeIssueModeMarker,
 } from '../src/tasks.ts'
+import { specRequirements } from '../src/templates.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
 let repoRoot: string
@@ -406,6 +407,9 @@ describe('newTaskSpec', () => {
     const spec = readFileSync(file, 'utf8')
     expect(spec).toContain('# manual-task')
     expect(spec).toContain('## Completion Criteria')
+    expect(specRequirements(spec)).toEqual([])
+    expect(specRequirements(spec.replace('## Requirement\n-\n', '## Requirement\n- Fix it.\n')))
+      .toEqual(['- Fix it.'])
     expect(spec.trimEnd().endsWith('TASK_COMPLETE')).toBe(true)
     expect(() => newTaskSpec(paths, 'manual-task')).toThrow(/already exists/)
   })
