@@ -628,7 +628,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the draft PR, emit `CYCLE_COMPLETE: <n>/<max>` with the PR URL to the machine-marker
     sink and a formatted copy to `loop.log`, then the CI gate,
     then review. Remote work defers the gate with a `Waiting remote` event when its
-    pending issue set changes and every ten minutes while unchanged. A light-gate cycle
+    pending issue set changes and every ten minutes while unchanged. When every pending
+    issue carries `loop:merge-failed` and none of `loop:ready`, `loop:in-progress`, or
+    `loop:merge-ready`, and each one's comments were read with every author's access
+    determined, nothing in the loop will change them: the gate records the repair in
+    `queue/decisions.txt` (deduped), logs it as an `ERROR`, and writes the stop file
+    instead of waiting or promoting. A light-gate cycle
     suite logs its `Started Suite` event before invoking the blocking commands. Its
     passing verdict is retained for that commit while PR setup retries, and is discarded
     as soon as the branch tip changes. A suite step that exits 75 (the test lock wait
