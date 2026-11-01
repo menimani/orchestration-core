@@ -967,6 +967,12 @@ function releasePreparationFile(paths: OrchPaths, taskId: string): string {
   return join(releasePreparationDir(paths), taskId)
 }
 
+// Marks a release intent as returning claims this account took itself, which it releases
+// only while it still holds them. An operator cleanup releases whoever holds the issue.
+function releaseOwnClaimsFile(paths: OrchPaths, taskId: string): string {
+  return join(paths.queueDir, 'issue-release-own-claims', taskId)
+}
+
 function failureCountDir(paths: OrchPaths): string {
   return join(paths.queueDir, 'issue-failure-count')
 }
@@ -1066,12 +1072,23 @@ function writeIssueNumbers(file: string, issueNumbers: readonly number[]): void 
   }
 }
 
-/** Record release work whose local cleanup is already complete. */
+/**
+ * Record release work whose local cleanup is already complete. With ownClaims, each issue
+ * is released only while this account still holds it.
+ */
 export function recordIssueReleaseIntent(
   paths: OrchPaths,
   taskId: string,
   issueNumbers: readonly number[],
+  ownClaims = false,
 ): void {
+  const marker = releaseOwnClaimsFile(paths, taskId)
+  if (ownClaims) {
+    mkdirSync(dirname(marker), { recursive: true })
+    writeFileSync(marker, '')
+  } else {
+    rmSync(marker, { force: true })
+  }
   writeIssueNumbers(releaseIntentFile(paths, taskId), issueNumbers)
 }
 
@@ -1087,6 +1104,7 @@ export function prepareIssueReleaseIntent(
 /** Atomically make a prepared release visible after local cleanup completes. */
 export function completeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
   mkdirSync(releaseIntentDir(paths), { recursive: true })
+  rmSync(releaseOwnClaimsFile(paths, taskId), { force: true })
   renameSync(releasePreparationFile(paths, taskId), releaseIntentFile(paths, taskId))
 }
 
@@ -1104,6 +1122,7 @@ export function removeIssueReleasePreparation(paths: OrchPaths, taskId: string):
 /** Remove release work after it has reconciled successfully. */
 function removeIssueReleaseIntent(paths: OrchPaths, taskId: string): void {
   rmSync(releaseIntentFile(paths, taskId), { force: true })
+  rmSync(releaseOwnClaimsFile(paths, taskId), { force: true })
 }
 
 export function issueNumberForTask(paths: OrchPaths, taskId: string): number | undefined {
@@ -1153,15 +1172,26 @@ export function dropClaimedTaskMaterialization(
   }
 }
 
-/** Restore any open claimed lifecycle state to an individually claimable finding. */
+/** Whether an open issue is assigned, but no longer to the account that claimed it. */
+function claimedByAnother(issue: ForgeIssue, claimant: string): boolean {
+  return issue.state === 'open' && issue.assignees.length > 0
+    && !issue.assignees.includes(claimant)
+}
+
+/**
+ * Restore any open claimed lifecycle state to an individually claimable finding. Given a
+ * claimant, an issue now assigned only to other accounts is left alone and reported false.
+ */
 export async function returnIssueToReady(
   forge: Forge,
   issueNumber: number,
   keepSingleton = false,
-): Promise<void> {
-  await withIssueCoordination(forge, issueNumber, async () => {
+  claimant?: string,
+): Promise<boolean> {
+  return withIssueCoordination(forge, issueNumber, async () => {
     const issue = await forge.getIssue(issueNumber)
-    if (issue.state !== 'open') return
+    if (issue.state !== 'open') return true
+    if (claimant !== undefined && claimedByAnother(issue, claimant)) return false
     for (const assignee of issue.assignees) await forge.unassignIssue(issueNumber, assignee)
     if (keepSingleton && !issue.labels.includes(LABEL_GROUP_SINGLETON)) {
       await forge.addLabel(issueNumber, LABEL_GROUP_SINGLETON)
@@ -1176,14 +1206,23 @@ export async function returnIssueToReady(
         || !issueHasExactlyLifecycleLabel(released, LABEL_READY))) {
       throw new Error(`Issue #${issueNumber} did not reach the single ${LABEL_READY} lifecycle state`)
     }
+    return true
   })
 }
 
-/** Remove a repeatedly failing issue from the claimable lifecycle. */
-async function parkIssue(forge: Forge, issueNumber: number): Promise<boolean> {
+/**
+ * Remove a repeatedly failing issue from the claimable lifecycle. Given a claimant, an
+ * issue now assigned only to other accounts is left alone.
+ */
+async function parkIssue(
+  forge: Forge,
+  issueNumber: number,
+  claimant?: string,
+): Promise<'parked' | 'unchanged' | 'claimed-elsewhere'> {
   return withIssueCoordination(forge, issueNumber, async () => {
     const issue = await forge.getIssue(issueNumber)
-    if (issue.state !== 'open') return false
+    if (issue.state !== 'open') return 'unchanged'
+    if (claimant !== undefined && claimedByAnother(issue, claimant)) return 'claimed-elsewhere'
     const alreadyParked = issueHasExactlyLifecycleLabel(issue, LABEL_RETRY_EXHAUSTED)
       && issue.assignees.length === 0
     for (const assignee of issue.assignees) await forge.unassignIssue(issueNumber, assignee)
@@ -1203,7 +1242,7 @@ async function parkIssue(forge: Forge, issueNumber: number): Promise<boolean> {
         `Issue #${issueNumber} did not reach the single ${LABEL_RETRY_EXHAUSTED} lifecycle state`,
       )
     }
-    return !alreadyParked
+    return alreadyParked ? 'unchanged' : 'parked'
   })
 }
 
@@ -1211,6 +1250,7 @@ export interface IssueReleaseOptions {
   maxIssueRetries?: number
   onPark?: (issueNumber: number, failures: number) => void
   onConflictPark?: (issueNumber: number, attempts: number) => void
+  onClaimedElsewhere?: (issueNumber: number) => void
 }
 
 export interface IssueReleaseFailure {
@@ -1232,7 +1272,12 @@ export class IssueReleaseReconciliationError extends AggregateError {
   }
 }
 
-/** Retry one durable cleanup release, removing the intent only after every issue verifies. */
+/**
+ * Retry one durable cleanup release. Each issue leaves the intent as soon as its release
+ * verifies, so a retry after a partial failure never touches an issue it already handed
+ * back; the intent itself is removed once every issue has verified. An intent recorded for
+ * this account's own claims skips any issue another account has claimed since.
+ */
 export async function reconcileIssueReleaseIntent(
   forge: Forge,
   paths: OrchPaths,
@@ -1241,23 +1286,43 @@ export async function reconcileIssueReleaseIntent(
 ): Promise<IssueReleaseFailure[]> {
   const issueNumbers = issueReleaseIntentForTask(paths, taskId)
   if (issueNumbers.length === 0) return []
-  const keepSingleton = issueNumbers.length > 1
-  const results = await Promise.allSettled(issueNumbers.map(async (issueNumber) => {
-    const failures = issueFailureCount(paths, issueNumber)
-    if (failures >= (options.maxIssueRetries ?? Number.POSITIVE_INFINITY)) {
-      const newlyParked = await parkIssue(forge, issueNumber)
-      if (newlyParked) options.onPark?.(issueNumber, failures)
-      return
+  // A retry may hold fewer issues than the group it came from; the task's issue map
+  // survives until the whole release verifies and still says whether it was grouped.
+  const keepSingleton = issueNumbers.length > 1 || issueNumbersForTask(paths, taskId).length > 1
+  // A claim that lapsed and was reaped may since belong to another claimant, whose live
+  // work releasing this task's own claims must not strip.
+  let claimant: string | undefined
+  if (existsSync(releaseOwnClaimsFile(paths, taskId))) {
+    try {
+      claimant = await forge.currentUser()
+    } catch (error) {
+      return issueNumbers.map((issueNumber) => ({ issueNumber, error }))
     }
+  }
+  const remaining = new Set(issueNumbers)
+  const results = await Promise.allSettled(issueNumbers.map(async (issueNumber) => {
+    let claimedElsewhere: boolean
+    const failures = issueFailureCount(paths, issueNumber)
     // A parked issue keeps its conflict record, so a person who readies it again hands
     // the kept commits to the next claim, and the merge that lands deletes their branches.
     const attempts = readConflictedAttempts(paths, issueConflictKey(issueNumber))
-    if (conflictRetriesExhausted(attempts)) {
-      const newlyParked = await parkIssue(forge, issueNumber)
-      if (newlyParked) options.onConflictPark?.(issueNumber, attempts.length)
-      return
+    if (failures >= (options.maxIssueRetries ?? Number.POSITIVE_INFINITY)) {
+      const outcome = await parkIssue(forge, issueNumber, claimant)
+      if (outcome === 'parked') options.onPark?.(issueNumber, failures)
+      claimedElsewhere = outcome === 'claimed-elsewhere'
+    } else if (conflictRetriesExhausted(attempts)) {
+      const outcome = await parkIssue(forge, issueNumber, claimant)
+      if (outcome === 'parked') options.onConflictPark?.(issueNumber, attempts.length)
+      claimedElsewhere = outcome === 'claimed-elsewhere'
+    } else {
+      claimedElsewhere = !await returnIssueToReady(forge, issueNumber, keepSingleton, claimant)
     }
-    await returnIssueToReady(forge, issueNumber, keepSingleton)
+    if (claimedElsewhere) options.onClaimedElsewhere?.(issueNumber)
+    remaining.delete(issueNumber)
+    if (remaining.size > 0) {
+      writeIssueNumbers(releaseIntentFile(paths, taskId),
+        issueNumbers.filter((number) => remaining.has(number)))
+    }
   }))
   const failures = results.flatMap((result, index) => result.status === 'rejected'
     ? [{ issueNumber: issueNumbers[index]!, error: result.reason }]

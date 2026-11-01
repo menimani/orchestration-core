@@ -732,6 +732,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
      parked under the exclusive `loop:retry-exhausted` lifecycle label, and the loop logs
      a `Parked` event before stopping. A completed task clears the counts for its linked
      issues; in worker mode, only once its completion has been published (item 36).
+     Such a release re-reads each issue first and leaves alone one that another account
+     has claimed since, since a lapsed claim may have been reaped and handed elsewhere;
+     an operator cleanup still releases whoever holds the issue. Each issue leaves the
+     persisted release intent as soon as its own release verifies, so retrying a partial
+     release never releases an issue a second time.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks.
 

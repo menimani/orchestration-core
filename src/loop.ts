@@ -62,7 +62,8 @@ import {
   isReadyToClaim,
   issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
   reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
-  completeIssueReleaseIntent, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
+  completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
+  reconcileIssueReleaseIntent,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
   removeIssueReleasePreparation,
@@ -2542,6 +2543,9 @@ export function createLoop(deps: LoopDeps) {
       onConflictPark: (issueNumber: number, attempts: number) => {
         event('Parked', `#${issueNumber}`, `${attempts} conflicting rebases; commits kept`)
       },
+      onClaimedElsewhere: (issueNumber: number) => {
+        event('Released', `#${issueNumber}`, 'claimed by another account since; left as it is')
+      },
     }
 
     const reconcileMergedIssues = async (
@@ -2892,7 +2896,11 @@ export function createLoop(deps: LoopDeps) {
         recordIssueFailure(paths, taskId)
       }
       if (failedIssues.length > 0 && remoteOperationsAvailable) {
-        recordIssueReleaseIntent(paths, taskId, failedIssues)
+        // A pending intent lists only the issues an earlier attempt could not release;
+        // recording the whole set again would release the others a second time.
+        if (issueReleaseIntentForTask(paths, taskId).length === 0) {
+          recordIssueReleaseIntent(paths, taskId, failedIssues, true)
+        }
         const failures = await reconcileIssueReleaseIntent(
           forge, paths, taskId, issueReleaseOptions,
         )
@@ -3198,7 +3206,7 @@ export function createLoop(deps: LoopDeps) {
             writeFileSync(join(scannedDir, `${entry.taskId}.failed`), '')
             let released = false
             if (remoteOperationsAvailable) {
-              recordIssueReleaseIntent(paths, entry.taskId, issueNumbers)
+              recordIssueReleaseIntent(paths, entry.taskId, issueNumbers, true)
               const failures = await reconcileIssueReleaseIntent(
                 forge, paths, entry.taskId, issueReleaseOptions,
               )
