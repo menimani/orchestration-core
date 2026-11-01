@@ -1581,11 +1581,37 @@ export async function heartbeatIssueForTask(
   }
 
   const timestamp = now.toISOString()
-  await Promise.all(issueNumbers.map((issueNumber) =>
+  const results = await Promise.allSettled(issueNumbers.map((issueNumber) =>
     forge.commentIssue(issueNumber, `Heartbeat: ${timestamp}`)))
-  mkdirSync(join(paths.queueDir, 'heartbeat'), { recursive: true })
-  writeFileSync(file, `${timestamp}\n`)
-  return true
+  // A deleted or transferred issue fails every poll; gating the timestamp on it would
+  // repost to every healthy member each poll, so it is unlinked instead.
+  const missing = issueNumbers.filter((_, index) => {
+    const result = results[index]!
+    return result.status === 'rejected' && result.reason instanceof ForgeIssueNotFoundError
+  })
+  if (missing.length > 0) unlinkIssuesFromTask(paths, taskId, missing)
+  const posted = results.some((result) => result.status === 'fulfilled')
+  if (posted) {
+    mkdirSync(join(paths.queueDir, 'heartbeat'), { recursive: true })
+    writeFileSync(file, `${timestamp}\n`)
+  }
+  const failure = results.find((result): result is PromiseRejectedResult =>
+    result.status === 'rejected' && !(result.reason instanceof ForgeIssueNotFoundError))
+  if (failure !== undefined) throw failure.reason
+  return posted
+}
+
+/** Drop issues that no longer exist from a task's issue map, removing the map once empty. */
+function unlinkIssuesFromTask(
+  paths: OrchPaths,
+  taskId: string,
+  issueNumbers: readonly number[],
+): void {
+  const file = issueMapFile(paths, taskId)
+  const retained = issueNumbersForTask(paths, taskId)
+    .filter((issueNumber) => !issueNumbers.includes(issueNumber))
+  if (retained.length === 0) rmSync(file, { force: true })
+  else writeIssueNumbers(file, retained)
 }
 
 export async function commentOnIssueMerge(

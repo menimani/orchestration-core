@@ -831,6 +831,8 @@ describe('GitHub forge JSON schemas', () => {
     })
 
     await expect(forge.getIssue(357)).rejects.toBeInstanceOf(ForgeIssueNotFoundError)
+    await expect(forge.commentIssue(357, 'Heartbeat: now'))
+      .rejects.toBeInstanceOf(ForgeIssueNotFoundError)
   })
 
   it('drops and reports stale closed entries from an open issue listing', async () => {

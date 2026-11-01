@@ -155,7 +155,7 @@ export interface Forge {
   /** Create an issue outside the current repository and return its URL. */
   createIssueInRepository(options: CreateIssueInRepositoryOptions): Promise<string>
   getIssue(issueNumber: number): Promise<ForgeIssue>
-  /** Add a comment to an issue. */
+  /** Add a comment to an issue; rejects with ForgeIssueNotFoundError once it is gone. */
   commentIssue(issueNumber: number, comment: string): Promise<void>
   /** Issue comments with normalized authorship, oldest first. */
   listIssueComments(issueNumber: number): Promise<ForgeIssueComment[]>

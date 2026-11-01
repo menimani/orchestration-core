@@ -2344,6 +2344,39 @@ describe('worker heartbeats', () => {
     ])
   })
 
+  it('keeps one heartbeat per interval when a grouped member is gone or failing', async () => {
+    const healthy = await forge.createIssue({
+      title: 'healthy', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    const failing = await forge.createIssue({
+      title: 'failing', body: buildIssueBody('[BUG] `a/c.ts` y', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    const deleted = 999
+    recordIssuesForTask(paths, 'task-grouped', [healthy, failing, deleted])
+    const commentIssue = forge.commentIssue.bind(forge)
+    forge.commentIssue = async (issueNumber, comment) => {
+      if (issueNumber === failing) throw new Error('forge unavailable')
+      await commentIssue(issueNumber, comment)
+    }
+
+    await expect(heartbeatIssueForTask(forge, paths, 'task-grouped',
+      new Date('2026-08-08T12:00:00Z'))).rejects.toThrow('forge unavailable')
+    expect(issueNumbersForTask(paths, 'task-grouped')).toEqual([healthy, failing])
+    expect(await heartbeatIssueForTask(forge, paths, 'task-grouped',
+      new Date('2026-08-08T12:00:30Z'))).toBe(false)
+    expect(forge.issueComments.get(healthy)).toEqual(['Heartbeat: 2026-08-08T12:00:00.000Z'])
+  })
+
+  it('drops the issue map once every linked issue is gone', async () => {
+    recordIssuesForTask(paths, 'task-orphaned', [998, 999])
+
+    expect(await heartbeatIssueForTask(forge, paths, 'task-orphaned',
+      new Date('2026-08-08T12:00:00Z'))).toBe(false)
+    expect(issueNumbersForTask(paths, 'task-orphaned')).toEqual([])
+  })
+
   it('comments with the merge linkage and refreshes the issue timestamp', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
