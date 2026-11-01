@@ -236,7 +236,7 @@ export function createLoop(deps: LoopDeps) {
   }>()
   const reconciledCycleGates = new Set<number>()
   let issueQueueInitialized = !config.issueQueueEnabled
-  const previousGateFailures = new Map<string, { message: string; count: number }>()
+  const previousGateFailures = new Map<string, number>()
   let gateWaitTarget: string | undefined
   let idleLogState: {
     startedAt: number
@@ -390,8 +390,8 @@ export function createLoop(deps: LoopDeps) {
 
   function reportGateFailure(message: string, gate = 'draft-pr'): void {
     const previous = previousGateFailures.get(gate)
-    const count = (previous?.count ?? 0) + 1
-    previousGateFailures.set(gate, { message, count })
+    const count = (previous ?? 0) + 1
+    previousGateFailures.set(gate, count)
     const detail = count === 1 ? message : `${message} (repeated ${count} times)`
     if (count > 1) {
       event('ERROR', detail)
