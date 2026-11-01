@@ -2,6 +2,7 @@ import {
   execSync, spawn, spawnSync, type ExecSyncOptionsWithStringEncoding, type StdioOptions,
 } from 'node:child_process'
 import { writeSync } from 'node:fs'
+import { constants } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { operatingSystem } from './adapters/os.ts'
 import { projectCommandEnvironment } from './internalEnvironment.ts'
@@ -69,6 +70,9 @@ function execTimedShellSync(
   })
 }
 
+/** Signals that stop the supervisor and must stop the shell it owns along with it. */
+const SUPERVISOR_STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+
 function superviseTimedShell(timeout: number, command: string): void {
   // The os adapter supplies the spawn options its process-tree termination relies on.
   const child = spawn(command, {
@@ -77,15 +81,27 @@ function superviseTimedShell(timeout: number, command: string): void {
     stdio: ['inherit', 'inherit', 'inherit'],
     windowsHide: true,
   })
-  const timer = setTimeout(() => {
+  const stopShell = (): void => {
     try {
       if (child.pid !== undefined) operatingSystem.terminateProcessTree(child.pid)
     } catch (error) {
       process.stderr.write(`${(error as Error).message}\n`)
     }
+  }
+  const timer = setTimeout(() => {
+    stopShell()
     writeSync(TIMEOUT_REPORT_FD, TIMEOUT_REPORT)
     process.exit(1)
   }, timeout)
+  // On POSIX the shell leads its own process group, so neither a terminal's Ctrl-C nor a
+  // group kill aimed at the supervisor's tree reaches it; the supervisor passes it on.
+  for (const signal of SUPERVISOR_STOP_SIGNALS) {
+    process.on(signal, () => {
+      clearTimeout(timer)
+      stopShell()
+      process.exit(128 + constants.signals[signal])
+    })
+  }
   child.on('error', (error) => {
     clearTimeout(timer)
     process.stderr.write(`${error.message}\n`)
