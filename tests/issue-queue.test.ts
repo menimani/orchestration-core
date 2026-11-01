@@ -28,10 +28,10 @@ import {
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
   type ClaimedRequirement,
 } from '../src/issueQueue.ts'
-import { existingTaskIdForDesc } from '../src/ids.ts'
+import { existingTaskIdForDesc, taskIdForDesc } from '../src/ids.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
-import { DelegatedTaskMutationError, specFile } from '../src/tasks.ts'
+import { DelegatedTaskMutationError, newTaskSpec, specFile } from '../src/tasks.ts'
 import { frameVerifiedRequirement } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -1160,6 +1160,29 @@ describe('claimIssueGroup', () => {
     expect(second.enqueue).toEqual({ outcome: 'enqueued', taskId: second.taskId, depth: 1 })
     expect(existingTaskIdForDesc(paths, 'auto', description)).toBe(second.taskId)
     expect(issueNumberForTask(paths, second.taskId)).toBe(secondIssueNumber)
+  })
+
+  it('mints a fresh task when the indexed task failed and still has its worktree', async () => {
+    // A lost claim leaves the description index on a failed task with no issue map, so
+    // nothing drops its materialization before the issue becomes claimable again.
+    const description = '[BUG] `src/a/b.ts` fails after a lost claim'
+    const failedTaskId = taskIdForDesc(paths, 'auto', description)
+    newTaskSpec(paths, failedTaskId)
+    writeFileSync(join(paths.statusDir, `${failedTaskId}.json`),
+      durableStatus(failedTaskId, 'failed'))
+    mkdirSync(worktreeDir(paths, failedTaskId), { recursive: true })
+
+    const issueNumber = await readyIssue(description)
+    const claim = await claimIssueGroup(
+      forge, paths, [await forge.getIssue(issueNumber)], 'worker-a', appendRequirements,
+    )
+    if (claim.outcome !== 'claimed') throw new Error(`expected a claim, got ${claim.outcome}`)
+
+    expect(claim.taskId).not.toBe(failedTaskId)
+    expect(claim.enqueue).toEqual({ outcome: 'enqueued', taskId: claim.taskId, depth: 1 })
+    expect(existingTaskIdForDesc(paths, 'auto', description)).toBe(claim.taskId)
+    expect(issueNumberForTask(paths, claim.taskId)).toBe(issueNumber)
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8')).toBe(`${claim.taskId}:1\n`)
   })
 
   it.each(['merged', 'no-change'])(
