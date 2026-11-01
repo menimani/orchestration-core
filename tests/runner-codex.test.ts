@@ -33,6 +33,58 @@ beforeEach(() => {
   mocks.readFileSync.mockReset().mockReturnValue('task specification')
 })
 
+interface SkillManifest {
+  commandPrefixPlaceholder: string
+  packagePathPrefixPlaceholder: string
+  skills: string[]
+}
+
+async function readManifest(packageRoot: string): Promise<SkillManifest> {
+  const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs')
+  return JSON.parse(actualFs.readFileSync(
+    join(packageRoot, 'skills', 'manifest.json'), 'utf8',
+  )) as SkillManifest
+}
+
+// Renders every file of every manifest skill against the real filesystem, keyed by its
+// skill-relative path.
+async function renderSkillTrees(
+  repoRoot: string,
+  packageRoot: string,
+): Promise<Record<string, string>> {
+  const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs')
+  const manifestPath = join(packageRoot, 'skills', 'manifest.json')
+  mocks.existsSync.mockImplementation(actualFs.existsSync)
+  mocks.readFileSync.mockImplementation((path) => path === manifestPath
+    ? actualFs.readFileSync(path, 'utf8')
+    : 'task specification')
+  const manifest = await readManifest(packageRoot)
+  const rendered: Record<string, string> = {}
+  const visit = (skill: string, root: string, current = root): void => {
+    for (const entry of actualFs.readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name))) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) visit(skill, root, path)
+      else if (entry.isFile()) {
+        const relativePath = path.slice(root.length + 1).replaceAll('\\', '/')
+        rendered[`${skill}/${relativePath}`] = createCodexRunner().sharedSkills.renderFile(
+          actualFs.readFileSync(path),
+          {
+            repoRoot,
+            packageRoot,
+            commandPrefixPlaceholder: manifest.commandPrefixPlaceholder,
+            packagePathPrefixPlaceholder: manifest.packagePathPrefixPlaceholder,
+          },
+        ).toString('utf8')
+      }
+    }
+  }
+  for (const skill of manifest.skills) {
+    visit(skill, join(packageRoot, 'skills', skill))
+  }
+  return rendered
+}
+
 describe('createCodexRunner', () => {
   it('provides the Codex repository skill destination and command rendering', () => {
     const repoRoot = join('fixture', 'repository')
@@ -149,45 +201,64 @@ describe('createCodexRunner', () => {
       .toBe('Read `CLAUDE.md` and `.claude/skills/verify-changes/SKILL.md`.\n')
   })
 
-  it('renders every complete shipped skill file for Codex', async () => {
-    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs')
-    mocks.existsSync.mockImplementation(actualFs.existsSync)
-    const packageRoot = join(import.meta.dirname, '..')
-    mocks.readFileSync.mockImplementation((path) => path === join(
-      packageRoot, 'skills', 'manifest.json',
-    ) ? actualFs.readFileSync(path, 'utf8') : 'task specification')
-    const manifest = JSON.parse(actualFs.readFileSync(
-      join(packageRoot, 'skills', 'manifest.json'), 'utf8',
-    )) as {
-      commandPrefixPlaceholder: string
-      packagePathPrefixPlaceholder: string
-      skills: string[]
-    }
-    const rendered: Record<string, string> = {}
-    const visit = (skill: string, root: string, current = root): void => {
-      for (const entry of actualFs.readdirSync(current, { withFileTypes: true })
-        .sort((left, right) => left.name.localeCompare(right.name))) {
-        const path = join(current, entry.name)
-        if (entry.isDirectory()) visit(skill, root, path)
-        else if (entry.isFile()) {
-          const relativePath = path.slice(root.length + 1).replaceAll('\\', '/')
-          rendered[`${skill}/${relativePath}`] = createCodexRunner().sharedSkills.renderFile(
-            actualFs.readFileSync(path),
-            {
-              repoRoot: packageRoot,
-              packageRoot,
-              commandPrefixPlaceholder: manifest.commandPrefixPlaceholder,
-              packagePathPrefixPlaceholder: manifest.packagePathPrefixPlaceholder,
-            },
-          ).toString('utf8')
-        }
-      }
-    }
-    for (const skill of manifest.skills) {
-      visit(skill, join(packageRoot, 'skills', skill))
-    }
+  it('renders a fixture skill tree from disk by the Codex transformation rules', async () => {
+    const repoRoot = join(import.meta.dirname, 'fixtures', 'codex-skill')
+    const rendered = await renderSkillTrees(repoRoot, join(repoRoot, 'orchestration'))
 
-    expect(rendered).toMatchSnapshot()
+    expect(Object.keys(rendered)).toEqual([
+      'fixture-review/references/checklist.md',
+      'fixture-review/SKILL.md',
+    ])
+    expect(rendered['fixture-review/SKILL.md']).toBe([
+      '---',
+      'name: fixture-review',
+      'description: Reviews a fixture change. Use when exercising the Codex rendering.',
+      '---',
+      '',
+      '# Fixture review',
+      '',
+      'Pull request:',
+      '',
+      'Run `gh pr view <pr-number> --json title,body` and use its output as context before continuing.',
+      '',
+      '  Run `git diff --stat` and use its output as context before continuing.',
+      '',
+      'Read `AGENTS.md`, then `.agents/skills/fixture-review/references/checklist.md`.',
+      'Leave `.claude/skills/fixture-missing/SKILL.md` as it is.',
+      '',
+      'Run `$fixture-review` again after fixes, verification directly with the applicable repository commands before committing,',
+      'a direct review of the changes for a second opinion, and the fixture-other workflow directly otherwise. Paths such as',
+      'src/fixture-file stay untouched.',
+      '',
+      "Check progress with npm run -C 'orchestration' loop-status and read",
+      '`orchestration/skills/manifest.json`.',
+      '',
+    ].join('\n'))
+    // A file without its own argument hint still names what the placeholder stood for.
+    expect(rendered['fixture-review/references/checklist.md']).toBe([
+      '# Checklist',
+      '',
+      "Queue follow-ups with npm run -C 'orchestration' queue for <arguments from the request>.",
+      '',
+    ].join('\n'))
+  })
+
+  it('renders every shipped skill file without leaving Claude-only syntax behind', async () => {
+    const packageRoot = join(import.meta.dirname, '..')
+    const rendered = await renderSkillTrees(packageRoot, packageRoot)
+    const manifest = await readManifest(packageRoot)
+
+    for (const skill of manifest.skills) {
+      expect(rendered[`${skill}/SKILL.md`]).toMatch(new RegExp(`^---\\nname: ${skill}\\n`))
+    }
+    for (const [file, text] of Object.entries(rendered)) {
+      expect.soft(text, file).not.toContain(manifest.commandPrefixPlaceholder)
+      expect.soft(text, file).not.toContain(manifest.packagePathPrefixPlaceholder)
+      expect.soft(text, file).not.toContain('$ARGUMENTS')
+      expect.soft(text, file).not.toMatch(/^[ \t]*!`/m)
+      expect.soft(text, file)
+        .not.toMatch(/^(?:argument-hint|allowed-tools|disable-model-invocation):/m)
+    }
   })
 
   it('launches codex through the operating-system adapter with the spec as standard input', async () => {
