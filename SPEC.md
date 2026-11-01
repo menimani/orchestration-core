@@ -149,6 +149,9 @@ comments and other items cite items by number, so a number is never reused.
   `status [<task-id>]` refreshes each running task, deciding completion from its final
   message as the loop does, then prints one line per task naming its id, status, and
   PID, or that there are none; a named task without a status record exits non-zero.
+  While no loop holds the queue, a running task with no process record and no completion
+  marker stays running, so a graceful stop's in-flight tasks reach the next loop as
+  dead at startup rather than as fresh failures.
   `queue` prints the backlog with each entry's depth, or `(empty)`, followed by the
   `status` listing.
   `logs <task-id> [-f]` prints the task's log; `-f` prints its last ten lines and then

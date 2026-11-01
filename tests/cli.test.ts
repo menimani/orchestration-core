@@ -951,6 +951,29 @@ describe('manual task commands', () => {
     expect(result.stderr).toBe('Task not found: manual-unknown\n')
   })
 
+  // A graceful stop leaves exactly this state; the next daemon, not status, classifies it.
+  it('leaves a running task without a process record running while no loop runs', async () => {
+    const paths = orchPaths(repoRoot)
+    await writeStatus(paths, 'stopped-in-flight', 'running')
+
+    const result = runCli(['status'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(`${'stopped-in-flight'.padEnd(20)} ${'running'.padEnd(10)} pid=\n`)
+    expect(runCli(['status', 'stopped-in-flight']).stdout).toContain('running')
+  })
+
+  it('fails a running task without a process record while a loop runs', async () => {
+    const paths = orchPaths(repoRoot)
+    await writeStatus(paths, 'dead-in-flight', 'running')
+    writeFileSync(join(paths.queueDir, 'loop.pid'), processMarkerText(processMarker(process.pid)))
+
+    const result = runCli(['status', 'dead-in-flight'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(`${'dead-in-flight'.padEnd(20)} ${'failed'.padEnd(10)} pid=\n`)
+  })
+
   it('reports that there are no tasks when none has a status record', () => {
     const result = runCli(['status'])
 
