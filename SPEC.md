@@ -958,7 +958,11 @@ For GitHub, the adapter asks the forge for the author's permission on the queue 
 `write`, `maintain`, and `admin` as the forge-neutral write-access verdict. A permission
 lookup that fails for any reason other than a rate limit answers "no write access", so a
 missing collaborator and an unreachable forge both resolve to untrusted rather than to a
-guess.
+guess. The adapter still tells the two apart: a missing collaborator or a read-level
+permission is a verdict, while any other failure marks the author's access as undetermined.
+A claim that meets an undetermined author skips that issue for the poll without labelling
+it and records a counted warning, so a transient outage never quarantines a trusted
+author's issue for good; the unlabelled issue keeps holding the idle gate open meanwhile.
 
 Authorship is checked both when a ready issue is claimed and when fingerprint ownership
 is reconciled. An untrusted issue remains unassigned and ready, receives

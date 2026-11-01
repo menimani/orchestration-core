@@ -212,6 +212,10 @@ function isMissingPrFailure(error: unknown): boolean {
     || /\bCould not resolve to a PullRequest with the number of \d+\b/i.test(text)
 }
 
+function isNotFoundFailure(error: unknown): boolean {
+  return /\bHTTP 404\b/.test(commandErrorText(error))
+}
+
 function isMissingIssueFailure(error: unknown): boolean {
   return /\bCould not resolve to an Issue with the number of \d+\b/i.test(commandErrorText(error))
 }
@@ -300,7 +304,7 @@ export function createGithubForge(
   // issues, the project's own for issues imported from it.
   const normalizeAuthor = async (
     author: { login: string } | null,
-    permissionCache = new Map<string, Promise<boolean>>(),
+    permissionCache = new Map<string, Promise<ForgeAuthor>>(),
     repositoryOf: () => Promise<string> = issueQueueRepository,
   ): Promise<ForgeAuthor> => {
     if (author === null) return { login: '(unknown)', hasWriteAccess: false }
@@ -308,7 +312,7 @@ export function createGithubForge(
     const cacheKey = author.login.toLowerCase()
     let permissionPromise = permissionCache.get(cacheKey)
     if (permissionPromise === undefined) {
-      permissionPromise = (async () => {
+      permissionPromise = (async (): Promise<ForgeAuthor> => {
         const encodedRepository = repository.split('/').map(encodeURIComponent).join('/')
         const args = [
           'api', `repos/${encodedRepository}/collaborators/${encodeURIComponent(author.login)}/permission`,
@@ -319,27 +323,30 @@ export function createGithubForge(
             await checkedGh(repoRoot, args),
             repositoryPermissionSchema,
           )
-          return WRITE_PERMISSIONS.has(data.permission.toLowerCase())
+          const hasWriteAccess = WRITE_PERMISSIONS.has(data.permission.toLowerCase())
             || (data.role_name !== undefined
               && data.role_name !== null
               && WRITE_PERMISSIONS.has(data.role_name.toLowerCase()))
+          return { login: author.login, hasWriteAccess }
         } catch (error) {
-          // Missing collaborators and transient permission lookup failures are both
-          // untrusted. Rate limits retain their reset signal so the loop can wait.
+          // Rate limits retain their reset signal so the loop can wait. A missing
+          // collaborator is a definite "no access"; any other failure is untrusted too,
+          // but marked so a caller does not record it as the author's verdict.
           if (error instanceof ForgeRateLimitError) throw error
-          return false
+          if (isNotFoundFailure(error)) return { login: author.login, hasWriteAccess: false }
+          return { login: author.login, hasWriteAccess: false, permissionLookupFailed: true }
         }
       })()
       // Collapse duplicate authors inside this forge response only. A later get/list
       // call must revalidate permission, especially the locked getIssue used by claim.
       permissionCache.set(cacheKey, permissionPromise)
     }
-    return { login: author.login, hasWriteAccess: await permissionPromise }
+    return permissionPromise
   }
 
   const normalizeIssue = async (
     issue: GithubIssue,
-    permissionCache?: Map<string, Promise<boolean>>,
+    permissionCache?: Map<string, Promise<ForgeAuthor>>,
     repositoryOf?: () => Promise<string>,
   ): Promise<ForgeIssue> => ({
     number: issue.number,
@@ -614,7 +621,7 @@ export function createGithubForge(
       ]
       const stdout = await checkedGh(repoRoot, args)
       const data = parseGhJson(args, stdout, issueCommentsSchema)
-      const permissionCache = new Map<string, Promise<boolean>>()
+      const permissionCache = new Map<string, Promise<ForgeAuthor>>()
       return Promise.all(data.comments.map(async (comment) => ({
         body: comment.body,
         author: await normalizeAuthor(comment.author, permissionCache),
@@ -623,7 +630,7 @@ export function createGithubForge(
 
     async listOpenIssues(label: string): Promise<ForgeIssue[]> {
       const listedIssues = await listGithubIssues('open', label)
-      const permissionCache = new Map<string, Promise<boolean>>()
+      const permissionCache = new Map<string, Promise<ForgeAuthor>>()
       const issues = githubIssueListSchema.parse(listedIssues)
         .filter((issue: GithubIssue) => {
           if (issue.state === 'OPEN') return true
@@ -635,7 +642,7 @@ export function createGithubForge(
 
     async listSourceIssues(): Promise<ForgeIssue[]> {
       const listedIssues = await listGithubIssues('open', undefined, codeRepositoryName)
-      const permissionCache = new Map<string, Promise<boolean>>()
+      const permissionCache = new Map<string, Promise<ForgeAuthor>>()
       return Promise.all(githubIssueListSchema.parse(listedIssues)
         .filter((issue: GithubIssue) => issue.state === 'OPEN')
         .map((issue) => normalizeIssue(issue, permissionCache, codeRepositoryName)))
@@ -643,7 +650,7 @@ export function createGithubForge(
 
     async listClosedIssues(label: string): Promise<ForgeIssue[]> {
       const listedIssues = await listGithubIssues('closed', label)
-      const permissionCache = new Map<string, Promise<boolean>>()
+      const permissionCache = new Map<string, Promise<ForgeAuthor>>()
       return Promise.all(closedGithubIssueListSchema.parse(listedIssues)
         .map((issue) => normalizeIssue(issue, permissionCache)))
     },

@@ -453,7 +453,9 @@ to the repository the issue lives in — `write`, `maintain`, or `admin` — sin
 accounts may already change the code the loop will eventually merge. Every other issue is
 labelled `loop:untrusted-author` and left ready but unclaimed, with a warning naming its
 author, and a permission lookup that fails for any reason other than a rate limit resolves
-to no write access rather than to a guess. On a repository where anyone may file an issue,
+to no write access rather than to a guess. Only a definite answer earns the label: a lookup
+that could not reach an answer skips the issue for that poll, under a counted warning, and
+the next poll asks again. On a repository where anyone may file an issue,
 that gate is what keeps a stranger's text out of a worker's task; the trust model in
 `SPEC.md` states it in full.
 

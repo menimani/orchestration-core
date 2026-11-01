@@ -48,6 +48,11 @@ export interface ForgeAuthor {
   login: string
   /** The forge's verdict that this account is allowed to write to the repository. */
   hasWriteAccess: boolean
+  /**
+   * Set when the forge could not answer at all, so `hasWriteAccess: false` is the safe
+   * default rather than a verdict. Absent when the forge gave a definite answer.
+   */
+  permissionLookupFailed?: true
 }
 
 export interface ForgeIssue {
