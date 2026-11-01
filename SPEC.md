@@ -592,10 +592,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     directory selected by an agent adapter. The runner supplies its target, and the
     project adapter supplies targets for additional interactive agents. The Codex adapter
     renders into repository root `.agents/skills/`; the Claude adapter renders into
-    `.claude/skills/` and resolves only the command prefix because the canonical sources
-    already use that agent's format. The sync runs only for the repository that owns the
-    package and for a subtree consumer. A fleet project runs the package from outside its
-    checkout, so the sync is skipped and its skills come from `install-skills`.
+    `.claude/skills/` and resolves only the command prefix and package path prefix
+    placeholders, `{{ORCHESTRATION_COMMAND_PREFIX}}` and
+    `{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}`, because the canonical sources already use
+    that agent's format. The package path prefix is the package directory relative to
+    the repository root with a trailing `/`, and empty in the owning repository. The
+    sync runs only for the repository that owns the package and for a subtree consumer.
+    A fleet project runs the package from outside its checkout, so the sync is skipped and its skills come from `install-skills`.
     Both use
     `npm run` as the command prefix in the owning repository and
     `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
