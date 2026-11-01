@@ -181,6 +181,7 @@ export function createLoop(deps: LoopDeps) {
   const decisionsFile = join(paths.queueDir, 'decisions.txt')
   const prUrlFile = join(paths.queueDir, 'pr-url.txt')
   const totalTaskCountFile = join(paths.queueDir, 'total-task-count.txt')
+  const announcedFailuresFile = join(paths.queueDir, 'announced-failures.txt')
   let emptyRun = false
   let finalGateReopened = false
 
@@ -201,6 +202,12 @@ export function createLoop(deps: LoopDeps) {
       return false
     }
   }))
+  // A finished run removes every `.failed` flag but keeps the task statuses, and lists
+  // the failures it already announced. Those belong to that run's PR and issue budget,
+  // so this run neither reports them again nor counts them toward the burst guard.
+  const tasksFailedBeforeStartup = new Set(existsSync(announcedFailuresFile)
+    ? readFileSync(announcedFailuresFile, 'utf8').split(/\r?\n/).filter((taskId) => taskId !== '')
+    : [])
   // Trees stopped so a merged dependency change can be installed died for the loop's
   // own reason, not the task's. Like the startup set, they are reported failed and
   // their issues released, but they count toward neither an issue's retry budget nor
@@ -1607,6 +1614,16 @@ export function createLoop(deps: LoopDeps) {
       }
     }
     if (!preserveTaskMarkers) {
+      // Every failure the run observed has been announced by now; its status outlives
+      // the flag removed below, so the next run is told which failures are not its own.
+      const failedTaskIds = listTaskIds(paths).filter((taskId) => {
+        try {
+          return readStatus(paths, taskId)?.status === 'failed'
+        } catch {
+          return false
+        }
+      })
+      writeFileSync(announcedFailuresFile, failedTaskIds.map((taskId) => `${taskId}\n`).join(''))
       rmSync(scannedDir, { recursive: true, force: true })
       mkdirSync(scannedDir, { recursive: true })
     }
@@ -2892,7 +2909,9 @@ export function createLoop(deps: LoopDeps) {
       // per task, and the count is kept for the gate to report.
       const failedFlag = join(scannedDir, `${taskId}.failed`)
       const failedIssues = status === 'failed' ? issueNumbersForTask(paths, taskId) : []
-      if (status === 'failed' && !existsSync(failedFlag) && !wasStoppedByLoop) {
+      const failedBeforeStartup = tasksFailedBeforeStartup.has(taskId)
+      if (status === 'failed' && !existsSync(failedFlag) && !wasStoppedByLoop
+        && !failedBeforeStartup) {
         recordIssueFailure(paths, taskId)
       }
       if (failedIssues.length > 0 && remoteOperationsAvailable) {
@@ -2911,7 +2930,7 @@ export function createLoop(deps: LoopDeps) {
           noteIssueReleaseFailure(new IssueReleaseReconciliationError(failures))
         }
       }
-      if (status === 'failed' && !existsSync(failedFlag)) {
+      if (status === 'failed' && !existsSync(failedFlag) && !failedBeforeStartup) {
         const cycleNow = readCount(scanCountFile)
         marker(`FAILED: ${taskId} — log: ${logFile(paths, taskId)}`)
         event('Failed', shortTaskId(taskId), `log ${shortTaskId(taskId)}.log`)

@@ -3584,6 +3584,37 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
+  it('neither announces nor counts failures left by a finished run', async () => {
+    initializeGitRepoWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const finished = makeLoop({
+      scanEnabled: false, autoPr: true, reviewEnabled: false, maxBurstFailures: 4,
+    })
+    finished.initializeSessionStateForBranch()
+    fakeForge.markPrReady = async () => {
+      forgeStatus = { ...forgeStatus, isDraft: false }
+    }
+    const taskIds = ['old-f1', 'old-f2', 'old-f3']
+    for (const taskId of taskIds) writeRawStatus(taskId, 'failed')
+
+    expect(await finished.poll()).toBe('done')
+    for (const taskId of taskIds) {
+      expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`)
+      expect(readStatus(paths, taskId)?.status).toBe('failed')
+    }
+    expect(existsSync(join(paths.queueDir, 'scanned', 'old-f1.failed'))).toBe(false)
+
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const next = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+    logged = []
+
+    expect(await next.poll()).toBe('continue')
+    expect(logged.some((line) => line.startsWith('FAILED:'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'failed-1'))).toBe(false)
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
   it('records a failed scan in its cycle before entering the cycle gate', async () => {
     const taskId = '20260809_000000_001_scan'
     const loop = makeLoop({
