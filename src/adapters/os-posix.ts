@@ -116,16 +116,10 @@ export function createOperatingSystem(
   runtime: PosixOperatingSystemRuntime = systemRuntime,
 ): OperatingSystem {
   const processTreeIsAlive = (pid: number): boolean => groupIsAlive(runtime, pid)
-  const terminateProcessTree = (pid: number): boolean => {
-    if (!processTreeIsAlive(pid)) {
-      if (processIsAlive(runtime, pid)) {
-        throw new Error(`Process ${pid} is alive but its detached process group cannot be found.`)
-      }
-      return false
-    }
-
+  const signalAndAwaitExit = (pid: number, signal?: NodeJS.Signals): boolean => {
     try {
-      runtime.signalProcessGroup(pid)
+      if (signal === undefined) runtime.signalProcessGroup(pid)
+      else runtime.signalProcessGroup(pid, signal)
     } catch {
       // The signal result is not authoritative: verify the process tree below.
     }
@@ -134,8 +128,20 @@ export function createOperatingSystem(
     while (processTreeIsAlive(pid) && runtime.now() < deadline) {
       runtime.sleep(PROCESS_EXIT_POLL_MS)
     }
-    if (processTreeIsAlive(pid)) throw new Error(`Could not stop process tree ${pid}.`)
-    return true
+    return !processTreeIsAlive(pid)
+  }
+  const terminateProcessTree = (pid: number): boolean => {
+    if (!processTreeIsAlive(pid)) {
+      if (processIsAlive(runtime, pid)) {
+        throw new Error(`Process ${pid} is alive but its detached process group cannot be found.`)
+      }
+      return false
+    }
+
+    // SIGTERM can be ignored or trapped, so a group that outlives its grace period is
+    // killed outright, as Windows always does with taskkill /F.
+    if (signalAndAwaitExit(pid) || signalAndAwaitExit(pid, 'SIGKILL')) return true
+    throw new Error(`Could not stop process tree ${pid}.`)
   }
 
   return {
