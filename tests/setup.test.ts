@@ -1,11 +1,11 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { renderProjectAdapter } from '../src/adapters/project.ts'
 import { QUEUE_LABELS } from '../src/issueQueue.ts'
 import { fleetPaths, orchPaths } from '../src/paths.ts'
-import { verifyRepositorySetup } from '../src/setup.ts'
+import { safeRepositoryPath, verifyRepositorySetup } from '../src/setup.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
 const repositories: string[] = []
@@ -14,6 +14,24 @@ afterEach(() => {
   for (const repository of repositories.splice(0)) {
     rmSync(repository, { recursive: true, force: true })
   }
+})
+
+describe('adapter-referenced path containment', () => {
+  it('rejects a Windows drive-relative path that resolves onto another drive', () => {
+    expect(safeRepositoryPath('C:\\repo', 'D:tools', win32)).toBeUndefined()
+    expect(safeRepositoryPath('C:\\repo', 'D:', win32)).toBeUndefined()
+    expect(safeRepositoryPath('C:\\repo', 'D:\\tools', win32)).toBeUndefined()
+    expect(safeRepositoryPath('C:\\repo', '..\\tools', win32)).toBeUndefined()
+    expect(safeRepositoryPath('C:\\repo', 'tools\\bin', win32)).toBe('C:\\repo\\tools\\bin')
+    expect(safeRepositoryPath('C:\\repo', '.', win32)).toBe('C:\\repo')
+  })
+
+  it('rejects POSIX paths that leave the repository', () => {
+    expect(safeRepositoryPath('/repo', '/tools', posix)).toBeUndefined()
+    expect(safeRepositoryPath('/repo', '../tools', posix)).toBeUndefined()
+    expect(safeRepositoryPath('/repo', 'tools/bin', posix)).toBe('/repo/tools/bin')
+    expect(safeRepositoryPath('/repo', '..tools', posix)).toBe('/repo/..tools')
+  })
 })
 
 describe('setup verification', () => {
