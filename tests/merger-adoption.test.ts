@@ -500,6 +500,36 @@ describe('remote task adoption', () => {
     expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
   })
 
+  it('defers adoption without counting a failure when the reporter\'s access is undetermined', async () => {
+    const task = pushWorkerBranch('20260809_000000_019_auto-report-permission-unknown')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    forge.issueCommentAuthors.get(issueNumber)![0] =
+      { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true }
+    const loop = makeLoop(stubProject)
+
+    await loop.adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .not.toContain('Remote task adoption failed')
+    expect(existsSync(join(paths.queueDir, 'merge-failure-count.txt'))
+      ? readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()
+      : '0').toBe('0')
+    expect(logged.join('\n')).toContain(`issue #${issueNumber} adoption deferred: `
+      + `the worker branch report on issue #${issueNumber} has an author whose write access could not be determined`)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+
+    forge.issueCommentAuthors.get(issueNumber)![0] = { login: 'maintainer-one', hasWriteAccess: true }
+    await loop.adoptRemoteTasks()
+
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeDefined()
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+  })
+
   it('retries issue updates for a persisted adoption without merging it again', async () => {
     const task = pushWorkerBranch('20260809_000000_005_auto-retry-adoption')
     const issueNumber = await mergeReadyIssue(task.branch, task.head)
