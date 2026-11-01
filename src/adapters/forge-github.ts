@@ -595,9 +595,16 @@ export function createGithubForge(
 
     async commentIssue(issueNumber: number, comment: string): Promise<void> {
       const repository = await issueQueueRepository()
-      await checkedGh(repoRoot, [
-        'issue', 'comment', String(issueNumber), '--repo', repository, '--body', comment,
-      ])
+      try {
+        await checkedGh(repoRoot, [
+          'issue', 'comment', String(issueNumber), '--repo', repository, '--body', comment,
+        ])
+      } catch (error) {
+        if (isMissingIssueFailure(error)) {
+          throw new ForgeIssueNotFoundError(issueNumber, { cause: error })
+        }
+        throw error
+      }
     },
 
     async listIssueComments(issueNumber: number): Promise<ForgeIssueComment[]> {

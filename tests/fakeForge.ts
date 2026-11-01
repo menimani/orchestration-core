@@ -120,7 +120,7 @@ export function makeFakeForge(user = 'worker-a'): FakeForge {
     },
     async commentIssue(issueNumber: number, comment: string): Promise<void> {
       const issue = fake.issues.get(issueNumber)
-      if (issue === undefined) throw new Error(`no such issue: #${issueNumber}`)
+      if (issue === undefined) throw new ForgeIssueNotFoundError(issueNumber)
       const comments = fake.issueComments.get(issueNumber) ?? []
       comments.push(comment)
       fake.issueComments.set(issueNumber, comments)
