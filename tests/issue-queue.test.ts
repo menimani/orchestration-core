@@ -31,7 +31,7 @@ import {
 import { existingTaskIdForDesc } from '../src/ids.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
-import { specFile } from '../src/tasks.ts'
+import { DelegatedTaskMutationError, specFile } from '../src/tasks.ts'
 import { frameVerifiedRequirement } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -2629,6 +2629,62 @@ describe('publishDelegatedTask', () => {
     expect(result).toEqual({ outcome: 'duplicate', issueNumber, materialize: false })
     expect(issueNumberForTask(paths, 'user-task')).toBeUndefined()
     expect((await forge.getIssue(issueNumber)).assignees).toEqual(['worker-busy'])
+  })
+
+  it('closes its own issue when a concurrent delegate filed the same fingerprint first', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const createIssue = forge.createIssue.bind(forge)
+    let racer: number | undefined
+    forge.createIssue = async (options) => {
+      // Another delegator's issue lands after the preflight lookup but before ours.
+      racer ??= await createIssue({
+        title: description,
+        body: buildIssueBody(description, 'other-task'),
+        labels: [LABEL_FINDING, LABEL_READY],
+      })
+      return createIssue(options)
+    }
+
+    const result = await publishDelegatedTask(forge, paths, description, 'user-task')
+
+    expect(racer).toBe(1)
+    expect(result).toEqual({ outcome: 'duplicate', issueNumber: 1, materialize: false })
+    const own = await forge.getIssue(2)
+    expect(own.state).toBe('closed')
+    expect(own.labels).toEqual([LABEL_FINDING])
+    expect(forge.issueComments.get(2)).toEqual([
+      'Duplicate of #1; both issues carry the same loop finding fingerprint.',
+    ])
+    const survivor = await forge.getIssue(1)
+    expect(survivor.state).toBe('open')
+    expect(survivor.labels).toEqual([LABEL_FINDING, LABEL_READY])
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprintOf(description)} 1\n`)
+    expect(issueNumberForTask(paths, 'user-task')).toBeUndefined()
+  })
+
+  it('reports the created issue when reconciliation after creation fails', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    const getIssue = forge.getIssue.bind(forge)
+    forge.listOpenIssues = async () => []
+    forge.getIssue = async (issueNumber) => {
+      if (issueNumber === 1) throw new Error('created issue re-read unavailable')
+      return getIssue(issueNumber)
+    }
+
+    const failure = await publishDelegatedTask(forge, paths, description, 'user-task')
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(DelegatedTaskMutationError)
+    expect((failure as DelegatedTaskMutationError).issueNumber).toBe(1)
+    expect((failure as DelegatedTaskMutationError).message).toBe(
+      'Could not reconcile issue #1 after delegated work may have been published: '
+        + 'created issue re-read unavailable',
+    )
+    expect((failure as DelegatedTaskMutationError).cause)
+      .toEqual(new Error('created issue re-read unavailable'))
+    expect(forge.issues.size).toBe(1)
+    expect(existsSync(join(paths.queueDir, 'issue-fingerprints'))).toBe(false)
   })
 })
 
