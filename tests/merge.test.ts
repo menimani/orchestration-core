@@ -1193,6 +1193,29 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(head)
   })
 
+  it('hands a check the real name of a changed non-ASCII file', async () => {
+    const taskId = '20260808_000000_094_user-non-ascii-check'
+    const fileName = 'old→new.ts'
+    git(repoRoot, ['config', 'core.quotePath', 'true'])
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, fileName), 'export {}\n')
+    git(worktree, ['add', '-A'])
+    git(worktree, ['commit', '-qm', 'feat: add a non-ASCII file'])
+    const appliesTo = vi.fn((changed: string[]) => changed.some((file) => file.endsWith('.ts')))
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'non-ascii-check',
+      mergeChecks: () => [{
+        label: 'TypeScript check', cwd: '', command: 'node -e "process.exit(1)"', appliesTo,
+      }],
+    }
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project }))
+      .rejects.toThrow(/Tests failed/)
+
+    expect(appliesTo).toHaveBeenCalledWith([fileName])
+  })
+
   it.each([
     [{ status: 1, signal: null }, 'exit status 1'],
     [{ status: 3221226505, signal: null }, 'exit status 3221226505 (0xC0000409)'],
@@ -1295,6 +1318,33 @@ describe('mergeTask', () => {
     expect(git(worktree, ['status', '--porcelain'])).toBe('')
     expect(readStatus(paths, taskId)?.status).toBe('completed')
     expectNoTemporaryWorktree('.merge-')
+  })
+
+  it('reports a conflicted non-ASCII file by its real name', async () => {
+    const taskId = '20260808_000000_095_user-non-ascii-conflict'
+    const fileName = 'old→new.md'
+    git(repoRoot, ['config', 'core.quotePath', 'true'])
+    writeFileSync(join(repoRoot, fileName), '# base\n')
+    git(repoRoot, ['add', fileName])
+    git(repoRoot, ['commit', '-qm', 'feat: add a non-ASCII file'])
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, fileName), '# task version\n')
+    git(worktree, ['add', fileName])
+    git(worktree, ['commit', '-qm', 'feat: change the file in task'])
+
+    writeFileSync(join(repoRoot, fileName), '# run version\n')
+    git(repoRoot, ['add', fileName])
+    git(repoRoot, ['commit', '-qm', 'feat: change the file on run branch'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    const failure = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject,
+    }).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(RebaseConflictError)
+    expect((failure as RebaseConflictError).conflict).toMatchObject({
+      conflictedFiles: [fileName],
+      conflictingCommits: [runHead],
+    })
   })
 
   it('keeps a rebase that fails without a conflict retryable', async () => {
