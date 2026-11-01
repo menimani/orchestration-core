@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { findFleetDir, projectForDirectory, readFleet, resolveFleetProject } from '../src/fleet.ts'
 import {
@@ -124,21 +124,23 @@ describe('fleet paths', () => {
     expect(locationArgs(repository)).toEqual(['--repo', join(dir, 'repository')])
   })
 
-  it.runIf(sep === '\\')('quotes path arguments but not flags in a copyable command', () => {
+  it('quotes path arguments but not flags in a copyable command', () => {
     const command = absolutePackageScriptCommand(
       ['--fleet', 'C:\\fleet dir', '--project', 'example'],
       'stop',
       'C:\\pkg',
+      '\\',
     )
 
     expect(command).toBe("npm run -C 'C:/pkg' stop -- --fleet 'C:/fleet dir' --project 'example'")
   })
 
-  it.runIf(sep === '/')('keeps a POSIX backslash as part of the name in a copyable command', () => {
+  it('keeps a POSIX backslash as part of the name in a copyable command', () => {
     const command = absolutePackageScriptCommand(
       ['--fleet', '/srv/fleet\\v2', '--project', 'example'],
       'stop',
       '/srv/core\\v2',
+      '/',
     )
 
     expect(command).toBe(
