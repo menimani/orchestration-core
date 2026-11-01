@@ -1,8 +1,11 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { dirname, join } from 'node:path'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { describe, expect, it, vi } from 'vitest'
+import {
+  existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   cmdArgumentLine, processTreeRootPid, quoteWindowsArgument, startWindowsProcess,
   type WindowsProcessRuntime,
@@ -45,6 +48,15 @@ describe('Windows process arguments', () => {
 
 type Publication = (readyFile: string) => void
 
+// Startup state goes under a root of this file's own, so a retained directory never lands
+// beside the ones production retains for an operator to inspect.
+let temporaryRoot = ''
+
+afterEach(() => {
+  if (temporaryRoot) rmSync(temporaryRoot, { recursive: true, force: true })
+  temporaryRoot = ''
+})
+
 function testRuntime(
   publication: Publication,
   launchTimeoutMs = 100,
@@ -62,6 +74,8 @@ function testRuntime(
     return true
   })
   const removeDirectory = vi.fn((path: string) => rmSync(path, { recursive: true, force: true }))
+  temporaryRoot = mkdtempSync(join(tmpdir(), 'orch-windows-process-'))
+  const root = temporaryRoot
   return {
     platform: 'win32',
     now: Date.now,
@@ -86,6 +100,7 @@ function testRuntime(
     },
     requestLauncherTreeTermination,
     removeDirectory,
+    temporaryRoot: () => root,
     launchTimeoutMs,
     launchPollMs: 5,
   }
@@ -222,11 +237,18 @@ it('retains startup state when direct cleanup verification cannot prove the laun
   runtime.now = () => now
   runtime.sleep = vi.fn(async (milliseconds: number) => { now += milliseconds })
 
-  await expect(startWindowsProcess(options, runtime)).rejects.toThrow(
+  const retained = startWindowsProcess(options, runtime)
+  await expect(retained).rejects.toThrow(
     /Could not stop Windows startup process tree 43210\. Startup state was retained at .+\./,
   )
   expect(runtime.requestLauncherTreeTermination).toHaveBeenCalledOnce()
   expect(runtime.removeDirectory).not.toHaveBeenCalled()
+  const [stateDirectory] = readdirSync(temporaryRoot)
+  expect(stateDirectory).toMatch(/^orchestration-windows-launch-/)
+  expect(existsSync(join(temporaryRoot, stateDirectory!, 'descriptor.json'))).toBe(true)
+  await expect(retained).rejects.toThrow(
+    `Startup state was retained at ${join(temporaryRoot, stateDirectory!)}.`,
+  )
 })
 
 it('returns the published PID when temporary-directory cleanup fails', async () => {

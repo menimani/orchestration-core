@@ -25,6 +25,7 @@ export interface WindowsProcessRuntime {
   probeProcess(pid: number): void
   requestLauncherTreeTermination(launcher: ChildProcess): boolean
   removeDirectory(path: string): void
+  temporaryRoot(): string
   launchTimeoutMs: number
   launchPollMs: number
 }
@@ -163,6 +164,7 @@ const systemRuntime: WindowsProcessRuntime = {
     return result.status === 0
   },
   removeDirectory: (path) => rmSync(path, { recursive: true, force: true }),
+  temporaryRoot: tmpdir,
   launchTimeoutMs: WINDOWS_LAUNCH_TIMEOUT_MS,
   launchPollMs: WINDOWS_LAUNCH_POLL_MS,
 }
@@ -287,7 +289,7 @@ export async function startWindowsProcess(
     throw new Error('The hidden Windows process launcher is available only on Windows.')
   }
 
-  const root = mkdtempSync(join(tmpdir(), 'orchestration-windows-launch-'))
+  const root = mkdtempSync(join(runtime.temporaryRoot(), 'orchestration-windows-launch-'))
   const descriptorFile = join(root, 'descriptor.json')
   const readyFile = join(root, 'ready')
   const errorFile = join(root, 'error')

@@ -31,16 +31,14 @@ describe('stale fixture sweep', () => {
     makeAged('orch-old-a')
     makeAged('orch runner-survival-b', join('orchestration', 'queue'))
     makeAged('orchestration-shell-c')
-    makeAged('orchestration-windows-launch-d')
     mkdirSync(join(root, 'orch-new-e'))
     makeAged('other-old-f')
 
-    expect(sweepStaleFixtures(root, NOW)).toBe(4)
+    expect(sweepStaleFixtures(root, NOW)).toBe(3)
 
     expect(existsSync(join(root, 'orch-old-a'))).toBe(false)
     expect(existsSync(join(root, 'orch runner-survival-b'))).toBe(false)
     expect(existsSync(join(root, 'orchestration-shell-c'))).toBe(false)
-    expect(existsSync(join(root, 'orchestration-windows-launch-d'))).toBe(false)
     expect(existsSync(join(root, 'orch-new-e'))).toBe(true)
     expect(existsSync(join(root, 'other-old-f'))).toBe(true)
   })

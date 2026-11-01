@@ -7,9 +7,7 @@ import { join } from 'node:path'
 // Per-test cleanup never runs when a vitest worker is killed, so a host that runs the suite
 // often accumulates fixtures — and the daemons some of them launched. Sibling worktrees run
 // the suite concurrently, so a recent fixture may belong to a live run and is left alone.
-const FIXTURE_PREFIXES = [
-  'orch-', 'orch runner-survival-', 'orchestration-shell-', 'orchestration-windows-launch-',
-]
+const FIXTURE_PREFIXES = ['orch-', 'orch runner-survival-', 'orchestration-shell-']
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000
 
 export function sweepStaleFixtures(tmpRoot: string, now = Date.now()): number {
