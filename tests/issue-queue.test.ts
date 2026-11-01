@@ -17,7 +17,8 @@ import {
   missingRequirementCompletionMarkers, parseIssueBody,
   publishDelegatedTask, publishFinding, reapStaleLeases,
   reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
-  clearIssueFailureCounts, prepareIssueReleaseIntent, reconcileIssueReleaseIntent,
+  clearIssueFailureCounts, completeIssueReleaseIntent, prepareIssueReleaseIntent,
+  reconcileIssueReleaseIntent,
   recordIssueCompletions,
   recordIssueFailure, recordIssueReleaseIntent, recordIssuesForTask,
   recordIssuePromotions,
@@ -1819,6 +1820,97 @@ describe('issue claim release', () => {
       },
     }])
     expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(true)
+  })
+
+  it('retries only the issues a partial release left behind', async () => {
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `grouped claim ${index}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [forge.user],
+    })))
+    const [released, stuck] = issueNumbers as [number, number]
+    recordIssuesForTask(paths, 'task-release', issueNumbers)
+    recordIssueReleaseIntent(paths, 'task-release', issueNumbers, true)
+    const addLabel = forge.addLabel.bind(forge)
+    let unavailable = true
+    forge.addLabel = async (number, label) => {
+      if (number === stuck && label === LABEL_READY && unavailable) {
+        throw new Error('release unavailable')
+      }
+      await addLabel(number, label)
+    }
+
+    const failures = await reconcileIssueReleaseIntent(forge, paths, 'task-release')
+
+    expect(failures).toMatchObject([{ issueNumber: stuck, error: { message: 'release unavailable' } }])
+    expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([stuck])
+    // Another checkout of the same account claims the issue this release already returned.
+    const reclaimed = forge.issues.get(released)!
+    reclaimed.assignees = [forge.user]
+    reclaimed.labels = [LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS]
+    unavailable = false
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-release')).resolves.toEqual([])
+
+    expect((await forge.getIssue(released)).labels).toContain(LABEL_IN_PROGRESS)
+    expect((await forge.getIssue(released)).assignees).toEqual([forge.user])
+    const retried = await forge.getIssue(stuck)
+    expect(retried.assignees).toEqual([])
+    expect(retried.labels).toEqual(expect.arrayContaining([LABEL_READY, LABEL_GROUP_SINGLETON]))
+    expect(retried.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([])
+    expect(issueNumbersForTask(paths, 'task-release')).toEqual([])
+  })
+
+  it('leaves alone an issue another account claimed after this claim was lost', async () => {
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `reclaimed issue ${index}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-b'],
+    })))
+    const [toReady, toPark] = issueNumbers as [number, number]
+    recordIssuesForTask(paths, 'task-release', [toReady])
+    recordIssuesForTask(paths, 'task-park', [toPark])
+    recordIssueFailure(paths, 'task-park')
+    recordIssueReleaseIntent(paths, 'task-release', [toReady], true)
+    recordIssueReleaseIntent(paths, 'task-park', [toPark], true)
+    const skipped: number[] = []
+    const parked: number[] = []
+    const options = {
+      maxIssueRetries: 1,
+      onPark: (issueNumber: number) => parked.push(issueNumber),
+      onClaimedElsewhere: (issueNumber: number) => skipped.push(issueNumber),
+    }
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-release', options))
+      .resolves.toEqual([])
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-park', options))
+      .resolves.toEqual([])
+
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.assignees).toEqual(['worker-b'])
+      expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+    }
+    expect(skipped).toEqual([toReady, toPark])
+    expect(parked).toEqual([])
+    expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([])
+    expect(issueReleaseIntentForTask(paths, 'task-park')).toEqual([])
+  })
+
+  it('releases every assignee for an operator cleanup intent', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'operator cleanup', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-b'],
+    })
+    recordIssuesForTask(paths, 'task-release', [issueNumber])
+    recordIssueReleaseIntent(paths, 'task-release', [issueNumber], true)
+    prepareIssueReleaseIntent(paths, 'task-release', [issueNumber])
+    completeIssueReleaseIntent(paths, 'task-release')
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-release')).resolves.toEqual([])
+
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toContain(LABEL_READY)
   })
 })
 

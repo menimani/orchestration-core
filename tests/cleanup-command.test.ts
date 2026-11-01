@@ -270,7 +270,7 @@ describe('cleanup command', () => {
 
     expect(failed).toBe(true)
     expect(issueNumbersForTask(paths, taskId)).toEqual(issueNumbers)
-    expect(issueReleaseIntentForTask(paths, taskId)).toEqual(issueNumbers)
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([failingIssue])
     expect(existsSync(specFile(paths, taskId))).toBe(false)
     expect(commandRuntime.error).toHaveBeenCalledWith(expect.stringContaining(failure))
 
