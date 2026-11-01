@@ -390,16 +390,20 @@ keep their previous rendering, with no warning, until a cycle runs with
 
 Runtime settings can be stored in `orchestration/config.json`, using the uppercase names
 below. The loop resolves file values first, then environment variables, then defaults, so
-existing launch commands and repositories without the file behave unchanged. Manage the
+repositories without the file behave unchanged. A value in `orchestration/config.json`
+overrides the environment: a launch prefix such as `MAX_SCAN_CYCLES=12` is silently
+ignored for any setting the file defines, so change that setting in the file. Manage the
 file with `npm run config -- list`, `npm run config -- get TASK_GATE`,
 `npm run config -- set TASK_GATE light`, and `npm run config -- unset TASK_GATE`; use the
 equivalent package-prefixed command for a subtree installation.
 
 The Claude-specific model variables in the table are exceptions: the Claude adapter
 reads them directly from the process environment when it is loaded, so they are not
-settings in `orchestration/config.json`. `UPSTREAM_REPO` is also environment-only: it
-overrides the package `upstreamRepo` value for the `report-upstream` command and cannot
-be stored in `orchestration/config.json`.
+settings in `orchestration/config.json`. `PROJECT` and `PROJECT_ADAPTER` are also
+environment-only: they are read from the process environment when the project adapter is
+resolved, so `npm run config -- set PROJECT …` rejects them as unknown settings.
+`UPSTREAM_REPO` is environment-only as well: it overrides the package `upstreamRepo` value
+for the `report-upstream` command and cannot be stored in `orchestration/config.json`.
 
 Configuration commands publish updates atomically through a temporary file in the same
 directory, so readers cannot observe a partial write. The file is checked when a setting
