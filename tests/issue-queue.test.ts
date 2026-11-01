@@ -2120,6 +2120,70 @@ describe('reapStaleLeases', () => {
     expect(repaired.labels).toEqual([LABEL_FINDING, LABEL_READY])
   })
 
+  it('leaves an assigned ready issue alone until its lease window has passed', async () => {
+    forge.clock = () => new Date('2026-08-08T11:30:00Z')
+    const fresh = await forge.createIssue({
+      title: 'freshly assigned ready', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_READY], assignees: ['worker-new'],
+    })
+    const before = await forge.getIssue(fresh)
+    const getIssue = forge.getIssue.bind(forge)
+    const reads: number[] = []
+    forge.getIssue = async (number) => {
+      reads.push(number)
+      return getIssue(number)
+    }
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+    expect(reads).toEqual([])
+    expect(await getIssue(fresh)).toEqual(before)
+  })
+
+  it.each([
+    ['an added assignee', async (number: number) => {
+      await forge.assignIssue(number, 'worker-new')
+    }],
+    ['a replaced assignee', async (number: number) => {
+      await forge.unassignIssue(number, 'worker-gone')
+      await forge.assignIssue(number, 'worker-new')
+    }],
+    ['an added in-progress label', async (number: number) => {
+      await forge.addLabel(number, LABEL_IN_PROGRESS)
+    }],
+    ['a removed ready label', async (number: number) => {
+      await forge.removeLabel(number, LABEL_READY)
+    }],
+    ['a refreshed updatedAt', async (number: number) => {
+      forge.clock = () => new Date('2026-08-08T11:59:00Z')
+      await forge.commentIssue(number, 'heartbeat')
+    }],
+  ])('leaves a stranded ready issue untouched after %s lands past the listing', async (
+    _description, mutate,
+  ) => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const stranded = await forge.createIssue({
+      title: 'stranded ready', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_READY], assignees: ['worker-gone'],
+    })
+    const getIssue = forge.getIssue.bind(forge)
+    let changed: ForgeIssue | undefined
+    forge.getIssue = async (number) => {
+      if (number === stranded && changed === undefined) {
+        await mutate(number)
+        changed = await getIssue(number)
+      }
+      return getIssue(number)
+    }
+
+    expect(await reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).toEqual([])
+    expect(changed).toBeDefined()
+    expect(await getIssue(stranded)).toEqual(changed)
+  })
+
   it('leaves an unassigned ready issue untouched', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const ready = await forge.createIssue({
