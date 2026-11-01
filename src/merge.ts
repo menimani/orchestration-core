@@ -26,7 +26,7 @@ import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
-  removeWorktreeWithFallback, type WorktreeRemovalRuntime,
+  removeWorktreeWithFallback, worktreeListIncludes, type WorktreeRemovalRuntime,
 } from './worktree.ts'
 
 export class MergeError extends Error {
@@ -400,12 +400,9 @@ function removeFinishedWorktree(
   }
 
   try {
-    const registered = runtime.git(paths.repoRoot, ['worktree', 'list', '--porcelain', '-z'])
-      .split('\0').some((field) => {
-        if (!field.startsWith('worktree ')) return false
-        return runtime.os.worktreePathFor(field.slice('worktree '.length)).comparisonKey
-          === runtime.os.worktreePathFor(worktree).comparisonKey
-      })
+    const registered = worktreeListIncludes(
+      runtime.os, runtime.git(paths.repoRoot, ['worktree', 'list', '--porcelain', '-z']), worktree,
+    )
     if (!registered) return true
   } catch (error) {
     log(`WARN: could not verify worktree metadata removal for ${worktree}: ${commandFailureSummary(error)}`)

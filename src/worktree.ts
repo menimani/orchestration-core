@@ -1,5 +1,6 @@
 import type { OperatingSystem } from './adapters/os.ts'
 import { commandFailureSummary } from './errorText.ts'
+import { canonicalPath } from './paths.ts'
 
 export interface WorktreeRemovalRuntime {
   os: OperatingSystem
@@ -49,4 +50,25 @@ export function removeWorktreeWithFallback(
     }
     return { fallback: worktreePath.removalFallback, gitFailure, fallbackFailure, pruneFailure }
   }
+}
+
+/**
+ * Whether `git worktree list --porcelain -z` output still registers the worktree. Git
+ * lists each worktree by its realpath, while the loop spells the path from its own root,
+ * which may run through a symlink, a junction or a Windows short name. Both sides are
+ * canonicalized before the platform key compares them; otherwise a registration that
+ * outlived its removal would go unnoticed.
+ */
+export function worktreeListIncludes(
+  os: OperatingSystem,
+  listing: string,
+  worktree: string,
+): boolean {
+  const listed = listing.split('\0')
+    .filter((field) => field.startsWith('worktree '))
+    .map((field) => field.slice('worktree '.length))
+  if (listed.length === 0) return false
+  const key = (path: string) => os.worktreePathFor(canonicalPath(path)).comparisonKey
+  const target = key(worktree)
+  return listed.some((path) => key(path) === target)
 }
