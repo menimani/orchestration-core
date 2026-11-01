@@ -82,8 +82,8 @@ export function packagePathPrefix(repoRoot: string, packageRoot = PACKAGE_ROOT):
   return packageDirectory === '' ? '' : `${packageDirectory}/`
 }
 
-function shellPathArgument(path: string): string {
-  return `'${shellPathSpelling(path).replaceAll("'", "'\\''")}'`
+function shellPathArgument(path: string, separator = sep): string {
+  return `'${shellPathSpelling(path, separator).replaceAll("'", "'\\''")}'`
 }
 
 /** Render a package command that can be copied and run from any working directory. */
@@ -91,10 +91,11 @@ export function absolutePackageScriptCommand(
   location: string | readonly string[],
   script: string,
   packageRoot = PACKAGE_ROOT,
+  separator = sep,
 ): string {
-  const command = `npm run -C ${shellPathArgument(packageRoot)} ${script}`
+  const command = `npm run -C ${shellPathArgument(packageRoot, separator)} ${script}`
   const args = typeof location === 'string' ? ['--repo', location] : location
-  const rendered = args.map((arg) => arg.startsWith('--') ? arg : shellPathArgument(arg))
+  const rendered = args.map((arg) => arg.startsWith('--') ? arg : shellPathArgument(arg, separator))
   return `${command} -- ${rendered.join(' ')}`
 }
 
