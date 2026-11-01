@@ -153,6 +153,56 @@ it('rejects cleanup while any captured startup descendant remains alive', async 
   expect(runtime.sleep).toHaveBeenCalled()
 })
 
+it('leaves an orphan created before the recycled launcher PID out of the startup tree', async () => {
+  const runtime = testRuntime(() => {}, 20)
+  const alive = new Set([43210, 43211, 43212])
+  let now = 0
+  runtime.listProcesses = () => [
+    { pid: 43210, parentPid: 1, createdAt: 2_000 },
+    { pid: 43211, parentPid: 43210, createdAt: 1_000 },
+    { pid: 43212, parentPid: 43211, createdAt: 1_500 },
+  ]
+  runtime.probeProcess = (pid) => {
+    if (!alive.has(pid)) throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+  }
+  runtime.requestLauncherTreeTermination = vi.fn(() => {
+    alive.delete(43210)
+    return true
+  })
+  runtime.now = () => now
+  runtime.sleep = vi.fn(async (milliseconds: number) => { now += milliseconds })
+
+  await expect(startWindowsProcess(options, runtime)).rejects.toThrow(
+    'never published a PID before startup timed out; startup cleanup found and terminated a live process tree',
+  )
+  expect(runtime.requestLauncherTreeTermination).toHaveBeenCalledOnce()
+  expect(runtime.removeDirectory).toHaveBeenCalledOnce()
+})
+
+it('keeps a startup child whose creation time is unreadable in the tree', async () => {
+  const runtime = testRuntime(() => {}, 20)
+  const alive = new Set([43210, 43211])
+  let now = 0
+  runtime.listProcesses = () => [
+    { pid: 43210, parentPid: 1, createdAt: 2_000 },
+    { pid: 43211, parentPid: 43210 },
+  ]
+  runtime.probeProcess = (pid) => {
+    if (!alive.has(pid)) throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+  }
+  runtime.requestLauncherTreeTermination = vi.fn(() => {
+    alive.delete(43210)
+    return true
+  })
+  runtime.now = () => now
+  runtime.sleep = vi.fn(async (milliseconds: number) => { now += milliseconds })
+
+  await expect(startWindowsProcess(options, runtime)).rejects.toThrow(
+    'Could not stop Windows startup process tree 43210.',
+  )
+  expect(runtime.removeDirectory).not.toHaveBeenCalled()
+})
+
 it('verifies cleanup directly when startup process enumeration fails', async () => {
   const runtime = testRuntime(() => {}, 20)
   runtime.listProcesses = () => { throw new Error('process enumeration failed') }
