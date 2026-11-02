@@ -54,7 +54,7 @@ export function newTaskSpec(paths: OrchPaths, taskId: string): string {
 ## Target Files
 (List the target files and directories)
 
-## Requirements
+## Requirement
 -
 
 ## Completion Criteria
@@ -83,6 +83,15 @@ function localBranchExists(paths: OrchPaths, branch: string): boolean {
   }
 }
 
+/** The worktree or branch a failed task still holds; a retry waits until cleanup removes it. */
+export function failedTaskLeftover(paths: OrchPaths, taskId: string): string | undefined {
+  const worktree = worktreeDir(paths, taskId)
+  if (existsSync(worktree)) return worktree
+  const branch = branchName(taskId)
+  if (localBranchExists(paths, branch)) return `branch ${branch}`
+  return undefined
+}
+
 /**
  * Append a task to the backlog unless it is already queued, running, or done.
  * Failed tasks may be re-enqueued — that is the manual retry path — but only once
@@ -102,12 +111,8 @@ export function enqueueTask(paths: OrchPaths, taskId: string, depth = 0): Enqueu
     return { outcome: 'already-processed', taskId, status }
   }
   if (status === 'failed') {
-    const worktree = worktreeDir(paths, taskId)
-    if (existsSync(worktree)) return { outcome: 'needs-cleanup', taskId, leftover: worktree }
-    const branch = branchName(taskId)
-    if (localBranchExists(paths, branch)) {
-      return { outcome: 'needs-cleanup', taskId, leftover: `branch ${branch}` }
-    }
+    const leftover = failedTaskLeftover(paths, taskId)
+    if (leftover !== undefined) return { outcome: 'needs-cleanup', taskId, leftover }
   }
   const appended = appendBacklogUnless(
     backlog,

@@ -88,12 +88,17 @@ export interface CreateIssueInRepositoryOptions {
   optionalLabels: string[]
 }
 
+export type WorkflowRunStatus = 'pending' | 'completed'
+
+export type WorkflowRunConclusion = 'success' | 'failure'
+
 export interface WorkflowRun {
   id: number
   createdAt: string
   headSha: string
-  status: string
-  conclusion: string | null
+  status: WorkflowRunStatus
+  /** Null until the run completes, or when the forge gave a completed run no verdict. */
+  conclusion: WorkflowRunConclusion | null
 }
 
 /** A forge quota exhaustion with the instant at which calls may resume. */

@@ -10,7 +10,6 @@ import { execShellSync } from './shell.ts'
 export interface BranchTopology {
   paths: OrchPaths
   packageRoot: string
-  daemonBranch: string
   daemonHead: string
   integrationBranch?: string
   validateDaemonCheckout(): string | undefined
@@ -71,7 +70,6 @@ export function prepareBranchTopology(
     return {
       paths,
       packageRoot,
-      daemonBranch: '',
       daemonHead: '',
       validateDaemonCheckout: () => undefined,
     }
@@ -143,7 +141,6 @@ export function prepareBranchTopology(
   return {
     paths: { ...paths, repoRoot: worktree },
     packageRoot: join(worktree, relative(paths.repoRoot, packageRoot)),
-    daemonBranch,
     daemonHead,
     integrationBranch,
     validateDaemonCheckout: () => checkoutProblem(paths.repoRoot, daemonBranch, daemonHead),

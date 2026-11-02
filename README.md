@@ -2,8 +2,8 @@
 
 An autonomous improvement loop for a software repository. It scans the codebase, turns
 what it finds into tasks, runs them through an agent CLI in isolated git worktrees, merges
-what passes the repository's own tests, reviews the accumulated diff when
-`AUTO_REVIEW=true`, and opens the pull request — unattended, for as many cycles as you
+what passes the repository's own tests, reviews the accumulated diff when automatic
+review is enabled, and opens the pull request — unattended, for as many cycles as you
 allow.
 
 It is deliberately made of ordinary parts: git worktrees, a text queue, forge issues, and
@@ -23,13 +23,16 @@ specific failure; the comments in the source name the incident rather than the p
 ## How a run works
 
 ```
-scan → tasks → run in worktrees → test → merge → cycle gate → … → review (AUTO_REVIEW=true only) → promote
+scan → tasks → run in worktrees → test → merge → cycle gate → … → review (REVIEW_ENABLED and AUTO_REVIEW only) → promote
 ```
 
 Each cycle scans the repository, queues what the scan reports, executes queued tasks in
 parallel worktrees, and merges each one only after the tests selected for the paths it
 touched pass against the branch tip. Cycles end at a gate that pushes and updates a draft
-pull request. With `AUTO_REVIEW=true`, the final cycle is reviewed by an agent reading
+pull request when `AUTO_PR` is on, as it is by default. Automatic review needs both
+`REVIEW_ENABLED` (on by default) and `AUTO_REVIEW` (off by default): `REVIEW_ENABLED`
+keeps the review boundary in the cycle gate, and `AUTO_REVIEW` makes that boundary
+dispatch a review. With both on, the final cycle is reviewed by an agent reading
 the whole branch diff; a round that raises findings turns them into fix tasks and reads
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
@@ -141,6 +144,24 @@ title for project bridges rather than for the loop core. A runner module likewis
 `createRunner(options)`. Factories may be asynchronous. A runner starts its agent CLI
 through `operatingSystem.launchAgent` from `adapters/os.ts`, which resolves a Windows
 `.cmd` shim, escapes its arguments, and keeps its console hidden.
+
+The export shape only gets a module loaded; the interfaces in `src/adapters/forge.ts` and
+`src/adapters/runner.ts` are the contract it must then satisfy, and they are
+authoritative over this summary. `Forge` has over two dozen required members — pull
+requests, workflow dispatch, and the issue queue — so start from that file, or from
+`src/adapters/forge-github.ts`, rather than from a list here. `Runner` is small:
+
+- `sharedSkills` — how the runner discovers and renders repository skills.
+- `start(options): Promise<number>` — launch the agent detached in `options.worktree`
+  with `options.specFile` as its prompt, and resolve with its PID once spawned.
+- `resolveModel(options)` — optional; the model the runner will pass explicitly, if any.
+
+What makes a runner substitutable is the marker protocol, not its CLI. The agent must
+write `options.finalMessageFile`, and the task counts as completed once that file
+carries `TASK_COMPLETE` on a line of its own, written last. Before it, the file may carry
+`NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, and `DECISION_REQUIRED: <text>`
+lines. Markers that appear only in the transcript log are ignored; the task lifecycle in
+`SPEC.md` states the rule.
 
 A forge factory's `target` names the repositories to act on when they are not the
 checkout's own: `codeRepository` for branches, pull requests, and workflow runs, and
@@ -385,18 +406,26 @@ keep their previous rendering, with no warning, until a cycle runs with
 
 ## Settings worth knowing
 
-Runtime settings can be stored in `orchestration/config.json`, using the uppercase names
-below. The loop resolves file values first, then environment variables, then defaults, so
-existing launch commands and repositories without the file behave unchanged. Manage the
+Runtime settings can be stored in `orchestration/config.json`, keyed by their uppercase
+names. The table below lists only the settings an adopter is most likely to change;
+`SPEC.md` under "Retained runtime configuration" states every setting with its default and
+accepted values, including those referred to here but not listed, such as `FORGE`,
+`WORKER_MODE`, and `POLL_INTERVAL`. The loop resolves file values first, then environment
+variables, then defaults, so repositories without the file behave unchanged. A value in
+`orchestration/config.json` overrides the environment: a launch prefix such as
+`MAX_SCAN_CYCLES=12` is silently ignored for any setting the file defines, so change that
+setting in the file. Manage the
 file with `npm run config -- list`, `npm run config -- get TASK_GATE`,
 `npm run config -- set TASK_GATE light`, and `npm run config -- unset TASK_GATE`; use the
 equivalent package-prefixed command for a subtree installation.
 
 The Claude-specific model variables in the table are exceptions: the Claude adapter
 reads them directly from the process environment when it is loaded, so they are not
-settings in `orchestration/config.json`. `UPSTREAM_REPO` is also environment-only: it
-overrides the package `upstreamRepo` value for the `report-upstream` command and cannot
-be stored in `orchestration/config.json`.
+settings in `orchestration/config.json`. `PROJECT` and `PROJECT_ADAPTER` are also
+environment-only: they are read from the process environment when the project adapter is
+resolved, so `npm run config -- set PROJECT …` rejects them as unknown settings.
+`UPSTREAM_REPO` is environment-only as well: it overrides the package `upstreamRepo` value
+for the `report-upstream` command and cannot be stored in `orchestration/config.json`.
 
 Configuration commands publish updates atomically through a temporary file in the same
 directory, so readers cannot observe a partial write. The file is checked when a setting
@@ -416,7 +445,9 @@ settings update at their next use.
 | `MAX_PARALLEL` | 3 | Ordinary task agent processes at once; scan agents use `SCAN_PARALLEL` independently |
 | `SCAN_PARALLEL` | 2 | Requested scan agent processes per cycle; values must be at least 1 and are reduced to the template's numbered section count at launch, independently of `MAX_PARALLEL` |
 | `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
-| `AUTO_REVIEW` | false | Enable agent review of cycle diffs and queue the findings as fixes |
+| `AUTO_PR` | true | Push the run branch and create or update its draft pull request at each cycle gate, then promote it when the run finishes; `false` performs none of these |
+| `REVIEW_ENABLED` | true | Keep the review boundary in the cycle gate; `false` skips review even with `AUTO_REVIEW=true`, and together with `AUTO_PR=false` bypasses the cycle gate entirely |
+| `AUTO_REVIEW` | false | With `REVIEW_ENABLED=true`, have an agent review cycle diffs at the review boundary and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
 | `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |

@@ -236,7 +236,7 @@ export function createLoop(deps: LoopDeps) {
   }>()
   const reconciledCycleGates = new Set<number>()
   let issueQueueInitialized = !config.issueQueueEnabled
-  const previousGateFailures = new Map<string, { message: string; count: number }>()
+  const previousGateFailures = new Map<string, number>()
   let gateWaitTarget: string | undefined
   let idleLogState: {
     startedAt: number
@@ -390,8 +390,8 @@ export function createLoop(deps: LoopDeps) {
 
   function reportGateFailure(message: string, gate = 'draft-pr'): void {
     const previous = previousGateFailures.get(gate)
-    const count = (previous?.count ?? 0) + 1
-    previousGateFailures.set(gate, { message, count })
+    const count = (previous ?? 0) + 1
+    previousGateFailures.set(gate, count)
     const detail = count === 1 ? message : `${message} (repeated ${count} times)`
     if (count > 1) {
       event('ERROR', detail)
@@ -705,6 +705,9 @@ export function createLoop(deps: LoopDeps) {
               paths, taskId, adoptionIssues.map((candidate) => candidate.number),
             )
             recordIssuePromotions(paths, taskId, mergedCommit, runBranch)
+            // A local attempt for the same issues may have conflicted earlier; the
+            // adopted branch carries the work its kept commits were waiting to deliver.
+            retireConflictedAttempts(taskId, adoptionIssues.map((candidate) => candidate.number))
             const cycle = readCount(scanCountFile)
             if (cycle > 0) {
               rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
@@ -1202,7 +1205,7 @@ export function createLoop(deps: LoopDeps) {
         if (combinesReviewFindings) {
           const file = specFile(paths, newId)
           const spec = readFileSync(file, 'utf8').replace(
-            '## Requirements\n-\n',
+            '## Requirement\n-\n',
             `## Requirement\n\n${desc}\n`,
           )
           writeFileSync(file, spec)
@@ -1886,6 +1889,13 @@ export function createLoop(deps: LoopDeps) {
       previousGateFailures.delete('draft-pr')
       return true
     }
+    // A person closed the run PR mid-run. Its branch still holds every merge of the run,
+    // and those issues stay promoted to it, so a second PR would only bypass that person.
+    // Stop for them on repetition, as the final gate does.
+    if (status.state === 'closed') {
+      reportGateFailure('could not update PR because it is closed')
+      return false
+    }
 
     try {
       const ahead = gitIn(paths.repoRoot, ['rev-list', '--count', `${baseRef}..HEAD`]).trim()
@@ -2236,10 +2246,14 @@ export function createLoop(deps: LoopDeps) {
               LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_MERGE_FAILED,
             ].includes(label)))
         const pendingIssueNumbers: number[] = []
+        const inspectedIssueNumbers = new Set<number>()
         for (const issue of openIssues) {
           if (issuePromotionForIssue(paths, issue.number) !== undefined) continue
           try {
             const comments = await commentsForIssue(issue)
+            if (!comments.some((comment) => comment.author.permissionLookupFailed === true)) {
+              inspectedIssueNumbers.add(issue.number)
+            }
             const mergeSha = standingMergeMarkers(comments)
               .map((comment) => /^MERGED: [^\r\n]+\r?\nMerged as ([0-9a-f]{40,64}) into run branch /i.exec(comment.body)?.[1])
               .find((sha) => sha !== undefined
@@ -2254,6 +2268,25 @@ export function createLoop(deps: LoopDeps) {
         pendingIssueNumbers.sort((a, b) => a - b)
         const remoteCount = pendingIssueNumbers.length
         warningLog.recovered('count-remote-issue-work')
+        // A merge-failed issue with no active lifecycle label waits for a person: nothing
+        // in the loop adopts, reaps, or retries it. When such issues are all that remains,
+        // waiting would hold the gate forever, so stop with the repair instead of promoting.
+        // An issue whose comments could not be judged may already be merged elsewhere, so
+        // it keeps the loop waiting for a later poll to ask again.
+        const awaitsRepair = (issueNumber: number): boolean => {
+          if (!inspectedIssueNumbers.has(issueNumber)) return false
+          const labels = openIssues.find((issue) => issue.number === issueNumber)?.labels ?? []
+          return labels.includes(LABEL_MERGE_FAILED)
+            && ![LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY].some((label) => labels.includes(label))
+        }
+        if (remoteCount > 0 && pendingIssueNumbers.every(awaitsRepair)) {
+          const issues = pendingIssueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
+          const reason = `Issues ${issues} are labelled ${LABEL_MERGE_FAILED} and are the only remaining work. Repair each adoption named in its comment, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, and restart the loop.`
+          if (!decisionAlreadyRecorded(reason)) appendFileSync(decisionsFile, `${reason}\n`)
+          event('ERROR', reason)
+          writeFileSync(stopFile, '')
+          return 'continue'
+        }
         if (remoteCount > 0) {
           gateWaitTarget = 'open finding'
           const pending = pendingIssueNumbers.join(' ')
@@ -3185,7 +3218,9 @@ export function createLoop(deps: LoopDeps) {
             // Closing promoted issues is bookkeeping a later poll can finish; it must not
             // cost this poll its claims.
             try {
-              const { closed, returned } = await closePromotedIssues(forge, paths, promotedCommitContained)
+              const { closed, returned } = await closePromotedIssues(
+                forge, paths, promotedCommitContained, optionalGit(['branch', '--show-current']).trim(),
+              )
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
               }

@@ -1518,6 +1518,7 @@ export async function mergeRemoteTask(
     runMergeChecks(worktree, currentBranch, options, io)
   })
 
+  const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   mergeWithVerifiedRecovery(
     paths.repoRoot,
     ['merge', '--quiet', '--no-ff', remoteRef, '-m', mergeMessage],
@@ -1525,6 +1526,11 @@ export async function mergeRemoteTask(
     mergeRuntime,
   )
   const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  // As in mergeTask, an unmoved HEAD means none of the worker's commits landed, so the
+  // issue must not be recorded as promoted.
+  if (mergeCommit === headBeforeMerge) {
+    throw new MergeError(`Adopting ${branch} created no commit on ${currentBranch}.`)
+  }
   options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,

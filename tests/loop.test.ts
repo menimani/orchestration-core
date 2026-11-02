@@ -35,6 +35,7 @@ import {
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
 import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
+import { refreshAll } from '../src/refresh.ts'
 import { readStatus } from '../src/status.ts'
 import { StartupProcessRetainedError, startTask } from '../src/start.ts'
 import { enqueueTask, specFile } from '../src/tasks.ts'
@@ -2961,6 +2962,63 @@ describe('remote issue queue idle detection', () => {
     expect(logText()).toContain('Recovered closing promoted issues after 0 minutes')
   })
 
+  it('neither releases nor recreates the run pull request a person closed mid-run', async () => {
+    paths = {
+      ...paths,
+      fleet: {
+        dir: repoRoot, project: 'example', repository: 'owner/example',
+        issueRepository: 'owner/fleet',
+      },
+    }
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, 'merged-task', [issueNumber])
+    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
+    fakeForge.prStatus = async () => ({
+      state: 'closed',
+      isDraft: false,
+      url: 'https://example.test/pull/9',
+      headSha: mergeCommit,
+      checks: [],
+    })
+    const createPr = vi.fn(async () => 'https://example.test/pull/10')
+    fakeForge.createPr = createPr
+
+    await loop.poll()
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+
+    // The run branch still holds the merge, so the issue stays promoted to it.
+    expect(createPr).not.toHaveBeenCalled()
+    expect(logText()).toContain('WARN could not update PR because it is closed')
+    expect(logText()).not.toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('merged-task')
+    expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(logText()).toContain('ERROR could not update PR because it is closed (repeated 2 times)')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(createPr).not.toHaveBeenCalled()
+
+    // A later run on another branch has abandoned the closed one, so its issue is ready.
+    git(['switch', '--quiet', '-c', 'feature/next-run'])
+    rmSync(join(paths.queueDir, 'stop'), { force: true })
+    loop.initializeSessionStateForBranch()
+    await loop.poll()
+    expect(logText()).toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    expect((await fakeForge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
+  })
+
   async function promotedIssueLoop(headSha: string) {
     paths = {
       ...paths,
@@ -3301,17 +3359,39 @@ describe('remote issue queue idle detection', () => {
     expect(logged).toContain('Running Status      Task=2  Queue=1')
   })
 
-  it('defers the cycle gate and review while a merge-failed issue is open', async () => {
+  it('stops with the repair when merge-failed issues are the only remaining work', async () => {
     const loop = makeReviewLoop(true)
     await fakeForge.createIssue({
       title: 'adoption needs repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
     })
+    const reason = 'Issues #1 are labelled loop:merge-failed and are the only remaining work. Repair each adoption named in its comment, remove loop:merge-failed, add loop:ready, and restart the loop.'
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'decisions.txt'), 'utf8')).toBe(`${reason}\n`)
+    expect(logText()).toContain(`ERROR ${reason}`)
+    expect(logText()).not.toContain('Waiting remote')
+  })
+
+  it('keeps waiting on a merge-failed issue while other remote work is active', async () => {
+    const loop = makeReviewLoop(true)
+    await fakeForge.createIssue({
+      title: 'adoption needs repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
+    })
+    await fakeForge.createIssue({
+      title: 'still running', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-    expect(logText()).toBe('Waiting remote      issues #1')
+    expect(logText()).toBe('Waiting remote      issues #1 #2')
   })
 
   it('defers the cycle gate and review when remote issue listing fails', async () => {
@@ -3636,6 +3716,26 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(await loop.poll()).toBe('continue')
     expect(logText()).toContain('ERROR 3 tasks failed in one poll; stopping for environment repair')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('does not count tasks refreshed by status between a stop and a restart as a burst', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    const taskIds = ['stopped-f1', 'stopped-f2', 'stopped-f3']
+    for (const taskId of taskIds) writeRawStatus(taskId, 'running', null)
+
+    // `status` run while no daemon holds the queue, as after a graceful stop.
+    await refreshAll(paths, { daemonOwnsQueue: false })
+    for (const taskId of taskIds) expect(readStatus(paths, taskId)?.status).toBe('running')
+
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of taskIds) {
+      expect(readStatus(paths, taskId)?.status).toBe('failed')
+      expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`)
+    }
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
   it('neither announces nor counts failures left by a finished run', async () => {
@@ -4471,6 +4571,41 @@ describe('completion marker output', () => {
     expect(await loop.postLoopPr()).toBe(false)
 
     expect(logText()).not.toContain('LOOP_DONE')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('records a PR merged before the final gate that holds HEAD without opening another', async () => {
+    const headSha = initializeGitRepoWithRemote()
+    forgeStatus = {
+      state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha, checks: [],
+    }
+    const loop = makeLoop()
+    const createPr = vi.fn(async () => 'https://example.test/pull/2')
+    fakeForge.createPr = createPr
+
+    expect(await loop.ensureDraftPr('final')).toBe(true)
+
+    expect(createPr).not.toHaveBeenCalled()
+    expect(readFileSync(join(paths.queueDir, 'pr-url.txt'), 'utf8'))
+      .toBe('https://example.test/pull/1\n')
+    expect(logText()).not.toContain('WARN')
+  })
+
+  it('fails the final gate when a merged PR head cannot be compared with HEAD', async () => {
+    initializeGitRepoWithRemote()
+    forgeStatus = {
+      state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha: 'f'.repeat(40), checks: [],
+    }
+    const loop = makeLoop()
+    const createPr = vi.fn(async () => 'https://example.test/pull/2')
+    fakeForge.createPr = createPr
+
+    expect(await loop.ensureDraftPr('final')).toBe(false)
+
+    expect(createPr).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'pr-url.txt'))).toBe(false)
+    expect(logged.filter((line) => line.startsWith('WARN could not compare merged PR head with HEAD: ')))
+      .toHaveLength(1)
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 

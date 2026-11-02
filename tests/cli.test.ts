@@ -951,6 +951,29 @@ describe('manual task commands', () => {
     expect(result.stderr).toBe('Task not found: manual-unknown\n')
   })
 
+  // A graceful stop leaves exactly this state; the next daemon, not status, classifies it.
+  it('leaves a running task without a process record running while no loop runs', async () => {
+    const paths = orchPaths(repoRoot)
+    await writeStatus(paths, 'stopped-in-flight', 'running')
+
+    const result = runCli(['status'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(`${'stopped-in-flight'.padEnd(20)} ${'running'.padEnd(10)} pid=\n`)
+    expect(runCli(['status', 'stopped-in-flight']).stdout).toContain('running')
+  })
+
+  it('fails a running task without a process record while a loop runs', async () => {
+    const paths = orchPaths(repoRoot)
+    await writeStatus(paths, 'dead-in-flight', 'running')
+    writeFileSync(join(paths.queueDir, 'loop.pid'), processMarkerText(processMarker(process.pid)))
+
+    const result = runCli(['status', 'dead-in-flight'])
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(`${'dead-in-flight'.padEnd(20)} ${'failed'.padEnd(10)} pid=\n`)
+  })
+
   it('reports that there are no tasks when none has a status record', () => {
     const result = runCli(['status'])
 
@@ -1008,6 +1031,16 @@ describe('manual task commands', () => {
       'Merge task/manual-merge-declined into the current branch? [y/N] Aborted.\n',
     )
     expect(result.stderr).toBe('')
+  })
+
+  it.each(['y\n', 'Y\n'])('proceeds with a merge without --yes on the answer %j', (answer) => {
+    const result = runCli(['merge', 'manual-merge-accepted'], answer)
+
+    expect(result.stdout).toBe(
+      'Merge task/manual-merge-accepted into the current branch? [y/N] Merging manual-merge-accepted\n',
+    )
+    expect(result.status).toBe(1)
+    expect(result.stderr).toBe('Task not found: manual-merge-accepted\n')
   })
 
   it('rejects an unknown merge option before asking', () => {

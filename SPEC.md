@@ -63,6 +63,15 @@ comments and other items cite items by number, so a number is never reused.
   are zero-padded, event names occupy a ten-character column, and subjects shorter than
   twelve characters are padded so details align. Events preserve their complete first
   line; multiline traces and command output belong in the referenced task or suite log.
+  A recoverable warning is deduplicated by its call site and full message: the first
+  occurrence writes `WARN <first line>` to `loop.log` and its full text, timestamped, to
+  `logs/warn-detail.log`. Further occurrences are counted, and once ten minutes have
+  passed since the last line for that warning, `loop.log` receives
+  `WARN <first line> repeated <n> times` and the count restarts. Warnings from different
+  call sites are tracked independently. When the call site next succeeds, its warnings
+  are cleared and `loop.log` receives one `Recovered <operation> after <n> minutes`
+  event, the whole minutes since the earliest of them first occurred; a call site with
+  no active warning records nothing.
   The three machine markers
   are the exception to presentation-only output: a foreground loop also prints each
   marker as an exact standalone line, while a background loop writes that exact line to
@@ -128,8 +137,9 @@ comments and other items cite items by number, so a number is never reused.
   usage, unknown flag-shaped arguments fail before forge access, and `--dry-run` prints
   the exact title and body without filing. An interactive invocation prints that same
   preview and requires confirmation; a declined confirmation never contacts the forge.
-- The manual task commands each take the task id as their first argument and, given
-  none, print their usage and exit non-zero.
+- `new`, `enqueue`, `start`, `logs`, and `merge` each take the task id as their first
+  argument and, given none, print their usage and exit non-zero. `status` given no id
+  lists every task and exits zero, and `queue` takes no id.
   `new <task-id>` writes the task specification template to `tasks/<task-id>.md` and
   prints `Created: <file>`; an existing specification is an error, never overwritten.
   `enqueue <task-id> [depth]` appends `<task-id>:<depth>` to `queue/backlog.txt` and
@@ -149,6 +159,9 @@ comments and other items cite items by number, so a number is never reused.
   `status [<task-id>]` refreshes each running task, deciding completion from its final
   message as the loop does, then prints one line per task naming its id, status, and
   PID, or that there are none; a named task without a status record exits non-zero.
+  While no loop holds the queue, a running task with no process record and no completion
+  marker stays running, so a graceful stop's in-flight tasks reach the next loop as
+  dead at startup rather than as fresh failures.
   `queue` prints the backlog with each entry's depth, or `(empty)`, followed by the
   `status` listing.
   `logs <task-id> [-f]` prints the task's log; `-f` prints its last ten lines and then
@@ -156,9 +169,9 @@ comments and other items cite items by number, so a number is never reused.
   missing log is an error.
   `merge <task-id> [--yes] [--test-cmd "<cmd>"]` merges `task/<task-id>` into the current
   branch as the loop's merge does (item 8 onwards). Without `--yes` it asks first, and
-  any answer but `y` prints `Aborted.` and exits zero. `--test-cmd` replaces `TEST_CMD`
-  for this merge; any other option is an error. A grouped task missing a requirement's
-  completion marker is refused before the merge. A completed merge resets the
+  any answer but `y` or `Y` prints `Aborted.` and exits zero. `--test-cmd` replaces
+  `TEST_CMD` for this merge; any other option is an error. A grouped task missing a
+  requirement's completion marker is refused before the merge. A completed merge resets the
   consecutive merge-failure count and, for an issue-born task, records the promotion and
   comments the merge on each linked issue, a failed comment being only a `WARN:`. A
   merge refusal prints its reason and exits non-zero.
@@ -273,8 +286,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    name the same file. Listings sort chronologically.
 3. `queue/desc-index` maps a description to its current task id. The same decision
    delegated twice resolves to one task, as does a repeated finding while its indexed
-   task is queued, running, completed, or failed. A failed task is not re-queued; once
-   `cleanup` has removed it, the repeated finding re-admits that task. If an identical
+   task is queued, running, completed, or failed. A failed task is not re-queued while
+   its worktree or branch remains; once `cleanup` has removed them, the repeated finding
+   re-admits that task. An issue claim cannot wait for that cleanup, so a claimed issue
+   whose indexed task failed and still holds its worktree or branch creates a fresh task
+   and updates the index. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
    creates a fresh task and updates the index; completed advisories remain deduplicated.
    A worker never merges, so in worker mode a completed task counts as finished here: a
@@ -408,8 +424,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
    issue again its new specification carries the same section. An issue whose chain has
    used both retries is instead parked under `loop:retry-exhausted` by the same release,
    with a `Parked` event that does not stop the loop; its record and branches are kept. When a retry merges or
-   completes without changes, every branch kept for its chain is deleted and its records
-   are removed. Pre-merge tests are chosen from the paths the
+   completes without changes, or a remote worker branch is adopted for one of its linked
+   issues, every branch kept for its chain is deleted and its records are removed. Pre-merge tests are chosen from the paths the
    rebased worktree touched. `TASK_GATE=full` asks the project adapter for its full merge
    checks; `TASK_GATE=light` asks it for reduced merge checks. At each cycle-gate entry,
    light mode runs every step in the adapter's cycle suite, while full mode runs only
@@ -585,10 +601,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     directory selected by an agent adapter. The runner supplies its target, and the
     project adapter supplies targets for additional interactive agents. The Codex adapter
     renders into repository root `.agents/skills/`; the Claude adapter renders into
-    `.claude/skills/` and resolves only the command prefix because the canonical sources
-    already use that agent's format. The sync runs only for the repository that owns the
-    package and for a subtree consumer. A fleet project runs the package from outside its
-    checkout, so the sync is skipped and its skills come from `install-skills`.
+    `.claude/skills/` and resolves only the command prefix and package path prefix
+    placeholders, `{{ORCHESTRATION_COMMAND_PREFIX}}` and
+    `{{ORCHESTRATION_PACKAGE_PATH_PREFIX}}`, because the canonical sources already use
+    that agent's format. The package path prefix is the package directory relative to
+    the repository root with a trailing `/`, and empty in the owning repository. The
+    sync runs only for the repository that owns the package and for a subtree consumer.
+    A fleet project runs the package from outside its checkout, so the sync is skipped and its skills come from `install-skills`.
     Both use
     `npm run` as the command prefix in the owning repository and
     `npm run -C <package-path>` in a subtree consumer, and duplicate destinations are
@@ -625,14 +644,21 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the draft PR, emit `CYCLE_COMPLETE: <n>/<max>` with the PR URL to the machine-marker
     sink and a formatted copy to `loop.log`, then the CI gate,
     then review. Remote work defers the gate with a `Waiting remote` event when its
-    pending issue set changes and every ten minutes while unchanged. A light-gate cycle
+    pending issue set changes and every ten minutes while unchanged. When every pending
+    issue carries `loop:merge-failed` and none of `loop:ready`, `loop:in-progress`, or
+    `loop:merge-ready`, and each one's comments were read with every author's access
+    determined, nothing in the loop will change them: the gate records the repair in
+    `queue/decisions.txt` (deduped), logs it as an `ERROR`, and writes the stop file
+    instead of waiting or promoting. A light-gate cycle
     suite logs its `Started Suite` event before invoking the blocking commands. Its
     passing verdict is retained for that commit while PR setup retries, and is discarded
     as soon as the branch tip changes. A suite step that exits 75 (the test lock wait
     timeout, see Runtime) never ran: the gate logs a WARN that the repository test lock
     stayed busy, writes no stop file, and a later poll runs the suite again. Repeated
     gate failures remain visible with a count; any repeated non-rate-limit PR-setup
-    failure logs `ERROR`, writes the stop file, and stops retrying.
+    failure logs `ERROR`, writes the stop file, and stops retrying. A run PR a person
+    closed mid-run is such a failure: its branch still holds the run's merges, so the loop
+    never opens a second PR for it.
     When scanning is disabled and the local backlog plus the known shared finding set are
     empty, the gate is final because no source can produce more work; it promotes and
     exits through the same path as the scan cap. An unavailable shared finding snapshot
@@ -1119,12 +1145,12 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     holding back that poll's claims. A promoted issue the forge reports as deleted is no
     longer awaited: its promotion record is dropped, along with the task's issue map once no
     promotion of that task remains, and the promotions after it still close. A run pull
-    request closed without merging will never land its work, so the merger comments
-    `UNPROMOTED: <task-id>` on each issue recorded for that run branch, naming the merge
-    commit, run branch, and pull request, returns the issue to ready and unassigned, drops
+    request closed without merging will never land its work once a later run has left its
+    branch, so the merger then comments `UNPROMOTED: <task-id>` on each issue recorded
+    for that run branch, naming the merge commit, run branch, and pull request, returns the issue to ready and unassigned, drops
     its promotion record the same way, and logs a `Released` event. The comment withdraws
     the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. Workers never
-    close promoted issues. Immediately after merging, the worker comments on every linked issue with the
+    close promoted issues. Immediately after merging, the merger comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
