@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { operatingSystem } from './adapters/os.ts'
 import { finalMessageFile, type OrchPaths } from './paths.ts'
+import { taskProcessRecorded } from './processRegistry.ts'
 import { readStatus, transitionStatus, type TaskStatus } from './status.ts'
 
 // The status refresh. Only a running task is ever
@@ -41,13 +42,17 @@ export interface RefreshOptions {
  * Refresh one task: a live process with the marker is completed; a dead process is
  * completed or failed by whether the marker made it into the final message. Without a
  * daemon, a task with no PID record and no marker stays running for the next daemon to
- * classify. Returns the status after refresh.
+ * classify; one whose record outlived its process crashed and is failed. Returns the
+ * status after refresh.
  */
 export async function refreshTask(
   paths: OrchPaths,
   taskId: string,
   { daemonOwnsQueue = true }: RefreshOptions = {},
 ): Promise<TaskStatus | undefined> {
+  // Asked before the status is read: reading it drops a record whose process is gone,
+  // after which a crashed runner would look like one a graceful stop released.
+  const recorded = taskProcessRecorded(paths, taskId)
   const status = readStatus(paths, taskId)
   if (status === undefined || status.status !== 'running') return status
 
@@ -61,7 +66,7 @@ export async function refreshTask(
     }
   } else if (completionMarkerPresent(paths, taskId)) {
     next = 'completed'
-  } else if (daemonOwnsQueue || status.pid !== null) {
+  } else if (daemonOwnsQueue || recorded || status.pid !== null) {
     next = 'failed'
   }
   if (next === undefined) return status
