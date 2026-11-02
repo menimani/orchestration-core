@@ -111,6 +111,20 @@ export function recordTaskProcess(
   }
 }
 
+/**
+ * Whether an entry is recorded for `taskId`, live or stale. Reading the PID drops a stale
+ * entry, so a caller that must tell a crashed runner from a task that has no entry asks
+ * this first.
+ */
+export function taskProcessRecorded(paths: OrchPaths, taskId: string): boolean {
+  try {
+    return statSync(registryFile(paths, taskId)).isFile()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
 /** Forget the process for `taskId`. Safe to call when nothing was recorded. */
 export function forgetTaskProcess(paths: OrchPaths, taskId: string): void {
   rmSync(registryFile(paths, taskId), { force: true })

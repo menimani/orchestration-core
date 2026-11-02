@@ -105,6 +105,20 @@ describe('refreshTask', () => {
     expect(readFileSync(file, 'utf8')).toBe(before)
   })
 
+  it('fails a task whose process record outlived its runner while no daemon owns the queue',
+    async () => {
+      const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+        .mockReturnValue('started:crashed')
+      writeRawStatus('crashed-task', '{"status":"running","pid":2147483647}\n')
+      processStartIdentity.mockReturnValue(undefined)
+      vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+      vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(false)
+
+      const after = await refreshTask(paths, 'crashed-task', { daemonOwnsQueue: false })
+
+      expect(after).toMatchObject({ status: 'failed', pid: null })
+    })
+
   it('completes a task without a process record while no daemon owns the queue', async () => {
     writeRawStatus('stopped-done', '{"status":"running","pid":null}\n')
     writeFileSync(finalMessageFile(paths, 'stopped-done'), 'TASK_COMPLETE\n')
