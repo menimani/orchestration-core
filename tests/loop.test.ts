@@ -65,6 +65,27 @@ vi.mock('../src/cleanup.ts', async (importOriginal) => {
   }
 })
 
+const mergedStatusFailure = vi.hoisted(() => ({
+  taskId: undefined as string | undefined,
+  onWrite: undefined as (() => void) | undefined,
+}))
+
+// Recording a merge runs unchanged unless a test names a task whose process must die
+// right after the merged status reaches disk.
+vi.mock('../src/status.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/status.ts')>()
+  return {
+    ...actual,
+    writeMergedStatus: async (...args: Parameters<typeof actual.writeMergedStatus>) => {
+      if (args[1] !== mergedStatusFailure.taskId) return actual.writeMergedStatus(...args)
+      mergedStatusFailure.taskId = undefined
+      mergedStatusFailure.onWrite?.()
+      await actual.writeMergedStatus(...args)
+      throw new Error('process stopped after recording the merge')
+    },
+  }
+})
+
 let repoRoot: string
 let paths: OrchPaths
 let logged: string[]
@@ -4931,6 +4952,42 @@ describe('completed task merge recovery', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('reopens the waiting gate before the merged status is recorded', async () => {
+    const taskId = '20260820_181837_036_auto-gate-before-merged-status'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const completeFlag = join(paths.queueDir, 'cycle-complete-1')
+    const resumeFlag = join(paths.queueDir, 'cycle-resume-1')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(completeFlag, '')
+    writeFileSync(resumeFlag, '')
+    let flagsAtRecord: boolean[] = []
+    mergedStatusFailure.taskId = taskId
+    mergedStatusFailure.onWrite = () => {
+      flagsAtRecord = [existsSync(completeFlag), existsSync(resumeFlag)]
+    }
+    const loopConfig = {
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    }
+    const loop = makeLoop(loopConfig)
+    loop.initializeSessionStateForBranch()
+
+    await loop.poll().catch(() => undefined)
+
+    expect(flagsAtRecord).toEqual([false, false])
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+
+    // A restart finds the task merged and skips it, so the gate must run again on the
+    // flags alone.
+    logged = []
+    const restarted = makeLoop(loopConfig)
+    expect(await restarted.poll()).toBe('continue')
+
+    expect(logText()).not.toContain(`Merging ${shortTaskId(taskId)}`)
+    expect(existsSync(completeFlag)).toBe(false)
+    expect(existsSync(resumeFlag)).toBe(false)
   })
 
   it('stops without recording a failure when a failed rebase leaves the task worktree mid-rebase', async () => {

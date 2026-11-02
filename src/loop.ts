@@ -700,6 +700,13 @@ export function createLoop(deps: LoopDeps) {
         const persistPromotion = (mergedCommit: string): void => {
           appliedMergeCommit = mergedCommit
           try {
+            // The flags go first: once the promotion is recorded, a restart treats the
+            // adoption as done and would promote the new commits past a stale gate.
+            const cycle = readCount(scanCountFile)
+            if (cycle > 0) {
+              rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+              rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
+            }
             writeFileSync(mergeFailureFile, '0\n')
             recordIssuesForTask(
               paths, taskId, adoptionIssues.map((candidate) => candidate.number),
@@ -708,11 +715,6 @@ export function createLoop(deps: LoopDeps) {
             // A local attempt for the same issues may have conflicted earlier; the
             // adopted branch carries the work its kept commits were waiting to deliver.
             retireConflictedAttempts(taskId, adoptionIssues.map((candidate) => candidate.number))
-            const cycle = readCount(scanCountFile)
-            if (cycle > 0) {
-              rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
-              rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
-            }
           } catch (error) {
             promotionPersistenceError = error
             throw error
@@ -2756,22 +2758,25 @@ export function createLoop(deps: LoopDeps) {
           onOrchestrationDepsEvent: orchestrationDepsEvent,
           beforeOrchestrationDepsInstall: stopTaskProcessesBeforeDependencyInstall,
           onMergeStart: () => event('Merging', shortTaskId(taskId)),
+          // A task delegated while the gate was waiting merges commits the gate has
+          // already pushed past; clearing the flags makes the gate push and verify again
+          // with the new commits included. The resume flag goes too, or a merge after the
+          // gate passed would reach promotion without suite, CI, or review. This runs
+          // before the merged status is written, since a restart that finds the task
+          // merged never comes back to it.
+          beforeMergeRecorded: () => {
+            if (isInspectionTaskId(paths, taskId)) return
+            const cycle = readCount(scanCountFile)
+            if (cycle > 0) {
+              rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
+              rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
+            }
+          },
           // Runs before the dependency sync: an install failure there stops the loop,
           // and a restart that finds the task merged never comes back to this point.
           onMerged: () => {
             writeFileSync(mergeFailureFile, '0\n')
             retireConflictedAttempts(taskId, linkedIssues)
-            // A task delegated while the gate was waiting merges commits the gate has
-            // already pushed past; clearing the flags makes the gate push and verify
-            // again with the new commits included. The resume flag goes too, or a merge
-            // after the gate passed would reach promotion without suite, CI, or review.
-            if (!isInspectionTaskId(paths, taskId)) {
-              const cycle = readCount(scanCountFile)
-              if (cycle > 0) {
-                rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
-                rmSync(join(paths.queueDir, `cycle-resume-${cycle}`), { force: true })
-              }
-            }
           },
           onMergeSkipped: (reason) => event(
             'Skipped', shortTaskId(taskId),
