@@ -2143,6 +2143,27 @@ describe('reapStaleLeases', () => {
     expect(repaired.labels).toEqual([LABEL_FINDING, LABEL_READY])
   })
 
+  it('stops reconciliation when a ready issue keeps its assignees after repair', async () => {
+    const base = new Date('2026-08-08T12:00:00Z')
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const stranded = await forge.createIssue({
+      title: 'stranded ready', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_READY], assignees: ['worker-gone'],
+    })
+    const unassigned: Array<[number, string]> = []
+    forge.unassignIssue = async (number, assignee) => {
+      unassigned.push([number, assignee])
+    }
+
+    await expect(reapStaleLeases(forge, paths, 3, base)).rejects.toThrow(
+      `Issue #${stranded} still has assignees after ready-lease repair`,
+    )
+    expect(unassigned).toEqual([[stranded, 'worker-gone']])
+    const issue = await forge.getIssue(stranded)
+    expect(issue.assignees).toEqual(['worker-gone'])
+    expect(issue.labels).toEqual([LABEL_FINDING, LABEL_READY])
+  })
+
   it('leaves an assigned ready issue alone until its lease window has passed', async () => {
     forge.clock = () => new Date('2026-08-08T11:30:00Z')
     const fresh = await forge.createIssue({
@@ -2394,6 +2415,34 @@ describe('reapStaleLeases', () => {
 
     expect(forge.issueComments.get(issueNumber)).toEqual([marker])
     expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
+  })
+
+  it('stops reconciliation when a reposted merge marker is not visible on read-back', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-merged', [issueNumber])
+    recordIssuePromotions(paths, 'task-merged', 'abc123', 'feature/run-9')
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+    const posted: Array<[number, string]> = []
+    forge.commentIssue = async (number, body) => {
+      posted.push([number, body])
+    }
+
+    await expect(reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).rejects.toThrow(`Issue #${issueNumber} merge comment is not visible after publishing it`)
+
+    expect(posted).toEqual([
+      [issueNumber, issueMergeComment('task-merged', 'abc123', 'feature/run-9')],
+    ])
+    expect(forge.issueComments.get(issueNumber) ?? []).toEqual([])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
   })
 
   it('leaves a promotion pending while its marker author permission is undetermined', async () => {
