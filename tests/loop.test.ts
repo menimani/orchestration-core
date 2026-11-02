@@ -65,6 +65,27 @@ vi.mock('../src/cleanup.ts', async (importOriginal) => {
   }
 })
 
+const mergedStatusFailure = vi.hoisted(() => ({
+  taskId: undefined as string | undefined,
+  onWrite: undefined as (() => void) | undefined,
+}))
+
+// Recording a merge runs unchanged unless a test names a task whose process must die
+// right after the merged status reaches disk.
+vi.mock('../src/status.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/status.ts')>()
+  return {
+    ...actual,
+    writeMergedStatus: async (...args: Parameters<typeof actual.writeMergedStatus>) => {
+      if (args[1] !== mergedStatusFailure.taskId) return actual.writeMergedStatus(...args)
+      mergedStatusFailure.taskId = undefined
+      mergedStatusFailure.onWrite?.()
+      await actual.writeMergedStatus(...args)
+      throw new Error('process stopped after recording the merge')
+    },
+  }
+})
+
 let repoRoot: string
 let paths: OrchPaths
 let logged: string[]
@@ -3364,7 +3385,7 @@ describe('remote issue queue idle detection', () => {
     await fakeForge.createIssue({
       title: 'adoption needs repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
     })
-    const reason = 'Issues #1 are labelled loop:merge-failed and are the only remaining work. Repair each adoption named in its comment, remove loop:merge-failed, add loop:ready, and restart the loop.'
+    const reason = 'Issues #1 are labelled loop:merge-failed and are the only remaining work. Repair each adoption named in its comment, remove loop:merge-failed and any loop:merge-ready, add loop:ready, and restart the loop.'
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(await loop.triggerScanIfIdle()).toBe('continue')
@@ -3374,6 +3395,21 @@ describe('remote issue queue idle detection', () => {
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
     expect(readFileSync(join(paths.queueDir, 'decisions.txt'), 'utf8')).toBe(`${reason}\n`)
     expect(logText()).toContain(`ERROR ${reason}`)
+    expect(logText()).not.toContain('Waiting remote')
+  })
+
+  it('stops with the repair when a failure relabel left merge-ready beside merge-failed', async () => {
+    const loop = makeReviewLoop(true)
+    await fakeForge.createIssue({
+      title: 'half-relabelled adoption', body: '',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY, 'loop:merge-failed'],
+    })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(logText()).toContain('ERROR Issues #1 are labelled loop:merge-failed')
     expect(logText()).not.toContain('Waiting remote')
   })
 
@@ -4931,6 +4967,42 @@ describe('completed task merge recovery', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(false)
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('reopens the waiting gate before the merged status is recorded', async () => {
+    const taskId = '20260820_181837_036_auto-gate-before-merged-status'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const completeFlag = join(paths.queueDir, 'cycle-complete-1')
+    const resumeFlag = join(paths.queueDir, 'cycle-resume-1')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(completeFlag, '')
+    writeFileSync(resumeFlag, '')
+    let flagsAtRecord: boolean[] = []
+    mergedStatusFailure.taskId = taskId
+    mergedStatusFailure.onWrite = () => {
+      flagsAtRecord = [existsSync(completeFlag), existsSync(resumeFlag)]
+    }
+    const loopConfig = {
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    }
+    const loop = makeLoop(loopConfig)
+    loop.initializeSessionStateForBranch()
+
+    await loop.poll().catch(() => undefined)
+
+    expect(flagsAtRecord).toEqual([false, false])
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+
+    // A restart finds the task merged and skips it, so the gate must run again on the
+    // flags alone.
+    logged = []
+    const restarted = makeLoop(loopConfig)
+    expect(await restarted.poll()).toBe('continue')
+
+    expect(logText()).not.toContain(`Merging ${shortTaskId(taskId)}`)
+    expect(existsSync(completeFlag)).toBe(false)
+    expect(existsSync(resumeFlag)).toBe(false)
   })
 
   it('stops without recording a failure when a failed rebase leaves the task worktree mid-rebase', async () => {

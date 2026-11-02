@@ -339,7 +339,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    operator cleanup also returns linked issues to `loop:ready` and removes their local
    task mapping. A forge failure is warned about without undoing the local cleanup; the
    cleanup leaves a durable release intent and retains the task mapping until the daemon
-   retries the release successfully. Reconciliation runs on each poll before stale-lease
+   retries the release successfully. A queued task outside the issue queue whose startup
+   fails before any status is persisted is not failed: it is re-enqueued at its depth and
+   left for a later poll. The first such failure warns; the same task failing to start
+   again with no successful start in between logs `ERROR` and writes the stop file, and a
+   re-enqueue that itself fails does so at once. Reconciliation runs on each poll before stale-lease
    reaping; three consecutive failed polls stop the loop, while a successful poll clears
    the failure streak. Persisted issue mappings, release preparations, and release intents
    are either empty or contain one positive safe integer per line. Any malformed entry
@@ -645,8 +649,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     sink and a formatted copy to `loop.log`, then the CI gate,
     then review. Remote work defers the gate with a `Waiting remote` event when its
     pending issue set changes and every ten minutes while unchanged. When every pending
-    issue carries `loop:merge-failed` and none of `loop:ready`, `loop:in-progress`, or
-    `loop:merge-ready`, and each one's comments were read with every author's access
+    issue carries `loop:merge-failed` and neither `loop:ready` nor `loop:in-progress` — a
+    `loop:merge-ready` left beside it is a failure relabel that did not finish, which
+    adoption skips as well — and each one's comments were read with every author's access
     determined, nothing in the loop will change them: the gate records the repair in
     `queue/decisions.txt` (deduped), logs it as an `ERROR`, and writes the stop file
     instead of waiting or promoting. A light-gate cycle
@@ -656,7 +661,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     timeout, see Runtime) never ran: the gate logs a WARN that the repository test lock
     stayed busy, writes no stop file, and a later poll runs the suite again. Repeated
     gate failures remain visible with a count; any repeated non-rate-limit PR-setup
-    failure logs `ERROR`, writes the stop file, and stops retrying. A run PR a person
+    failure logs `ERROR`, writes the stop file, and stops retrying, as does a repeated
+    non-rate-limit failure to read the PR's CI status (item 16). A run PR a person
     closed mid-run is such a failure: its branch still holds the run's merges, so the loop
     never opens a second PR for it.
     When scanning is disabled and the local backlog plus the known shared finding set are
@@ -680,7 +686,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
-    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. An open
+    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. A PR status
+    read that fails leaves the verdict unknown: the first non-rate-limit failure warns, a
+    second in a row logs `ERROR` and writes the stop file, a successful read resets the
+    count, and a forge rate limit is not counted. An open
     PR whose reported head commit is not the local `HEAD` is pending, whatever its
     checks say, because the forge can still report the previous head after a push. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
@@ -1154,9 +1163,13 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
-    stale-lease reaping recognizes its linked locally merged task and repeats the merge
-    comment instead of unassigning or relabeling the issue. That refreshes `updatedAt`
-    again, keeping the issue claimed until promotion closes it. An ordinary forge outage
+    stale-lease reaping recognizes its promotion record and leaves the issue claimed,
+    without unassigning or relabeling it, until promotion closes it. A record whose merge
+    comment is already confirmed gets no further comment. For an unconfirmed record the
+    reaper reposts the merge comment only when no trusted marker for it is visible, reads
+    the comments back, and confirms the record once the marker is visible; a marker whose
+    author's permission cannot be read leaves the record pending for a later poll. An
+    ordinary forge outage
     degrades a poll to local-only work. Persisted cleanup release failures are retried each
     poll and stop the loop after three consecutive failures. Labels are ensured at loop
     startup.
@@ -1256,7 +1269,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     task id, with the latter naming the first eight characters of the merge commit;
     promotion closes the issue. A failure logs the aligned `Failed` event with the short
     task id and merge-log name. It is
-    commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
+    commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed` — adding the
+    failure label first and reading the issue back to confirm it holds that single
+    lifecycle label, logging a WARN when it does not — and counts
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
     As in item 10, a gate command that exits 75 never ran its tests: the adoption is
