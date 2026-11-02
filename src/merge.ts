@@ -156,6 +156,12 @@ export interface MergeOptions {
    */
   reasons?: readonly string[] | undefined
   /**
+   * Withdraw what a recorded local merge must not leave standing, before the merged status
+   * is written. A restart that finds the task merged never calls onMerged, so state that
+   * would let unverified commits through cannot wait for it. Runs again on a retry.
+   */
+  beforeMergeRecorded?: (() => void) | undefined
+  /**
    * Persist what follows from the merge before post-merge work begins or this function
    * returns. A dependency install that fails afterwards stops the loop, and a restart
    * that finds the merge already recorded never repeats this step.
@@ -957,6 +963,7 @@ async function finalizeLocalMerge(
   depsEvent: OrchestrationDepsEvent,
   options: MergeOptions,
 ): Promise<string> {
+  options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterMerge(
