@@ -645,8 +645,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     sink and a formatted copy to `loop.log`, then the CI gate,
     then review. Remote work defers the gate with a `Waiting remote` event when its
     pending issue set changes and every ten minutes while unchanged. When every pending
-    issue carries `loop:merge-failed` and none of `loop:ready`, `loop:in-progress`, or
-    `loop:merge-ready`, and each one's comments were read with every author's access
+    issue carries `loop:merge-failed` and neither `loop:ready` nor `loop:in-progress` — a
+    `loop:merge-ready` left beside it is a failure relabel that did not finish, which
+    adoption skips as well — and each one's comments were read with every author's access
     determined, nothing in the loop will change them: the gate records the repair in
     `queue/decisions.txt` (deduped), logs it as an `ERROR`, and writes the stop file
     instead of waiting or promoting. A light-gate cycle
@@ -1260,7 +1261,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     task id, with the latter naming the first eight characters of the merge commit;
     promotion closes the issue. A failure logs the aligned `Failed` event with the short
     task id and merge-log name. It is
-    commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed`, and counts
+    commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed` — adding the
+    failure label first and reading the issue back to confirm it holds that single
+    lifecycle label, logging a WARN when it does not — and counts
     through the consecutive-merge-failure limit instead of returning singleton work to
     ready. A failed grouped adoption instead returns all members as singleton-ready work.
     As in item 10, a gate command that exits 75 never ran its tests: the adoption is

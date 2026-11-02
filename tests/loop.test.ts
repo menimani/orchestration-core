@@ -3385,7 +3385,7 @@ describe('remote issue queue idle detection', () => {
     await fakeForge.createIssue({
       title: 'adoption needs repair', body: '', labels: [LABEL_FINDING, 'loop:merge-failed'],
     })
-    const reason = 'Issues #1 are labelled loop:merge-failed and are the only remaining work. Repair each adoption named in its comment, remove loop:merge-failed, add loop:ready, and restart the loop.'
+    const reason = 'Issues #1 are labelled loop:merge-failed and are the only remaining work. Repair each adoption named in its comment, remove loop:merge-failed and any loop:merge-ready, add loop:ready, and restart the loop.'
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(await loop.triggerScanIfIdle()).toBe('continue')
@@ -3395,6 +3395,21 @@ describe('remote issue queue idle detection', () => {
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
     expect(readFileSync(join(paths.queueDir, 'decisions.txt'), 'utf8')).toBe(`${reason}\n`)
     expect(logText()).toContain(`ERROR ${reason}`)
+    expect(logText()).not.toContain('Waiting remote')
+  })
+
+  it('stops with the repair when a failure relabel left merge-ready beside merge-failed', async () => {
+    const loop = makeReviewLoop(true)
+    await fakeForge.createIssue({
+      title: 'half-relabelled adoption', body: '',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY, 'loop:merge-failed'],
+    })
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(logText()).toContain('ERROR Issues #1 are labelled loop:merge-failed')
     expect(logText()).not.toContain('Waiting remote')
   })
 

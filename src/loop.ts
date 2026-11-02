@@ -60,7 +60,8 @@ import {
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   isReadyToClaim,
-  issueSourcesForTask, missingRequirementCompletionMarkers, parseIssueBody, publishFinding,
+  issueSourcesForTask, markIssueMergeFailed, missingRequirementCompletionMarkers, parseIssueBody,
+  publishFinding,
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
@@ -812,8 +813,7 @@ export function createLoop(deps: LoopDeps) {
             await Promise.all(adoptionIssues.map((candidate) =>
               returnIssueToReady(forge, candidate.number, true)))
           } else {
-            await forge.addLabel(issue.number, LABEL_MERGE_FAILED)
-            await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+            await markIssueMergeFailed(forge, issue.number)
           }
         } catch (labelError) {
           if (!(labelError instanceof ForgeRateLimitError)) {
@@ -2273,17 +2273,19 @@ export function createLoop(deps: LoopDeps) {
         // A merge-failed issue with no active lifecycle label waits for a person: nothing
         // in the loop adopts, reaps, or retries it. When such issues are all that remains,
         // waiting would hold the gate forever, so stop with the repair instead of promoting.
+        // A merge-ready label left beside merge-failed is a failure relabel that did not
+        // finish; adoption skips an issue with two lifecycle labels, so it waits the same.
         // An issue whose comments could not be judged may already be merged elsewhere, so
         // it keeps the loop waiting for a later poll to ask again.
         const awaitsRepair = (issueNumber: number): boolean => {
           if (!inspectedIssueNumbers.has(issueNumber)) return false
           const labels = openIssues.find((issue) => issue.number === issueNumber)?.labels ?? []
           return labels.includes(LABEL_MERGE_FAILED)
-            && ![LABEL_READY, LABEL_IN_PROGRESS, LABEL_MERGE_READY].some((label) => labels.includes(label))
+            && ![LABEL_READY, LABEL_IN_PROGRESS].some((label) => labels.includes(label))
         }
         if (remoteCount > 0 && pendingIssueNumbers.every(awaitsRepair)) {
           const issues = pendingIssueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
-          const reason = `Issues ${issues} are labelled ${LABEL_MERGE_FAILED} and are the only remaining work. Repair each adoption named in its comment, remove ${LABEL_MERGE_FAILED}, add ${LABEL_READY}, and restart the loop.`
+          const reason = `Issues ${issues} are labelled ${LABEL_MERGE_FAILED} and are the only remaining work. Repair each adoption named in its comment, remove ${LABEL_MERGE_FAILED} and any ${LABEL_MERGE_READY}, add ${LABEL_READY}, and restart the loop.`
           if (!decisionAlreadyRecorded(reason)) appendFileSync(decisionsFile, `${reason}\n`)
           event('ERROR', reason)
           writeFileSync(stopFile, '')
