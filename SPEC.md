@@ -1154,9 +1154,13 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
     merged-but-not-promoted window. If the issue reaches the lease age before promotion,
-    stale-lease reaping recognizes its linked locally merged task and repeats the merge
-    comment instead of unassigning or relabeling the issue. That refreshes `updatedAt`
-    again, keeping the issue claimed until promotion closes it. An ordinary forge outage
+    stale-lease reaping recognizes its promotion record and leaves the issue claimed,
+    without unassigning or relabeling it, until promotion closes it. A record whose merge
+    comment is already confirmed gets no further comment. For an unconfirmed record the
+    reaper reposts the merge comment only when no trusted marker for it is visible, reads
+    the comments back, and confirms the record once the marker is visible; a marker whose
+    author's permission cannot be read leaves the record pending for a later poll. An
+    ordinary forge outage
     degrades a poll to local-only work. Persisted cleanup release failures are retried each
     poll and stop the loop after three consecutive failures. Labels are ensured at loop
     startup.
