@@ -166,6 +166,22 @@ export function normalizeEntry(entry: RollupEntry): CheckConclusion {
   return 'pending'
 }
 
+// Only an explicit `success` passes: `neutral`, `skipped`, `cancelled`, and any value
+// GitHub adds later read as failure. A run that has not completed has no conclusion yet,
+// and every status other than `completed` (queued, waiting, in_progress, ...) is pending.
+export function normalizeWorkflowRun(data: GithubWorkflowRun): WorkflowRun {
+  const completed = data.status === 'completed'
+  return {
+    id: data.databaseId,
+    createdAt: data.createdAt,
+    headSha: data.headSha,
+    status: completed ? 'completed' : 'pending',
+    conclusion: !completed || (data.conclusion ?? '') === ''
+      ? null
+      : data.conclusion === 'success' ? 'success' : 'failure',
+  }
+}
+
 async function gh(repoRoot: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('gh', args, {
     cwd: repoRoot,
@@ -261,14 +277,6 @@ export function createGithubForge(
   const codeRepository = target.codeRepository === undefined
     ? []
     : ['--repo', target.codeRepository]
-
-  const parseWorkflowRun = (data: GithubWorkflowRun): WorkflowRun => ({
-    id: data.databaseId,
-    createdAt: data.createdAt,
-    headSha: data.headSha,
-    status: data.status,
-    conclusion: data.conclusion,
-  })
 
   // The issue queue belongs to the repository this forge was created for. Resolve that
   // identity once and carry it on every queue call instead of letting gh infer a target
@@ -499,7 +507,7 @@ export function createGithubForge(
       const run = workflowRunForDispatch(
         parseGhJson(args, stdout, workflowRunListSchema), ref, dispatchToken,
       )
-      return run === undefined ? undefined : parseWorkflowRun(run)
+      return run === undefined ? undefined : normalizeWorkflowRun(run)
     },
 
     async getWorkflowRun(runId: number): Promise<WorkflowRun> {
@@ -508,7 +516,7 @@ export function createGithubForge(
         '--json', 'databaseId,createdAt,displayTitle,headBranch,headSha,status,conclusion',
       ]
       const stdout = await checkedGh(repoRoot, args)
-      return parseWorkflowRun(parseGhJson(args, stdout, workflowRunSchema))
+      return normalizeWorkflowRun(parseGhJson(args, stdout, workflowRunSchema))
     },
 
     async currentUser(): Promise<string> {

@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
-  createGithubForge, workflowRunForDispatch, type GithubCommand, type GithubWorkflowRun,
+  createGithubForge, normalizeWorkflowRun, workflowRunForDispatch, type GithubCommand,
+  type GithubWorkflowRun,
 } from '../src/adapters/forge-github.ts'
 import { ForgeIssueNotFoundError, ForgeRateLimitError, type Forge } from '../src/adapters/forge.ts'
 import { ensureQueueLabels, QUEUE_LABELS } from '../src/issueQueue.ts'
@@ -800,16 +801,38 @@ describe('GitHub forge JSON schemas', () => {
       id: 71,
       createdAt: '2026-08-08T15:00:00Z',
       headSha: 'wanted-sha',
-      status: 'queued',
+      status: 'pending',
       conclusion: null,
     })
     await expect(forgeReturning(workflowRunFixture).getWorkflowRun(71)).resolves.toEqual({
       id: 71,
       createdAt: '2026-08-08T15:00:00Z',
       headSha: 'wanted-sha',
-      status: 'queued',
+      status: 'pending',
       conclusion: null,
     })
+  })
+
+  it('translates GitHub workflow run states into forge-neutral ones', () => {
+    const states = (overrides: Partial<GithubWorkflowRun>) => {
+      const { status, conclusion } = normalizeWorkflowRun(run(overrides))
+      return { status, conclusion }
+    }
+    for (const status of ['queued', 'in_progress', 'waiting', 'requested', 'pending']) {
+      expect(states({ status, conclusion: '' })).toEqual({ status: 'pending', conclusion: null })
+    }
+    expect(states({ status: 'in_progress', conclusion: 'success' }))
+      .toEqual({ status: 'pending', conclusion: null })
+    expect(states({ status: 'completed', conclusion: 'success' }))
+      .toEqual({ status: 'completed', conclusion: 'success' })
+    for (const conclusion of ['failure', 'cancelled', 'neutral', 'skipped', 'timed_out', 'stale']) {
+      expect(states({ status: 'completed', conclusion }))
+        .toEqual({ status: 'completed', conclusion: 'failure' })
+    }
+    expect(states({ status: 'completed', conclusion: null }))
+      .toEqual({ status: 'completed', conclusion: null })
+    expect(states({ status: 'completed', conclusion: '' }))
+      .toEqual({ status: 'completed', conclusion: null })
   })
 
   it('validates and normalizes issue views, lists, and comments', async () => {
