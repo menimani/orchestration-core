@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { deploy, type DeploymentClock } from '../src/deploy.ts'
+import type { WorkflowRun } from '../src/adapters/forge.ts'
 import { makeFakeForge } from './fakeForge.ts'
 
 function response(revision: string, status = 200) {
@@ -24,7 +25,7 @@ describe('deploy', () => {
         id: 73,
         createdAt: '2026-08-08T15:00:01Z',
         headSha: '73aa',
-        status: 'in_progress',
+        status: 'pending',
         conclusion: null,
       })
     const getWorkflowRun = vi.fn(async () => ({
@@ -276,14 +277,14 @@ describe('deploy', () => {
       id: 76,
       createdAt: '2026-08-08T15:00:00Z',
       headSha: 'expected-sha',
-      status: 'in_progress',
+      status: 'pending',
       conclusion: null,
     })
-    forge.getWorkflowRun = vi.fn(async () => ({
+    forge.getWorkflowRun = vi.fn(async (): Promise<WorkflowRun> => ({
       id: 76,
       createdAt: '2026-08-08T15:00:00Z',
       headSha: 'expected-sha',
-      status: 'in_progress',
+      status: 'pending',
       conclusion: null,
     }))
     let time = 0
