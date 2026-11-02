@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -194,6 +194,30 @@ describe('loop replacement startup', () => {
     expect(readFileSync(pidFile, 'utf8')).toBe(predecessorMarker)
     expect(os.terminateProcessTree).toHaveBeenCalledWith(43218)
     expect(child.unref).not.toHaveBeenCalled()
+  })
+
+  it('waits past an empty ready file instead of failing the replacement', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    const child = fakeChild(43221)
+    const os = fakeOperatingSystem(child, () => {
+      setTimeout(() => writeFileSync(readyFile, ''), 0)
+      setTimeout(() => writeFileSync(readyFile, '43221\n'), 50)
+    })
+    const onReady = vi.fn()
+
+    await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      onReady,
+      startupTimeoutMs: 1_000,
+    })).resolves.toEqual({ ok: true, pid: 43221 })
+    expect(onReady).toHaveBeenCalledWith(43221)
+    expect(os.terminateProcessTree).not.toHaveBeenCalled()
+    expect(child.unref).toHaveBeenCalled()
   })
 
   it('keeps the predecessor PID when the replacement dies after publishing readiness', async () => {
@@ -430,5 +454,6 @@ describe('loop replacement startup', () => {
     } as unknown as OperatingSystem)
 
     expect(readFileSync(readyFile, 'utf8')).toBe('43213\n')
+    expect(readdirSync(root)).toEqual(['ready'])
   })
 })

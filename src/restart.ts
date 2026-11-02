@@ -88,7 +88,15 @@ export function signalLoopRestartReady(
   const readyFile = env[LOOP_RESTART_READY_FILE_ENV]
   try {
     if (readyFile === undefined || readyFile === '') return
-    writeFileSync(readyFile, `${os.processTreeRootPid(env)}\n`, { flag: 'wx' })
+    // The predecessor polls this file, so it must never observe it created but not yet
+    // written: write a complete candidate under a unique name, then rename it into place.
+    const candidate = `${readyFile}.ready-${randomUUID()}`
+    try {
+      writeFileSync(candidate, `${os.processTreeRootPid(env)}\n`, { flag: 'wx' })
+      renameSync(candidate, readyFile)
+    } finally {
+      rmSync(candidate, { force: true })
+    }
   } finally {
     delete env[LOOP_RESTART_READY_FILE_ENV]
     delete env[LOOP_RESTART_PREDECESSOR_PID_ENV]
@@ -196,11 +204,13 @@ export async function startLoopReplacement(
       } catch {
         return
       }
+      // An empty file is a readiness write still in progress, not a published PID.
+      if (owner === '') return
       if (owner !== `${pid}`) {
         fail({
           ok: false,
           pid,
-          error: `replacement published an unexpected PID (${owner || 'empty'})`,
+          error: `replacement published an unexpected PID (${owner})`,
         })
         return
       }
