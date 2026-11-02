@@ -1247,6 +1247,28 @@ async function parkIssue(
   })
 }
 
+/**
+ * Swap a failed adoption's `loop:merge-ready` for `loop:merge-failed`. The failure label
+ * goes on first, so an interrupted swap leaves both labels — still counted by the cycle
+ * gate — rather than none, which would drop the finding from every lifecycle state.
+ */
+export async function markIssueMergeFailed(forge: Forge, issueNumber: number): Promise<void> {
+  return withIssueCoordination(forge, issueNumber, async () => {
+    const issue = await forge.getIssue(issueNumber)
+    if (issue.state !== 'open') return
+    if (!issue.labels.includes(LABEL_MERGE_FAILED)) {
+      await forge.addLabel(issueNumber, LABEL_MERGE_FAILED)
+    }
+    if (issue.labels.includes(LABEL_MERGE_READY)) {
+      await forge.removeLabel(issueNumber, LABEL_MERGE_READY)
+    }
+    const failed = await forge.getIssue(issueNumber)
+    if (failed.state === 'open' && !issueHasExactlyLifecycleLabel(failed, LABEL_MERGE_FAILED)) {
+      throw new Error(`Issue #${issueNumber} did not reach the single ${LABEL_MERGE_FAILED} lifecycle state`)
+    }
+  })
+}
+
 export interface IssueReleaseOptions {
   maxIssueRetries?: number
   onPark?: (issueNumber: number, failures: number) => void
