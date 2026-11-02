@@ -339,7 +339,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    operator cleanup also returns linked issues to `loop:ready` and removes their local
    task mapping. A forge failure is warned about without undoing the local cleanup; the
    cleanup leaves a durable release intent and retains the task mapping until the daemon
-   retries the release successfully. Reconciliation runs on each poll before stale-lease
+   retries the release successfully. A queued task outside the issue queue whose startup
+   fails before any status is persisted is not failed: it is re-enqueued at its depth and
+   left for a later poll. The first such failure warns; the same task failing to start
+   again with no successful start in between logs `ERROR` and writes the stop file, and a
+   re-enqueue that itself fails does so at once. Reconciliation runs on each poll before stale-lease
    reaping; three consecutive failed polls stop the loop, while a successful poll clears
    the failure streak. Persisted issue mappings, release preparations, and release intents
    are either empty or contain one positive safe integer per line. Any malformed entry
@@ -657,7 +661,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     timeout, see Runtime) never ran: the gate logs a WARN that the repository test lock
     stayed busy, writes no stop file, and a later poll runs the suite again. Repeated
     gate failures remain visible with a count; any repeated non-rate-limit PR-setup
-    failure logs `ERROR`, writes the stop file, and stops retrying. A run PR a person
+    failure logs `ERROR`, writes the stop file, and stops retrying, as does a repeated
+    non-rate-limit failure to read the PR's CI status (item 16). A run PR a person
     closed mid-run is such a failure: its branch still holds the run's merges, so the loop
     never opens a second PR for it.
     When scanning is disabled and the local backlog plus the known shared finding set are
@@ -681,7 +686,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
 16. The CI gate is skipped by default (`CI_GATE_ENABLED=false`): CI does not run on
     draft PRs, and a gate polling for absent checks hangs forever. When enabled:
     pending → keep polling; failure → generate a ci-fix task, up to
-    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. An open
+    `MAX_CI_FIX_ATTEMPTS`, then stop rather than poll a gate that cannot pass. A PR status
+    read that fails leaves the verdict unknown: the first non-rate-limit failure warns, a
+    second in a row logs `ERROR` and writes the stop file, a successful read resets the
+    count, and a forge rate limit is not counted. An open
     PR whose reported head commit is not the local `HEAD` is pending, whatever its
     checks say, because the forge can still report the previous head after a push. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
