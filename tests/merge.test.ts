@@ -20,7 +20,7 @@ import {
   branchName, finalMessageFile, orchPaths, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
-import { readStatus, writeStatus } from '../src/status.ts'
+import { readStatus, writeMergedStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import {
   removeWorktreeWithFallback, type WorktreeRemovalRuntime,
@@ -512,6 +512,60 @@ describe('mergeTask', () => {
 
     expect(existsSync(guard)).toBe(true)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it.each(['merged', 'no-change'] as const)(
+    'skips a task already recorded %s without taking the merge guard',
+    async (recorded) => {
+      const taskId = `20260808_000000_040_user-already-${recorded}`
+      const worktree = await makeCompletedTask(taskId, { commit: true })
+      const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+      if (recorded === 'merged') {
+        await writeMergedStatus(paths, taskId, initialHead, 'main')
+      } else {
+        await writeStatus(paths, taskId, 'no-change')
+      }
+      const onMergeSkipped = vi.fn()
+      const onMergeStart = vi.fn()
+
+      await expect(mergeTask(paths, taskId, {
+        taskGate: 'light', project: noCheckProject, onMergeSkipped, onMergeStart,
+      })).resolves.toEqual({ outcome: 'skipped', reason: 'succeeded' })
+
+      expect(onMergeSkipped.mock.calls).toEqual([['succeeded']])
+      expect(onMergeStart).not.toHaveBeenCalled()
+      expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+      expect(existsSync(join(paths.queueDir, 'merge-guards'))).toBe(false)
+      expect(existsSync(worktree)).toBe(true)
+      expect(readStatus(paths, taskId)?.status).toBe(recorded)
+    },
+  )
+
+  it('skips a task another merger finished while this one waited for the guard', async () => {
+    const taskId = '20260808_000000_041_user-merged-while-waiting'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    // A retired guard that cannot be removed yet keeps this merger waiting to reclaim it.
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mkdirSync(guard, { recursive: true })
+    writeFileSync(join(guard, 'retired'), '')
+    const blocker = join(guard, 'blocker')
+    writeFileSync(blocker, 'keeps the retired guard in place\n')
+    const onMergeSkipped = vi.fn()
+    const onMergeStart = vi.fn()
+
+    const pending = mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, onMergeSkipped, onMergeStart,
+    })
+    await writeMergedStatus(paths, taskId, initialHead, 'main')
+    rmSync(blocker)
+
+    await expect(pending).resolves.toEqual({ outcome: 'skipped', reason: 'succeeded' })
+    expect(onMergeSkipped.mock.calls).toEqual([['succeeded']])
+    expect(onMergeStart).not.toHaveBeenCalled()
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
   it('merges a committed task, removes its worktree and branch, and records merged', async () => {
