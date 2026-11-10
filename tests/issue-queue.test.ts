@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError, type ForgeIssue } from '../src/adapters/forge.ts'
 import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels, closePromotedIssues,
-  commentOnIssueMerge, fingerprintOf, issueMergeComment, issueUnpromotedComment, groupReadyFindings,
+  commentOnIssueMerge, fingerprintOf, isDocumentationFinding, issueMergeComment, issueUnpromotedComment, groupReadyFindings,
   heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   issueFailureCount, issueReleaseIntentForTask,
@@ -111,6 +111,16 @@ describe('fingerprintOf', () => {
     expect(a).toBe(b)
     expect(a).not.toBe(c)
     expect(a.startsWith('text:')).toBe(true)
+  })
+})
+
+describe('isDocumentationFinding', () => {
+  it('recognizes a finding by its leading DOCS tag alone', () => {
+    expect(isDocumentationFinding('[DOCS] `README.md` names a stale variable')).toBe(true)
+    expect(isDocumentationFinding('[DOCS] the setup section omits a step')).toBe(true)
+    expect(isDocumentationFinding('[BUG] `README.md` is parsed wrongly')).toBe(false)
+    expect(isDocumentationFinding('[TEST] cover the [DOCS] tag')).toBe(false)
+    expect(isDocumentationFinding('update the docs for the new flag')).toBe(false)
   })
 })
 

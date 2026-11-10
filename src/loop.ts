@@ -50,6 +50,7 @@ import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { interruptedScansFileName } from './scanRecovery.ts'
+import { heldFindingsFileName, readHeldFindings, writeHeldFindings } from './heldFindings.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
@@ -59,7 +60,7 @@ import {
   confirmIssuePromotion, dropClaimedTaskMaterialization, groupReadyFindings,
   heartbeatIssueForTask, fingerprintOf, issueMergeComment,
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
-  isReadyToClaim,
+  isDocumentationFinding, isReadyToClaim,
   issueSourcesForTask, markIssueMergeFailed, missingRequirementCompletionMarkers, parseIssueBody,
   publishFinding,
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
@@ -1085,18 +1086,29 @@ export function createLoop(deps: LoopDeps) {
     if (findings.length === 0) return { findings, destinations, reconciled: true }
     const isReview = isReviewTaskId(taskId)
     const findingOrigin = isReview ? 'fix' : 'auto'
-    const otherFindingOrigin = isReview ? 'auto' : 'fix'
-    const existingFindingTask = (description: string): string | undefined =>
-      existingTaskIdForDesc(paths, findingOrigin, description)
-        ?? existingTaskIdForDesc(paths, otherFindingOrigin, description)
 
     const newDepth = depth + 1
     if (newDepth > config.maxGrowthDepth) {
       event('WARN', `growth depth limit ${config.maxGrowthDepth} ignored findings from ${shortTaskId(taskId)}`)
       return { findings, destinations, reconciled: true }
     }
+    // A documentation fix written while the cycle's code is still changing describes code
+    // that is about to move, and parallel ones conflict on the same files. Hold them for
+    // one combined task once the cycle's other work has merged. A review's findings keep
+    // their own combined task, and a worker has no cycle gate to release them at.
+    const holdsDocumentation = !isReview && !config.workerMode
+    if (holdsDocumentation && findings.some(isDocumentationFinding)) {
+      const held = await holdDocumentationFindings(
+        taskId, findings.filter(isDocumentationFinding), newDepth,
+      )
+      if (!held.reconciled) return { findings, destinations, ...held }
+    }
+    const dispatchedFindings = holdsDocumentation
+      ? findings.filter((finding) => !isDocumentationFinding(finding))
+      : findings
+    if (dispatchedFindings.length === 0) return { findings, destinations, reconciled: true }
     if (config.issueQueueEnabled) {
-      let pendingFindings = findings
+      let pendingFindings = dispatchedFindings
       if (isReview) {
         let filtered: Awaited<ReturnType<typeof unresolvedFindings>>
         try {
@@ -1159,29 +1171,13 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const pendingFindings = isReview
-      ? [...new Set(findings)].filter((finding) => {
-        const existing = existingFindingTask(finding)
-        if (existing !== undefined) {
-          // A failed task is never retried automatically: it keeps its worktree until
-          // the operator's cleanup, and startTask refuses that worktree, so re-queueing
-          // it would only be dropped at startup. Cleanup removes the status, after which
-          // the same finding re-admits the task; suppressing on the bare existence of
-          // the spec blocked that retry path.
-          const status = readTaskState(paths, existing)
-          const queued = existsSync(queueFile)
-            && readFileSync(queueFile, 'utf8').split(/\r?\n/)
-              .some((line) => line.startsWith(`${existing}:`))
-          const mergedAdvisory = (status === 'merged' || status === 'no-change')
-            && fingerprintOf(finding).startsWith('advisory:')
-          if (queued || status === 'running' || status === 'completed' || status === 'failed'
-            || mergedAdvisory) {
-            destinations.push(shortTaskId(existing))
-            return false
-          }
-        }
-        return true
+      ? [...new Set(dispatchedFindings)].filter((finding) => {
+        const existing = outstandingFindingTask(finding, findingOrigin)
+        if (existing === undefined) return true
+        destinations.push(shortTaskId(existing))
+        return false
       })
-      : findings
+      : dispatchedFindings
     if (pendingFindings.length === 0) return { findings, destinations, reconciled: true }
     const combinesReviewFindings = isReview && pendingFindings.length > 1
     const descriptions = combinesReviewFindings
@@ -1190,56 +1186,210 @@ export function createLoop(deps: LoopDeps) {
     let reconciled = true
     for (const desc of descriptions) {
       if (!hasTaskCapacity(taskId)) continue
-      const existing = existingFindingTask(desc)
-      const needsFreshTask = existing !== undefined
-        && ['merged', 'no-change'].includes(readTaskState(paths, existing) ?? '')
-        && !fingerprintOf(desc).startsWith('advisory:')
-      const newId = needsFreshTask
-        ? newTaskId(paths, `${findingOrigin}-${descSlug(desc)}`)
-        : existing ?? taskIdForDesc(paths, findingOrigin, desc)
-      if (needsFreshTask) recordTaskIdForDesc(paths, findingOrigin, desc, newId)
-      destinations.push(shortTaskId(newId))
-      if (!existsSync(specFile(paths, newId))) {
-        // The template carries the Commit and TASK_COMPLETE instructions — a spec
-        // without them produces work whose completion is indistinguishable from a
-        // crash, recorded failed with the commits sitting in the worktree.
-        newTaskSpec(paths, newId)
-        if (combinesReviewFindings) {
-          const file = specFile(paths, newId)
-          const spec = readFileSync(file, 'utf8').replace(
-            '## Requirement\n-\n',
-            `## Requirement\n\n${desc}\n`,
-          )
-          writeFileSync(file, spec)
-          appendSharedRequirements(newId, taskId, desc, false)
-        } else {
-          appendSharedRequirements(newId, taskId, desc)
-        }
-      }
-      if (combinesReviewFindings) {
-        for (const finding of pendingFindings) {
-          recordTaskIdForDesc(paths, findingOrigin, finding, newId)
-        }
-      }
-      // A fix born from a review is repairing something subtle enough to have escaped
-      // the implementer once, so review-spawned tasks run at high effort.
-      const effortFile = join(paths.queueDir, 'effort', newId)
-      if (isReview && !existsSync(effortFile)) {
-        mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
-        writeFileSync(effortFile, 'high\n')
-      }
-      try {
-        const enqueue = enqueueTaskImpl(paths, newId, newDepth)
-        if (enqueue.outcome === 'enqueued') recordPublishedTask()
-      } catch (error) {
-        reconciled = false
-        reportGateFailure(
-          `could not enqueue finding from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
-          `completion-scan-${taskId}`,
-        )
-      }
+      const queued = queueFindingTask(
+        desc, taskId, newDepth, findingOrigin,
+        combinesReviewFindings ? pendingFindings : undefined,
+      )
+      destinations.push(shortTaskId(queued.taskId))
+      if (!queued.enqueued) reconciled = false
     }
     return { findings, destinations, reconciled }
+  }
+
+  function existingFindingTask(description: string, origin: 'auto' | 'fix'): string | undefined {
+    return existingTaskIdForDesc(paths, origin, description)
+      ?? existingTaskIdForDesc(paths, origin === 'fix' ? 'auto' : 'fix', description)
+  }
+
+  /** The task already carrying a finding, when a new one for it would only be dropped. */
+  function outstandingFindingTask(finding: string, origin: 'auto' | 'fix'): string | undefined {
+    const existing = existingFindingTask(finding, origin)
+    if (existing === undefined) return undefined
+    // A failed task is never retried automatically: it keeps its worktree until
+    // the operator's cleanup, and startTask refuses that worktree, so re-queueing
+    // it would only be dropped at startup. Cleanup removes the status, after which
+    // the same finding re-admits the task; suppressing on the bare existence of
+    // the spec blocked that retry path.
+    const status = readTaskState(paths, existing)
+    const queued = existsSync(queueFile)
+      && readFileSync(queueFile, 'utf8').split(/\r?\n/)
+        .some((line) => line.startsWith(`${existing}:`))
+    const mergedAdvisory = (status === 'merged' || status === 'no-change')
+      && fingerprintOf(finding).startsWith('advisory:')
+    return queued || status === 'running' || status === 'completed' || status === 'failed'
+      || mergedAdvisory
+      ? existing
+      : undefined
+  }
+
+  /**
+   * Queue one finding description as a local task. Combined findings arrive as the
+   * numbered list in `desc`, and each is recorded against the one task carrying them.
+   */
+  function queueFindingTask(
+    desc: string,
+    parentId: string,
+    depth: number,
+    origin: 'auto' | 'fix',
+    combinedFindings: readonly string[] | undefined,
+    pitfallKey = desc,
+  ): { taskId: string; enqueued: boolean } {
+    const existing = existingFindingTask(desc, origin)
+    const needsFreshTask = existing !== undefined
+      && ['merged', 'no-change'].includes(readTaskState(paths, existing) ?? '')
+      && !fingerprintOf(desc).startsWith('advisory:')
+    const newId = needsFreshTask
+      ? newTaskId(paths, `${origin}-${descSlug(desc)}`)
+      : existing ?? taskIdForDesc(paths, origin, desc)
+    if (needsFreshTask) recordTaskIdForDesc(paths, origin, desc, newId)
+    if (!existsSync(specFile(paths, newId))) {
+      // The template carries the Commit and TASK_COMPLETE instructions — a spec
+      // without them produces work whose completion is indistinguishable from a
+      // crash, recorded failed with the commits sitting in the worktree.
+      newTaskSpec(paths, newId)
+      if (combinedFindings !== undefined) {
+        const file = specFile(paths, newId)
+        const spec = readFileSync(file, 'utf8').replace(
+          '## Requirement\n-\n',
+          `## Requirement\n\n${desc}\n`,
+        )
+        writeFileSync(file, spec)
+        appendSharedRequirements(newId, parentId, desc, false, pitfallKey)
+      } else {
+        appendSharedRequirements(newId, parentId, desc, true, pitfallKey)
+      }
+    }
+    if (combinedFindings !== undefined) {
+      for (const finding of combinedFindings) {
+        recordTaskIdForDesc(paths, origin, finding, newId)
+      }
+    }
+    // A fix born from a review is repairing something subtle enough to have escaped
+    // the implementer once, so review-spawned tasks run at high effort.
+    const effortFile = join(paths.queueDir, 'effort', newId)
+    if (origin === 'fix' && !existsSync(effortFile)) {
+      mkdirSync(join(paths.queueDir, 'effort'), { recursive: true })
+      writeFileSync(effortFile, 'high\n')
+    }
+    try {
+      const enqueue = enqueueTaskImpl(paths, newId, depth)
+      if (enqueue.outcome === 'enqueued') recordPublishedTask()
+    } catch (error) {
+      reportGateFailure(
+        `could not enqueue finding from ${shortTaskId(parentId)}: ${errorSummary(error)}`,
+        `completion-scan-${parentId}`,
+      )
+      return { taskId: newId, enqueued: false }
+    }
+    return { taskId: newId, enqueued: true }
+  }
+
+  /**
+   * Hold a finished task's documentation findings until the cycle's other work has
+   * merged. A finding already held, already carried by a task, or already open as an
+   * issue is skipped exactly as the dispatch paths would skip it.
+   */
+  async function holdDocumentationFindings(
+    taskId: string,
+    documentation: readonly string[],
+    depth: number,
+  ): Promise<{ reconciled: boolean; failure?: string }> {
+    const heldFingerprints = new Set(readHeldFindings(paths).map(({ finding }) => fingerprintOf(finding)))
+    let candidates = documentation.filter((finding) => {
+      const fingerprint = fingerprintOf(finding)
+      if (heldFingerprints.has(fingerprint)) return false
+      heldFingerprints.add(fingerprint)
+      return true
+    })
+    if (candidates.length === 0) return { reconciled: true }
+    if (config.issueQueueEnabled) {
+      try {
+        candidates = (await unresolvedFindings(forge, paths, candidates)).unresolved
+        warningLog.recovered(`unresolved-findings-${taskId}`)
+      } catch (error) {
+        if (error instanceof ForgeRateLimitError) return { reconciled: false }
+        const failure = `could not check documentation findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
+        warning(
+          `unresolved-findings-${taskId}`,
+          `checking documentation findings from ${shortTaskId(taskId)}`,
+          failure,
+        )
+        return { reconciled: false, failure }
+      }
+    } else {
+      candidates = candidates.filter((finding) => outstandingFindingTask(finding, 'auto') === undefined)
+    }
+    if (candidates.length === 0) return { reconciled: true }
+    writeHeldFindings(paths, [
+      ...readHeldFindings(paths),
+      ...candidates.map((finding) => ({ depth, parentTaskId: taskId, finding })),
+    ])
+    event(
+      'Deferred',
+      shortTaskId(taskId),
+      `${candidates.length} documentation finding(s) until the cycle's other tasks finish`,
+    )
+    return { reconciled: true }
+  }
+
+  /**
+   * Release the held documentation findings as one task through the ordinary path for a
+   * finding of their greatest depth. Returns true while the gate must wait: the combined
+   * task now exists, or filing it failed and a later poll retries. The holding file is
+   * truncated only once the task or issue exists, or when the growth bounds drop it.
+   */
+  async function releaseHeldDocumentation(): Promise<boolean> {
+    const held = readHeldFindings(paths)
+    const first = held[0]
+    if (first === undefined) return false
+    const findings = held.map(({ finding }) => finding)
+    const depth = Math.max(...held.map((record) => record.depth))
+    const parentId = first.parentTaskId
+    const combined = findings.length > 1
+    const desc = combined
+      ? findings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')
+      : first.finding
+    if (depth > config.maxGrowthDepth) {
+      event('WARN', `growth depth limit ${config.maxGrowthDepth} ignored findings from ${shortTaskId(parentId)}`)
+      writeHeldFindings(paths, [])
+      return false
+    }
+    if (!hasTaskCapacity(parentId)) {
+      writeHeldFindings(paths, [])
+      return false
+    }
+    if (config.issueQueueEnabled) {
+      try {
+        const result = await publishFinding(
+          forge, paths, desc, parentId, undefined,
+          combined ? `Documentation fixes (cycle ${readCount(scanCountFile)})` : undefined,
+          combined ? findings : undefined,
+          depth,
+        )
+        if (result.outcome === 'created') {
+          recordPublishedTask()
+          event('Filed', `#${result.issueNumber}`, `by ${shortTaskId(parentId)}`)
+        }
+      } catch (error) {
+        if (!(error instanceof ForgeRateLimitError)) {
+          reportGateFailure(
+            `could not file held documentation findings: ${errorSummary(error)}`,
+            'release-documentation',
+          )
+        }
+        gateWaitTarget = 'documentation release'
+        return true
+      }
+    } else if (!queueFindingTask(
+      desc, parentId, depth, 'auto', combined ? findings : undefined, first.finding,
+    ).enqueued) {
+      gateWaitTarget = 'documentation release'
+      return true
+    }
+    previousGateFailures.delete('release-documentation')
+    writeHeldFindings(paths, [])
+    event('Released', 'docs', `${held.length} documentation finding(s) as one task`)
+    return true
   }
 
   // A scan writes its findings in prose, so the same advisory comes back worded
@@ -1645,7 +1795,8 @@ export function createLoop(deps: LoopDeps) {
     for (const name of readdirSync(paths.queueDir)) {
       if (/^(cycle-complete-|cycle-suite-tip-|cycle-resume-|ci-fix-emitted-|ci-fix-pending-id-|review-round-|review-id-|review-pending-id-|failed-|scan-yield-|scan-expected-)/.test(name)
         || name === 'decisions.txt' || name === 'pr-url.txt'
-        || name === 'empty-scan-count.txt' || name === 'merge-failure-count.txt') {
+        || name === 'empty-scan-count.txt' || name === 'merge-failure-count.txt'
+        || name === heldFindingsFileName) {
         rmSync(join(paths.queueDir, name), { force: true })
       }
     }
@@ -2327,6 +2478,9 @@ export function createLoop(deps: LoopDeps) {
         return 'continue'
       }
     }
+    // Every other task of the cycle is terminal, so the documentation held meanwhile
+    // describes the code it will ship with. Its one task closes the cycle instead.
+    if (await releaseHeldDocumentation()) return 'continue'
 
     const currentScans = readCount(scanCountFile)
     const expectedScanFile = join(paths.queueDir, `scan-expected-${currentScans}`)
