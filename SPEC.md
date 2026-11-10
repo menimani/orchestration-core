@@ -188,7 +188,7 @@ commands remain valid. Use
 temporary file in the same directory and renames it into place atomically, so the loop
 cannot observe a partially written file.
 
-The loop caches the observed file version against its modification time and resolves a
+The loop caches the observed file version against its modification time and size and resolves a
 setting when it is referenced. File values pass through the same validation as environment
 values. A malformed file or a value that fails that validation stops the run; the error
 reports the file, the affected setting (or the file contents when JSON cannot identify a
