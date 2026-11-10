@@ -2629,6 +2629,60 @@ describe('reapStaleLeases', () => {
     expect(issueNumbersForTask(paths, 'task-grouped')).toEqual([])
   })
 
+  describe.each([
+    ['given the poll listing', true],
+    ['fetching its own listing', false],
+  ])('promotion record cleanup %s', (_description, passListing) => {
+    async function promoted(taskId: string): Promise<number> {
+      const issueNumber = await forge.createIssue({
+        title: taskId, body: buildIssueBody(`[BUG] \`a/b.ts\` ${taskId}`, 'p'),
+        labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+      })
+      recordIssuesForTask(paths, taskId, [issueNumber])
+      recordIssuePromotions(paths, taskId, 'abc123', 'feature/run-9')
+      return issueNumber
+    }
+
+    async function reapCountingLookups(): Promise<number[]> {
+      const listing = passListing ? await forge.listOpenIssues(LABEL_FINDING) : undefined
+      const lookedUp: number[] = []
+      const getIssue = forge.getIssue.bind(forge)
+      forge.getIssue = async (issueNumber) => {
+        lookedUp.push(issueNumber)
+        return getIssue(issueNumber)
+      }
+      await reapStaleLeases(
+        forge, paths, 3, new Date('2026-08-08T12:00:00Z'), new Set(), listing)
+      return lookedUp
+    }
+
+    it('keeps the record of a listed open issue without asking the forge for it', async () => {
+      const issueNumber = await promoted('task-open')
+
+      expect(await reapCountingLookups()).not.toContain(issueNumber)
+      expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-open')
+      expect(issueNumbersForTask(paths, 'task-open')).toEqual([issueNumber])
+    })
+
+    it('removes the record of an unlisted issue the forge reports closed', async () => {
+      const issueNumber = await promoted('task-closed')
+      await forge.closeIssue(issueNumber, 'promoted')
+
+      expect(await reapCountingLookups()).toContain(issueNumber)
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+      expect(issueNumbersForTask(paths, 'task-closed')).toEqual([])
+    })
+
+    it('removes the record of an unlisted issue the forge no longer has', async () => {
+      const issueNumber = await promoted('task-deleted')
+      forge.issues.delete(issueNumber)
+
+      expect(await reapCountingLookups()).toContain(issueNumber)
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+      expect(issueNumbersForTask(paths, 'task-deleted')).toEqual([])
+    })
+  })
+
   it('reaps a stale mapped lease when its local task is not merged', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
