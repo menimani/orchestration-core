@@ -31,7 +31,7 @@ import {
 } from './conflictRetry.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
-import { readStatus, transitionStatus } from './status.ts'
+import { readStatus, readTaskState, transitionStatus } from './status.ts'
 import {
   startTask, StartupOwnershipUnknownError, StartupProcessRetainedError,
 } from './start.ts'
@@ -827,7 +827,7 @@ export function createLoop(deps: LoopDeps) {
 
   function countRunning(): number {
     return listTaskIds(paths)
-      .filter((taskId) => readStatus(paths, taskId)?.status === 'running').length
+      .filter((taskId) => readTaskState(paths, taskId) === 'running').length
   }
 
   // MAX_PARALLEL caps ordinary task processes and shared-issue claims; scan fan-out is
@@ -836,7 +836,7 @@ export function createLoop(deps: LoopDeps) {
   function countRunningTasks(): number {
     return listTaskIds(paths)
       .filter((taskId) => !isScanTaskId(taskId)
-        && readStatus(paths, taskId)?.status === 'running').length
+        && readTaskState(paths, taskId) === 'running').length
   }
 
   function queueLength(): number {
@@ -851,7 +851,7 @@ export function createLoop(deps: LoopDeps) {
   function countAllTasks(): number {
     if (existsSync(totalTaskCountFile)) return readCount(totalTaskCountFile)
     const taskIds = new Set(listTaskIds(paths).filter((taskId) => {
-      const status = readStatus(paths, taskId)?.status
+      const status = readTaskState(paths, taskId)
       return status === 'running' || status === 'completed'
     }))
     if (existsSync(queueFile)) {
@@ -1167,7 +1167,7 @@ export function createLoop(deps: LoopDeps) {
           // it would only be dropped at startup. Cleanup removes the status, after which
           // the same finding re-admits the task; suppressing on the bare existence of
           // the spec blocked that retry path.
-          const status = readStatus(paths, existing)?.status
+          const status = readTaskState(paths, existing)
           const queued = existsSync(queueFile)
             && readFileSync(queueFile, 'utf8').split(/\r?\n/)
               .some((line) => line.startsWith(`${existing}:`))
@@ -1192,7 +1192,7 @@ export function createLoop(deps: LoopDeps) {
       if (!hasTaskCapacity(taskId)) continue
       const existing = existingFindingTask(desc)
       const needsFreshTask = existing !== undefined
-        && ['merged', 'no-change'].includes(readStatus(paths, existing)?.status ?? '')
+        && ['merged', 'no-change'].includes(readTaskState(paths, existing) ?? '')
         && !fingerprintOf(desc).startsWith('advisory:')
       const newId = needsFreshTask
         ? newTaskId(paths, `${findingOrigin}-${descSlug(desc)}`)
@@ -1332,7 +1332,7 @@ export function createLoop(deps: LoopDeps) {
 
   function isScanRunning(): boolean {
     return listTaskIds(paths).some((taskId) =>
-      isScanTaskId(taskId) && readStatus(paths, taskId)?.status === 'running')
+      isScanTaskId(taskId) && readTaskState(paths, taskId) === 'running')
   }
 
   /**
@@ -1579,7 +1579,7 @@ export function createLoop(deps: LoopDeps) {
     let missingVerdict = false
 
     if (lastId !== '') {
-      const status = readStatus(paths, lastId)?.status
+      const status = readTaskState(paths, lastId)
       if (status !== 'completed' && status !== 'merged' && status !== 'no-change') {
         event('WARN', `review ${shortTaskId(lastId)} ended ${status ?? 'unknown'} without a verdict`)
         missingVerdict = true
@@ -1654,7 +1654,7 @@ export function createLoop(deps: LoopDeps) {
       // the flag removed below, so the next run is told which failures are not its own.
       const failedTaskIds = listTaskIds(paths).filter((taskId) => {
         try {
-          return readStatus(paths, taskId)?.status === 'failed'
+          return readTaskState(paths, taskId) === 'failed'
         } catch {
           return false
         }
@@ -2230,7 +2230,7 @@ export function createLoop(deps: LoopDeps) {
     gateWaitTarget = undefined
     if (countRunning() > 0 || queueLength() > 0) return 'continue'
     if (isScanRunning()) return 'continue'
-    if (listTaskIds(paths).some((taskId) => readStatus(paths, taskId)?.status === 'completed'
+    if (listTaskIds(paths).some((taskId) => readTaskState(paths, taskId) === 'completed'
       && !existsSync(join(scannedDir, taskId)))) {
       gateWaitTarget = 'completion scan'
       return 'continue'
@@ -2321,7 +2321,7 @@ export function createLoop(deps: LoopDeps) {
     // session cleanup erase the merge-failure count that should stop the loop.
     if (config.autoMerge && !config.workerMode) {
       const unmerged = listTaskIds(paths).find((taskId) => !isInspectionTaskId(paths, taskId)
-        && readStatus(paths, taskId)?.status === 'completed')
+        && readTaskState(paths, taskId) === 'completed')
       if (unmerged !== undefined) {
         gateWaitTarget = `merge of ${shortTaskId(unmerged)}`
         return 'continue'
@@ -2951,7 +2951,7 @@ export function createLoop(deps: LoopDeps) {
             // A status that survived a failed cleanup still reaches the poll sweep, which
             // records the loss itself. One that cleanup already removed reaches nobody.
             if (terminalized && retryId === undefined && !lossRecorded
-              && readStatus(paths, taskId) === undefined) {
+              && readTaskState(paths, taskId) === undefined) {
               try {
                 removeConflictedAttempts(paths, taskId)
                 recordAbandonedConflict()
@@ -2983,11 +2983,12 @@ export function createLoop(deps: LoopDeps) {
     }
 
     for (const taskId of listTaskIds(paths)) {
-      const before = readStatus(paths, taskId)
+      // Only a running task needs its process; refreshTask makes that one full read.
+      const before = readTaskState(paths, taskId)
       if (before === undefined) continue
-      const status = before.status === 'running'
+      const status = before === 'running'
         ? (await refreshTask(paths, taskId))?.status
-        : before.status
+        : before
       if (status === undefined) continue
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
       // A task can finish between the stop and this refresh; only once it leaves
@@ -3384,7 +3385,7 @@ export function createLoop(deps: LoopDeps) {
               break
             }
           } else {
-            if (readStatus(paths, entry.taskId) === undefined) {
+            if (readTaskState(paths, entry.taskId) === undefined) {
               requeueAfterStartupFailure(entry.taskId, entry.depth, error)
               // A deterministic preflight error would otherwise be dequeued again in
               // this poll. Preserve it for a later poll after the input is repaired.
@@ -3405,7 +3406,7 @@ export function createLoop(deps: LoopDeps) {
     }
 
     const scans = config.workerMode ? 0 : listTaskIds(paths)
-      .filter((taskId) => isScanTaskId(taskId) && readStatus(paths, taskId)?.status === 'running')
+      .filter((taskId) => isScanTaskId(taskId) && readTaskState(paths, taskId) === 'running')
       .length
     // A finding left ready because every slot was taken is queued work too. Counting
     // only the local file printed Queue=0 beside a backlog the loop could already see.
