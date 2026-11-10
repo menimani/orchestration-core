@@ -4,7 +4,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Forge, ForgeIssue, ForgeIssueComment } from './adapters/forge.ts'
-import { ForgeIssueNotFoundError } from './adapters/forge.ts'
+import { ForgeIssueNotFoundError, ForgeRateLimitError } from './adapters/forge.ts'
 import { withBacklogLock } from './backlog.ts'
 import { conflictRetriesExhausted, issueConflictKey, readConflictedAttempts } from './conflictRetry.ts'
 import {
@@ -67,6 +67,9 @@ const LIFECYCLE_LABELS = [
 type LifecycleLabel = typeof LIFECYCLE_LABELS[number]
 const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000
 const MAX_CLAIM_GROUP_SIZE = 4
+// Four concurrent closes stay near 30 comment-creating requests a minute, well under
+// the forge's secondary limit, while taking about a quarter of the sequential time.
+const PROMOTED_CLOSE_CONCURRENCY = 4
 
 const POST_CREATE_RECONCILE_DELAYS_MS = [0, 100, 250, 500] as const
 
@@ -1638,23 +1641,69 @@ export async function closePromotedIssues(
       continue
     }
     if (pr.state !== 'merged' || pr.headSha === '') continue
-    for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
-      if (!contains(promotion.mergeCommit, pr.headSha)) continue
-      try {
-        await closeIssueAndRemoveLifecycleLabels(forge, promotion.issueNumber, [
-          `PROMOTED: ${promotion.taskId}`,
-          `Merged as ${promotion.mergeCommit} into run branch ${runBranch}, whose pull request ${pr.url} has merged.`,
-        ].join('\n'))
-      } catch (error) {
+    const contained = promotions.filter((candidate) =>
+      candidate.runBranch === runBranch && contains(candidate.mergeCommit, pr.headSha))
+    // Each close is several forge calls, so a merged run of a hundred issues would hold
+    // the loop for minutes one at a time. A rate limit starts no further close.
+    const outcomes = await settleWithConcurrency(
+      contained,
+      PROMOTED_CLOSE_CONCURRENCY,
+      (promotion) => closeIssueAndRemoveLifecycleLabels(forge, promotion.issueNumber, [
+        `PROMOTED: ${promotion.taskId}`,
+        `Merged as ${promotion.mergeCommit} into run branch ${runBranch}, whose pull request ${pr.url} has merged.`,
+      ].join('\n')),
+      (error) => error instanceof ForgeRateLimitError,
+    )
+    let failure: { error: unknown } | undefined
+    contained.forEach((promotion, index) => {
+      const outcome = outcomes[index]
+      if (outcome === undefined) return
+      if (outcome.status === 'fulfilled') {
+        closed.push(promotion.issueNumber)
+      } else if (outcome.reason instanceof ForgeIssueNotFoundError) {
         // A deleted issue would fail every poll and hold back each promotion after it.
-        if (!(error instanceof ForgeIssueNotFoundError)) throw error
         removePromotionRecord(paths, promotion.issueNumber)
-        continue
+      } else if (failure === undefined
+        || (outcome.reason instanceof ForgeRateLimitError
+          && !(failure.error instanceof ForgeRateLimitError))) {
+        // The caller waits out a rate limit only when it sees one, so a rate limit
+        // outranks any other failure.
+        failure = { error: outcome.reason }
       }
-      closed.push(promotion.issueNumber)
-    }
+    })
+    if (failure !== undefined) throw failure.error
   }
   return { closed, returned }
+}
+
+/**
+ * Map items through an async action with at most `limit` calls in flight, returning
+ * each settled outcome in input order. A failure lets the calls in flight finish; one
+ * that `stopsOthers` accepts also starts no further call, and every item left unstarted
+ * has an undefined outcome.
+ */
+async function settleWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  action: (item: T) => Promise<R>,
+  stopsOthers: (error: unknown) => boolean = () => false,
+): Promise<Array<PromiseSettledResult<R> | undefined>> {
+  const outcomes: Array<PromiseSettledResult<R> | undefined> = items.map(() => undefined)
+  let next = 0
+  let stopped = false
+  async function worker(): Promise<void> {
+    while (!stopped && next < items.length) {
+      const index = next++
+      try {
+        outcomes[index] = { status: 'fulfilled', value: await action(items[index]!) }
+      } catch (error) {
+        outcomes[index] = { status: 'rejected', reason: error }
+        if (stopsOthers(error)) stopped = true
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()))
+  return outcomes
 }
 
 function heartbeatFile(paths: OrchPaths, taskId: string): string {
