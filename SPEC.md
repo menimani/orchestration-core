@@ -1251,9 +1251,10 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     configuration code against the project's `config.json`, which overrides the
     environment, and refuses to start when that code predates worker mode or the
     configuration does not resolve it on. Only then does it launch
-    `loop --approve-mode issue --daemon` through the updated checkout's CLI — for a fleet
-    project, the fleet's package, naming the fleet and project again — and exit with that
-    launch's status.
+    `loop --approve-mode issue --daemon` through the updated checkout's CLI and exit with
+    that launch's status. For a fleet project, both the configuration check and the
+    launch use the fleet's running package instead of the checkout, so the fast-forward
+    does not update the code they load, and the launch names the fleet and project again.
 37. Exactly one normal, non-worker daemon owns the run tree and is the merger. After
     processing local completions, each stop-file-free poll adopts `loop:merge-ready`
     issues from that poll's shared finding snapshot: it reads the reported branch and head, fetches that branch
