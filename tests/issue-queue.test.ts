@@ -6,7 +6,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ForgeIssue } from '../src/adapters/forge.ts'
+import { ForgeRateLimitError, type ForgeIssue } from '../src/adapters/forge.ts'
 import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels, closePromotedIssues,
   commentOnIssueMerge, fingerprintOf, issueMergeComment, issueUnpromotedComment, groupReadyFindings,
@@ -3173,5 +3173,121 @@ describe('closePromotedIssues', () => {
       .toEqual({ closed: [], returned: [issueNumber] })
     expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
     expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+  })
+
+  async function mergedRun(count: number): Promise<number[]> {
+    const issueNumbers: number[] = []
+    for (let index = 0; index < count; index++) {
+      issueNumbers.push(await promotedIssue(`task-${index}`, 'a'.repeat(40), 'run/merged'))
+    }
+    forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
+    return issueNumbers
+  }
+
+  function recordOrder(issueNumbers: number[]): number[] {
+    return readdirSync(join(paths.queueDir, 'issue-promotion'))
+      .map((name) => Number(/^(\d+)\.json$/.exec(name)?.[1]))
+      .filter((issueNumber) => issueNumbers.includes(issueNumber))
+  }
+
+  it('closes every promotion of a merged run and lists them in record order', async () => {
+    const issueNumbers = await mergedRun(12)
+    const closeIssue = forge.closeIssue
+    // Later issues finish first, so completion order differs from record order.
+    forge.closeIssue = async (issueNumber, comment) => {
+      await new Promise((resolve) => setTimeout(resolve, 2 * (20 - issueNumber)))
+      await closeIssue(issueNumber, comment)
+    }
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: recordOrder(issueNumbers), returned: [] })
+    for (const issueNumber of issueNumbers) {
+      expect((await forge.getIssue(issueNumber)).state).toBe('closed')
+    }
+  })
+
+  it('keeps no more than four closes in flight at once', async () => {
+    const issueNumbers = await mergedRun(12)
+    const closeIssue = forge.closeIssue
+    const pending: Array<() => void> = []
+    let inFlight = 0
+    let maxInFlight = 0
+    forge.closeIssue = async (issueNumber, comment) => {
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise<void>((resolve) => pending.push(resolve))
+      inFlight--
+      await closeIssue(issueNumber, comment)
+    }
+
+    const closing = closePromotedIssues(forge, paths, () => true)
+    let released = 0
+    while (released < issueNumbers.length) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const release = pending.shift()
+      if (release === undefined) continue
+      release()
+      released++
+    }
+
+    expect((await closing).closed).toEqual(recordOrder(issueNumbers))
+    expect(maxInFlight).toBe(4)
+  })
+
+  it('closes the others when one close fails, rethrows it, and finishes on the next call', async () => {
+    const issueNumbers = await mergedRun(6)
+    const failing = issueNumbers[2]!
+    const closeIssue = forge.closeIssue
+    forge.closeIssue = async (issueNumber, comment) => {
+      if (issueNumber === failing) throw new Error('forge unavailable')
+      await closeIssue(issueNumber, comment)
+    }
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toThrow('forge unavailable')
+    for (const issueNumber of issueNumbers) {
+      expect((await forge.getIssue(issueNumber)).state).toBe(issueNumber === failing ? 'open' : 'closed')
+    }
+    expect(issuePromotionForIssue(paths, failing)?.taskId).toBe('task-2')
+
+    forge.closeIssue = closeIssue
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: recordOrder(issueNumbers), returned: [] })
+    expect((await forge.getIssue(failing)).state).toBe('closed')
+  })
+
+  it('starts no further close after a rate limit', async () => {
+    const issueNumbers = await mergedRun(12)
+    const closeIssue = forge.closeIssue
+    const started: number[] = []
+    forge.closeIssue = async (issueNumber, comment) => {
+      started.push(issueNumber)
+      if (started.length === 1) throw new ForgeRateLimitError(new Date('2026-11-11T00:00:00Z'))
+      await closeIssue(issueNumber, comment)
+    }
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toBeInstanceOf(ForgeRateLimitError)
+    expect(started).toHaveLength(4)
+    const open: number[] = []
+    for (const issueNumber of issueNumbers) {
+      if ((await forge.getIssue(issueNumber)).state === 'open') open.push(issueNumber)
+    }
+    expect(open).toHaveLength(9)
+    expect(open).toContain(started[0]!)
+  })
+
+  it('drops the records of deleted issues while the rest of a merged run still close', async () => {
+    const issueNumbers = await mergedRun(8)
+    const deleted = [issueNumbers[1]!, issueNumbers[5]!]
+    for (const issueNumber of deleted) forge.issues.delete(issueNumber)
+    const remaining = issueNumbers.filter((issueNumber) => !deleted.includes(issueNumber))
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: recordOrder(remaining), returned: [] })
+    for (const issueNumber of deleted) {
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    }
+    for (const issueNumber of remaining) {
+      expect((await forge.getIssue(issueNumber)).state).toBe('closed')
+    }
   })
 })
