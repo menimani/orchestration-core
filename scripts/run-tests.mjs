@@ -5,6 +5,7 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve, toNamespacedPath } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { createProcessIdentityCache } from './process-identity-cache.mjs'
 
 const packageRoot = resolve(import.meta.dirname, '..')
 const lockName = '.orchestration-test-suite-lock'
@@ -79,6 +80,16 @@ function processIdentity(pid) {
   }
 }
 
+const cachedProcessIdentity = createProcessIdentityCache(processIdentity)
+let ownProcessIdentity
+
+// This process cannot change identity while it runs, so its own PID is probed once.
+function currentProcessIdentity(pid, recordedIdentity) {
+  if (pid !== process.pid) return cachedProcessIdentity(pid, recordedIdentity)
+  if (ownProcessIdentity === undefined) ownProcessIdentity = processIdentity(pid)
+  return ownProcessIdentity
+}
+
 function invokingWindowsShellPid() {
   // Windows never updates ParentProcessId when a parent exits, so a recorded parent PID
   // may since belong to an unrelated process. An ancestor created after its child is
@@ -136,7 +147,7 @@ function readLockOwner() {
       || typeof owner.cwd !== 'string' || owner.cwd === ''
     ) return { alive: false, diagnostic: 'invalid owner record' }
     const alive = processIsAlive(owner.pid)
-    const currentIdentity = alive ? processIdentity(owner.pid) : null
+    const currentIdentity = alive ? currentProcessIdentity(owner.pid, owner.processIdentity) : null
     return {
       alive: alive && (currentIdentity === null || currentIdentity === owner.processIdentity),
       diagnostic: `PID ${owner.pid}, acquired ${owner.acquiredAt}, cwd ${owner.cwd}${
@@ -190,7 +201,7 @@ function queueTicketIsAlive(path) {
       || typeof ticket.processIdentity !== 'string' || ticket.processIdentity === ''
     ) return false
     const alive = processIsAlive(ticket.pid)
-    const currentIdentity = alive ? processIdentity(ticket.pid) : null
+    const currentIdentity = alive ? currentProcessIdentity(ticket.pid, ticket.processIdentity) : null
     return alive && (currentIdentity === null || currentIdentity === ticket.processIdentity)
   } catch {
     try {
@@ -245,7 +256,7 @@ async function acquireLock(cancellationSignal) {
   const waitLimit = Number.isSafeInteger(configuredMaximumWait) && configuredMaximumWait > 0
     ? configuredMaximumWait
     : defaultMaximumWaitMilliseconds
-  const identity = processIdentity(process.pid)
+  const identity = currentProcessIdentity(process.pid)
   if (identity === null) throw new Error('Unable to determine the test lock process identity.')
   mkdirSync(queueDirectory, { recursive: true })
   writeFileSync(ticketFile, `${JSON.stringify({ pid: process.pid, processIdentity: identity })}\n`, { flag: 'wx' })

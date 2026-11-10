@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { afterEach, describe, expect, it } from 'vitest'
+import { createProcessIdentityCache } from '../scripts/process-identity-cache.mjs'
 
 const fixtures: string[] = []
 // Bounds a spawned child's first observable write. The children are node and PowerShell
@@ -68,8 +69,81 @@ function run(command: string, args: readonly string[], cwd: string, env: NodeJS.
   })
 }
 
+// run-tests.mjs imports its identity cache, so every wrapper fixture carries that module.
+function copyIdentityCache(scripts: string): void {
+  writeFileSync(
+    join(scripts, 'process-identity-cache.mjs'),
+    readFileSync(join(import.meta.dirname, '..', 'scripts', 'process-identity-cache.mjs')),
+  )
+}
+
+function countingProbe(answers: Record<number, string | null>): { probe: (pid: number) => string | null, calls: number[] } {
+  const calls: number[] = []
+  return {
+    calls,
+    probe: (pid) => {
+      calls.push(pid)
+      return answers[pid] ?? null
+    },
+  }
+}
+
 afterEach(() => {
   for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true })
+})
+
+describe('process identity cache', () => {
+  it('reuses a matching identity for five seconds and probes again after', () => {
+    let clock = 0
+    const { probe, calls } = countingProbe({ 10: 'owner' })
+    const identity = createProcessIdentityCache(probe, () => clock)
+
+    expect(identity(10, 'owner')).toBe('owner')
+    clock = 4_999
+    expect(identity(10, 'owner')).toBe('owner')
+    expect(calls).toEqual([10])
+    clock = 5_000
+    expect(identity(10, 'owner')).toBe('owner')
+    expect(calls).toEqual([10, 10])
+  })
+
+  it('never probes again once the identity differs from the recorded one', () => {
+    let clock = 0
+    const { probe, calls } = countingProbe({ 10: 'stranger' })
+    const identity = createProcessIdentityCache(probe, () => clock)
+
+    expect(identity(10, 'owner')).toBe('stranger')
+    clock = 60_000
+    expect(identity(10, 'owner')).toBe('stranger')
+    expect(calls).toEqual([10])
+  })
+
+  it('reuses an unavailable identity for five seconds', () => {
+    let clock = 0
+    const answers: Record<number, string | null> = { 10: null }
+    const { probe, calls } = countingProbe(answers)
+    const identity = createProcessIdentityCache(probe, () => clock)
+
+    expect(identity(10, 'owner')).toBeNull()
+    answers[10] = 'owner'
+    clock = 4_999
+    expect(identity(10, 'owner')).toBeNull()
+    expect(calls).toEqual([10])
+    clock = 5_000
+    expect(identity(10, 'owner')).toBe('owner')
+    expect(calls).toEqual([10, 10])
+  })
+
+  it('keeps a separate entry for each PID', () => {
+    const { probe, calls } = countingProbe({ 10: 'owner', 20: 'waiter' })
+    const identity = createProcessIdentityCache(probe, () => 0)
+
+    expect(identity(10, 'owner')).toBe('owner')
+    expect(identity(20, 'waiter')).toBe('waiter')
+    expect(identity(10, 'owner')).toBe('owner')
+    expect(identity(20, 'waiter')).toBe('waiter')
+    expect(calls).toEqual([10, 20])
+  })
 })
 
 describe('test suite wrapper', () => {
@@ -81,6 +155,7 @@ describe('test suite wrapper', () => {
     const vitest = join(repository, 'node_modules', 'vitest')
     mkdirSync(scripts, { recursive: true })
     mkdirSync(vitest, { recursive: true })
+    copyIdentityCache(scripts)
     writeFileSync(
       join(scripts, 'run-tests.mjs'),
       readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')),
@@ -186,6 +261,7 @@ describe('test suite wrapper', () => {
     const vitest = join(fixture, 'node_modules', 'vitest')
     mkdirSync(scripts, { recursive: true })
     mkdirSync(vitest, { recursive: true })
+    copyIdentityCache(scripts)
     writeFileSync(join(scripts, 'run-tests.mjs'), readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')))
     writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
     writeFileSync(join(vitest, 'vitest.mjs'), '')
@@ -212,6 +288,7 @@ describe('test suite wrapper', () => {
     const vitest = join(fixture, 'node_modules', 'vitest')
     mkdirSync(scripts, { recursive: true })
     mkdirSync(vitest, { recursive: true })
+    copyIdentityCache(scripts)
     const wrapper = readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs'), 'utf8')
       .replace(
         'function processIdentity(pid) {',
@@ -249,6 +326,7 @@ describe('test suite wrapper', () => {
     const vitest = join(fixture, 'node_modules', 'vitest')
     mkdirSync(scripts, { recursive: true })
     mkdirSync(vitest, { recursive: true })
+    copyIdentityCache(scripts)
     const wrapper = readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs'), 'utf8')
       .replace(
         'renameSync(lockDirectory, abandoned)',
@@ -295,6 +373,7 @@ describe('test suite wrapper', () => {
     const sharedRoot = join(fixture, 'shared')
     mkdirSync(scripts, { recursive: true })
     mkdirSync(vitest, { recursive: true })
+    copyIdentityCache(scripts)
     mkdirSync(sharedRoot)
     writeFileSync(join(scripts, 'run-tests.mjs'), readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')))
     writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
@@ -335,6 +414,7 @@ describe('test suite wrapper', () => {
     const vitest = join(fixture, 'node_modules', 'vitest')
     mkdirSync(scripts, { recursive: true })
     mkdirSync(vitest, { recursive: true })
+    copyIdentityCache(scripts)
     // Starting the wait clock 15 minutes in the past proves the waiter keeps waiting past
     // the default instead of sitting out a real quarter hour.
     const wrapper = readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs'), 'utf8')
