@@ -10,6 +10,7 @@ import {
 } from './processOwner.ts'
 
 const LOCK_RETRY_MS = 10
+const LOCK_RETRY_MAX_MS = 250
 const OWNER_GRACE_MS = 30_000
 const sleepBuffer = new SharedArrayBuffer(4)
 const releasedOwnedLockTokens = new Set<string>()
@@ -168,6 +169,9 @@ export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
   // Bound the wait by elapsed time, not attempts: an attempt against a live owner can
   // run a synchronous process-identity lookup that costs far more than the retry delay.
   const deadline = Date.now() + OWNER_GRACE_MS
+  // Back off while the lock stays held: every attempt churns the recovery mutex and
+  // re-reads the owner, so a fixed short delay turns a long hold into thousands of them.
+  let delay = LOCK_RETRY_MS
   let lockToken: string
   for (;;) {
     const acquired = tryAcquireBacklogLock(lockDir)
@@ -179,7 +183,8 @@ export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
     if (remaining <= 0) {
       throw new Error(`Timed out waiting for the backlog lock: ${backlog}`)
     }
-    Atomics.wait(new Int32Array(sleepBuffer), 0, 0, Math.min(LOCK_RETRY_MS, remaining))
+    Atomics.wait(new Int32Array(sleepBuffer), 0, 0, Math.min(delay, remaining))
+    delay = Math.min(delay * 2, LOCK_RETRY_MAX_MS)
   }
 
   try {
