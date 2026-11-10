@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config'
 import { uncollectedSuites } from './tests/platformCoverage.ts'
+import { SEQUENTIAL_SUITES } from './tests/sequentialSuites.ts'
 
 export default defineConfig({
   test: {
@@ -29,5 +30,30 @@ export default defineConfig({
     // drive the same git-heavy setup as the tests they precede.
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // Almost all of a run is spent creating git child processes, which parallelizes, and
+    // each file keeps its fixtures in its own temporary directories, so those files run
+    // on several workers. The files in tests/sequentialSuites.ts wait on deadlines or
+    // time process exits, so they run one at a time once the parallel group is done.
+    // Both projects inherit everything above; the root globalSetup still runs once.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'parallel',
+          exclude: SEQUENTIAL_SUITES,
+          maxWorkers: 4,
+          sequence: { groupOrder: 0 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'sequential',
+          include: SEQUENTIAL_SUITES,
+          fileParallelism: false,
+          sequence: { groupOrder: 1 },
+        },
+      },
+    ],
   },
 })
