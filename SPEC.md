@@ -527,8 +527,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     another cycle or completion.
     A scan the cycle recorded as failed counts towards the expected total as a delivered
     but silent yield: the cycle closes, its id still reaches the decisions and the pull
-    request through the cycle's loss note, and the empty counter is neither reset nor
-    advanced, because a failed scan is no evidence that its sections are clean.
+    request through the cycle's loss note, and a failed scan by itself neither resets nor
+    advances the empty counter, because a failed scan is no evidence that its sections
+    are clean. A finding from another scan in the same cycle still resets it.
     A scan interrupted by the operator `stop` command is the exception: the command
     records the live scan before terminating it, and the next daemon discards that scan's
     task state, rewinds the incomplete cycle, and dispatches the cycle's full scan set
