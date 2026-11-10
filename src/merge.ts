@@ -26,7 +26,8 @@ import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
-  removeWorktreeWithFallback, worktreeListIncludes, type WorktreeRemovalRuntime,
+  removeWorktreeWithFallback, worktreeListIncludes, type WorktreeRemovalOptions,
+  type WorktreeRemovalRuntime,
 } from './worktree.ts'
 
 export class MergeError extends Error {
@@ -747,12 +748,17 @@ export function describeCommandFailure(error: unknown): string {
   return `did not run: ${error instanceof Error ? error.message : String(error)}`
 }
 
+/**
+ * Run the merge gate in a prospective worktree, and say whether any shell command ran
+ * there: an explicit test command, a check, or a check's install. Git queries do not
+ * count. A worktree nothing ran in holds no process, so its removal skips the scan.
+ */
 function runMergeChecks(
   worktree: string,
   baseRef: string,
   options: MergeOptions,
   io: MergeIo,
-): void {
+): boolean {
   if (options.testCmd !== undefined && options.testCmd !== '') {
     io.out(`=== Running tests in worktree: ${options.testCmd} ===`)
     try {
@@ -766,21 +772,23 @@ function runMergeChecks(
       && !ranIsolated(worktree, 'the worktree', io)) {
       throw new MergeError('Tests passed against borrowed dependencies. Aborting merge.')
     }
-    return
+    return true
   }
-  if (options.skipAutoTest === true) return
+  if (options.skipAutoTest === true) return false
 
   const changed = gitPaths(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
   let ok = true
   // A check that only waited out the test lock defers the merge, unless another check
   // genuinely failed: that failure is known, and deferring would hide it.
   let lockBusy = false
+  let ranCommand = false
   for (const check of options.project.mergeChecks(options.taskGate)) {
     if (check.appliesTo !== undefined && !check.appliesTo(changed)) continue
     if (check.requires !== undefined && !existsSync(join(worktree, check.requires))) continue
     if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
     const install = check.installWhenMissing
     if (install !== undefined && !existsSync(join(worktree, install.path))) {
+      ranCommand = true
       const installed = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`)
       if (installed === 'lock-busy') {
         lockBusy = true
@@ -789,6 +797,7 @@ function runMergeChecks(
       ok = installed === 'passed' && ok
     }
     const directory = join(worktree, check.cwd)
+    ranCommand = true
     const outcome = io.tryRun(directory, check.command, check.label)
     if (outcome === 'lock-busy') {
       lockBusy = true
@@ -801,6 +810,7 @@ function runMergeChecks(
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
   if (lockBusy) throw new TestLockBusyError(testLockBusyMessage)
+  return ranCommand
 }
 
 /**
@@ -825,16 +835,19 @@ function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
 // The error a step throws decides how the loop treats the attempt: a test-lock deferral is
 // retried uncounted and a recovery failure stops the loop. A removal that also fails is
 // logged beside that error rather than replacing it, and fails the merge only when the
-// step itself succeeded.
+// step itself succeeded. A step that returns false ran no command in the worktree, so its
+// removal skips looking for processes holding it; a step that throws or returns nothing
+// keeps that scan.
 export function inTemporaryWorktree(
   paths: OrchPaths,
   worktree: string,
   log: (text: string) => void,
-  step: () => void,
+  step: () => boolean | void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
+  let ranCommand: boolean | void
   try {
-    step()
+    ranCommand = step()
   } catch (error) {
     try {
       removeTemporaryWorktree(paths, worktree, log, runtime)
@@ -843,7 +856,7 @@ export function inTemporaryWorktree(
     }
     throw error
   }
-  removeTemporaryWorktree(paths, worktree, log, runtime)
+  removeTemporaryWorktree(paths, worktree, log, runtime, { untouched: ranCommand === false })
 }
 
 export function removeTemporaryWorktree(
@@ -851,8 +864,9 @@ export function removeTemporaryWorktree(
   worktree: string,
   log: (text: string) => void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
+  options: WorktreeRemovalOptions = {},
 ): void {
-  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, log)
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, log, options)
   if (result.fallbackFailure === undefined && result.pruneFailure === undefined) return
   const pruneDetail = result.pruneFailure === undefined ? '' : `; prune: ${result.pruneFailure}`
   throw new MergeError(
@@ -1382,7 +1396,7 @@ async function mergeTaskWithGuardHeld(
     } catch {
       // an empty inspection diff is fine
     }
-    runMergeChecks(prospectiveWorktree, currentBranch, options, io)
+    return runMergeChecks(prospectiveWorktree, currentBranch, options, io)
   })
 
   const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
@@ -1522,7 +1536,7 @@ export async function mergeRemoteTask(
     )
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
-    runMergeChecks(worktree, currentBranch, options, io)
+    return runMergeChecks(worktree, currentBranch, options, io)
   })
 
   const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
