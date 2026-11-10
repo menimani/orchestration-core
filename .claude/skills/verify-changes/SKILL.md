@@ -31,14 +31,17 @@ Run the checks that apply, not all of them: a README change does not need the su
 Measure the exit code directly. `command | tail` reports the exit code of `tail`, so a
 failing check reads as a pass — redirect to a file and check `$?` instead.
 
-The suite drives real git repositories in temporary directories. Parallel workers made
-their fixtures race, so CI runs it single-threaded:
+The suite drives real git repositories in temporary directories. `vitest.config.ts` runs
+its git-fixture files in parallel, then the process- and deadline-sensitive files listed
+in `tests/sequentialSuites.ts` one at a time. To run every file one at a time instead:
 
 ```
 npm test -- --pool=threads --no-file-parallelism
 ```
 
-Use that form when a failure will not reproduce, before concluding it is a flake.
+Use that form when a failure will not reproduce, before concluding it is a flake. A file
+that proves timing-sensitive under parallel load belongs in `tests/sequentialSuites.ts`;
+move the whole file there rather than loosening its tests.
 
 A running loop keeps repository checkouts under `orchestration/worktrees/`, and a Claude
 Code session started in a worktree keeps one under `.claude/worktrees/`. Those hold their
