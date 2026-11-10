@@ -1548,13 +1548,20 @@ function removePromotionRecord(paths: OrchPaths, issueNumber: number): void {
   if (!taskStillPromoting) rmSync(issueMapFile(paths, promotion.taskId), { force: true })
 }
 
-async function removeClosedPromotionRecords(forge: Forge, paths: OrchPaths): Promise<void> {
+async function removeClosedPromotionRecords(
+  forge: Forge,
+  paths: OrchPaths,
+  listedOpenIssues: ReadonlySet<number>,
+): Promise<void> {
   const dir = promotionDir(paths)
   if (!existsSync(dir)) return
   for (const name of readdirSync(dir)) {
     const match = /^(\d+)\.json$/.exec(name)
     if (match === null) continue
     const issueNumber = Number(match[1])
+    // The poll's open-issue listing already answers for the issues it holds; only a
+    // record whose issue is missing from it may have closed or been deleted since.
+    if (listedOpenIssues.has(issueNumber)) continue
     let issue: ForgeIssue
     try {
       issue = await forge.getIssue(issueNumber)
@@ -2232,7 +2239,8 @@ export async function reapStaleLeases(
     await returnIssueToReady(forge, issue.number)
     reaped.push(issue.number)
   }
-  await removeClosedPromotionRecords(forge, paths)
+  await removeClosedPromotionRecords(
+    forge, paths, new Set(openIssues.map((issue) => issue.number)))
   return reaped
 }
 
