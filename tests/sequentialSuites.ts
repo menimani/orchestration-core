@@ -9,7 +9,7 @@
 // every entry exists and that each test file lands in exactly one of the two groups.
 
 export const SEQUENTIAL_SUITES: string[] = [
-  'tests/cli.test.ts',
+  'tests/cli-daemon.test.ts',
   'tests/run-tests.test.ts',
   'tests/windows-run-tests-cancellation.test.ts',
   'tests/windows-console.test.ts',
