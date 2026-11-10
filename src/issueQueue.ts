@@ -159,6 +159,14 @@ function findingParts(description: string): { tag: string | undefined; path: str
   }
 }
 
+/**
+ * A finding tagged `[DOCS]` asks for a documentation fix no code change needs, so the
+ * loop holds it until its cycle's other work has merged.
+ */
+export function isDocumentationFinding(description: string): boolean {
+  return findingParts(description).tag === 'docs'
+}
+
 /** The first path in a finding title is its established primary-file convention. */
 function findingPrimaryFile(title: string): string | undefined {
   return findingParts(title).path

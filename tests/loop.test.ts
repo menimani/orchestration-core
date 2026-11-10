@@ -4677,6 +4677,8 @@ describe('scanForNextTasks', () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_016_scan', 'NEXT_TASK: [DOCS] a stale README section a scan found\n')
     await loop.scanForNextTasks('20250101_000000_016_scan', 0)
+    // A documentation finding waits for the cycle's other work, then is released alone.
+    await loop.triggerScanIfIdle()
 
     const specs = readdirSync(paths.tasksDir)
     expect(specs).toHaveLength(1)
@@ -4691,6 +4693,8 @@ describe('scanForNextTasks', () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_017_scan', 'NEXT_TASK: [DOCS] a stale README section a scan found\n')
     await loop.scanForNextTasks('20250101_000000_017_scan', 0)
+    // A documentation finding waits for the cycle's other work, then is released alone.
+    await loop.triggerScanIfIdle()
 
     const specs = readdirSync(paths.tasksDir)
     expect(specs).toHaveLength(1)
@@ -4790,5 +4794,290 @@ describe('scanForNextTasks', () => {
     expect(freshTaskId).not.toBe(taskId)
     expect(readdirSync(paths.tasksDir)).toHaveLength(2)
     expect(logText()).not.toContain('Duplicate finding')
+  })
+})
+
+describe('documentation findings held for the cycle', () => {
+  const heldFile = (): string => join(paths.queueDir, 'held-documentation.txt')
+  const heldRecords = (): string[] => existsSync(heldFile())
+    ? readFileSync(heldFile(), 'utf8').split(/\r?\n/).filter((line) => line !== '')
+    : []
+  const suiteRuns = (): boolean => existsSync(join(repoRoot, 'suite-runs'))
+  const taskIdsNow = (): string[] => readdirSync(paths.tasksDir).map((name) => name.replace(/\.md$/, ''))
+  const gatedProject: ProjectAdapter = {
+    ...stubProject,
+    cycleSuite: () => [{
+      label: 'Marker', cwd: '',
+      command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+    }],
+  }
+  const gateConfig: Partial<LoopConfig> = {
+    taskGate: 'light', autoPr: false, ciGateEnabled: false, reviewEnabled: true, autoReview: false,
+  }
+
+  beforeEach(() => {
+    mkdirSync(join(paths.root, 'templates', 'pitfalls'), { recursive: true })
+    writeFileSync(join(paths.root, 'templates', 'pitfalls', 'docs.md'), 'Project documentation pitfalls.\n')
+    writeFileSync(join(paths.root, 'templates', 'task-requirements.md'), 'Shared requirements.\n')
+  })
+
+  it('starts code at once and releases the documentation as one numbered task after it merges', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop(gateConfig, gatedProject)
+    const scanId = '20250101_000000_030_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [BUG] `src/parse.ts` drops the last line',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+
+    const dispatch = await loop.scanForNextTasks(scanId, 0)
+
+    expect(dispatch.findings).toHaveLength(3)
+    const [bugId] = taskIdsNow()
+    expect(taskIdsNow()).toHaveLength(1)
+    expect(readFileSync(specFile(paths, bugId!), 'utf8')).toContain('[BUG] `src/parse.ts` drops the last line')
+    expect(backlogEntries()).toEqual([`${bugId}:1`])
+    expect(heldRecords()).toEqual([
+      `1\t${scanId}\t[DOCS] \`README.md\` names a removed flag`,
+      `1\t${scanId}\t[DOCS] \`SPEC.md\` misstates the retry bound`,
+    ])
+    expect(logged).toContain(
+      "Deferred 030_scan    2 documentation finding(s) until the cycle's other tasks finish",
+    )
+
+    // While the code task is queued, running, or awaiting its merge, nothing is released.
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    writeRawStatus(bugId!, 'running')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    writeRawStatus(bugId!, 'completed')
+    writeFileSync(join(paths.queueDir, 'scanned', bugId!), '')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(taskIdsNow()).toEqual([bugId])
+    expect(heldRecords()).toHaveLength(2)
+    expect(suiteRuns()).toBe(false)
+
+    writeRawStatus(bugId!, 'merged')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    const docsId = taskIdsNow().find((taskId) => taskId !== bugId)
+    expect(taskIdsNow()).toHaveLength(2)
+    expect(backlogEntries()).toEqual([`${docsId}:1`])
+    const spec = readFileSync(specFile(paths, docsId!), 'utf8')
+    expect(spec).toContain([
+      '## Requirement',
+      '',
+      '1. [DOCS] `README.md` names a removed flag',
+      '2. [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    expect(spec).toContain('Project documentation pitfalls.')
+    expect(heldRecords()).toEqual([])
+    expect(logged).toContain('Released docs        2 documentation finding(s) as one task')
+    expect(suiteRuns()).toBe(false)
+
+    // The cycle closes only once the documentation task is terminal.
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    writeRawStatus(docsId!, 'running')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(suiteRuns()).toBe(false)
+    writeRawStatus(docsId!, 'merged')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(taskIdsNow()).toHaveLength(2)
+  })
+
+  it('releases a single held finding without numbering it', async () => {
+    const loop = makeLoop()
+    const scanId = '20250101_000000_031_scan'
+    writeFinal(scanId, 'NEXT_TASK: [DOCS] `README.md` omits the cleanup command\n')
+    await loop.scanForNextTasks(scanId, 0)
+    expect(taskIdsNow()).toEqual([])
+    expect(logged).toContain(
+      "Deferred 031_scan    1 documentation finding(s) until the cycle's other tasks finish",
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    const [docsId] = taskIdsNow()
+    expect(taskIdsNow()).toHaveLength(1)
+    expect(docsId).toContain('_auto-')
+    const spec = readFileSync(specFile(paths, docsId!), 'utf8')
+    expect(spec).toContain(
+      `## Auto-generated task (parent: ${scanId})\n\n[DOCS] \`README.md\` omits the cleanup command\n`,
+    )
+    expect(spec).not.toContain('1. [DOCS]')
+    expect(backlogEntries()).toEqual([`${docsId}:1`])
+    expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
+  })
+
+  it('counts a documentation-only scan as a finding scan and releases it when nothing else is open', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-1'), '1\n')
+    writeFileSync(join(paths.queueDir, 'empty-scan-count.txt'), '2\n')
+    const loop = makeLoop(gateConfig, gatedProject)
+    const scanId = '20250101_000000_032_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+
+    await loop.scanForNextTasks(scanId, 0)
+    loop.recordScanYield(scanId)
+
+    expect(readFileSync(join(paths.queueDir, 'scan-yield-1'), 'utf8')).toBe(`${scanId}\tfound\n`)
+    expect(taskIdsNow()).toEqual([])
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(taskIdsNow()).toHaveLength(1)
+    expect(suiteRuns()).toBe(false)
+    loop.foldScanYields(1)
+    expect(readFileSync(join(paths.queueDir, 'empty-scan-count.txt'), 'utf8').trim()).toBe('0')
+  })
+
+  it('holds a documentation finding reported by two scans once', async () => {
+    const loop = makeLoop()
+    const finding = '[DOCS] `README.md` names a removed flag'
+    writeFinal('20250101_000000_033_scan', `NEXT_TASK: ${finding}\n`)
+    writeFinal('20250101_000000_034_scan', `NEXT_TASK: ${finding}\nNEXT_TASK: ${finding}\n`)
+
+    await loop.scanForNextTasks('20250101_000000_033_scan', 0)
+    await loop.scanForNextTasks('20250101_000000_034_scan', 0)
+
+    expect(heldRecords()).toEqual([`1\t20250101_000000_033_scan\t${finding}`])
+    expect(logged.filter((line) => line.startsWith('Deferred'))).toHaveLength(1)
+
+    // Once released, the task carrying it suppresses the same finding as any task would.
+    await loop.triggerScanIfIdle()
+    expect(taskIdsNow()).toHaveLength(1)
+    writeFinal('20250101_000000_035_scan', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_035_scan', 0)
+    expect(heldRecords()).toEqual([])
+    expect(taskIdsNow()).toHaveLength(1)
+  })
+
+  it('keeps the holding file across a restart and clears it when a new run starts', async () => {
+    initializeGitRepo()
+    const loop = makeLoop()
+    loop.initializeSessionStateForBranch()
+    writeFinal('20250101_000000_036_scan', 'NEXT_TASK: [DOCS] `README.md` names a removed flag\n')
+    await loop.scanForNextTasks('20250101_000000_036_scan', 1)
+
+    const restarted = makeLoop()
+    restarted.initializeSessionStateForBranch()
+    expect(heldRecords()).toEqual([
+      '2\t20250101_000000_036_scan\t[DOCS] `README.md` names a removed flag',
+    ])
+    expect(await restarted.triggerScanIfIdle()).toBe('continue')
+    const [docsId] = taskIdsNow()
+    expect(backlogEntries()).toEqual([`${docsId}:2`])
+
+    writeFinal('20250101_000000_037_scan', 'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound\n')
+    await restarted.scanForNextTasks('20250101_000000_037_scan', 0)
+    expect(heldRecords()).toHaveLength(1)
+    git(['switch', '-c', 'feature/next-run'])
+    makeLoop().initializeSessionStateForBranch()
+    expect(existsSync(heldFile())).toBe(false)
+  })
+
+  it('drops held findings with the task-limit warning when the combined task has no capacity', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ ...gateConfig, maxTotalTasks: 1 }, gatedProject)
+    writeFinal('20250101_000000_038_scan', [
+      'NEXT_TASK: [BUG] `src/parse.ts` drops the last line',
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+    ].join('\n'))
+    await loop.scanForNextTasks('20250101_000000_038_scan', 0)
+    const [bugId] = taskIdsNow()
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    writeRawStatus(bugId!, 'merged')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logText()).toContain('WARN task limit 1 ignored findings from 038_scan')
+    expect(heldRecords()).toEqual([])
+    expect(taskIdsNow()).toEqual([bugId])
+    expect(suiteRuns()).toBe(true)
+  })
+
+  it('leaves a cycle without documentation findings as it was', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop(gateConfig, gatedProject)
+    writeFinal('20250101_000000_039_scan', [
+      'NEXT_TASK: [BUG] `src/parse.ts` drops the last line',
+      'NEXT_TASK: [TEST] `src/parse.test.ts` lacks a trailing-line case',
+    ].join('\n'))
+
+    await loop.scanForNextTasks('20250101_000000_039_scan', 0)
+
+    expect(taskIdsNow()).toHaveLength(2)
+    expect(backlogEntries()).toHaveLength(2)
+    expect(existsSync(heldFile())).toBe(false)
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    for (const taskId of taskIdsNow()) writeRawStatus(taskId, 'merged')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(suiteRuns()).toBe(true)
+    expect(taskIdsNow()).toHaveLength(2)
+    expect(logText()).not.toMatch(/Deferred|Released/)
+  })
+
+  it('files the held findings as one issue with every fingerprint once the other issues close', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    writeFinal('20250101_000000_040_scan', [
+      'NEXT_TASK: [BUG] `src/parse.ts` drops the last line',
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+
+    await loop.scanForNextTasks('20250101_000000_040_scan', 0)
+
+    expect([...fakeForge.issues.values()].map((issue) => issue.title))
+      .toEqual(['[BUG] `src/parse.ts` drops the last line'])
+    expect(heldRecords()).toHaveLength(2)
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+
+    await fakeForge.closeIssue(1, 'fixed')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(fakeForge.issues.size).toBe(2)
+    const combined = await fakeForge.getIssue(2)
+    expect(combined.title).toBe('Documentation fixes (cycle 1)')
+    expect(combined.body).toContain([
+      '1. [DOCS] `README.md` names a removed flag',
+      '2. [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    expect(combined.body.match(/^Fingerprint: /gm)).toHaveLength(2)
+    expect(combined.body).toContain('Depth: 1')
+    expect(heldRecords()).toEqual([])
+    expect(suiteRuns()).toBe(false)
+  })
+
+  it('leaves the findings of a review task on their combined path', async () => {
+    const loop = makeLoop()
+    writeFinal('20250101_000000_041_review-c1', [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [BUG] `src/parse.ts` drops the last line',
+    ].join('\n'))
+
+    await loop.scanForNextTasks('20250101_000000_041_review-c1', 0)
+
+    expect(existsSync(heldFile())).toBe(false)
+    const [fixId] = taskIdsNow()
+    expect(taskIdsNow()).toHaveLength(1)
+    expect(fixId).toContain('_fix-')
+    expect(readFileSync(specFile(paths, fixId!), 'utf8')).toContain([
+      '## Requirement',
+      '',
+      '1. [DOCS] `README.md` names a removed flag',
+      '2. [BUG] `src/parse.ts` drops the last line',
+    ].join('\n'))
+    expect(backlogEntries()).toEqual([`${fixId}:1`])
   })
 })

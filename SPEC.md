@@ -368,6 +368,29 @@ are not parsed by `loadConfig` and are not operator-file settings.
    findings before publishing it, so a filing failure is one of its publication errors,
    retried on later polls until the fifth consecutive failure marks the task failed, and
    never stops the loop.
+6a. A finding whose leading tag is `[DOCS]` is held rather than dispatched when the task
+    that reported it is not a review task and the daemon is not in worker mode. It is
+    appended to `queue/held-documentation.txt`, one record per finding with the depth it
+    would have been queued at and the task that reported it, written atomically, unless
+    its fingerprint is already held or the duplicate checks of the dispatch paths find it
+    already carried by a queued, running, completed, or failed task or an open finding
+    issue. The daemon logs one `Deferred <task> <n> documentation finding(s) until
+    the cycle's other tasks finish` event per source task. Every other finding, and every
+    finding of a review task, is dispatched as item 6 describes, and a held finding still
+    counts as a finding of its scan, so a scan reporting only documentation is not empty.
+    When the cycle gate (item 15) finds nothing queued, running, or awaiting its merge
+    and, in issue mode, no finding of the run open, claimed, or awaiting merge, a non-empty
+    holding file is released before the cycle suite and review: one task whose
+    description is the finding itself when one is held, otherwise a numbered list
+    `1. <finding>` in the order held, at the greatest held depth. It is queued locally, or
+    filed as one issue; an issue combining several findings is titled `Documentation
+    fixes (cycle <n>)` and carries every held fingerprint. It counts once against
+    `MAX_TOTAL_TASKS` and passes the ordinary merge gate. The file is truncated only after
+    that task or issue exists, `Released` is logged with the count, and the cycle closes
+    only once the task is terminal; documentation the task itself reports is held and
+    released by the same rule within `MAX_GROWTH_DEPTH`. When the task limit or the depth bound refuses the combined task,
+    the held findings are dropped with the WARN a single finding logs. The file survives
+    a daemon restart and is cleared with the rest of a run's state.
 7. `DECISION_REQUIRED: <text>` is logged and carried into the PR risks, never queued.
    Dedup: a line naming a `GHSA-`/`CVE-` identifier matches on the identifier (a scan
    words the same advisory differently every cycle); a line naming neither matches on

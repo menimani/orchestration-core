@@ -37,6 +37,14 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
+A `[DOCS]` finding from a scan or an ordinary task is not queued on its own: it is held in
+`queue/held-documentation.txt` until every other task of the cycle has merged, failed, or
+finished without a change. The held findings then become one task, numbered in the order
+they were held, that passes the same merge gate as any other; the cycle's suite, review,
+and pull-request update wait for it. A review's findings keep their own combined fix
+task, and a task that changes behaviour still updates `README.md` and `SPEC.md` in its own
+commit.
+
 Consumers may list review findings that have been explicitly accepted in an optional
 `accepted-limits.md` file in the project directory (`orchestration/` in a subtree
 consumer, `projects/<name>/` in a fleet). A missing or blank file contributes `(none)`.
