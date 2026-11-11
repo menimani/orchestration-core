@@ -331,7 +331,10 @@ describe('process-group liveness', () => {
     }
 
     expect(() => createWindowsOperatingSystem(runtime).terminateProcessTree(4321))
-      .toThrow(`Refusing to stop process tree 4321 because it contains the current process ${process.pid}.`)
+      .toThrow(
+        `Refusing to stop process tree 4321 because it contains the current process ${process.pid}`
+        + ` through 4321 (creation time unknown) -> ${process.pid} (creation time unknown).`,
+      )
     expect(spawn).not.toHaveBeenCalled()
   })
 
