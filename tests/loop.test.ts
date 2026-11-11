@@ -17,6 +17,7 @@ import {
   recordIssuesForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
+import { pitfallsFileForDesc } from '../src/gates.ts'
 import { existingTaskIdForDesc, shortTaskId } from '../src/ids.ts'
 import { cleanupTask } from '../src/cleanup.ts'
 import { runCleanupCommand } from '../src/cleanupCommand.ts'
@@ -4862,6 +4863,22 @@ describe('scanForNextTasks', () => {
     expect(spec).toContain('Shared requirements.\n\nProject documentation pitfalls.\n')
     expect(spec).not.toContain('Stale async responses')
     expect(spec).not.toContain('clearAllMocks keeps implementations')
+  })
+
+  it('selects the pitfall list from the tag of an imported requirement', () => {
+    const imported = (title: string): string => [
+      `> ${title}`,
+      'Imported from issue 9 of acme/widget, opened by octo.',
+      '> The body.',
+    ].join('\n\n')
+    const pitfallsDir = join(paths.projectRoot, 'templates', 'pitfalls')
+
+    expect(pitfallsFileForDesc(paths, imported('[TEST] cover the retry path')))
+      .toBe(join(pitfallsDir, 'tests.md'))
+    expect(pitfallsFileForDesc(paths, imported('[DOCS] a stale README section')))
+      .toBe(join(pitfallsDir, 'docs.md'))
+    expect(pitfallsFileForDesc(paths, imported('[BUG] a defect')))
+      .toBe(join(pitfallsDir, 'code.md'))
   })
 
   it('adds no pitfall list when the selected file is missing', async () => {

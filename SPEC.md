@@ -314,7 +314,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    When generating a task specification, the description's leading category selects a
    project pitfall list: `[TEST]` selects `templates/pitfalls/tests.md`, `[DOCS]` selects
    `templates/pitfalls/docs.md`, and every other description selects
-   `templates/pitfalls/code.md`. When the selected file exists, its contents follow the
+   `templates/pitfalls/code.md`. The category is read from the description's first
+   paragraph with the quote marker (`> ` or a bare `>`) removed from the start of each
+   line, so an imported issue's quoted title selects a list as its own tag would.
+   When the selected file exists, its contents follow the
    shared task requirements in the generated specification; when it does not exist, no
    pitfall list is added.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
@@ -451,10 +454,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
 8a. A task's merge commit has the subject `Merge <task-id> via orchestration`, followed by
     the forge's closing text for each linked issue the merge may name. Its body records why
     the work exists, as one `Why:` line per distinct requirement: the first paragraph,
-    whitespace collapsed, cut at 300 characters. A local merge reads the requirements from
+    whitespace collapsed, cut at 300 characters. The tag and the paragraph are read with
+    the quote marker (`> ` or a bare `>`) removed from the start of each of its lines,
+    so an imported issue contributes its title. A local merge reads the requirements from
     the task's specification, framed requirements in order or else its `## Requirement`
     section; an adopted worker branch reads them from its issues. A requirement tagged
-    `[SECURITY]` or naming a GHSA or CVE identifier contributes only
+    `[SECURITY]`, an imported one by its quoted title, or naming a GHSA or CVE identifier
+    contributes only
     `Why: security fix; details withheld.`, because its text describes a weakness that
     stays exploitable wherever the fix has not landed. A retry recognizes a merge it
     already applied by the exact task head and the subject alone, since the requirement
@@ -1428,8 +1434,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     that `init` and `verify-setup` manage is unchanged. Its requirement is the issue title, a line naming
     the source issue and its author, and the issue body, with every line of the title and
     the body quoted, so the project's text can neither pose as the queue issue's metadata lines nor end its
-    requirement with a heading. `--dry-run` prints `Would import:` lines and files
-    nothing; a real run prints `Imported:` lines naming the queue issue and whether it is
+    requirement with a heading; the merge commit's `Why:` line, its security withholding,
+    and the pitfall list still read the quoted title's tag and text (item 8a). `--dry-run`
+    prints `Would import:` lines and files nothing; a real run prints `Imported:` lines naming the queue issue and whether it is
     ready. A claim records the source fingerprints of the issues it took, and the task's
     merge commit, local or adopted, carries the forge's closing text for those source
     issues of the project's own repository, the only issue numbers a merge in a fleet with

@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
+import { requirementLead } from './templates.ts'
 
 // Which commands verify a merge, and when, is project knowledge — it lives in the
 // project adapter (orchestration/project/project-<name>.ts), not here. The rest of this
@@ -10,8 +11,9 @@ import type { OrchPaths } from './paths.ts'
 // after reviews flagged it twice, the lowest-impact entry dropped at the cap and
 // restored past the cap when a dropped pattern recurs.
 export function pitfallsFileForDesc(paths: OrchPaths, description: string): string {
-  const name = description.startsWith('[TEST]') ? 'tests'
-    : description.startsWith('[DOCS]') ? 'docs'
+  const lead = requirementLead(description)
+  const name = lead.startsWith('[TEST]') ? 'tests'
+    : lead.startsWith('[DOCS]') ? 'docs'
       : 'code'
   return join(paths.projectRoot, 'templates', 'pitfalls', `${name}.md`)
 }

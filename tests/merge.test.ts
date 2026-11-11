@@ -516,6 +516,42 @@ describe('mergeTask', () => {
       .toBe('Why: security fix; details withheld.')
   })
 
+  it('withholds the details of an imported security requirement', async () => {
+    const taskId = '20260808_000000_030_user-imported-security-reason'
+    await makeCompletedTask(taskId, { commit: true })
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light',
+      project: noCheckProject,
+      reasons: [[
+        '> [SECURITY] The token check in `src/auth.ts` accepts an empty signature',
+        'Imported from issue 7 of acme/widget, opened by octo.',
+        '> The signature is compared only when present.\n>\n> Details follow.',
+      ].join('\n\n')],
+    })
+
+    expect(git(repoRoot, ['log', '-1', '--format=%b']).trim())
+      .toBe('Why: security fix; details withheld.')
+  })
+
+  it('records an imported requirement title without its quote marker', async () => {
+    const taskId = '20260808_000000_031_user-imported-reason'
+    await makeCompletedTask(taskId, { commit: true })
+
+    await mergeTask(paths, taskId, {
+      taskGate: 'light',
+      project: noCheckProject,
+      reasons: [[
+        '> [BUG] Drop the duplicate retry in `src/fetch.ts`',
+        'Imported from issue 8 of acme/widget, opened by octo.',
+        '> It doubles every timeout.',
+      ].join('\n\n')],
+    })
+
+    expect(git(repoRoot, ['log', '-1', '--format=%b']).trim())
+      .toBe('Why: [BUG] Drop the duplicate retry in `src/fetch.ts`')
+  })
+
   it('recognizes an applied merge whose reasons have changed since', async () => {
     const taskId = '20260808_000000_029_user-edited-reason'
     await makeCompletedTask(taskId, { commit: true })
