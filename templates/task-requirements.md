@@ -9,6 +9,11 @@ the implementation, then run the same reproduction after the fix as well as the 
 full suite. Do not weaken assertions, widen timeouts, or disable checks merely to make a
 failure disappear.
 
+Commit on the branch the worktree is already on: it is this task's own branch, and the
+merge takes only that branch. Do not create, switch, or rename branches. A rule asking
+for `feature/`, `fix/`, or `chore/` branch names is already met by the run branch this
+task merges into.
+
 Review the final diff for unintended changes and repository-specific invariants that
 automated checks may not cover. Report the commands you ran and any checks you could not
 run.

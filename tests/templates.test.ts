@@ -33,6 +33,14 @@ describe('template resolution', () => {
     )
   })
 
+  it('tells the agent to commit on the worktree branch without creating or switching one', () => {
+    const template = readTemplate(paths, 'task-requirements.md').replace(/\s+/g, ' ')
+
+    expect(template).toContain('Commit on the branch the worktree is already on')
+    expect(template).toContain('Do not create, switch, or rename branches.')
+    expect(template).toContain('is already met by the run branch this task merges into')
+  })
+
   it('keeps repository-specific guidance out of the core defaults', () => {
     const defaults = [
       readTemplate(paths, 'task-requirements.md'),

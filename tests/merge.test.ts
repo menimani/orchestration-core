@@ -1025,6 +1025,127 @@ describe('mergeTask', () => {
   })
 })
 
+describe('mergeTask with commits left off the task branch', () => {
+  const branchOf = (cwd: string): string => git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+  const tipOf = (ref: string): string => git(repoRoot, ['rev-parse', ref]).trim()
+
+  function commitInWorktree(worktree: string, file: string): string {
+    writeFileSync(join(worktree, file), 'work\n')
+    git(worktree, ['add', '-A'])
+    git(worktree, ['commit', '-qm', 'feat: add work on another branch'])
+    return git(worktree, ['rev-parse', 'HEAD']).trim()
+  }
+
+  it('adopts commits the agent made on a branch it created', async () => {
+    const taskId = '20261111_000000_001_user-feature-branch'
+    const worktree = await makeCompletedTask(taskId)
+    git(worktree, ['switch', '-q', '-c', 'feature/x'])
+    const agentCommit = commitInWorktree(worktree, 'feature.txt')
+    const outputFile = join(repoRoot, 'adopt-branch.log')
+
+    const result = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+    })
+
+    expect(result.outcome).toBe('merged')
+    const mergeCommit = tipOf('main')
+    expect(git(repoRoot, ['log', '-1', '--format=%s', mergeCommit]).trim())
+      .toBe(`Merge ${taskId} via orchestration`)
+    git(repoRoot, ['merge-base', '--is-ancestor', agentCommit, mergeCommit])
+    expect(readFileSync(join(repoRoot, 'feature.txt'), 'utf8')).toBe('work\n')
+    expect(readFileSync(outputFile, 'utf8')).toContain(
+      `=== Adopted task commits from feature/x onto ${branchName(taskId)} ===`,
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(readStatus(paths, taskId)?.merge_commit).toBe(mergeCommit)
+    expect(tipOf('feature/x')).toBe(agentCommit)
+  })
+
+  it('adopts commits the agent made on a detached HEAD', async () => {
+    const taskId = '20261111_000000_002_user-detached-head'
+    const worktree = await makeCompletedTask(taskId)
+    git(worktree, ['switch', '-q', '--detach'])
+    const agentCommit = commitInWorktree(worktree, 'detached.txt')
+    const outputFile = join(repoRoot, 'adopt-detached.log')
+
+    const result = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+    })
+
+    expect(result.outcome).toBe('merged')
+    git(repoRoot, ['merge-base', '--is-ancestor', agentCommit, tipOf('main')])
+    expect(readFileSync(outputFile, 'utf8')).toContain(
+      `=== Adopted task commits from detached HEAD ${agentCommit} onto ${branchName(taskId)} ===`,
+    )
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('leaves a branch that diverged from the task branch to the ordinary checks', async () => {
+    const taskId = '20261111_000000_003_user-diverged-branch'
+    writeFileSync(join(repoRoot, 'second.txt'), 'second\n')
+    git(repoRoot, ['add', 'second.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: second commit'])
+    const worktree = await makeCompletedTask(taskId)
+    const taskTip = tipOf(branchName(taskId))
+    git(worktree, ['switch', '-q', '-c', 'feature/x', 'HEAD~1'])
+    commitInWorktree(worktree, 'diverged.txt')
+    const runHead = tipOf('main')
+    const outputFile = join(repoRoot, 'adopt-diverged.log')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+    })).rejects.toThrow(`Merging ${branchName(taskId)} created no commit on main.`)
+
+    expect(readFileSync(outputFile, 'utf8')).not.toContain('Adopted task commits')
+    expect(tipOf(branchName(taskId))).toBe(taskTip)
+    expect(branchOf(worktree)).toBe('feature/x')
+    expect(tipOf('main')).toBe(runHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('leaves a dirty worktree on another branch to the uncommitted-changes check', async () => {
+    const taskId = '20261111_000000_004_user-dirty-branch'
+    const worktree = await makeCompletedTask(taskId)
+    const taskTip = tipOf(branchName(taskId))
+    git(worktree, ['switch', '-q', '-c', 'feature/x'])
+    commitInWorktree(worktree, 'feature.txt')
+    writeFileSync(join(worktree, 'uncommitted.txt'), 'left behind\n')
+    const outputFile = join(repoRoot, 'adopt-dirty.log')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+    })).rejects.toThrow('The worktree has uncommitted changes')
+
+    expect(existsSync(outputFile) ? readFileSync(outputFile, 'utf8') : '')
+      .not.toContain('Adopted task commits')
+    expect(tipOf(branchName(taskId))).toBe(taskTip)
+    expect(branchOf(worktree)).toBe('feature/x')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('still refuses a merge that created no commit when nothing needed adopting', async () => {
+    const taskId = '20261111_000000_005_user-no-work-anywhere'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskTip = tipOf(branchName(taskId))
+    git(worktree, ['switch', '-q', '-c', 'feature/x'])
+    const runHead = tipOf('main')
+    const outputFile = join(repoRoot, 'adopt-nothing.log')
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string =>
+        cwd === paths.repoRoot && args[0] === 'merge' && args[1] === '--quiet' ? '' : git(cwd, args),
+    }
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile, mergeRuntime,
+    })).rejects.toThrow(`Merging ${branchName(taskId)} created no commit on main.`)
+
+    expect(readFileSync(outputFile, 'utf8')).not.toContain('Adopted task commits')
+    expect(tipOf(branchName(taskId))).toBe(taskTip)
+    expect(tipOf('main')).toBe(runHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+})
+
 describe('mergeRemoteTask', () => {
   it('rejects a malformed task branch without changing HEAD or worktree state', async () => {
     const before = repositoryState()
