@@ -50,7 +50,7 @@ describe('publishImportedIssue', () => {
     expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IMPORTED, LABEL_READY])
     expect(parseIssueBody(issue.body, 1)).toMatchObject({
       fingerprints: ['source:owner/app#7'],
-      requirement: 'Source issue 7\n\nImported from Owner/App#7, opened by @maintainer.\n\n> It breaks.',
+      requirement: 'Source issue 7\n\nImported from issue 7 of Owner/App, opened by maintainer.\n\n> It breaks.',
     })
   })
 
