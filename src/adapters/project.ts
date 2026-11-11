@@ -272,7 +272,6 @@ function renderScaffoldMember(
 function declaredPropertyName(property: ts.ObjectLiteralElementLike): string | undefined {
   if (ts.isSpreadAssignment(property)) return undefined
   const name = property.name
-  if (name === undefined) return undefined
   if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
     return name.text
   }
