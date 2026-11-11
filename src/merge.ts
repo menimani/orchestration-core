@@ -544,6 +544,10 @@ function mergeWithVerifiedRecovery(
  * elsewhere would merge nothing. Only a clean worktree whose HEAD fast-forwards the task
  * branch is adopted; anything else is left for the ordinary checks to report. The
  * agent's branch stays: removing the worktree is cleanup's business, not this function's.
+ *
+ * The task branch moves in one compare-and-swap ref update before the worktree switches
+ * to it, so a switch that fails (a held index lock, say) cannot strand detached commits
+ * behind the reflog; the next attempt finds HEAD at the task tip and only switches.
  */
 function adoptStrandedTaskCommits(worktree: string, branch: string, io: MergeIo): void {
   if (!existsSync(worktree)) return
@@ -557,17 +561,18 @@ function adoptStrandedTaskCommits(worktree: string, branch: string, io: MergeIo)
   if (headBranch === branch) return
   if (git(worktree, ['status', '--porcelain']).trim() !== '') return
   const head = git(worktree, ['rev-parse', 'HEAD']).trim()
-  if (head === taskTip) return
-  try {
-    git(worktree, ['merge-base', '--is-ancestor', taskTip, head])
-  } catch {
-    // Diverged from the task branch: adopting would discard the task branch's own commits.
-    return
+  if (head !== taskTip) {
+    try {
+      git(worktree, ['merge-base', '--is-ancestor', taskTip, head])
+    } catch {
+      // Diverged from the task branch: adopting would discard the task branch's own commits.
+      return
+    }
+    git(worktree, ['update-ref', `refs/heads/${branch}`, head, taskTip])
+    const source = headBranch === 'HEAD' ? `detached HEAD ${head}` : headBranch
+    io.out(`=== Adopted task commits from ${source} onto ${branch} ===`)
   }
   git(worktree, ['switch', '--quiet', branch])
-  git(worktree, ['merge', '--quiet', '--ff-only', head])
-  const source = headBranch === 'HEAD' ? `detached HEAD ${head}` : headBranch
-  io.out(`=== Adopted task commits from ${source} onto ${branch} ===`)
 }
 
 function rebaseTaskOntoRunTip(
