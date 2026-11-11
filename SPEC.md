@@ -1386,7 +1386,14 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     `--no-ff` and `closes #N` for every issue named by a grouped worker report, unless the
     queue is kept in a fleet's `issueRepository` (item 35). It persists
     a successful adoption for every member before updating the issues, so a later poll
-    retries failed metadata updates without merging again. These per-issue promotion
+    retries failed metadata updates without merging again. An adopted issue leaves
+    `loop:merge-ready`, and its promotion is confirmed, only once a fresh comment listing
+    shows its exact `MERGED:` marker from an account with write access; a marker from an
+    author whose access is undetermined does not count. Within one daemon run the marker is
+    posted at most once per issue and merge commit: later polls only re-read the comments,
+    and a marker still not visible as trusted, or one under an undetermined author, is
+    reported once through the deduplicated warning log, keyed by the issue, and logged as
+    recovered when the marker is confirmed. These per-issue promotion
     records use the schema and fail-closed repair behavior in item 35; malformed persisted
     state stops reconciliation rather than permitting a duplicate merge or issue release. A
     successful adoption logs aligned `Merging` and `Merged` events keyed by the short
