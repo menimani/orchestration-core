@@ -1623,20 +1623,23 @@ export interface PromotedIssueOutcome {
 }
 
 /**
- * Close queue issues whose merged work has been promoted, for a queue kept apart from
- * the project's repository where no merge commit can close them. A run branch's pull
+ * Settle promotion records whose run pull request has finished. With `closeMerged`, for
+ * a queue kept apart from the project's repository where no merge commit can close
+ * them, close the issues whose merged work has been promoted: a run branch's pull
  * request that has merged carries every task merged into it up to its head, whichever
  * way the forge merged it, so that is the evidence; a merge commit the head does not
- * contain stays open for a later run. A run pull request closed without merging will
- * never land that work once its branch is abandoned, so its issues go back to ready
- * rather than waiting for good. The branch the loop still holds is not abandoned: its
- * merges remain on it and a person may reopen the pull request, so those issues wait.
+ * contain stays open for a later run. Without it the merge commit's own `closes #N`
+ * closes them. In either mode a run pull request closed without merging will never
+ * land that work once its branch is abandoned, so its issues go back to ready rather
+ * than waiting for good. The branch the loop still holds is not abandoned: its merges
+ * remain on it and a person may reopen the pull request, so those issues wait.
  */
 export async function closePromotedIssues(
   forge: Forge,
   paths: OrchPaths,
   contains: (ancestor: string, descendant: string) => boolean,
   heldBranch = '',
+  closeMerged = true,
 ): Promise<PromotedIssueOutcome> {
   const dir = promotionDir(paths)
   if (!existsSync(dir)) return { closed: [], returned: [] }
@@ -1678,7 +1681,7 @@ export async function closePromotedIssues(
       }
       continue
     }
-    if (pr.state !== 'merged' || pr.headSha === '') continue
+    if (!closeMerged || pr.state !== 'merged' || pr.headSha === '') continue
     const contained = promotions.filter((candidate) =>
       candidate.runBranch === runBranch && contains(candidate.mergeCommit, pr.headSha))
     // Each close is several forge calls, so a merged run of a hundred issues would hold
