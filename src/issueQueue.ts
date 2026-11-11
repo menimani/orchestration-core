@@ -1554,6 +1554,9 @@ export function recordIssuePromotions(
   mergeCommit: string,
   runBranch: string,
 ): number[] {
+  // The reader rejects a record without a run branch, so writing one would make every
+  // later reconcile fail even though the merge itself succeeded.
+  if (runBranch === '') throw new Error(`Cannot record the promotion of ${taskId} without a run branch`)
   const issueNumbers = issueNumbersForTask(paths, taskId)
   if (issueNumbers.length === 0) return []
   mkdirSync(promotionDir(paths), { recursive: true })

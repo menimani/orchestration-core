@@ -2616,6 +2616,20 @@ describe('reapStaleLeases', () => {
     ])
   })
 
+  it('refuses to record a promotion without a run branch, leaving no record behind', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-merged', [issueNumber])
+
+    expect(() => recordIssuePromotions(paths, 'task-merged', 'abc123', ''))
+      .toThrow('without a run branch')
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    await expect(closePromotedIssues(forge, paths, () => true)).resolves
+      .toEqual({ closed: [], returned: [] })
+  })
+
   it('confirms an existing trusted merge marker instead of posting a duplicate', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
