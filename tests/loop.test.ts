@@ -5200,6 +5200,26 @@ describe('documentation findings held for the cycle', () => {
     expect(suiteRuns()).toBe(true)
   })
 
+  it('drops held findings with the depth-limit warning when their depth exceeds the bound', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    // Recorded under a run whose bound allowed depth 2; the restarted loop allows only 1.
+    writeFileSync(heldFile(), [
+      '1\t20250101_000000_040_scan\t[DOCS] `README.md` names a removed flag',
+      '2\t20250101_000000_040_scan\t[DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n') + '\n')
+    const loop = makeLoop({ ...gateConfig, maxGrowthDepth: 1 }, gatedProject)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logText()).toContain('WARN growth depth limit 1 ignored findings from 040_scan')
+    expect(logText()).not.toContain('Released')
+    expect(heldRecords()).toEqual([])
+    expect(taskIdsNow()).toEqual([])
+    expect(backlogEntries()).toEqual([])
+    expect(suiteRuns()).toBe(true)
+  })
+
   it('leaves a cycle without documentation findings as it was', async () => {
     initializeGitRepo()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
