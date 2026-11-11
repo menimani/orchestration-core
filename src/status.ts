@@ -85,12 +85,7 @@ function schemaPath(path: PropertyKey[]): string {
   }).join('')
 }
 
-export function readStatus(
-  paths: OrchPaths,
-  taskId: string,
-  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
-  processTreeIsAlive: ProcessTreeIsAlive = operatingSystem.processTreeIsAlive,
-): TaskStatus | undefined {
+function readDurableStatus(paths: OrchPaths, taskId: string): DurableTaskStatus | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(statusFile(paths, taskId), 'utf8')) as unknown
@@ -107,7 +102,26 @@ export function readStatus(
       cause: result.error,
     })
   }
-  const record: DurableTaskStatus = result.data
+  return result.data
+}
+
+/**
+ * The durable state alone, validated exactly as `readStatus` validates it. A caller that
+ * only compares the state uses this: `readStatus` asks the process registry for the PID,
+ * which costs a process launch per live task on Windows.
+ */
+export function readTaskState(paths: OrchPaths, taskId: string): TaskState | undefined {
+  return readDurableStatus(paths, taskId)?.status
+}
+
+export function readStatus(
+  paths: OrchPaths,
+  taskId: string,
+  processStartIdentity: ProcessStartIdentity = operatingSystem.processStartIdentity,
+  processTreeIsAlive: ProcessTreeIsAlive = operatingSystem.processTreeIsAlive,
+): TaskStatus | undefined {
+  const record = readDurableStatus(paths, taskId)
+  if (record === undefined) return undefined
   // The record is durable; the process it named is not. The registry answers for the
   // process, so a number left in an old record is not read back as a live task.
   return {

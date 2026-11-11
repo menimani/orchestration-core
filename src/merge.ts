@@ -26,7 +26,8 @@ import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
-  removeWorktreeWithFallback, worktreeListIncludes, type WorktreeRemovalRuntime,
+  removeWorktreeWithFallback, worktreeListIncludes, type WorktreeRemovalOptions,
+  type WorktreeRemovalRuntime,
 } from './worktree.ts'
 
 export class MergeError extends Error {
@@ -155,6 +156,12 @@ export interface MergeOptions {
    * merge reads them from the task's specification when they are not given.
    */
   reasons?: readonly string[] | undefined
+  /**
+   * Withdraw what a recorded local merge must not leave standing, before the merged status
+   * is written. A restart that finds the task merged never calls onMerged, so state that
+   * would let unverified commits through cannot wait for it. Runs again on a retry.
+   */
+  beforeMergeRecorded?: (() => void) | undefined
   /**
    * Persist what follows from the merge before post-merge work begins or this function
    * returns. A dependency install that fails afterwards stops the loop, and a restart
@@ -531,6 +538,38 @@ function mergeWithVerifiedRecovery(
 }
 
 /** Bring a completed local task up to the run tip before any merge-gate work begins. */
+/**
+ * Return a task's commits to its own branch when the agent committed on a branch it
+ * created or on a detached HEAD. The merge takes the task branch, so commits left
+ * elsewhere would merge nothing. Only a clean worktree whose HEAD fast-forwards the task
+ * branch is adopted; anything else is left for the ordinary checks to report. The
+ * agent's branch stays: removing the worktree is cleanup's business, not this function's.
+ */
+function adoptStrandedTaskCommits(worktree: string, branch: string, io: MergeIo): void {
+  if (!existsSync(worktree)) return
+  let taskTip: string
+  try {
+    taskTip = git(worktree, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).trim()
+  } catch {
+    return
+  }
+  const headBranch = git(worktree, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+  if (headBranch === branch) return
+  if (git(worktree, ['status', '--porcelain']).trim() !== '') return
+  const head = git(worktree, ['rev-parse', 'HEAD']).trim()
+  if (head === taskTip) return
+  try {
+    git(worktree, ['merge-base', '--is-ancestor', taskTip, head])
+  } catch {
+    // Diverged from the task branch: adopting would discard the task branch's own commits.
+    return
+  }
+  git(worktree, ['switch', '--quiet', branch])
+  git(worktree, ['merge', '--quiet', '--ff-only', head])
+  const source = headBranch === 'HEAD' ? `detached HEAD ${head}` : headBranch
+  io.out(`=== Adopted task commits from ${source} onto ${branch} ===`)
+}
+
 function rebaseTaskOntoRunTip(
   worktree: string,
   currentBranch: string,
@@ -741,12 +780,17 @@ export function describeCommandFailure(error: unknown): string {
   return `did not run: ${error instanceof Error ? error.message : String(error)}`
 }
 
+/**
+ * Run the merge gate in a prospective worktree, and say whether any shell command ran
+ * there: an explicit test command, a check, or a check's install. Git queries do not
+ * count. A worktree nothing ran in holds no process, so its removal skips the scan.
+ */
 function runMergeChecks(
   worktree: string,
   baseRef: string,
   options: MergeOptions,
   io: MergeIo,
-): void {
+): boolean {
   if (options.testCmd !== undefined && options.testCmd !== '') {
     io.out(`=== Running tests in worktree: ${options.testCmd} ===`)
     try {
@@ -760,21 +804,23 @@ function runMergeChecks(
       && !ranIsolated(worktree, 'the worktree', io)) {
       throw new MergeError('Tests passed against borrowed dependencies. Aborting merge.')
     }
-    return
+    return true
   }
-  if (options.skipAutoTest === true) return
+  if (options.skipAutoTest === true) return false
 
   const changed = gitPaths(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
   let ok = true
   // A check that only waited out the test lock defers the merge, unless another check
   // genuinely failed: that failure is known, and deferring would hide it.
   let lockBusy = false
+  let ranCommand = false
   for (const check of options.project.mergeChecks(options.taskGate)) {
     if (check.appliesTo !== undefined && !check.appliesTo(changed)) continue
     if (check.requires !== undefined && !existsSync(join(worktree, check.requires))) continue
     if (check.unless !== undefined && existsSync(join(worktree, check.unless))) continue
     const install = check.installWhenMissing
     if (install !== undefined && !existsSync(join(worktree, install.path))) {
+      ranCommand = true
       const installed = io.tryRun(join(worktree, check.cwd), install.command, `${check.label} install`)
       if (installed === 'lock-busy') {
         lockBusy = true
@@ -783,6 +829,7 @@ function runMergeChecks(
       ok = installed === 'passed' && ok
     }
     const directory = join(worktree, check.cwd)
+    ranCommand = true
     const outcome = io.tryRun(directory, check.command, check.label)
     if (outcome === 'lock-busy') {
       lockBusy = true
@@ -795,6 +842,7 @@ function runMergeChecks(
   }
   if (!ok) throw new MergeError('Tests failed. Aborting merge.')
   if (lockBusy) throw new TestLockBusyError(testLockBusyMessage)
+  return ranCommand
 }
 
 /**
@@ -819,16 +867,19 @@ function ranIsolated(directory: string, label: string, io: MergeIo): boolean {
 // The error a step throws decides how the loop treats the attempt: a test-lock deferral is
 // retried uncounted and a recovery failure stops the loop. A removal that also fails is
 // logged beside that error rather than replacing it, and fails the merge only when the
-// step itself succeeded.
+// step itself succeeded. A step that returns false ran no command in the worktree, so its
+// removal skips looking for processes holding it; a step that throws or returns nothing
+// keeps that scan.
 export function inTemporaryWorktree(
   paths: OrchPaths,
   worktree: string,
   log: (text: string) => void,
-  step: () => void,
+  step: () => boolean | void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
 ): void {
+  let ranCommand: boolean | void
   try {
-    step()
+    ranCommand = step()
   } catch (error) {
     try {
       removeTemporaryWorktree(paths, worktree, log, runtime)
@@ -837,7 +888,7 @@ export function inTemporaryWorktree(
     }
     throw error
   }
-  removeTemporaryWorktree(paths, worktree, log, runtime)
+  removeTemporaryWorktree(paths, worktree, log, runtime, { untouched: ranCommand === false })
 }
 
 export function removeTemporaryWorktree(
@@ -845,8 +896,9 @@ export function removeTemporaryWorktree(
   worktree: string,
   log: (text: string) => void,
   runtime: WorktreeRemovalRuntime = worktreeRemovalRuntime,
+  options: WorktreeRemovalOptions = {},
 ): void {
-  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, log)
+  const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, log, options)
   if (result.fallbackFailure === undefined && result.pruneFailure === undefined) return
   const pruneDetail = result.pruneFailure === undefined ? '' : `; prune: ${result.pruneFailure}`
   throw new MergeError(
@@ -957,6 +1009,7 @@ async function finalizeLocalMerge(
   depsEvent: OrchestrationDepsEvent,
   options: MergeOptions,
 ): Promise<string> {
+  options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterMerge(
@@ -1296,6 +1349,7 @@ async function mergeTaskWithGuardHeld(
   const branch = branchName(taskId)
   const currentBranch = git(paths.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
 
+  adoptStrandedTaskCommits(worktree, branch, io)
   if (git(worktree, ['status', '--porcelain']).trim() !== '') {
     throw new MergeError(
       `The worktree has uncommitted changes: ${worktree}\n`
@@ -1375,7 +1429,7 @@ async function mergeTaskWithGuardHeld(
     } catch {
       // an empty inspection diff is fine
     }
-    runMergeChecks(prospectiveWorktree, currentBranch, options, io)
+    return runMergeChecks(prospectiveWorktree, currentBranch, options, io)
   })
 
   const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
@@ -1515,7 +1569,7 @@ export async function mergeRemoteTask(
     )
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
-    runMergeChecks(worktree, currentBranch, options, io)
+    return runMergeChecks(worktree, currentBranch, options, io)
   })
 
   const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()

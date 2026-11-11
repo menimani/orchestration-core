@@ -414,6 +414,48 @@ describe('remote task adoption', () => {
     expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_FAILED)
   })
 
+  it('reports a failure relabel that could not remove merge-ready', async () => {
+    const branch = 'task/20260809_000000_096_auto-relabel-interrupted'
+    const issueNumber = await forge.createIssue({
+      title: 'missing worker branch',
+      body: 'The reported worker branch was never pushed.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })
+    await forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${'b'.repeat(40)}`)
+    const removeLabel = forge.removeLabel.bind(forge)
+    let failures = 0
+    forge.removeLabel = async (number, label) => {
+      if (label === LABEL_MERGE_READY && failures++ === 0) throw new Error('label service unavailable')
+      await removeLabel(number, label)
+    }
+
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_MERGE_FAILED)
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(logged.join('\n'))
+      .toContain(`could not relabel issue #${issueNumber}: label service unavailable`)
+  })
+
+  it('reports a failure relabel whose merge-ready removal did not take effect', async () => {
+    const branch = 'task/20260809_000000_095_auto-relabel-ignored'
+    const issueNumber = await forge.createIssue({
+      title: 'missing worker branch',
+      body: 'The reported worker branch was never pushed.',
+      labels: [LABEL_FINDING, LABEL_MERGE_READY],
+    })
+    await forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${branch}\nHead commit: ${'b'.repeat(40)}`)
+    forge.removeLabel = async () => {}
+
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    expect(logged.join('\n')).toContain(
+      `could not relabel issue #${issueNumber}: Issue #${issueNumber} did not reach the single ${LABEL_MERGE_FAILED} lifecycle state`)
+  })
+
   it('retries a partial release until every member leaves grouped adoption', async () => {
     const branch = 'task/20260809_000000_098_auto-partial-group'
     const head = 'b'.repeat(40)

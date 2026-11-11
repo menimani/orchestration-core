@@ -6,10 +6,10 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ForgeIssue } from '../src/adapters/forge.ts'
+import { ForgeRateLimitError, type ForgeIssue } from '../src/adapters/forge.ts'
 import {
   buildIssueBody, claimIssueGroup, closeIssueAndRemoveLifecycleLabels, closePromotedIssues,
-  commentOnIssueMerge, fingerprintOf, issueMergeComment, issueUnpromotedComment, groupReadyFindings,
+  commentOnIssueMerge, fingerprintOf, isDocumentationFinding, issueMergeComment, issueUnpromotedComment, groupReadyFindings,
   heartbeatIssueForTask,
   issueCompletionForIssue, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   issueFailureCount, issueReleaseIntentForTask,
@@ -28,6 +28,7 @@ import {
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
   type ClaimedRequirement,
 } from '../src/issueQueue.ts'
+import { issueConflictKey, writeConflictedAttempts } from '../src/conflictRetry.ts'
 import { existingTaskIdForDesc, taskIdForDesc } from '../src/ids.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
@@ -111,6 +112,16 @@ describe('fingerprintOf', () => {
     expect(a).toBe(b)
     expect(a).not.toBe(c)
     expect(a.startsWith('text:')).toBe(true)
+  })
+})
+
+describe('isDocumentationFinding', () => {
+  it('recognizes a finding by its leading DOCS tag alone', () => {
+    expect(isDocumentationFinding('[DOCS] `README.md` names a stale variable')).toBe(true)
+    expect(isDocumentationFinding('[DOCS] the setup section omits a step')).toBe(true)
+    expect(isDocumentationFinding('[BUG] `README.md` is parsed wrongly')).toBe(false)
+    expect(isDocumentationFinding('[TEST] cover the [DOCS] tag')).toBe(false)
+    expect(isDocumentationFinding('update the docs for the new flag')).toBe(false)
   })
 })
 
@@ -1243,6 +1254,29 @@ describe('claimIssueGroup', () => {
     expect(after.labels).toContain(LABEL_READY)
   })
 
+  it('leaves a claim another worker completed before this worker assigned itself', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` is claimed elsewhere first')
+    const issue = await forge.getIssue(issueNumber)
+    const assignIssue = forge.assignIssue.bind(forge)
+    forge.assignIssue = async (number, assignee) => {
+      if (number === issueNumber && assignee === 'worker-a') {
+        // worker-z read the same ready issue and finished its whole claim first.
+        await assignIssue(number, 'worker-z')
+        await forge.addLabel(number, LABEL_IN_PROGRESS)
+        await forge.removeLabel(number, LABEL_READY)
+      }
+      await assignIssue(number, assignee)
+    }
+
+    const result = await claimIssueGroup(forge, paths, [issue], 'worker-a', appendRequirements)
+
+    expect(result).toEqual({ outcome: 'lost-race', issueNumber })
+    const after = await forge.getIssue(issueNumber)
+    expect(after.assignees).toEqual(['worker-z'])
+    expect(after.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
   it.each([
     ['loses its lifecycle label', async (number: number) => {
       await forge.removeLabel(number, LABEL_READY)
@@ -1761,6 +1795,61 @@ describe('issue claim release', () => {
     expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'failed-task'))).toBe(true)
   })
 
+  it.each([
+    { kind: 'parked', exhaustion: 'retry', state: 'open', labels: [LABEL_FINDING, LABEL_RETRY_EXHAUSTED] },
+    { kind: 'parked', exhaustion: 'conflict', state: 'open', labels: [LABEL_FINDING, LABEL_RETRY_EXHAUSTED] },
+    { kind: 'closed', exhaustion: 'retry', state: 'closed', labels: [LABEL_FINDING, LABEL_IN_PROGRESS] },
+    { kind: 'closed', exhaustion: 'conflict', state: 'closed', labels: [LABEL_FINDING, LABEL_IN_PROGRESS] },
+  ] as const)('does not park an already $kind issue again after $exhaustion exhaustion', async ({
+    exhaustion, state, labels,
+  }) => {
+    const issueNumber = await forge.createIssue({
+      title: 'exhausted issue', body: '', labels: [...labels],
+      assignees: state === 'closed' ? ['worker-a'] : [],
+    })
+    if (state === 'closed') await forge.closeIssue(issueNumber, 'Closed by a person.')
+    recordIssuesForTask(paths, 'exhausted-task', [issueNumber])
+    if (exhaustion === 'retry') {
+      recordIssueFailure(paths, 'exhausted-task')
+    } else {
+      const head = 'a'.repeat(40)
+      writeConflictedAttempts(paths, issueConflictKey(issueNumber), [1, 2, 3].map((index) => ({
+        taskId: `conflicted-task-${index}`,
+        branch: `conflict/conflicted-task-${index}`,
+        runBranch: 'main',
+        runTip: head,
+        base: head,
+        taskTip: head,
+        conflictedFiles: ['README.md'],
+        conflictingCommits: [head],
+      })))
+    }
+    recordIssueReleaseIntent(paths, 'exhausted-task', [issueNumber])
+    const mutations: string[] = []
+    forge.addLabel = async (number, label) => { mutations.push(`add:${number}:${label}`) }
+    forge.removeLabel = async (number, label) => { mutations.push(`remove:${number}:${label}`) }
+    forge.unassignIssue = async (number, assignee) => {
+      mutations.push(`unassign:${number}:${assignee}`)
+    }
+    const parked: Array<[number, number]> = []
+    const conflictParked: Array<[number, number]> = []
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'exhausted-task', {
+      maxIssueRetries: 1,
+      onPark: (number, failures) => parked.push([number, failures]),
+      onConflictPark: (number, attempts) => conflictParked.push([number, attempts]),
+    })).resolves.toEqual([])
+
+    expect(mutations).toEqual([])
+    expect(parked).toEqual([])
+    expect(conflictParked).toEqual([])
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.state).toBe(state)
+    expect(issue.labels).toEqual(labels)
+    expect(issue.assignees).toEqual(state === 'closed' ? ['worker-a'] : [])
+    expect(issueReleaseIntentForTask(paths, 'exhausted-task')).toEqual([])
+  })
+
   it('clears an issue failure streak when its task completes successfully', () => {
     const issueNumber = 42
     recordIssuesForTask(paths, 'successful-task', [issueNumber])
@@ -2143,6 +2232,27 @@ describe('reapStaleLeases', () => {
     expect(repaired.labels).toEqual([LABEL_FINDING, LABEL_READY])
   })
 
+  it('stops reconciliation when a ready issue keeps its assignees after repair', async () => {
+    const base = new Date('2026-08-08T12:00:00Z')
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const stranded = await forge.createIssue({
+      title: 'stranded ready', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_READY], assignees: ['worker-gone'],
+    })
+    const unassigned: Array<[number, string]> = []
+    forge.unassignIssue = async (number, assignee) => {
+      unassigned.push([number, assignee])
+    }
+
+    await expect(reapStaleLeases(forge, paths, 3, base)).rejects.toThrow(
+      `Issue #${stranded} still has assignees after ready-lease repair`,
+    )
+    expect(unassigned).toEqual([[stranded, 'worker-gone']])
+    const issue = await forge.getIssue(stranded)
+    expect(issue.assignees).toEqual(['worker-gone'])
+    expect(issue.labels).toEqual([LABEL_FINDING, LABEL_READY])
+  })
+
   it('leaves an assigned ready issue alone until its lease window has passed', async () => {
     forge.clock = () => new Date('2026-08-08T11:30:00Z')
     const fresh = await forge.createIssue({
@@ -2396,6 +2506,34 @@ describe('reapStaleLeases', () => {
     expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
   })
 
+  it('stops reconciliation when a reposted merge marker is not visible on read-back', async () => {
+    forge.clock = () => new Date('2026-08-08T06:00:00Z')
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-merged', [issueNumber])
+    recordIssuePromotions(paths, 'task-merged', 'abc123', 'feature/run-9')
+    forge.clock = () => new Date('2026-08-08T12:00:00Z')
+    const posted: Array<[number, string]> = []
+    forge.commentIssue = async (number, body) => {
+      posted.push([number, body])
+    }
+
+    await expect(reapStaleLeases(
+      forge, paths, 3, new Date('2026-08-08T12:00:00Z'),
+    )).rejects.toThrow(`Issue #${issueNumber} merge comment is not visible after publishing it`)
+
+    expect(posted).toEqual([
+      [issueNumber, issueMergeComment('task-merged', 'abc123', 'feature/run-9')],
+    ])
+    expect(forge.issueComments.get(issueNumber) ?? []).toEqual([])
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual(['worker-a'])
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+  })
+
   it('leaves a promotion pending while its marker author permission is undetermined', async () => {
     forge.clock = () => new Date('2026-08-08T06:00:00Z')
     const issueNumber = await forge.createIssue({
@@ -2578,6 +2716,60 @@ describe('reapStaleLeases', () => {
     await forge.closeIssue(issueNumbers[1]!, 'fully promoted')
     await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
     expect(issueNumbersForTask(paths, 'task-grouped')).toEqual([])
+  })
+
+  describe.each([
+    ['given the poll listing', true],
+    ['fetching its own listing', false],
+  ])('promotion record cleanup %s', (_description, passListing) => {
+    async function promoted(taskId: string): Promise<number> {
+      const issueNumber = await forge.createIssue({
+        title: taskId, body: buildIssueBody(`[BUG] \`a/b.ts\` ${taskId}`, 'p'),
+        labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+      })
+      recordIssuesForTask(paths, taskId, [issueNumber])
+      recordIssuePromotions(paths, taskId, 'abc123', 'feature/run-9')
+      return issueNumber
+    }
+
+    async function reapCountingLookups(): Promise<number[]> {
+      const listing = passListing ? await forge.listOpenIssues(LABEL_FINDING) : undefined
+      const lookedUp: number[] = []
+      const getIssue = forge.getIssue.bind(forge)
+      forge.getIssue = async (issueNumber) => {
+        lookedUp.push(issueNumber)
+        return getIssue(issueNumber)
+      }
+      await reapStaleLeases(
+        forge, paths, 3, new Date('2026-08-08T12:00:00Z'), new Set(), listing)
+      return lookedUp
+    }
+
+    it('keeps the record of a listed open issue without asking the forge for it', async () => {
+      const issueNumber = await promoted('task-open')
+
+      expect(await reapCountingLookups()).not.toContain(issueNumber)
+      expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-open')
+      expect(issueNumbersForTask(paths, 'task-open')).toEqual([issueNumber])
+    })
+
+    it('removes the record of an unlisted issue the forge reports closed', async () => {
+      const issueNumber = await promoted('task-closed')
+      await forge.closeIssue(issueNumber, 'promoted')
+
+      expect(await reapCountingLookups()).toContain(issueNumber)
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+      expect(issueNumbersForTask(paths, 'task-closed')).toEqual([])
+    })
+
+    it('removes the record of an unlisted issue the forge no longer has', async () => {
+      const issueNumber = await promoted('task-deleted')
+      forge.issues.delete(issueNumber)
+
+      expect(await reapCountingLookups()).toContain(issueNumber)
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+      expect(issueNumbersForTask(paths, 'task-deleted')).toEqual([])
+    })
   })
 
   it('reaps a stale mapped lease when its local task is not merged', async () => {
@@ -2899,7 +3091,9 @@ describe('loop integration in issue mode', () => {
     await forge.assignIssue(unlinked, 'worker-gone')
     recordIssuesForTask(paths, 'task-running', [linked])
     writeFileSync(join(paths.statusDir, 'task-running.json'),
-      durableStatus('task-running', 'running', { pid: process.pid }))
+      durableStatus('task-running', 'running', {
+        pid: process.pid, started_at: '2026-08-08T11:00:00Z',
+      }))
     recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
 
@@ -2937,7 +3131,9 @@ describe('loop integration in issue mode', () => {
     })
     recordIssuesForTask(paths, 'task-running', [issueNumber])
     writeFileSync(join(paths.statusDir, 'task-running.json'),
-      durableStatus('task-running', 'running', { pid: process.pid }))
+      durableStatus('task-running', 'running', {
+        pid: process.pid, started_at: '2026-08-08T11:00:00Z',
+      }))
     recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
     forge.commentIssue = async () => { throw new Error('forge unavailable') }
@@ -3070,5 +3266,142 @@ describe('closePromotedIssues', () => {
       .toEqual({ closed: [], returned: [issueNumber] })
     expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
     expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+  })
+
+  async function mergedRun(count: number): Promise<number[]> {
+    const issueNumbers: number[] = []
+    for (let index = 0; index < count; index++) {
+      issueNumbers.push(await promotedIssue(`task-${index}`, 'a'.repeat(40), 'run/merged'))
+    }
+    forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
+    return issueNumbers
+  }
+
+  function recordOrder(issueNumbers: number[]): number[] {
+    return readdirSync(join(paths.queueDir, 'issue-promotion'))
+      .map((name) => Number(/^(\d+)\.json$/.exec(name)?.[1]))
+      .filter((issueNumber) => issueNumbers.includes(issueNumber))
+  }
+
+  it('closes every promotion of a merged run and lists them in record order', async () => {
+    const issueNumbers = await mergedRun(12)
+    const closeIssue = forge.closeIssue
+    // Later issues finish first, so completion order differs from record order.
+    forge.closeIssue = async (issueNumber, comment) => {
+      await new Promise((resolve) => setTimeout(resolve, 2 * (20 - issueNumber)))
+      await closeIssue(issueNumber, comment)
+    }
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: recordOrder(issueNumbers), returned: [] })
+    for (const issueNumber of issueNumbers) {
+      expect((await forge.getIssue(issueNumber)).state).toBe('closed')
+    }
+  })
+
+  it('keeps no more than four closes in flight at once', async () => {
+    const issueNumbers = await mergedRun(12)
+    const closeIssue = forge.closeIssue
+    const pending: Array<() => void> = []
+    let inFlight = 0
+    let maxInFlight = 0
+    forge.closeIssue = async (issueNumber, comment) => {
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise<void>((resolve) => pending.push(resolve))
+      inFlight--
+      await closeIssue(issueNumber, comment)
+    }
+
+    const closing = closePromotedIssues(forge, paths, () => true)
+    let released = 0
+    while (released < issueNumbers.length) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const release = pending.shift()
+      if (release === undefined) continue
+      release()
+      released++
+    }
+
+    expect((await closing).closed).toEqual(recordOrder(issueNumbers))
+    expect(maxInFlight).toBe(4)
+  })
+
+  it('closes the others when one close fails, rethrows it, and finishes on the next call', async () => {
+    const issueNumbers = await mergedRun(6)
+    const failing = issueNumbers[2]!
+    const closeIssue = forge.closeIssue
+    forge.closeIssue = async (issueNumber, comment) => {
+      if (issueNumber === failing) throw new Error('forge unavailable')
+      await closeIssue(issueNumber, comment)
+    }
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toThrow('forge unavailable')
+    for (const issueNumber of issueNumbers) {
+      expect((await forge.getIssue(issueNumber)).state).toBe(issueNumber === failing ? 'open' : 'closed')
+    }
+    expect(issuePromotionForIssue(paths, failing)?.taskId).toBe('task-2')
+
+    forge.closeIssue = closeIssue
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: recordOrder(issueNumbers), returned: [] })
+    expect((await forge.getIssue(failing)).state).toBe('closed')
+  })
+
+  it('starts no further close after a rate limit', async () => {
+    const issueNumbers = await mergedRun(12)
+    const closeIssue = forge.closeIssue
+    const started: number[] = []
+    forge.closeIssue = async (issueNumber, comment) => {
+      started.push(issueNumber)
+      if (started.length === 1) throw new ForgeRateLimitError(new Date('2026-11-11T00:00:00Z'))
+      await closeIssue(issueNumber, comment)
+    }
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toBeInstanceOf(ForgeRateLimitError)
+    expect(started).toHaveLength(4)
+    const open: number[] = []
+    for (const issueNumber of issueNumbers) {
+      if ((await forge.getIssue(issueNumber)).state === 'open') open.push(issueNumber)
+    }
+    expect(open).toHaveLength(9)
+    expect(open).toContain(started[0]!)
+  })
+
+  it('rethrows a rate limit over an earlier failure of another kind', async () => {
+    const issueNumbers = await mergedRun(4)
+    const [failing, , limited] = recordOrder(issueNumbers)
+    const closeIssue = forge.closeIssue
+    forge.closeIssue = async (issueNumber, comment) => {
+      if (issueNumber === failing) throw new Error('forge unavailable')
+      if (issueNumber === limited) throw new ForgeRateLimitError(new Date('2026-11-11T00:00:00Z'))
+      await closeIssue(issueNumber, comment)
+    }
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toBeInstanceOf(ForgeRateLimitError)
+    for (const issueNumber of issueNumbers) {
+      expect((await forge.getIssue(issueNumber)).state)
+        .toBe(issueNumber === failing || issueNumber === limited ? 'open' : 'closed')
+    }
+    for (const issueNumber of [failing!, limited!]) {
+      expect(issuePromotionForIssue(paths, issueNumber)?.taskId)
+        .toBe(`task-${issueNumbers.indexOf(issueNumber)}`)
+    }
+  })
+
+  it('drops the records of deleted issues while the rest of a merged run still close', async () => {
+    const issueNumbers = await mergedRun(8)
+    const deleted = [issueNumbers[1]!, issueNumbers[5]!]
+    for (const issueNumber of deleted) forge.issues.delete(issueNumber)
+    const remaining = issueNumbers.filter((issueNumber) => !deleted.includes(issueNumber))
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: recordOrder(remaining), returned: [] })
+    for (const issueNumber of deleted) {
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    }
+    for (const issueNumber of remaining) {
+      expect((await forge.getIssue(issueNumber)).state).toBe('closed')
+    }
   })
 })

@@ -37,6 +37,14 @@ the whole branch diff; a round that raises findings turns them into fix tasks an
 the corrected diff again. The run ends by promoting the pull request, or, when automatic
 review is enabled, by stopping for a person if that review will not converge.
 
+A `[DOCS]` finding from a scan or an ordinary task is not queued on its own: it is held in
+`queue/held-documentation.txt` until every other task of the cycle has merged, failed, or
+finished without a change. The held findings then become one task, numbered in the order
+they were held, that passes the same merge gate as any other; the cycle's suite, review,
+and pull-request update wait for it. A review's findings keep their own combined fix
+task, and a task that changes behaviour still updates `README.md` and `SPEC.md` in its own
+commit.
+
 Consumers may list review findings that have been explicitly accepted in an optional
 `accepted-limits.md` file in the project directory (`orchestration/` in a subtree
 consumer, `projects/<name>/` in a fleet). A missing or blank file contributes `(none)`.
@@ -279,7 +287,9 @@ promotion all use the integration branch. The project adapter's
 `integrationWorktreeSetup` commands install dependencies in that fresh checkout; the
 operator does not prepare it by hand. Human fixes made during the run should branch from
 and merge into the integration branch as well, where the next task can see them.
-Immediately before a completed local task enters its merge gate, the loop rebases that
+Immediately before a completed local task enters its merge gate, the loop first returns
+commits its agent left on a branch of its own, or on a detached HEAD, to the task branch
+when they fast-forward it, naming that branch in the merge log; then it rebases that
 task branch onto the current integration tip. Long-running tasks therefore test the work
 that has landed while they were running instead of repeatedly presenting the same stale
 branch to the gate. If every task commit becomes empty because that work already landed,
@@ -429,7 +439,7 @@ for the `report-upstream` command and cannot be stored in `orchestration/config.
 
 Configuration commands publish updates atomically through a temporary file in the same
 directory, so readers cannot observe a partial write. The file is checked when a setting
-is used and reparsed only after its modification time changes. A malformed file or an
+is used and reparsed only after its modification time or size changes. A malformed file or an
 invalid value stops the run and reports the file, setting, and failure instead of using an
 older or environment value. Valid live changes are logged with their old and new values.
 `FORGE` and `RUNNER` are pinned because
@@ -452,6 +462,7 @@ settings update at their next use.
 | `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `MAX_ISSUE_RETRIES` | 3 | Consecutive failed tasks allowed per issue before it is parked as `loop:retry-exhausted` |
+| `TASK_DEADLINE_HOURS` | 4 | Hours a task may run without completing, from its status file's `started_at`, before the daemon stops its process tree and fails it; `0` sets no deadline |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | medium / medium / medium | Reasoning effort per kind of work; `TASK_EFFORT` applies to queued tasks without a per-task override, while review-spawned fixes always use high effort |
 | `RUNNER` | codex | Agent CLI adapter; accepts `codex`, `claude`, or an external module selector |
 | `RUNNER_CLAUDE_MODEL` | claude-opus-5 | Base Claude model used when `RUNNER=claude` and no task-specific model is set |
@@ -495,6 +506,12 @@ A failed task returns its issue to `loop:ready` until that issue reaches
 parked as `loop:retry-exhausted` and the loop records a `Parked` event instead of claiming it
 again, then stops for operator repair. A successful task completion clears the issue's
 persisted failure count.
+
+A runner that stays alive without finishing — stuck on a network call or an interactive
+prompt — would otherwise hold its issue through heartbeats and keep the cycle gate waiting
+forever. The daemon therefore gives each task `TASK_DEADLINE_HOURS` (default 4) from its
+status file's `started_at`: past that, it stops the process tree, records the reason in
+the task's log, and fails the task, so the issue is released like any other failure.
 
 Concurrent workers must authenticate as **distinct forge accounts**; the login is the
 worker identity, and two daemons sharing one account are indistinguishable to the claim.

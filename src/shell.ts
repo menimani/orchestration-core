@@ -95,13 +95,15 @@ function superviseTimedShell(timeout: number, command: string): void {
   }, timeout)
   // On POSIX the shell leads its own process group, so neither a terminal's Ctrl-C nor a
   // group kill aimed at the supervisor's tree reaches it; the supervisor passes it on.
-  for (const signal of SUPERVISOR_STOP_SIGNALS) {
-    process.on(signal, () => {
+  const stopListeners = SUPERVISOR_STOP_SIGNALS.map((signal) => {
+    const listener = (): void => {
       clearTimeout(timer)
       stopShell()
       process.exit(128 + constants.signals[signal])
-    })
-  }
+    }
+    process.on(signal, listener)
+    return [signal, listener] as const
+  })
   child.on('error', (error) => {
     clearTimeout(timer)
     process.stderr.write(`${error.message}\n`)
@@ -109,8 +111,15 @@ function superviseTimedShell(timeout: number, command: string): void {
   })
   child.on('exit', (code, signal) => {
     clearTimeout(timer)
-    if (signal !== null) process.kill(process.pid, signal)
-    else process.exit(code ?? 1)
+    if (signal === null) {
+      process.exit(code ?? 1)
+      return
+    }
+    // The shell is gone, so the stop listeners have nothing left to stop. Removed, they
+    // let the re-raised signal end the supervisor by default, and the caller sees the
+    // shell's signal rather than the exit status the listener would substitute for it.
+    for (const [stopSignal, listener] of stopListeners) process.off(stopSignal, listener)
+    process.kill(process.pid, signal)
   })
 }
 

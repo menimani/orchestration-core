@@ -43,6 +43,8 @@ jobs:
 
       - run: npx tsc --noEmit
 
-      # Single-threaded: the suite drives real git repositories in temporary
-      # directories, and parallel workers made their fixtures race on a shared runner.
-      - run: npm test -- --pool=threads --no-file-parallelism
+      # The suite runs its git-fixture files in parallel, then the timing-sensitive files
+      # in tests/sequentialSuites.ts one at a time; vitest.config.ts declares both groups.
+      # A file that proves timing-sensitive here belongs on that list. Adding
+      # --no-file-parallelism runs everything one file at a time to reproduce a failure.
+      - run: npm test -- --pool=threads

@@ -60,16 +60,18 @@ No placeholder bodies, truncated files, or unresolved TODOs. A change is finishe
 its purpose to a reviewer. Reporting something finished while a known failure remains is
 worse than reporting it unfinished.
 
-The suite drives real git repositories in temporary directories, so CI runs it
-single-threaded. Reproduce a stubborn failure with
-`npm test -- --pool=threads --no-file-parallelism` before calling it a
-flake. Do not run builds or installs while a loop is running — they lock files its
+The suite drives real git repositories in temporary directories. Its git-fixture files
+run in parallel; the process- and deadline-sensitive files listed in
+`tests/sequentialSuites.ts` run one at a time afterwards. Reproduce a stubborn failure
+with `npm test -- --pool=threads --no-file-parallelism` before calling it a flake, and
+move a file that proves timing-sensitive under parallel load onto that list rather than
+loosening its tests. Do not run builds or installs while a loop is running — they lock files its
 workers need.
 
 Before pushing a change that touches a platform branch, commit or stash all other
 changes and run `npm run test:linux` from Windows. It exports the committed tree into a
 Node 24 Linux container, then installs, checks the source language, typechecks, and runs
-the single-threaded suite there. The container never mounts the checkout, so its Linux
+the suite there. The container never mounts the checkout, so its Linux
 dependencies cannot replace the Windows binaries in the working tree's `node_modules`.
 
 ## English everywhere

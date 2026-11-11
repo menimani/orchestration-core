@@ -50,14 +50,17 @@ async function waitForFiles(files: string[]): Promise<void> {
 }
 
 /** Replace the wall clock with one that only moves when a retry sleeps or a test advances it. */
-function simulateClock(): { advance: (ms: number) => void } {
+function simulateClock(
+  onSleep: (now: number) => void = () => undefined,
+): { advance: (ms: number) => void, sleeps: () => number } {
   let now = Date.now()
   vi.spyOn(Date, 'now').mockImplementation(() => now)
-  vi.spyOn(Atomics, 'wait').mockImplementation((_array, _index, _value, timeout) => {
+  const wait = vi.spyOn(Atomics, 'wait').mockImplementation((_array, _index, _value, timeout) => {
     now += timeout ?? 0
+    onSleep(now)
     return 'timed-out'
   })
-  return { advance: (ms) => { now += ms } }
+  return { advance: (ms) => { now += ms }, sleeps: () => wait.mock.calls.length }
 }
 
 describe('backlog process lock', () => {
@@ -85,6 +88,37 @@ describe('backlog process lock', () => {
 
     expect(() => withBacklogLock(backlog, () => undefined))
       .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+  })
+
+  it('backs off against a live owner and still times out at the grace deadline', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()}\n`)
+    const clock = simulateClock()
+    const started = Date.now()
+
+    expect(() => withBacklogLock(backlog, () => undefined))
+      .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+    // One attempt precedes each sleep and one follows the last.
+    expect(clock.sleeps() + 1).toBeLessThan(200)
+    expect(Date.now() - started).toBe(30_000)
+    expect(existsSync(lockDir)).toBe(true)
+  })
+
+  it('acquires a lock released shortly after the first attempt', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()}\n`)
+    const started = Date.now()
+    simulateClock((now) => {
+      if (now - started >= 25) rmSync(lockDir, { recursive: true, force: true })
+    })
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    expect(Date.now() - started).toBeLessThanOrEqual(50)
+    expect(existsSync(lockDir)).toBe(false)
   })
 
   it('bounds acquisition by elapsed time when identity lookups are slow', () => {

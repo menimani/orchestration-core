@@ -7,6 +7,15 @@ export interface WorktreeRemovalRuntime {
   git(cwd: string, args: string[]): string
 }
 
+export interface WorktreeRemovalOptions {
+  /**
+   * Nothing was ever started inside the worktree, so the processes holding it need not be
+   * looked for. That lookup lists every process on the host, so only a caller that
+   * created the worktree and ran no command in it may set this.
+   */
+  untouched?: boolean
+}
+
 export interface WorktreeRemovalResult {
   fallback: string | undefined
   gitFailure: string | undefined
@@ -17,15 +26,17 @@ export interface WorktreeRemovalResult {
 /**
  * Remove a worktree with the long-path fallback required by Windows, after ending the
  * processes still running inside it that stopping the task's runner did not reach.
- * Each process ended that way is reported through `report`.
+ * Each process ended that way is reported through `report`. An `untouched` worktree is
+ * removed without looking for them.
  */
 export function removeWorktreeWithFallback(
   repoRoot: string,
   worktree: string,
   runtime: WorktreeRemovalRuntime,
   report: (line: string) => void,
+  options: WorktreeRemovalOptions = {},
 ): WorktreeRemovalResult {
-  runtime.os.terminateWorktreeProcesses(worktree, report)
+  if (options.untouched !== true) runtime.os.terminateWorktreeProcesses(worktree, report)
   try {
     runtime.git(repoRoot, ['worktree', 'remove', worktree, '--force'])
     return {

@@ -105,6 +105,20 @@ describe('refreshTask', () => {
     expect(readFileSync(file, 'utf8')).toBe(before)
   })
 
+  it('fails a task whose process record outlived its runner while no daemon owns the queue',
+    async () => {
+      const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+        .mockReturnValue('started:crashed')
+      writeRawStatus('crashed-task', '{"status":"running","pid":2147483647}\n')
+      processStartIdentity.mockReturnValue(undefined)
+      vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+      vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(false)
+
+      const after = await refreshTask(paths, 'crashed-task', { daemonOwnsQueue: false })
+
+      expect(after).toMatchObject({ status: 'failed', pid: null })
+    })
+
   it('completes a task without a process record while no daemon owns the queue', async () => {
     writeRawStatus('stopped-done', '{"status":"running","pid":null}\n')
     writeFileSync(finalMessageFile(paths, 'stopped-done'), 'TASK_COMPLETE\n')
@@ -210,5 +224,87 @@ describe('noChangeMarkerPresent', () => {
     expect(noChangeMarkerPresent(paths, 'x')).toBe(false)
     writeFileSync(finalMessageFile(paths, 'x'), 'NO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
     expect(noChangeMarkerPresent(paths, 'x')).toBe(true)
+  })
+})
+
+describe('refreshTask deadline', () => {
+  const pid = 2147483647
+  const startedAt = Date.parse('2026-08-08T03:00:00Z')
+  const hours = (count: number) => startedAt + count * 3_600_000
+
+  function liveOverdueTask(taskId: string) {
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const processTreeIsAlive = vi.spyOn(operatingSystem, 'processTreeIsAlive')
+      .mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('started:stuck')
+    writeRawStatus(taskId, `{"status":"running","pid":${pid}}\n`)
+    return processTreeIsAlive
+  }
+
+  it('stops an overdue tree and fails the task with the reason in its log', async () => {
+    const processTreeIsAlive = liveOverdueTask('stuck-task')
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockImplementation(() => {
+      processTreeIsAlive.mockReturnValue(false)
+      return true
+    })
+    const verdicts: unknown[] = []
+
+    const after = await refreshTask(paths, 'stuck-task', {
+      taskDeadlineHours: 4, now: () => hours(4), onDeadline: (verdict) => verdicts.push(verdict),
+    })
+
+    expect(terminate).toHaveBeenCalledWith(pid)
+    expect(after).toMatchObject({ status: 'failed', pid: null })
+    expect(verdicts).toEqual([{ taskId: 'stuck-task', pid, stopped: true }])
+    expect(readFileSync(join(paths.logsDir, 'stuck-task.log'), 'utf8')).toContain(
+      'Task deadline exceeded: running since 2026-08-08T03:00:00Z, past the 4-hour task '
+      + `deadline; process tree ${pid} was stopped`,
+    )
+  })
+
+  it('keeps an overdue task running while its tree survives termination', async () => {
+    liveOverdueTask('resisting-task')
+    vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    const verdicts: unknown[] = []
+
+    const after = await refreshTask(paths, 'resisting-task', {
+      taskDeadlineHours: 4, now: () => hours(5), onDeadline: (verdict) => verdicts.push(verdict),
+    })
+
+    expect(after).toMatchObject({ status: 'running', pid })
+    expect(verdicts).toEqual([{
+      taskId: 'resisting-task', pid, stopped: false,
+      error: 'process tree termination could not be verified',
+    }])
+    expect(terminableTaskProcessPid(paths, 'resisting-task')).toBe(pid)
+  })
+
+  it('does not stop a task before its deadline or when no deadline is set', async () => {
+    liveOverdueTask('young-task')
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+
+    const early = await refreshTask(paths, 'young-task', {
+      taskDeadlineHours: 4, now: () => hours(4) - 1,
+    })
+    const unlimited = await refreshTask(paths, 'young-task', {
+      taskDeadlineHours: 0, now: () => hours(1000),
+    })
+
+    expect(early?.status).toBe('running')
+    expect(unlimited?.status).toBe('running')
+    expect(terminate).not.toHaveBeenCalled()
+  })
+
+  it('completes an overdue task whose marker already arrived', async () => {
+    liveOverdueTask('late-done')
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    writeFileSync(finalMessageFile(paths, 'late-done'), 'TASK_COMPLETE\n')
+
+    const after = await refreshTask(paths, 'late-done', {
+      taskDeadlineHours: 4, now: () => hours(10),
+    })
+
+    expect(after?.status).toBe('completed')
+    expect(terminate).not.toHaveBeenCalled()
   })
 })

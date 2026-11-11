@@ -9,6 +9,14 @@ import { afterEach, expect, it } from 'vitest'
 // This assertion launches PowerShell and depends on Windows process-tree semantics.
 // vitest.config.ts leaves the file uncollected off Windows; see platformCoverage.ts.
 
+// run-tests.mjs imports its identity cache, so every wrapper fixture carries that module.
+function copyIdentityCache(scripts: string): void {
+  writeFileSync(
+    join(scripts, 'process-identity-cache.mjs'),
+    readFileSync(join(import.meta.dirname, '..', 'scripts', 'process-identity-cache.mjs')),
+  )
+}
+
 const fixtures: string[] = []
 const processRoots: number[] = []
 // Bounds a spawned child's first observable write. PowerShell and node startup stretches
@@ -84,6 +92,7 @@ it('terminates Vitest and releases its lock when the invoking PowerShell exits',
   const pidFile = join(fixture, 'vitest-pid')
   mkdirSync(scripts, { recursive: true })
   mkdirSync(vitest, { recursive: true })
+  copyIdentityCache(scripts)
   writeFileSync(
     join(scripts, 'run-tests.mjs'),
     readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')),
@@ -153,6 +162,7 @@ it('keeps the lock owned by the Vitest supervisor when the wrapper exits', async
   const startedFile = join(fixture, 'started')
   mkdirSync(scripts, { recursive: true })
   mkdirSync(vitest, { recursive: true })
+  copyIdentityCache(scripts)
   writeFileSync(
     join(scripts, 'run-tests.mjs'),
     readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs')),
@@ -221,6 +231,7 @@ it('stops a locked waiter when its invoking PowerShell exits', async () => {
   const waitingFile = join(fixture, 'waiting')
   mkdirSync(scripts, { recursive: true })
   mkdirSync(vitest, { recursive: true })
+  copyIdentityCache(scripts)
   const wrapper = readFileSync(join(import.meta.dirname, '..', 'scripts', 'run-tests.mjs'), 'utf8')
     .replace(
       'async function runTestSuite() {',

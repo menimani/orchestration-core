@@ -732,17 +732,23 @@ const cmdDeploy: Command = async (paths, args) => {
 }
 
 const cmdMerge: Command = async (paths, args) => {
+  const usage = 'Usage: merge <task-id> [--yes] [--test-cmd "cmd"]'
   const taskId = args[0]
   if (taskId === undefined) {
-    console.error('Usage: merge <task-id> [--yes] [--test-cmd "cmd"]')
+    console.error(usage)
     return 1
   }
   let autoYes = false
   let testCmd: string | undefined
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--yes') autoYes = true
-    else if (args[i] === '--test-cmd') testCmd = args[++i]
-    else {
+    else if (args[i] === '--test-cmd') {
+      testCmd = args[++i]
+      if (testCmd === undefined) {
+        console.error(usage)
+        return 1
+      }
+    } else {
       console.error(`Unknown option: ${args[i]}`)
       return 1
     }

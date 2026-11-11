@@ -30,7 +30,7 @@ export function liveTaskProcesses(
     const pid = taskProcessPid(
       paths, taskId, bootedAt, os.processStartIdentity, os.processTreeIsAlive,
     )
-    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue
+    if (pid === undefined) continue
     // Ownership blocks while any member of the recorded tree is alive. The runner root
     // can exit before a descendant, and cleanup must still find that orphaned tree.
     if (os.processTreeIsAlive(pid)) {
