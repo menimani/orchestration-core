@@ -44,6 +44,22 @@ describe('project-scoped issue queue', () => {
     expect(queue.labels).toEqual(new Set(['project:first']))
   })
 
+  it('files into an existing scope label without creating it again', async () => {
+    queue.labels.add('project:first')
+    const attempts: string[] = []
+    queue.createLabel = async (name: string) => {
+      attempts.push(name)
+      throw new Error(`label ${name} already exists`)
+    }
+    const scoped = scopeForgeToProject(queue, 'project:first')
+
+    const issueNumber = await scoped.createIssue({ title: 'one', body: 'one', labels: [LABEL_READY] })
+
+    expect(attempts).toEqual([])
+    expect((await queue.getIssue(issueNumber)).labels).toEqual([LABEL_READY, 'project:first'])
+    expect(queue.labels).toEqual(new Set(['project:first']))
+  })
+
   it('retries creating the scope label after a failed attempt', async () => {
     const createLabel = queue.createLabel.bind(queue)
     const attempts: string[] = []
