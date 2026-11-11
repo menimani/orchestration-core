@@ -648,6 +648,36 @@ describe('remote task adoption', () => {
     expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
   })
 
+  it('keeps an adopted issue merge-ready until its posted merge marker is visible', async () => {
+    const task = pushWorkerBranch('20260809_000000_020_auto-lagging-marker')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const listIssueComments = forge.listIssueComments.bind(forge)
+    let markerVisible = false
+    forge.listIssueComments = async (number) => {
+      const comments = await listIssueComments(number)
+      return markerVisible ? comments : comments.filter((comment) => !comment.body.startsWith('MERGED: '))
+    }
+    const loop = makeLoop(stubProject)
+
+    await loop.adoptRemoteTasks()
+
+    const mergedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({ mergeCommit: mergedHead })
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_READY)
+    expect(logged.join('\n')).toContain(
+      `could not update adopted issue #${issueNumber}: merge comment is not visible after publishing it`)
+
+    markerVisible = true
+    await loop.adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(mergedHead)
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+    expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
+      .toHaveLength(1)
+  })
+
   it('retries promotion persistence after the remote merge was already applied', async () => {
     const task = pushWorkerBranch('20260809_000000_008_auto-retry-promotion-persistence')
     const issueNumber = await mergeReadyIssue(task.branch, task.head)

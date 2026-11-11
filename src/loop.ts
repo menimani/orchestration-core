@@ -622,15 +622,20 @@ export function createLoop(deps: LoopDeps) {
     runBranch: string,
   ): Promise<void> {
     const comment = issueMergeComment(taskId, mergeCommit, runBranch)
-    const present = trustedCommentPresent(await commentsForIssue(issue), comment)
+    let present = trustedCommentPresent(await commentsForIssue(issue), comment)
+    if (present === false) {
+      await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
+      present = trustedCommentPresent(await forge.listIssueComments(issue.number), comment)
+    }
     // The marker may already stand under an author whose permission could not be read.
     // Keeping merge-ready retries this next poll instead of posting a duplicate now.
     if (present === undefined) {
       throw new Error('merge marker author permission could not be read; deferring')
     }
-    if (!present) {
-      await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
-    }
+    // Without merge-ready the issue carries no lifecycle label, so nothing would revisit
+    // an unconfirmed promotion; keeping it retries the check next poll.
+    if (!present) throw new Error('merge comment is not visible after publishing it')
+    confirmIssuePromotion(paths, issue.number)
     await forge.removeLabel(issue.number, LABEL_MERGE_READY)
   }
 
