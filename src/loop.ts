@@ -66,7 +66,7 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   isDocumentationFinding, isReadyToClaim,
   issueSourcesForTask, markIssueMergeFailed, missingRequirementCompletionMarkers, parseIssueBody,
-  openFindingFingerprints, publishFinding,
+  openFindingCoversHeld, publishFinding,
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
@@ -1371,23 +1371,24 @@ export function createLoop(deps: LoopDeps) {
    * truncated only once the task or issue exists, or when the growth bounds drop it.
    *
    * Filing can fail after the issue already exists, which keeps the holding file. A held
-   * finding an open trusted issue (or, locally, an outstanding task) already carries is
-   * therefore dropped first, so a retry never files the same findings a second time.
+   * finding an open trusted issue covers (or, locally, an outstanding task carries) is
+   * therefore dropped first, so a retry never files the same findings a second time,
+   * while a finding observed again after an earlier fix merged is still filed.
    */
   async function releaseHeldDocumentation(
     openFindings: readonly ForgeIssue[] | undefined,
   ): Promise<boolean> {
     let held = readHeldFindings(paths)
     if (held.length === 0) return false
-    const covered = config.issueQueueEnabled ? openFindingFingerprints(openFindings ?? []) : undefined
-    const survivors = held.filter(({ finding }) => covered === undefined
-      ? outstandingFindingTask(finding, 'auto') === undefined
-      : !covered.has(fingerprintOf(finding)))
+    const heldParents = new Set(held.map(({ parentTaskId }) => parentTaskId))
+    const survivors = held.filter(({ finding }) => config.issueQueueEnabled
+      ? !openFindingCoversHeld(paths, openFindings ?? [], fingerprintOf(finding), heldParents)
+      : outstandingFindingTask(finding, 'auto') === undefined)
     if (survivors.length < held.length) {
       event(
         'Deduplicated',
         'docs',
-        `${held.length - survivors.length} held documentation finding(s) already carried by an open ${covered === undefined ? 'task' : 'issue'}`,
+        `${held.length - survivors.length} held documentation finding(s) already carried by an open ${config.issueQueueEnabled ? 'issue' : 'task'}`,
       )
       if (survivors.length === 0) {
         clearHeldFindings(paths)

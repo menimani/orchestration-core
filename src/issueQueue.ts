@@ -460,15 +460,27 @@ function migrateFingerprintLedgerForIssue(paths: OrchPaths, issue: ForgeIssue): 
 }
 
 /**
- * The fingerprints carried by open finding issues from trusted authors. An issue whose
- * fix already merged still counts: it stays open until promotion closes it.
+ * Whether an open finding issue from a trusted author already covers a held finding:
+ * the issue suppresses its fingerprint as the dispatch duplicate checks would, or its
+ * `Parent:` names a task whose findings are held, so a release of that holding file
+ * filed it. Only the latter still counts once its fix merged and it awaits promotion;
+ * the merged fix of an earlier observation does not cover the finding seen again.
  */
-export function openFindingFingerprints(openFindings: readonly ForgeIssue[]): Set<string> {
-  return new Set(openFindings
-    .filter((issue) => issue.state === 'open'
-      && isTrustedFingerprintOwner(issue)
-      && issue.labels.includes(LABEL_FINDING))
-    .flatMap(issueFingerprints))
+export function openFindingCoversHeld(
+  paths: OrchPaths,
+  openFindings: readonly ForgeIssue[],
+  fingerprint: string,
+  heldParentTaskIds: ReadonlySet<string>,
+): boolean {
+  return openFindings.some((issue) => {
+    if (issue.state !== 'open'
+      || !isTrustedFingerprintOwner(issue)
+      || !issue.labels.includes(LABEL_FINDING)
+      || !hasIssueFingerprint(issue, fingerprint)) return false
+    if (issueSuppressesFingerprint(paths, issue, fingerprint)) return true
+    const parentTaskId = parseIssueBody(issue.body, issue.number)?.parentTaskId
+    return parentTaskId !== undefined && heldParentTaskIds.has(parentTaskId)
+  })
 }
 
 function hasIssueFingerprint(issue: ForgeIssue, fingerprint: string): boolean {
