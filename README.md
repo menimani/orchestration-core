@@ -45,8 +45,9 @@ itself filed, is dropped, so a filing that failed after creating its issue is ne
 again, while a finding seen again after an earlier fix merged is filed anew. The rest then become one task, numbered in the order
 they were held, that passes the same merge gate as any other; the cycle's suite, review,
 and pull-request update wait for it. A review's findings keep their own combined fix
-task, and a task that changes behaviour still updates `README.md` and `SPEC.md` in its own
-commit.
+task. Keeping `README.md` and `SPEC.md` in step with a behaviour change, in the same
+commit, is this repository's own convention, stated in its `CLAUDE.md`; the loop neither
+asks a consumer's tasks for it nor enforces it.
 
 Consumers may list review findings that have been explicitly accepted in an optional
 `accepted-limits.md` file in the project directory (`orchestration/` in a subtree
