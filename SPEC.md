@@ -128,8 +128,10 @@ comments and other items cite items by number, so a number is never reused.
   `ORCHESTRATION_FLEET='<fleet>' npm run -C '<package>'`, and package paths as the
   package's absolute path, so they work from any of the fleet's project checkouts. Each
   destination keeps its own record of the skills the core owns, as a repository sync
-  does; a skill there under the same name that the record does not list is reported as
-  `Conflict:` and left unchanged, and any conflict or failure exits non-zero. Installed
+  does; a skill there under the same name that the record does not list and whose
+  content differs from the rendered skill is reported as `Conflict:` and left unchanged,
+  and any conflict or failure exits non-zero. One whose content already matches is left
+  unrecorded and unreported, and does not by itself fail the install. Installed
   skills carry no project guidance fragment. Without `--fleet`, the fleet is
   `ORCHESTRATION_FLEET` or the nearest `fleet.json` at or above the caller's directory.
   It accepts neither `--repo` nor `--project`; either one fails before installing.
@@ -1184,9 +1186,12 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     `README.md` or `package.json`, an extensionless path such as `.githooks/pre-commit`
     or `src/adapters/`, and a backslash-separated path are not paths here and leave the
     finding on the digest alone.
-    Normalization ignores case, punctuation, whitespace, word order, grammatical filler,
-    plural and selected action-word forms, and issue/commit references; distinct terms
-    still distinguish separate requirements in one file. Review findings are checked
+    Normalization ignores case, punctuation, whitespace, non-relational word order,
+    grammatical filler, plural and selected action-word forms, and issue/commit
+    references. Ordering words such as `before`, `after`, and `then` keep the terms on
+    either side of them, so an inverse relationship is a different finding, and a
+    repeated term counts each time; distinct terms still distinguish separate
+    requirements in one file. Review findings are checked
     independently before unresolved findings are combined; a combined issue stores every
     constituent fingerprint, so it also suppresses a later individual report while
     that work remains pending. Once a non-advisory issue's task merges into the run
@@ -1218,7 +1223,12 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     deterministically — the lexicographically first login wins, losers unassign
     themselves — and the winner relabels to `loop:in-progress` and materializes the
     issue as a local task through the standard template (completion marker included),
-    honoring an `Effort:` field. Daemons sharing an account are indistinguishable
+    honoring an `Effort:` field. A claimed issue whose body cannot be parsed is not
+    materialized: it is quarantined from `loop:in-progress` to `loop:merge-failed` with a
+    comment naming the problem and the repair (fix the body, remove `loop:merge-failed`,
+    add `loop:ready`, unassign the worker, and restart the loop). The daemon records that
+    reason in `queue/decisions.txt` (deduped), logs it as an `ERROR`, and writes the stop
+    file, ending the poll's claims. Daemons sharing an account are indistinguishable
     and may both materialize the issue, so that configuration is unsupported. A
     linked task that is running, or completed and still holding its claim, adds a
     `Heartbeat: <ISO timestamp>` issue comment at least every
@@ -1393,8 +1403,10 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     a different branch or head, or an unavailable member, fails the adoption.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
-    `loop:in-progress` → `loop:retry-exhausted` parking branch, while inspections and
-    accepted no-change verdicts take the intentional `loop:in-progress` → closed shortcut.
+    `loop:in-progress` → `loop:retry-exhausted` parking branch, inspections and
+    accepted no-change verdicts take the intentional `loop:in-progress` → closed shortcut,
+    and a claimed issue whose body cannot be parsed takes the `loop:in-progress` →
+    `loop:merge-failed` quarantine of item 34, which stops the loop.
 38. `import-issues [--dry-run] [--ready-trusted]` files a fleet project's open issues into
     the fleet's queue and requires a fleet whose `fleet.json` names an `issueRepository`;
     anywhere else it exits non-zero. It reads the project repository's open issues,

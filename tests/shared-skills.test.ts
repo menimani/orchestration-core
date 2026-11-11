@@ -485,4 +485,20 @@ describe('user skill install', () => {
     expect(readFileSync(join(home, '.claude', 'skills', 'git-commit', 'SKILL.md'), 'utf8'))
       .toBe('My own commit skill.\n')
   })
+
+  it('leaves an unrecorded skill identical to the rendered one unrecorded and unreported', () => {
+    const home = join(fixtureRoot, 'home')
+    const fleet = join(fixtureRoot, 'fleet')
+    installUserSkills(fleet, packageRoot, [interactiveSharedSkills], home)
+    const stateFile = join(home, '.claude', 'skills', '.orchestration-core-sync.json')
+    rmSync(stateFile)
+
+    const result = installUserSkills(fleet, packageRoot, [interactiveSharedSkills], home)
+
+    expect(result.failures).toEqual([])
+    expect(result.conflicts).toEqual([])
+    expect(result.installed).toEqual([])
+    expect(result.updated).toEqual([])
+    expect(existsSync(stateFile)).toBe(false)
+  })
 })
