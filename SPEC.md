@@ -531,10 +531,20 @@ are not parsed by `loadConfig` and are not operator-file settings.
     scan, a review, or a task queued for inspection — leaves both flags in place.
 11a. After a local or remote task merge, a first-parent change to this package's
     `package.json` or `package-lock.json` runs `npm ci --no-audit --no-fund` in the
-    package root. A successful install records the lockfile hash under `node_modules`.
+    package root. Before every install attempt the loop writes a pending record,
+    `queue/orchestration-deps-pending-<hash>.json`, keyed by a hash of the package root,
+    and removes it only once the install succeeds. A post-merge install first stops every
+    live task process tree, since `npm ci` empties the `node_modules` those processes
+    load from; each stopped task is reported failed as item 19 describes. If any tree
+    survives the stop, the install is skipped rather than run underneath it: the loop
+    logs a `Skipped` orchestration deps event naming the surviving tree, keeps the
+    pending record, and stops with an error asking for a restart once the process is
+    gone. A successful install records the lockfile hash under `node_modules`.
     At daemon startup, after ownership is acquired and before adapters are loaded, the
-    same install runs when that recorded hash does not match or a declared dependency is
-    missing. Startup synchronization is limited to the package copy inside the repository
+    same install runs when a pending record exists — even if the recorded hash matches —
+    or when that recorded hash does not match or a declared dependency is missing
+    (`tests/loop-merge-recovery.test.ts` and `tests/loop.test.ts` pin the skip and the
+    forced startup install). Startup synchronization is limited to the package copy inside the repository
     being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
     it is running from. Install output is captured; a failure stops the loop or startup
     with an error that names the package root and the `npm ci --no-audit --no-fund`
