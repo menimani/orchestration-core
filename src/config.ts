@@ -31,6 +31,8 @@ export interface LoopConfig {
   maxBurstFailures: number
   maxIssueRetries: number
   maxConsecutiveMergeFailures: number
+  /** Handbacks a task gets when its own content keeps failing the merge gate; 0 disables. */
+  maxGateFixAttempts: number
   scanEffort: ReasoningEffort
   taskEffort: ReasoningEffort
   reviewEffort: ReasoningEffort
@@ -97,6 +99,7 @@ export const CONFIG_ENV_NAMES = {
   maxBurstFailures: 'MAX_BURST_FAILURES',
   maxIssueRetries: 'MAX_ISSUE_RETRIES',
   maxConsecutiveMergeFailures: 'MAX_CONSECUTIVE_MERGE_FAILURES',
+  maxGateFixAttempts: 'MAX_GATE_FIX_ATTEMPTS',
   scanEffort: 'SCAN_EFFORT',
   taskEffort: 'TASK_EFFORT',
   reviewEffort: 'REVIEW_EFFORT',
@@ -230,6 +233,7 @@ function resolveConfig(env: NodeJS.ProcessEnv): LoopConfig {
     maxBurstFailures: num(env, 'MAX_BURST_FAILURES', 3),
     maxIssueRetries: num(env, 'MAX_ISSUE_RETRIES', 3),
     maxConsecutiveMergeFailures: num(env, 'MAX_CONSECUTIVE_MERGE_FAILURES', 3),
+    maxGateFixAttempts: num(env, 'MAX_GATE_FIX_ATTEMPTS', 1),
     scanEffort: effort(env, 'SCAN_EFFORT', 'medium'),
     taskEffort: effort(env, 'TASK_EFFORT', 'medium'),
     reviewEffort: effort(env, 'REVIEW_EFFORT', 'medium'),

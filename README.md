@@ -314,6 +314,24 @@ A merge gate whose test command exits 75 never ran its tests, so the merge is de
 with a WARN rather than failed: the task stays completed, the next poll runs the gate
 again, and the consecutive-merge-failure count does not move.
 
+A merge gate whose verification commands ran and failed is retried once with the same
+commits, since a suite can fail once under load. When the same task fails verification a
+second time in a row, retrying cannot help: the failure is its content, such as a new file
+under a coverage threshold or an expected value a parallel merge changed. While the task
+has one of its `MAX_GATE_FIX_ATTEMPTS` handbacks left (default 1), that failure is not
+counted. Instead the task's runner starts again in its existing worktree and branch, logged
+as a `Handback` event naming the attempt, from a specification that holds the original one,
+states that its commits failed verification on the run branch, and carries the bounded tail
+of its merge log framed as untrusted repository output. The runner must make the
+verification pass by correcting the change, commit on the same branch, and never delete,
+skip, or weaken a test. The handed-back task is an ordinary running task — it takes a
+parallel slot, keeps its issue claim alive, and obeys the task deadline and the stop
+command — and its merge is attempted afresh when it completes. Uncommitted changes, rebase
+conflicts, failures diagnosed as infrastructure, test-lock deferrals, adopted worker
+branches, and anything after a stop are never handed back. Once the handbacks are used, or
+with `MAX_GATE_FIX_ATTEMPTS=0`, failures count toward `MAX_CONSECUTIVE_MERGE_FAILURES` as
+before.
+
 A stopped daemon retains both branch identities and the daemon commit. Restarting is a
 resume of the same run: integration commits made while it was down remain available to
 later tasks, but a changed daemon branch or commit is rejected instead of silently
@@ -466,6 +484,7 @@ settings update at their next use.
 | `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `MAX_ISSUE_RETRIES` | 3 | Consecutive failed tasks allowed per issue before it is parked as `loop:retry-exhausted` |
+| `MAX_GATE_FIX_ATTEMPTS` | 1 | Times a completed task whose own content fails merge verification twice in a row is handed back to its runner to fix; `0` counts every failure toward the consecutive-merge-failure stop instead |
 | `TASK_DEADLINE_HOURS` | 4 | Hours a task may run without completing, from its status file's `started_at`, before the daemon stops its process tree and fails it; `0` sets no deadline |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | medium / medium / medium | Reasoning effort per kind of work; `TASK_EFFORT` applies to queued tasks without a per-task override, while review-spawned fixes always use high effort |
 | `RUNNER` | codex | Agent CLI adapter; accepts `codex`, `claude`, or an external module selector |

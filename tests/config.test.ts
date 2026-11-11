@@ -144,6 +144,15 @@ describe('loadConfig', () => {
     },
   )
 
+  it('defaults MAX_GATE_FIX_ATTEMPTS to one and accepts zero to disable handbacks', () => {
+    expect(loadConfig({}, { filePath: false }).maxGateFixAttempts).toBe(1)
+    expect(loadConfig({ MAX_GATE_FIX_ATTEMPTS: '0' }, { filePath: false }).maxGateFixAttempts).toBe(0)
+    expect(loadConfig({ MAX_GATE_FIX_ATTEMPTS: '2' }, { filePath: false }).maxGateFixAttempts).toBe(2)
+    expect(() => loadConfig({ MAX_GATE_FIX_ATTEMPTS: '-1' }, { filePath: false })).toThrow(
+      /MAX_GATE_FIX_ATTEMPTS must be a non-negative integer/,
+    )
+  })
+
   it('rejects MAX_PARALLEL below one', () => {
     expect(() => loadConfig({ MAX_PARALLEL: '0' }, { filePath: false })).toThrow(/MAX_PARALLEL must be at least 1/)
   })

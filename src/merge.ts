@@ -107,6 +107,13 @@ export const TEST_LOCK_BUSY_EXIT_CODE = 75
  */
 export class TestLockBusyError extends MergeError {}
 
+/**
+ * A verification command ran in the prospective worktree and failed. Unlike every other
+ * gate refusal, this one can be the task's own content, so the loop may hand it back to
+ * the task's runner to correct instead of retrying the same commits.
+ */
+export class VerificationFailedError extends MergeError {}
+
 export interface MergeRuntime {
   git: (cwd: string, args: string[]) => string
 }
@@ -801,7 +808,7 @@ function runMergeChecks(
     } catch (error) {
       io.out(`=== Tests failed: ${describeCommandFailure(error)} ===`)
       if (testLockStayedBusy(error)) throw new TestLockBusyError(testLockBusyMessage)
-      throw new MergeError('Tests failed. Aborting merge.')
+      throw new VerificationFailedError('Tests failed. Aborting merge.')
     }
     if (options.project.verifyDependencyIsolation === true
       && !ranIsolated(worktree, 'the worktree', io)) {
@@ -843,7 +850,7 @@ function runMergeChecks(
       || (passed && ranIsolated(directory, check.label, io))
     ok = passed && isolated && ok
   }
-  if (!ok) throw new MergeError('Tests failed. Aborting merge.')
+  if (!ok) throw new VerificationFailedError('Tests failed. Aborting merge.')
   if (lockBusy) throw new TestLockBusyError(testLockBusyMessage)
   return ranCommand
 }
