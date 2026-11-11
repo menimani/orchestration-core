@@ -1543,6 +1543,71 @@ describe('claimIssueGroup', () => {
     expect(retained?.labels).not.toContain(LABEL_READY)
   })
 
+  it('reports both task materialization and materialization cleanup failures', async () => {
+    const description = '[BUG] `src/a/b.ts` fails while discarding a partial task'
+    const issueNumber = await readyIssue(description)
+    const issue = await forge.getIssue(issueNumber)
+    const materializationFailure = new Error('append failed')
+    let failedTaskId: string | undefined
+
+    const failure = await claimIssueGroup(forge, paths, [issue], 'worker-a', (taskId) => {
+      failedTaskId = taskId
+      // A directory where the specification belongs cannot be removed without recursion,
+      // so discarding the partial task fails after the claim is already in place.
+      rmSync(specFile(paths, taskId))
+      mkdirSync(specFile(paths, taskId))
+      throw materializationFailure
+    }).then(() => undefined, (error: unknown) => error)
+
+    if (failedTaskId === undefined) throw new Error('expected append to be attempted')
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(failure).toMatchObject({
+      message: `Claim group materialization and compensation both failed for issues #${issueNumber}`,
+    })
+    const errors = (failure as AggregateError).errors
+    expect(errors).toHaveLength(2)
+    expect(errors[0]).toBe(materializationFailure)
+    expect(errors[1]).toBeInstanceOf(AggregateError)
+    expect(errors[1]).toMatchObject({
+      message: `Could not remove materialization for task ${failedTaskId}`,
+    })
+    expect((errors[1] as AggregateError).errors).toHaveLength(1)
+    expect(existsSync(specFile(paths, failedTaskId))).toBe(true)
+    const released = await forge.getIssue(issueNumber)
+    expect(released.assignees).toEqual([])
+    expect(released.labels).toContain(LABEL_READY)
+    expect(released.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
+  it.each([
+    ['an empty group', 0],
+    ['a group larger than four issues', 5],
+  ] as const)('rejects %s before any forge call', async (_description, size) => {
+    const issues = await Promise.all(Array.from({ length: size }, async (_unused, index) =>
+      forge.getIssue(await readyIssue(`[BUG] \`src/a/b${index}.ts\` belongs to an oversized group`))))
+    const accessed: string[] = []
+    const observedForge = new Proxy(forge, {
+      get(target, property, receiver) {
+        accessed.push(String(property))
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    const append = vi.fn()
+
+    await expect(claimIssueGroup(observedForge, paths, issues, 'worker-a', append))
+      .rejects.toThrow(new Error('A claim group must contain between 1 and 4 issues.'))
+
+    expect(accessed).toEqual([])
+    expect(append).not.toHaveBeenCalled()
+    for (const issue of issues) {
+      const after = await forge.getIssue(issue.number)
+      expect(after.assignees).toEqual([])
+      expect(after.labels).toContain(LABEL_READY)
+      expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
+    }
+    expect(existsSync(paths.tasksDir) ? readdirSync(paths.tasksDir) : []).toEqual([])
+  })
+
   it('quarantines an unparseable issue with an actionable reason', async () => {
     const issueNumber = await forge.createIssue({
       title: 'hand-written', body: 'no structure here', labels: [LABEL_FINDING, LABEL_READY],
