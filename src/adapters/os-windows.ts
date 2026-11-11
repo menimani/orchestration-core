@@ -6,6 +6,8 @@ import { cmdArgumentLine, processTreeRootPid, startWindowsProcess } from './wind
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
+// A hung query answers "unknown", which callers already treat as unverifiable.
+const PROCESS_START_IDENTITY_TIMEOUT_MS = 5_000
 
 export interface WindowsOperatingSystemRuntime {
   spawn(command: string, args: readonly string[]): void
@@ -61,6 +63,7 @@ function windowsProcessStartIdentity(pid: number): string | undefined {
   ], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: PROCESS_START_IDENTITY_TIMEOUT_MS,
     windowsHide: true,
   })
   const startTime = result.status === 0 ? result.stdout.trim() : ''

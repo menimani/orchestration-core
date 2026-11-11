@@ -20,6 +20,46 @@ describe('operating-system adapters', () => {
     expect(operatingSystem.processStartIdentity(process.pid)).toBe(identity)
   })
 
+  it('falls back to PID liveness when the Windows start-identity query times out', async () => {
+    const spawnSync = vi.fn(() => ({
+      status: null,
+      stdout: '',
+      error: Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+    }))
+    vi.doMock('node:child_process', async (importOriginal) => ({
+      ...await importOriginal<typeof import('node:child_process')>(),
+      spawnSync,
+    }))
+    vi.resetModules()
+    try {
+      const [windows, os, processOwner] = await Promise.all([
+        import('../src/adapters/os-windows.ts'),
+        import('../src/adapters/os.ts'),
+        import('../src/processOwner.ts'),
+      ])
+      const windowsOs = windows.createOperatingSystem()
+
+      expect(windowsOs.processStartIdentity(process.pid)).toBeUndefined()
+      expect(spawnSync).toHaveBeenCalledWith(
+        'powershell.exe',
+        expect.anything(),
+        expect.objectContaining({ timeout: 5_000 }),
+      )
+
+      vi.spyOn(os.operatingSystem, 'processStartIdentity')
+        .mockImplementation((pid) => windowsOs.processStartIdentity(pid))
+      const processIsAlive = vi.spyOn(os.operatingSystem, 'processIsAlive').mockReturnValue(true)
+      expect(processOwner.lockOwnerIsCurrent(process.pid, 'recorded-start')).toBe(true)
+      processIsAlive.mockReturnValue(false)
+      expect(processOwner.lockOwnerIsCurrent(process.pid, 'recorded-start')).toBe(false)
+      expect(processIsAlive).toHaveBeenCalledWith(process.pid)
+    } finally {
+      vi.restoreAllMocks()
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
+  })
+
   it('exposes behavior without a platform field', () => {
     expect(createWindowsOperatingSystem()).not.toHaveProperty('platform')
     expect(createPosixOperatingSystem()).not.toHaveProperty('platform')

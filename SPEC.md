@@ -18,6 +18,16 @@ comments and other items cite items by number, so a number is never reused.
   `Timed out after <ms>ms waiting for the repository test lock. Lock owner: <owner>.`
   and exits with status 75 (EX_TEMPFAIL), never 1, so a caller can tell a suite that
   never ran from one that failed.
+- Every read-modify-write of `queue/backlog.txt` takes the backlog lock beside it, and a
+  waiter gives up after 30 seconds. A lock, or the recovery mutex that serializes its
+  reclamation, is broken only when its owner is stale: retired by its holder, or older
+  than those 30 seconds and no longer its recorded process start. While one acquisition
+  waits, it remembers the exact owner text it last verified as current and skips the
+  process-identity query for that same text for one second; a changed owner text is
+  verified at once, and a stale verdict, with every decision to break or reclaim, always
+  comes from a fresh read and a fresh query. On Windows that query is bounded at five
+  seconds, and a query that times out answers "unknown", which falls back to whether the
+  recorded PID is alive.
 - Before a foreground loop enters its first cycle, or a background launcher spawns its
   daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
   runner models and reasoning efforts, and every setting whose resolved value differs
