@@ -249,7 +249,7 @@ export function createOperatingSystem(
         comparisonKey: resolve(path),
         removalPath: path,
         removalFallback: 'direct-removal fallback',
-        holderHint: `Find holder: lsof +D -- ${quoted}`,
+        holderHint: `Find holder: lsof +D ${quoted}`,
       }
     },
     environmentNameKey: (name) => name,
