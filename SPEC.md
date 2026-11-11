@@ -480,9 +480,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     task id, issue number, or the orchestration.
 8b. Before the rebase in item 9, a task whose agent committed off its own branch is
     adopted: when the task worktree exists and is clean, its HEAD is another local branch
-    or detached, and the task branch tip is a strict ancestor of that HEAD, the worktree
-    switches back to the task branch and fast-forwards it to that HEAD, and the merge log
-    names the branch the commits came from. The agent's branch is left in place. A HEAD
+    or detached, and the task branch tip is a strict ancestor of that HEAD, the task
+    branch is first moved to that HEAD in one compare-and-swap ref update that succeeds
+    only while the branch still points at the tip it was read at, the merge log names the
+    branch the commits came from, and only then does the worktree switch to the task
+    branch. A HEAD that already equals the task branch tip, as after a switch that failed
+    once the ref had moved, is only switched back, with no ref update and no log line.
+    The agent's branch is left in place. A HEAD
     that has diverged from the task branch, or a dirty worktree, is not adopted and meets
     the ordinary checks unchanged, so a task that committed nothing on any branch still
     fails because its merge created no commit.
