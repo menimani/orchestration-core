@@ -56,3 +56,8 @@ export function writeHeldFindings(paths: OrchPaths, findings: readonly HeldFindi
     rmSync(temporary, { force: true })
   }
 }
+
+/** Remove the holding file once nothing is held. */
+export function clearHeldFindings(paths: OrchPaths): void {
+  rmSync(heldFindingsFile(paths), { force: true })
+}

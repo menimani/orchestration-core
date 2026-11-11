@@ -459,6 +459,18 @@ function migrateFingerprintLedgerForIssue(paths: OrchPaths, issue: ForgeIssue): 
   })
 }
 
+/**
+ * The fingerprints carried by open finding issues from trusted authors. An issue whose
+ * fix already merged still counts: it stays open until promotion closes it.
+ */
+export function openFindingFingerprints(openFindings: readonly ForgeIssue[]): Set<string> {
+  return new Set(openFindings
+    .filter((issue) => issue.state === 'open'
+      && isTrustedFingerprintOwner(issue)
+      && issue.labels.includes(LABEL_FINDING))
+    .flatMap(issueFingerprints))
+}
+
 function hasIssueFingerprint(issue: ForgeIssue, fingerprint: string): boolean {
   return issueFingerprints(issue).includes(fingerprint)
 }

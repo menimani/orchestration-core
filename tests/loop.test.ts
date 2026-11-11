@@ -5216,6 +5216,118 @@ describe('documentation findings held for the cycle', () => {
     expect(suiteRuns()).toBe(false)
   })
 
+  it('does not file held findings again when listing fails after their issue was created', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    let current = new Date(2026, 7, 11, 14, 0, 0)
+    const resetAt = new Date(2026, 7, 11, 14, 40, 0)
+    const loop = makeLoop(
+      { ...gateConfig, issueQueueEnabled: true }, gatedProject, undefined, () => current,
+    )
+    writeFinal('20250101_000000_042_scan', [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    await loop.scanForNextTasks('20250101_000000_042_scan', 0)
+    expect(heldRecords()).toHaveLength(2)
+
+    // The forge creates the combined issue, then rate-limits the listing that follows.
+    const listOpenIssues = fakeForge.listOpenIssues.bind(fakeForge)
+    let limited = false
+    fakeForge.listOpenIssues = async (label) => {
+      if (fakeForge.issues.size === 1 && !limited) {
+        limited = true
+        throw new ForgeRateLimitError(resetAt)
+      }
+      return listOpenIssues(label)
+    }
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(limited).toBe(true)
+    expect(fakeForge.issues.size).toBe(1)
+    expect(heldRecords()).toHaveLength(2)
+
+    // Once the limit clears, the gate waits on the open, unmerged issue.
+    current = new Date(2026, 7, 11, 14, 41, 0)
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    expect(heldRecords()).toHaveLength(2)
+    expect(logged).toContain('Waiting remote      issues #1')
+
+    // Merged into the run branch, the open issue already carries every held finding.
+    recordIssuesForTask(paths, 'docs-task', [1])
+    recordIssuePromotions(paths, 'docs-task', 'abc123', 'feature/run-1')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    expect(existsSync(heldFile())).toBe(false)
+    expect(logged).toContain(
+      'Deduplicated docs        2 held documentation finding(s) already carried by an open issue',
+    )
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([])
+
+    await fakeForge.closeIssue(1, 'promoted')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    expect(existsSync(heldFile())).toBe(false)
+  })
+
+  it('releases only the held finding that no open issue carries', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    const scanId = '20250101_000000_043_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    await loop.scanForNextTasks(scanId, 0)
+    expect(heldRecords()).toHaveLength(2)
+    const covering = await fakeForge.createIssue({
+      title: 'merged documentation fix',
+      body: buildIssueBody('[DOCS] `README.md` names a removed flag', 'other-task'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, 'other-task', [covering])
+    recordIssuePromotions(paths, 'other-task', 'abc123', 'feature/run-1')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logged).toContain(
+      'Deduplicated docs        1 held documentation finding(s) already carried by an open issue',
+    )
+    expect(fakeForge.issues.size).toBe(2)
+    const released = await fakeForge.getIssue(covering + 1)
+    expect(released.title).toBe('[DOCS] `SPEC.md` misstates the retry bound')
+    expect(released.body).not.toContain('README.md')
+    expect(released.body.match(/^Fingerprint: /gm)).toHaveLength(1)
+    expect(heldRecords()).toEqual([])
+    expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
+  })
+
+  it('does not count an open issue from an author without write access as coverage', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    const finding = '[DOCS] `README.md` names a removed flag'
+    writeFinal('20250101_000000_044_scan', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_044_scan', 0)
+    expect(heldRecords()).toHaveLength(1)
+    const outside = await fakeForge.createIssue({
+      title: 'outside documentation claim',
+      body: buildIssueBody(finding, 'outside'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    fakeForge.issues.get(outside)!.author = { login: 'drive-by-user', hasWriteAccess: false }
+    recordIssuesForTask(paths, 'outside-task', [outside])
+    recordIssuePromotions(paths, 'outside-task', 'abc123', 'feature/run-1')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logged.filter((line) => line.startsWith('Deduplicated'))).toEqual([])
+    expect(fakeForge.issues.size).toBe(2)
+    expect((await fakeForge.getIssue(outside + 1)).title).toBe(finding)
+    expect(heldRecords()).toEqual([])
+  })
+
   it('leaves the findings of a review task on their combined path', async () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_041_review-c1', [
