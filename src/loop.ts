@@ -753,7 +753,12 @@ export function createLoop(deps: LoopDeps) {
           throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
 
-        const runBranch = optionalGit(['branch', '--show-current']).trim()
+        // Read before the merge, and checked: a promotion recorded without its run branch
+        // is malformed, and every later reconcile would fail on it.
+        const runBranch = git(['branch', '--show-current']).trim()
+        if (runBranch === '') {
+          throw new MergeError(`Could not adopt ${report.branch}: the checkout is not on a branch.`)
+        }
         let appliedMergeCommit: string | undefined
         let promotionPersistenceError: unknown
         const persistPromotion = (mergedCommit: string): void => {
@@ -3093,7 +3098,9 @@ export function createLoop(deps: LoopDeps) {
         // Issue reconciliation needs the forge, so it waits for the merge to finish; a
         // restart that finds the task merged reconciles from the promotion record.
         if (linkedIssues.length > 0) {
-          const runBranch = optionalGit(['branch', '--show-current']).trim()
+          // The merged status holds the branch the merge checked and landed on; asking
+          // the checkout again could answer nothing and record a malformed promotion.
+          const runBranch = readStatus(paths, taskId)?.run_branch ?? ''
           await reconcileMergedIssues(taskId, linkedIssues, mergeCommit, runBranch)
         }
       } catch (error) {
@@ -3515,8 +3522,12 @@ export function createLoop(deps: LoopDeps) {
             // cost this poll its claims. A queue in the project's own repository is closed
             // by the merge commit, but an abandoned run still has to return its issues.
             try {
+              // An unknown held branch would make the run this checkout still holds look
+              // abandoned and return its merged issues, so a failed lookup skips the step.
+              const heldBranch = git(['branch', '--show-current']).trim()
+              if (heldBranch === '') throw new Error('the checkout is not on a branch')
               const { closed, returned } = await closePromotedIssues(
-                forge, paths, promotedCommitContained, optionalGit(['branch', '--show-current']).trim(),
+                forge, paths, promotedCommitContained, heldBranch,
                 issueQueueIsSeparate(paths),
               )
               for (const issueNumber of closed) {
