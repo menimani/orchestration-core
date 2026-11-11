@@ -111,10 +111,7 @@ function superviseTimedShell(timeout: number, command: string): void {
   })
   child.on('exit', (code, signal) => {
     clearTimeout(timer)
-    if (signal === null) {
-      process.exit(code ?? 1)
-      return
-    }
+    if (signal === null) process.exit(code ?? 1)
     // The shell is gone, so the stop listeners have nothing left to stop. Removed, they
     // let the re-raised signal end the supervisor by default, and the caller sees the
     // shell's signal rather than the exit status the listener would substitute for it.
