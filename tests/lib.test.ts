@@ -12,7 +12,8 @@ import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
   branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId,
   isScanTaskId,
-  absolutePackageScriptCommand, orchPaths, packageSubtreePrefix, statusFile, type OrchPaths,
+  absolutePackageScriptCommand, orchPaths, packageSubtreePrefix, shellPathSpelling, statusFile,
+  type OrchPaths,
 } from '../src/paths.ts'
 import { nonCanonicalSpelling } from './pathComparison.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
@@ -287,8 +288,8 @@ describe('status files', () => {
 describe('package script commands', () => {
   it('renders a repository-specific command that is independent of the working directory', () => {
     const packageRoot = join(repoRoot, 'orchestration', 'core package')
-    const expectedPackageRoot = packageRoot.replaceAll('\\', '/')
-    const expectedRepoRoot = repoRoot.replaceAll('\\', '/')
+    const expectedPackageRoot = shellPathSpelling(packageRoot)
+    const expectedRepoRoot = shellPathSpelling(repoRoot)
 
     expect(absolutePackageScriptCommand(repoRoot, 'loop-status', packageRoot))
       .toBe(`npm run -C '${expectedPackageRoot}' loop-status -- --repo '${expectedRepoRoot}'`)

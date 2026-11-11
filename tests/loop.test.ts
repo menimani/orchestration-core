@@ -24,7 +24,7 @@ import { runCleanupCommand } from '../src/cleanupCommand.ts'
 import { createLoop, formatEventLine, type Loop } from '../src/loop.ts'
 import { pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup } from '../src/merge.ts'
 import {
-  branchName, finalMessageFile, PACKAGE_ROOT, statusFile, worktreeDir,
+  branchName, finalMessageFile, PACKAGE_ROOT, shellPathSpelling, statusFile, worktreeDir,
 } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { refreshAll } from '../src/refresh.ts'
@@ -1347,7 +1347,7 @@ describe('runAutoReview', () => {
       ...paths,
       root: join(stateRepoRoot, 'orchestration'),
     })
-    const packagePrefix = relative(stateRepoRoot, PACKAGE_ROOT).replaceAll('\\', '/')
+    const packagePrefix = shellPathSpelling(relative(stateRepoRoot, PACKAGE_ROOT))
 
     expect(makeLoop({ integrationBranch: 'integration/run' }).runAutoReview(7, false))
       .toBe(false)
