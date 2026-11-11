@@ -1256,7 +1256,8 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     further close. A failure to close is warned about and retried on the next poll without
     holding back that poll's claims; the issues that did close stay closed. A promoted issue the forge reports as deleted is no
     longer awaited: its promotion record is dropped, along with the task's issue map once no
-    promotion of that task remains, and the promotions after it still close. A run pull
+    promotion of that task remains, and the promotions after it still close. In every
+    issue-queue mode, separate or not, a run pull
     request closed without merging will never land its work once a later run has left its
     branch, so the merger then comments `UNPROMOTED: <task-id>` on each issue recorded
     for that run branch, naming the merge commit, run branch, and pull request, returns the issue to ready and unassigned, drops

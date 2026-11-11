@@ -3472,12 +3472,14 @@ export function createLoop(deps: LoopDeps) {
             issueHasMergeMarker,
             issueReleaseOptions,
           )
-          if (!config.workerMode && issueQueueIsSeparate(paths)) {
+          if (!config.workerMode) {
             // Closing promoted issues is bookkeeping a later poll can finish; it must not
-            // cost this poll its claims.
+            // cost this poll its claims. A queue in the project's own repository is closed
+            // by the merge commit, but an abandoned run still has to return its issues.
             try {
               const { closed, returned } = await closePromotedIssues(
                 forge, paths, promotedCommitContained, optionalGit(['branch', '--show-current']).trim(),
+                issueQueueIsSeparate(paths),
               )
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')

@@ -3278,6 +3278,16 @@ describe('closePromotedIssues', () => {
     expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [closable], returned: [] })
   })
 
+  it('leaves a merged run pull request\'s issues to the merge commit without closeMerged', async () => {
+    const issueNumber = await promotedIssue('task-same-repo', 'a'.repeat(40), 'run/merged')
+    forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true, '', false))
+      .toEqual({ closed: [], returned: [] })
+    expect((await forge.getIssue(issueNumber)).state).toBe('open')
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-same-repo')
+  })
+
   it('returns the issues of a run pull request closed without merging to ready', async () => {
     const issueNumber = await forge.createIssue({
       title: 'task-abandoned', body: buildIssueBody('[BUG] task-abandoned', 'scan-1'),
