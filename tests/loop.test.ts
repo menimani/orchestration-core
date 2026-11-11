@@ -5281,9 +5281,10 @@ describe('documentation findings held for the cycle', () => {
     ].join('\n'))
     await loop.scanForNextTasks(scanId, 0)
     expect(heldRecords()).toHaveLength(2)
+    // An earlier release of this holding file filed the first finding; its fix merged.
     const covering = await fakeForge.createIssue({
       title: 'merged documentation fix',
-      body: buildIssueBody('[DOCS] `README.md` names a removed flag', 'other-task'),
+      body: buildIssueBody('[DOCS] `README.md` names a removed flag', scanId),
       labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
     })
     recordIssuesForTask(paths, 'other-task', [covering])
@@ -5301,6 +5302,40 @@ describe('documentation findings held for the cycle', () => {
     expect(released.body.match(/^Fingerprint: /gm)).toHaveLength(1)
     expect(heldRecords()).toEqual([])
     expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
+  })
+
+  it('files a finding observed again after its earlier fix merged and awaits promotion', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    const finding = '[DOCS] `README.md` names a removed flag'
+    writeFinal('20250101_000000_045_scan', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_045_scan', 0)
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    const first = await fakeForge.getIssue(1)
+    expect(first.body).toContain('Parent: 20250101_000000_045_scan')
+    expect(heldRecords()).toEqual([])
+    recordIssuesForTask(paths, 'docs-task', [1])
+    recordIssuePromotions(paths, 'docs-task', 'abc123', 'feature/run-1')
+
+    // The first fix was incomplete: a later scan reports the same finding again.
+    writeFinal('20250101_000000_046_scan', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_046_scan', 0)
+    expect(heldRecords()).toEqual([`1\t20250101_000000_046_scan\t${finding}`])
+    expect(logged).toContain(
+      "Deferred 046_scan    1 documentation finding(s) until the cycle's other tasks finish",
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logged.filter((line) => line.startsWith('Deduplicated'))).toEqual([])
+    expect(fakeForge.issues.size).toBe(2)
+    const second = await fakeForge.getIssue(2)
+    expect(second.title).toBe(finding)
+    expect(second.body).toContain('Parent: 20250101_000000_046_scan')
+    expect(second.body.match(/^Fingerprint: .*$/m)?.[0]).toBe(first.body.match(/^Fingerprint: .*$/m)?.[0])
+    expect(heldRecords()).toEqual([])
   })
 
   it('does not count an open issue from an author without write access as coverage', async () => {
