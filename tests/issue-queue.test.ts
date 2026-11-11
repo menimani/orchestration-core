@@ -3312,6 +3312,27 @@ describe('closePromotedIssues', () => {
     expect(open).toContain(started[0]!)
   })
 
+  it('rethrows a rate limit over an earlier failure of another kind', async () => {
+    const issueNumbers = await mergedRun(4)
+    const [failing, , limited] = recordOrder(issueNumbers)
+    const closeIssue = forge.closeIssue
+    forge.closeIssue = async (issueNumber, comment) => {
+      if (issueNumber === failing) throw new Error('forge unavailable')
+      if (issueNumber === limited) throw new ForgeRateLimitError(new Date('2026-11-11T00:00:00Z'))
+      await closeIssue(issueNumber, comment)
+    }
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toBeInstanceOf(ForgeRateLimitError)
+    for (const issueNumber of issueNumbers) {
+      expect((await forge.getIssue(issueNumber)).state)
+        .toBe(issueNumber === failing || issueNumber === limited ? 'open' : 'closed')
+    }
+    for (const issueNumber of [failing!, limited!]) {
+      expect(issuePromotionForIssue(paths, issueNumber)?.taskId)
+        .toBe(`task-${issueNumbers.indexOf(issueNumber)}`)
+    }
+  })
+
   it('drops the records of deleted issues while the rest of a merged run still close', async () => {
     const issueNumbers = await mergedRun(8)
     const deleted = [issueNumbers[1]!, issueNumbers[5]!]
