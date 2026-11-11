@@ -7,7 +7,9 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
-import { branchName, finalMessageFile, orchPaths, worktreeDir } from '../src/paths.ts'
+import {
+  branchName, finalMessageFile, orchPaths, shellPathSpelling, worktreeDir,
+} from '../src/paths.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import { writeStatus } from '../src/status.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -449,7 +451,7 @@ describe('fleet project selection', () => {
     expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
     expect(result.stdout).toContain('Installed: .agents/skills/git-commit')
     expect(readFileSync(join(home, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
-      .toContain(`ORCHESTRATION_FLEET='${fleet.replaceAll('\\', '/')}' npm run -C `)
+      .toContain(`ORCHESTRATION_FLEET='${shellPathSpelling(fleet)}' npm run -C `)
   })
 
   it('installs the shared skills where each fleet project runner discovers them', () => {
