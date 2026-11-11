@@ -1421,8 +1421,8 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     until an operator relabels it ready. Only a fleet queue that imports needs those two
     labels, so a real run creates them in the queue repository itself and the shared set
     that `init` and `verify-setup` manage is unchanged. Its requirement is the issue title, a line naming
-    the source issue and its author, and the issue body with every line quoted, so the
-    project's text can neither pose as the queue issue's metadata lines nor end its
+    the source issue and its author, and the issue body, with every line of the title and
+    the body quoted, so the project's text can neither pose as the queue issue's metadata lines nor end its
     requirement with a heading. `--dry-run` prints `Would import:` lines and files
     nothing; a real run prints `Imported:` lines naming the queue issue and whether it is
     ready. A claim records the source fingerprints of the issues it took, and the task's
