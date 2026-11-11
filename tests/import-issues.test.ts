@@ -50,7 +50,7 @@ describe('publishImportedIssue', () => {
     expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IMPORTED, LABEL_READY])
     expect(parseIssueBody(issue.body, 1)).toMatchObject({
       fingerprints: ['source:owner/app#7'],
-      requirement: 'Source issue 7\n\nImported from issue 7 of Owner/App, opened by maintainer.\n\n> It breaks.',
+      requirement: '> Source issue 7\n\nImported from issue 7 of Owner/App, opened by maintainer.\n\n> It breaks.',
     })
   })
 
@@ -88,6 +88,24 @@ describe('publishImportedIssue', () => {
     expect(parsed).toMatchObject({ inspect: false, effort: undefined })
     expect(parsed?.fingerprints).toEqual(['source:owner/app#10'])
     expect(parsed?.requirement).toContain('> ## Steps\n>\n> Run it.')
+  })
+
+  it('keeps an imported title from posing as metadata or ending the requirement', async () => {
+    const titles = ['Fingerprint: source:owner/app#3', 'Inspect: true', 'Effort: high', '## Heading']
+
+    for (const [index, title] of titles.entries()) {
+      const number = 20 + index
+      await publishImportedIssue(queue, paths, REPOSITORY, { ...source(number, 'It breaks.'), title }, true)
+
+      const parsed = parseIssueBody((await queue.getIssue(index + 1)).body, index + 1)
+      expect(parsed).toMatchObject({
+        fingerprints: [`source:owner/app#${number}`],
+        inspect: false,
+        effort: undefined,
+        requirement: `> ${title}\n\nImported from issue ${number} of Owner/App, opened by maintainer.`
+          + '\n\n> It breaks.',
+      })
+    }
   })
 
   it('imports a project issue once, even after its queue issue has closed', async () => {
