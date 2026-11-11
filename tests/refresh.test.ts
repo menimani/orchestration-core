@@ -279,6 +279,47 @@ describe('refreshTask deadline', () => {
     expect(terminableTaskProcessPid(paths, 'resisting-task')).toBe(pid)
   })
 
+  it('does not stop an overdue PID whose start identity no longer matches', async () => {
+    liveOverdueTask('reused-task')
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('started:reused')
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    const verdicts: unknown[] = []
+
+    const after = await refreshTask(paths, 'reused-task', {
+      taskDeadlineHours: 4, now: () => hours(5), onDeadline: (verdict) => verdicts.push(verdict),
+    })
+
+    expect(terminate).not.toHaveBeenCalled()
+    expect(after).toMatchObject({ status: 'running', pid })
+    expect(verdicts).toEqual([{
+      taskId: 'reused-task', pid, stopped: false,
+      error: 'process identity was not captured at launch or is currently unavailable',
+    }])
+  })
+
+  it('does not stop an overdue task whose recorded process changed after the read', async () => {
+    const otherPid = pid - 1
+    liveOverdueTask('handed-over-task')
+    // The registry is rewritten between the status read and the deadline stop.
+    vi.spyOn(operatingSystem, 'processIsAlive').mockImplementation(() => {
+      recordTaskProcess(paths, 'handed-over-task', otherPid)
+      return true
+    })
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    const verdicts: unknown[] = []
+
+    const after = await refreshTask(paths, 'handed-over-task', {
+      taskDeadlineHours: 4, now: () => hours(5), onDeadline: (verdict) => verdicts.push(verdict),
+    })
+
+    expect(terminate).not.toHaveBeenCalled()
+    expect(after).toMatchObject({ status: 'running', pid })
+    expect(verdicts).toEqual([{
+      taskId: 'handed-over-task', pid, stopped: false, error: 'task process ownership changed',
+    }])
+    expect(terminableTaskProcessPid(paths, 'handed-over-task')).toBe(otherPid)
+  })
+
   it('does not stop a task before its deadline or when no deadline is set', async () => {
     liveOverdueTask('young-task')
     const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
