@@ -1126,6 +1126,20 @@ describe('manual merge', () => {
     expect(result.stderr).toContain('check stderr')
     expect(result.stderr).toContain('Tests failed. Aborting merge.')
   })
+
+  it('rejects --test-cmd without a command instead of falling back to TEST_CMD', () => {
+    const result = spawnSync(process.execPath, [CLI, 'merge', 'missing-test-cmd', '--yes', '--test-cmd'], {
+      cwd: repoRoot,
+      env: { ...CORE_ENV, TEST_CMD: 'node -e "process.exit(0)"' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe('Usage: merge <task-id> [--yes] [--test-cmd "cmd"]\n')
+  })
 })
 
 describe('manually promoted run ending', () => {
