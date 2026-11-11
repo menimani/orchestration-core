@@ -41,7 +41,7 @@ export default defineConfig({
         test: {
           name: 'parallel',
           exclude: SEQUENTIAL_SUITES,
-          maxWorkers: 4,
+          maxWorkers: 6,
           sequence: { groupOrder: 0 },
         },
       },
