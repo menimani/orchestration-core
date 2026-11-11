@@ -46,6 +46,8 @@ export interface LoopConfig {
   workerMode: boolean
   /** Hours an in-progress issue may sit unupdated before its lease is reaped. */
   issueLeaseHours: number
+  /** Hours a task may run without completing before its process tree is stopped; 0 disables. */
+  taskDeadlineHours: number
   /** Pull the consumed orchestration subtree at the safe pre-cycle boundary. */
   coreAutoUpdate: boolean
   /** Git remote, URL, or owner/repository shorthand for the shared core. */
@@ -107,6 +109,7 @@ export const CONFIG_ENV_NAMES = {
   issueQueueEnabled: 'ISSUE_QUEUE_ENABLED',
   workerMode: 'WORKER_MODE',
   issueLeaseHours: 'ISSUE_LEASE_HOURS',
+  taskDeadlineHours: 'TASK_DEADLINE_HOURS',
   coreAutoUpdate: 'CORE_AUTO_UPDATE',
   upstreamRemote: 'UPSTREAM_REMOTE',
   upstreamBranch: 'UPSTREAM_BRANCH',
@@ -239,6 +242,7 @@ function resolveConfig(env: NodeJS.ProcessEnv): LoopConfig {
     issueQueueEnabled,
     workerMode,
     issueLeaseHours: num(env, 'ISSUE_LEASE_HOURS', 3),
+    taskDeadlineHours: num(env, 'TASK_DEADLINE_HOURS', 4),
     coreAutoUpdate: bool(env, 'CORE_AUTO_UPDATE', true),
     upstreamRemote: str(env, 'UPSTREAM_REMOTE', defaultUpstreamRemote()),
     upstreamBranch: str(env, 'UPSTREAM_BRANCH', 'main'),

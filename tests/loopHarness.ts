@@ -92,7 +92,10 @@ export function makeLoop(
   terminateTaskProcesses?: () => TaskProcessTermination,
   startTaskImpl: typeof startTask = startTask,
 ): Loop {
-  const config = { ...loadConfig({}), ...overrides }
+  // The fixtures register the test process itself as a runner, with a fixed UTC start
+  // that a local-time clock puts hours in the past on some hosts. A deadline would stop
+  // the test process there, so only a test that asks for one gets it.
+  const config = { ...loadConfig({}), taskDeadlineHours: 0, ...overrides }
   return createLoop({
     paths,
     config,

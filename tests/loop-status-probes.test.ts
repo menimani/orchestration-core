@@ -19,6 +19,9 @@ import { stubProject } from './stubProject.ts'
 // reads must answer from the durable record alone.
 
 const RUNNER_PID = process.pid + 1_000_000
+// The poll's clock. The runners started an hour before it, well inside the task deadline.
+const POLL_TIME = new Date(2026, 7, 9, 12, 0, 0)
+const RUNNER_STARTED_AT = new Date(POLL_TIME.getTime() - 3_600_000).toISOString()
 
 let repoRoot: string
 let paths: OrchPaths
@@ -57,8 +60,8 @@ function writeRunningStatus(taskId: string): void {
   writeFileSync(statusFile(paths, taskId), JSON.stringify({
     task_id: taskId,
     status: 'running',
-    started_at: '2026-08-08T03:00:00Z',
-    updated_at: '2026-08-08T03:00:00Z',
+    started_at: RUNNER_STARTED_AT,
+    updated_at: RUNNER_STARTED_AT,
     worktree: worktreeDir(paths, taskId),
     branch: branchName(taskId),
   }))
@@ -88,7 +91,7 @@ describe('poll status reads', () => {
       runner,
       project: stubProject,
       log: (line) => logged.push(line),
-      now: () => new Date(2026, 7, 9, 12, 0, 0),
+      now: () => POLL_TIME,
     })
     loop.initializeSessionStateForBranch()
     // Startup classifies every task once by its process; only the poll's reads count.

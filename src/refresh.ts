@@ -1,7 +1,9 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { operatingSystem } from './adapters/os.ts'
-import { finalMessageFile, type OrchPaths } from './paths.ts'
-import { taskProcessRecorded } from './processRegistry.ts'
+import { finalMessageFile, logFile, type OrchPaths } from './paths.ts'
+import {
+  forgetTaskProcess, taskProcessRecorded, terminableTaskProcessPid,
+} from './processRegistry.ts'
 import { readStatus, transitionStatus, type TaskStatus } from './status.ts'
 
 // The status refresh. Only a running task is ever
@@ -36,19 +38,70 @@ export interface RefreshOptions {
    * counted against their issues and the burst guard.
    */
   daemonOwnsQueue?: boolean
+  /**
+   * Hours a live task may stay running without the completion marker, measured from its
+   * status file's `started_at`. Zero or absent sets no deadline.
+   */
+  taskDeadlineHours?: number
+  /** Epoch milliseconds the deadline is measured against. */
+  now?: () => number
+  /** Told when an overdue task's process tree was stopped, or why it could not be. */
+  onDeadline?: (verdict: DeadlineVerdict) => void
+}
+
+export type DeadlineVerdict =
+  | { taskId: string, pid: number, stopped: true }
+  | { taskId: string, pid: number, stopped: false, error: string }
+
+const HOUR_MS = 3_600_000
+
+function deadlineExpired(startedAt: string, deadlineHours: number, now: () => number): boolean {
+  if (deadlineHours <= 0) return false
+  const started = Date.parse(startedAt)
+  // An unreadable start time cannot prove the task overdue, so it is left running.
+  return Number.isFinite(started) && now() - started >= deadlineHours * HOUR_MS
+}
+
+/**
+ * Stop an overdue task's process tree the way cleanup does: only a process whose start
+ * identity was captured at launch is terminated, and the stop counts only once the whole
+ * tree is gone. Returns why the tree could not be stopped, or undefined once it is.
+ */
+function stopOverdueProcess(paths: OrchPaths, taskId: string, pid: number): string | undefined {
+  const terminablePid = terminableTaskProcessPid(
+    paths, taskId, undefined, operatingSystem.processStartIdentity,
+    operatingSystem.processTreeIsAlive,
+  )
+  if (terminablePid === undefined) {
+    return 'process identity was not captured at launch or is currently unavailable'
+  }
+  if (terminablePid !== pid) return 'task process ownership changed'
+  try {
+    if (!operatingSystem.terminateProcessTree(terminablePid)
+      || operatingSystem.processTreeIsAlive(terminablePid)) {
+      return 'process tree termination could not be verified'
+    }
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  forgetTaskProcess(paths, taskId)
+  return undefined
 }
 
 /**
  * Refresh one task: a live process with the marker is completed; a dead process is
  * completed or failed by whether the marker made it into the final message. Without a
  * daemon, a task with no PID record and no marker stays running for the next daemon to
- * classify; one whose record outlived its process crashed and is failed. Returns the
- * status after refresh.
+ * classify; one whose record outlived its process crashed and is failed. A live task past
+ * its deadline has its process tree stopped and is failed with the reason in its log; one
+ * whose tree cannot be stopped stays running and is tried again at the next refresh.
+ * Returns the status after refresh.
  */
 export async function refreshTask(
   paths: OrchPaths,
   taskId: string,
-  { daemonOwnsQueue = true }: RefreshOptions = {},
+  { daemonOwnsQueue = true, taskDeadlineHours = 0, now = Date.now, onDeadline }:
+    RefreshOptions = {},
 ): Promise<TaskStatus | undefined> {
   // Asked before the status is read: reading it drops a record whose process is gone,
   // after which a crashed runner would look like one a graceful stop released.
@@ -59,10 +112,22 @@ export async function refreshTask(
   const alive = status.pid !== null && operatingSystem.processIsAlive(status.pid)
   let next: 'completed' | 'failed' | undefined
   let nextPid: number | undefined
+  let deadlineReason: string | undefined
   if (alive) {
     if (completionMarkerPresent(paths, taskId)) {
       next = 'completed'
       nextPid = status.pid ?? undefined
+    } else if (deadlineExpired(status.started_at, taskDeadlineHours, now)) {
+      const pid = status.pid!
+      const error = stopOverdueProcess(paths, taskId, pid)
+      if (error !== undefined) {
+        onDeadline?.({ taskId, pid, stopped: false, error })
+        return status
+      }
+      onDeadline?.({ taskId, pid, stopped: true })
+      next = 'failed'
+      deadlineReason = `running since ${status.started_at}, past the `
+        + `${taskDeadlineHours}-hour task deadline; process tree ${pid} was stopped`
     }
   } else if (completionMarkerPresent(paths, taskId)) {
     next = 'completed'
@@ -73,7 +138,10 @@ export async function refreshTask(
 
   // When the transition loses, a merge won the lock after this refresh classified the
   // file; the re-read is the answer, not this refresh's stale decision.
-  await transitionStatus(paths, taskId, 'running', next, nextPid)
+  const transitioned = await transitionStatus(paths, taskId, 'running', next, nextPid)
+  if (transitioned && deadlineReason !== undefined) {
+    appendFileSync(logFile(paths, taskId), `\nTask deadline exceeded: ${deadlineReason}\n`)
+  }
   return readStatus(paths, taskId)
 }
 

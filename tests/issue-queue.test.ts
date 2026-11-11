@@ -3035,7 +3035,9 @@ describe('loop integration in issue mode', () => {
     await forge.assignIssue(unlinked, 'worker-gone')
     recordIssuesForTask(paths, 'task-running', [linked])
     writeFileSync(join(paths.statusDir, 'task-running.json'),
-      durableStatus('task-running', 'running', { pid: process.pid }))
+      durableStatus('task-running', 'running', {
+        pid: process.pid, started_at: '2026-08-08T11:00:00Z',
+      }))
     recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
 
@@ -3073,7 +3075,9 @@ describe('loop integration in issue mode', () => {
     })
     recordIssuesForTask(paths, 'task-running', [issueNumber])
     writeFileSync(join(paths.statusDir, 'task-running.json'),
-      durableStatus('task-running', 'running', { pid: process.pid }))
+      durableStatus('task-running', 'running', {
+        pid: process.pid, started_at: '2026-08-08T11:00:00Z',
+      }))
     recordTaskProcess(paths, 'task-running', process.pid)
     forge.clock = () => new Date('2026-08-08T12:00:00Z')
     forge.commentIssue = async () => { throw new Error('forge unavailable') }

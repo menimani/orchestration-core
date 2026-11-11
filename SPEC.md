@@ -256,6 +256,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `WORKER_MODE` | `false` | Run an execution-only daemon that claims and executes shared issues (item 36). `true` requires `ISSUE_QUEUE_ENABLED=true`. |
 | `MAX_ISSUE_RETRIES` | `3` | Consecutive failed tasks allowed per issue before it is parked as `loop:retry-exhausted` (item 19a). |
 | `ISSUE_LEASE_HOURS` | `3` | Hours without heartbeats after which an in-progress issue is reaped back to ready (item 34). |
+| `TASK_DEADLINE_HOURS` | `4` | Hours a task may stay `running` without the completion marker, measured from its status file's `started_at`, before the daemon stops its process tree and fails it (Task lifecycle item 1). `0` sets no deadline. |
 | `CORE_AUTO_UPDATE` | `true` | Check and pull the shared-core subtree before each cycle. `false` skips the check and the shared skill sync. |
 | `UPSTREAM_REMOTE` | package `upstreamRepo` | Remote name, Git URL or path, or GitHub `owner/repository` to fetch and subtree-pull. |
 | `UPSTREAM_BRANCH` | `main` | Shared-core branch to compare and pull. |
@@ -265,7 +266,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
 1. A task is `completed` once `TASK_COMPLETE` appears on its own line in the task's
    `.final` file (written by the runner through its last-message output), even if its
    runner process is still alive. Without that marker, it remains `running` while the
-   process is alive and becomes `failed` when the process is gone. Markers in the
+   process is alive and becomes `failed` when the process is gone. The daemon bounds how
+   long that may last: a live task without the marker whose status file's `started_at` is
+   at least `TASK_DEADLINE_HOURS` old (default 4; `0` sets no deadline) has its process
+   tree stopped the way cleanup stops it — only a process whose start identity was
+   captured at launch, and only once the whole tree is confirmed gone — and is then
+   transitioned to `failed` with a `Task deadline exceeded:` line in its log, so the
+   ordinary failure path records the failure and releases its issues. A tree that cannot
+   be stopped leaves the task `running` under a counted warning, and the next poll tries
+   again. The `status` command applies no deadline. Markers in the
    transcript log are ignored — only the final-message file is authoritative. An ordinary
    completed task may additionally report `NO_CHANGE_WARRANTED` on its own line when its
    investigation proves the requested change is already unnecessary. A missing task
