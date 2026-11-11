@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReasoningEffort, RunnerStartOptions } from '../src/adapters/runner.ts'
 
@@ -225,6 +226,37 @@ describe('Claude process wrapper', () => {
     await expect(runClaudeProcess('final-message.txt', ['--model', 'two\nlines']))
       .rejects.toThrow('quote or line break')
     expect(mocks.spawn).not.toHaveBeenCalled()
+  })
+
+  it('rejects without publishing a final message when claude cannot be spawned', async () => {
+    const child = mockChild()
+    mocks.spawn.mockReturnValue(child)
+    const error = Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' })
+
+    const completed = runClaudeProcess('final-message.txt', ['-p'])
+    child.emit('error', error)
+
+    await expect(completed).rejects.toBe(error)
+    expect(mocks.writeFileSync).not.toHaveBeenCalled()
+    expect(mocks.renameSync).not.toHaveBeenCalled()
+  })
+
+  it('exits 1 when the wrapper is started without a final-message file', async () => {
+    // child_process is mocked for this file, so the wrapper runs as a real process
+    // through the actual implementation.
+    const { spawnSync } = await vi.importActual<typeof import('node:child_process')>(
+      'node:child_process',
+    )
+    const wrapper = fileURLToPath(new URL('../src/adapters/runner-claude.ts', import.meta.url))
+
+    const result = spawnSync(process.execPath, [wrapper, '--claude-runner-wrapper'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toBe('Claude runner wrapper requires a final-message file.\n')
+    expect(result.stdout).toBe('')
   })
 })
 
