@@ -28,6 +28,7 @@ import {
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
   type ClaimedRequirement,
 } from '../src/issueQueue.ts'
+import { issueConflictKey, writeConflictedAttempts } from '../src/conflictRetry.ts'
 import { existingTaskIdForDesc, taskIdForDesc } from '../src/ids.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
@@ -1792,6 +1793,61 @@ describe('issue claim release', () => {
     }])
     expect(parked).toEqual([])
     expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'failed-task'))).toBe(true)
+  })
+
+  it.each([
+    { kind: 'parked', exhaustion: 'retry', state: 'open', labels: [LABEL_FINDING, LABEL_RETRY_EXHAUSTED] },
+    { kind: 'parked', exhaustion: 'conflict', state: 'open', labels: [LABEL_FINDING, LABEL_RETRY_EXHAUSTED] },
+    { kind: 'closed', exhaustion: 'retry', state: 'closed', labels: [LABEL_FINDING, LABEL_IN_PROGRESS] },
+    { kind: 'closed', exhaustion: 'conflict', state: 'closed', labels: [LABEL_FINDING, LABEL_IN_PROGRESS] },
+  ] as const)('does not park an already $kind issue again after $exhaustion exhaustion', async ({
+    exhaustion, state, labels,
+  }) => {
+    const issueNumber = await forge.createIssue({
+      title: 'exhausted issue', body: '', labels: [...labels],
+      assignees: state === 'closed' ? ['worker-a'] : [],
+    })
+    if (state === 'closed') await forge.closeIssue(issueNumber, 'Closed by a person.')
+    recordIssuesForTask(paths, 'exhausted-task', [issueNumber])
+    if (exhaustion === 'retry') {
+      recordIssueFailure(paths, 'exhausted-task')
+    } else {
+      const head = 'a'.repeat(40)
+      writeConflictedAttempts(paths, issueConflictKey(issueNumber), [1, 2, 3].map((index) => ({
+        taskId: `conflicted-task-${index}`,
+        branch: `conflict/conflicted-task-${index}`,
+        runBranch: 'main',
+        runTip: head,
+        base: head,
+        taskTip: head,
+        conflictedFiles: ['README.md'],
+        conflictingCommits: [head],
+      })))
+    }
+    recordIssueReleaseIntent(paths, 'exhausted-task', [issueNumber])
+    const mutations: string[] = []
+    forge.addLabel = async (number, label) => { mutations.push(`add:${number}:${label}`) }
+    forge.removeLabel = async (number, label) => { mutations.push(`remove:${number}:${label}`) }
+    forge.unassignIssue = async (number, assignee) => {
+      mutations.push(`unassign:${number}:${assignee}`)
+    }
+    const parked: Array<[number, number]> = []
+    const conflictParked: Array<[number, number]> = []
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'exhausted-task', {
+      maxIssueRetries: 1,
+      onPark: (number, failures) => parked.push([number, failures]),
+      onConflictPark: (number, attempts) => conflictParked.push([number, attempts]),
+    })).resolves.toEqual([])
+
+    expect(mutations).toEqual([])
+    expect(parked).toEqual([])
+    expect(conflictParked).toEqual([])
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.state).toBe(state)
+    expect(issue.labels).toEqual(labels)
+    expect(issue.assignees).toEqual(state === 'closed' ? ['worker-a'] : [])
+    expect(issueReleaseIntentForTask(paths, 'exhausted-task')).toEqual([])
   })
 
   it('clears an issue failure streak when its task completes successfully', () => {
