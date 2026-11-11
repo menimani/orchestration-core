@@ -460,6 +460,7 @@ settings update at their next use.
 | `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `MAX_ISSUE_RETRIES` | 3 | Consecutive failed tasks allowed per issue before it is parked as `loop:retry-exhausted` |
+| `TASK_DEADLINE_HOURS` | 4 | Hours a task may run without completing, from its status file's `started_at`, before the daemon stops its process tree and fails it; `0` sets no deadline |
 | `SCAN_EFFORT` / `TASK_EFFORT` / `REVIEW_EFFORT` | medium / medium / medium | Reasoning effort per kind of work; `TASK_EFFORT` applies to queued tasks without a per-task override, while review-spawned fixes always use high effort |
 | `RUNNER` | codex | Agent CLI adapter; accepts `codex`, `claude`, or an external module selector |
 | `RUNNER_CLAUDE_MODEL` | claude-opus-5 | Base Claude model used when `RUNNER=claude` and no task-specific model is set |
@@ -503,6 +504,12 @@ A failed task returns its issue to `loop:ready` until that issue reaches
 parked as `loop:retry-exhausted` and the loop records a `Parked` event instead of claiming it
 again, then stops for operator repair. A successful task completion clears the issue's
 persisted failure count.
+
+A runner that stays alive without finishing — stuck on a network call or an interactive
+prompt — would otherwise hold its issue through heartbeats and keep the cycle gate waiting
+forever. The daemon therefore gives each task `TASK_DEADLINE_HOURS` (default 4) from its
+status file's `started_at`: past that, it stops the process tree, records the reason in
+the task's log, and fails the task, so the issue is released like any other failure.
 
 Concurrent workers must authenticate as **distinct forge accounts**; the login is the
 worker identity, and two daemons sharing one account are indistinguishable to the claim.

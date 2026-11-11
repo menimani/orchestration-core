@@ -51,6 +51,7 @@ describe('loadConfig', () => {
       forge: 'github',
       runner: 'codex',
       workerMode: false,
+      taskDeadlineHours: 4,
       coreAutoUpdate: true,
       upstreamRemote: 'menimani/orchestration-core',
       upstreamBranch: 'main',

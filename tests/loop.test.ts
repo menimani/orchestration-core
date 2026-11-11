@@ -3535,6 +3535,45 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n')).toHaveLength(3)
   })
 
+  it('stops and fails a task that outlives its deadline', async () => {
+    // A PID no test process owns, answered as a live runner whose identity still matches.
+    const pid = process.pid + 1_000_000
+    const taskId = '20260808_030000_001_auto-stuck'
+    const spies = [
+      vi.spyOn(operatingSystem, 'processStartIdentity')
+        .mockImplementation((probed) => (probed === pid ? 'stuck-start' : undefined)),
+      vi.spyOn(operatingSystem, 'processIsAlive').mockImplementation((probed) => probed === pid),
+    ]
+    let treeAlive = true
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
+      .mockImplementation(() => {
+        treeAlive = false
+        return true
+      })
+    spies.push(terminate, vi.spyOn(operatingSystem, 'processTreeIsAlive')
+      .mockImplementation((probed) => probed === pid && treeAlive))
+    try {
+      writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+      writeRawStatus(taskId, 'running', pid)
+      const loop = makeLoop(
+        { autoMerge: false, scanEnabled: false, taskDeadlineHours: 4 }, stubProject, undefined,
+        () => new Date('2026-08-08T07:00:00Z'),
+      )
+
+      expect(await loop.poll()).toBe('continue')
+
+      expect(terminate).toHaveBeenCalledWith(pid)
+      expect(readStatus(paths, taskId)?.status).toBe('failed')
+      expect(logText()).toContain(
+        `Stopped 001_auto    process tree PID ${pid} after the 4-hour task deadline`)
+      expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`)
+      expect(readFileSync(join(paths.logsDir, `${taskId}.log`), 'utf8'))
+        .toContain('Task deadline exceeded: running since 2026-08-08T03:00:00Z')
+    } finally {
+      spies.forEach((spy) => spy.mockRestore())
+    }
+  })
+
   it('does not count tasks already dead at daemon startup as a failure burst', async () => {
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
     for (const taskId of ['old-f1', 'old-f2', 'old-f3']) {

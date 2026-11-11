@@ -30,7 +30,9 @@ import {
   removeConflictedAttempts, writeConflictedAttempts, type ConflictedAttempt,
 } from './conflictRetry.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
-import { refreshTask, listTaskIds, noChangeMarkerPresent } from './refresh.ts'
+import {
+  refreshTask, listTaskIds, noChangeMarkerPresent, type DeadlineVerdict,
+} from './refresh.ts'
 import { readStatus, readTaskState, transitionStatus } from './status.ts'
 import {
   startTask, StartupOwnershipUnknownError, StartupProcessRetainedError,
@@ -375,6 +377,19 @@ export function createLoop(deps: LoopDeps) {
         + `PID ${failure.pid} survived: ${failure.error}`)
     }
     return result.failures.length === 0
+  }
+
+  function reportTaskDeadline(verdict: DeadlineVerdict): void {
+    const hours = config.taskDeadlineHours
+    if (verdict.stopped) {
+      warningLog.recovered(`deadline-${verdict.taskId}`)
+      event('Stopped', shortTaskId(verdict.taskId),
+        `process tree PID ${verdict.pid} after the ${hours}-hour task deadline`)
+      return
+    }
+    warning(`deadline-${verdict.taskId}`, `deadline stop for ${shortTaskId(verdict.taskId)}`,
+      `${shortTaskId(verdict.taskId)} passed the ${hours}-hour task deadline but process tree `
+      + `PID ${verdict.pid} could not be stopped: ${verdict.error}`)
   }
 
   function warning(callSite: string, operation: string, subject: string): void {
@@ -3141,7 +3156,11 @@ export function createLoop(deps: LoopDeps) {
       const before = readTaskState(paths, taskId)
       if (before === undefined) continue
       const status = before === 'running'
-        ? (await refreshTask(paths, taskId))?.status
+        ? (await refreshTask(paths, taskId, {
+          taskDeadlineHours: config.taskDeadlineHours,
+          now: () => now().getTime(),
+          onDeadline: reportTaskDeadline,
+        }))?.status
         : before
       if (status === undefined) continue
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
