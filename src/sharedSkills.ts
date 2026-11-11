@@ -143,7 +143,7 @@ function filesIn(root: string, current = root): RenderedFile[] {
     if (entry.isSymbolicLink()) throw new Error(`shared skills cannot contain symlinks: ${path}`)
     if (entry.isDirectory()) files.push(...filesIn(root, path))
     else if (entry.isFile()) files.push({
-      path: relative(root, path).replaceAll('\\', '/'),
+      path: shellPathSpelling(relative(root, path)),
       contents: readFileSync(path),
     })
     else throw new Error(`unsupported shared skill entry: ${path}`)
@@ -336,7 +336,7 @@ function syncTarget(
   }
   // Skill names alone cannot say which directory reported them once several are served.
   const reported = (skill: string): string =>
-    `${repositoryPath.replaceAll('\\', '/')}/${skill}`
+    `${shellPathSpelling(repositoryPath)}/${skill}`
   const stateFile = join(destinationRoot, STATE_FILE)
   // Rendering can fail independently for each skill. Finish it for the whole target
   // before migrating or replacing anything so failed rendering cannot leave an updated

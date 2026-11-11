@@ -23,7 +23,7 @@ import {
 } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, issueQueueIsSeparate, logFile,
-  branchName, conflictBranchName, PACKAGE_ROOT, worktreeDir, type OrchPaths,
+  branchName, conflictBranchName, PACKAGE_ROOT, shellPathSpelling, worktreeDir, type OrchPaths,
 } from './paths.ts'
 import {
   conflictRetriesExhausted, conflictRetrySection, issueConflictKey, readConflictedAttempts,
@@ -414,7 +414,7 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function shortLogPath(file: string): string {
-    return relative(paths.root, file).replaceAll('\\', '/')
+    return shellPathSpelling(relative(paths.root, file))
   }
 
   function errorSummary(error: unknown): string {
@@ -458,7 +458,7 @@ export function createLoop(deps: LoopDeps) {
     const value = raw.trim()
     const count = Number(value)
     if (!/^\d+$/.test(value) || !Number.isSafeInteger(count)) {
-      const stateFile = relative(paths.root, file).replaceAll('\\', '/')
+      const stateFile = shellPathSpelling(relative(paths.root, file))
       const message = `persisted counter ${stateFile} is invalid; expected a non-negative integer; stopping the loop`
       event('ERROR', message)
       writeFileSync(stopFile, '')

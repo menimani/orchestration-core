@@ -2,7 +2,9 @@ import { execFileSync } from 'node:child_process'
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync,
 } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import {
+  basename, dirname, isAbsolute, join, posix, relative, resolve, sep,
+} from 'node:path'
 import type { Forge } from './adapters/forge.ts'
 import { renderProjectAdapter, repairProjectAdapterSource } from './adapters/project.ts'
 import { ensureQueueLabels, QUEUE_LABELS } from './issueQueue.ts'
@@ -64,9 +66,14 @@ function adapterFilenameName(adapterPath: string): string | undefined {
   return /^project-(.+)\.ts$/.exec(basename(adapterPath))?.[1]
 }
 
-function relativeImport(fromDirectory: string, target: string): string {
-  const path = relative(fromDirectory, target).replaceAll('\\', '/')
-  if (isAbsolute(path)) {
+/** The specifier an adapter in `fromDirectory` imports `target` by, under the given path flavor. */
+export function relativeImport(
+  fromDirectory: string,
+  target: string,
+  platformPath: Pick<typeof posix,'isAbsolute' | 'relative' | 'sep'> = { isAbsolute, relative, sep },
+): string {
+  const path = shellPathSpelling(platformPath.relative(fromDirectory, target), platformPath.sep)
+  if (platformPath.isAbsolute(path)) {
     throw new Error('The orchestration package and repository must be on the same filesystem volume.')
   }
   return path.startsWith('.') ? path : `./${path}`
