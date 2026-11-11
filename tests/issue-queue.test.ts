@@ -113,6 +113,14 @@ describe('fingerprintOf', () => {
     expect(a).not.toBe(c)
     expect(a.startsWith('text:')).toBe(true)
   })
+
+  it('keeps untagged findings naming different paths apart', () => {
+    const a = fingerprintOf('Fix null check in src/a.ts')
+    const b = fingerprintOf('Fix null check in src/b.ts')
+    expect(a.startsWith('text:')).toBe(true)
+    expect(b.startsWith('text:')).toBe(true)
+    expect(a).not.toBe(b)
+  })
 })
 
 describe('isDocumentationFinding', () => {

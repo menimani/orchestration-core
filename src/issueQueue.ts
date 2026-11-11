@@ -259,9 +259,12 @@ export function fingerprintOf(description: string): string {
   const advisory = description.toUpperCase().match(/GHSA(-[0-9A-Z]{4}){3}|CVE-\d{4}-\d{4,}/)
   if (advisory !== null) return `advisory:${advisory[0]}`
   const { tag, path } = findingParts(description)
-  const normalized = normalizedFindingText(description, tag, path)
+  const tagged = tag !== undefined && path !== undefined
+  // Only the tagged form carries the path outside the digest, so an untagged finding
+  // keeps its path among the terms that tell it apart.
+  const normalized = normalizedFindingText(description, tag, tagged ? path : undefined)
   const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 16)
-  if (tag !== undefined && path !== undefined) return `${tag}:${path}:${digest}`
+  if (tagged) return `${tag}:${path}:${digest}`
   return `text:${digest}`
 }
 
