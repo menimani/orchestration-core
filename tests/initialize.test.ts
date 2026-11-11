@@ -132,6 +132,35 @@ describe('repository initialization', () => {
     expect(() => git(repository, ['config', '--local', '--get', 'core.hooksPath'])).toThrow()
   })
 
+  it('reports an existing project scope label without creating it again', async () => {
+    const { repository, fleet, installedPackage } = fleetFixture()
+    const queue = makeFakeForge()
+    queue.labels.add('project:example')
+    const createLabel = queue.createLabel.bind(queue)
+    const created: string[] = []
+    queue.createLabel = async (name: string, description: string) => {
+      created.push(name)
+      return createLabel(name, description)
+    }
+    const reports: string[] = []
+    const paths = fleetPaths({
+      dir: fleet, project: 'example', repository: 'owner/example', issueRepository: 'owner/fleet',
+    }, repository, false)
+
+    const result = await initializeRepository(paths, queue, 'example', {
+      packageRoot: installedPackage,
+      report: (line) => reports.push(line),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(created).toEqual(QUEUE_LABELS.map((label) => label.name))
+    expect(queue.labels).toEqual(new Set([
+      ...QUEUE_LABELS.map((label) => label.name), 'project:example',
+    ]))
+    expect(reports).toContain('EXISTS: label project:example')
+    expect(reports).not.toContain('CREATED: label project:example')
+  })
+
   it('leaves contract-complete project files unchanged when repaired', async () => {
     const { repository, installedPackage } = fixture()
     const forge = makeFakeForge()
