@@ -18,7 +18,7 @@ import {
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
   NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
-  UnverifiedRunnerError, OrchestrationDepsInstallError,
+  UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterMerge,
   type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
@@ -801,6 +801,12 @@ export function createLoop(deps: LoopDeps) {
             event('WARN', `could not persist adopted issue #${issue.number}; retrying next poll`)
             continue
           }
+          // mergeRemoteTask synchronizes dependencies only once onMerged returns, so the
+          // failed first attempt skipped it and later gates would run on stale packages.
+          syncOrchestrationDepsAfterMerge(
+            paths, mergeCommit, taskId, orchestrationDepsEvent, orchestrationDepsRuntime,
+            stopTaskProcessesBeforeDependencyInstall,
+          )
         }
         try {
           await Promise.all(adoptionIssues.map((candidate) =>

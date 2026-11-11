@@ -2,7 +2,24 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const mocks = vi.hoisted(() => ({ failedPromotionRenames: 0 }))
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    renameSync: (...args: Parameters<typeof actual.renameSync>) => {
+      if (mocks.failedPromotionRenames > 0 && /issue-promotion/.test(String(args[1]))) {
+        mocks.failedPromotionRenames -= 1
+        throw new Error('temporary promotion write failure')
+      }
+      return actual.renameSync(...args)
+    },
+  }
+})
+
 import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
@@ -722,6 +739,39 @@ describe('remote task adoption', () => {
     })
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_FAILED)
+  })
+
+  it('synchronizes dependencies when a promotion retry succeeds after the remote merge', async () => {
+    const task = pushWorkerBranch('20260809_000000_009_auto-retried-promotion-deps')
+    writeFileSync(join(workerRoot, 'package.json'), '{"private":true}\n')
+    git(workerRoot, ['add', 'package.json'])
+    git(workerRoot, ['commit', '-qm', 'chore: add worker package manifest'])
+    git(workerRoot, ['push', '-q', 'origin', task.branch])
+    task.head = git(workerRoot, ['rev-parse', 'HEAD']).trim()
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    let installs = 0
+    mocks.failedPromotionRenames = 1
+
+    try {
+      await makeLoop(stubProject, {
+        packageRoot: repoRoot,
+        install: () => {
+          installs += 1
+        },
+      }).adoptRemoteTasks()
+    } finally {
+      mocks.failedPromotionRenames = 0
+    }
+
+    const mergedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({
+      issueNumber,
+      mergeCommit: mergedHead,
+      runBranch: 'main',
+    })
+    expect(installs).toBe(1)
+    expect(logged.some((line) => /Installed/.test(line))).toBe(true)
+    expect(logged.some((line) => /Merged/.test(line))).toBe(true)
   })
 
   it('persists adoption and stops when post-merge dependency synchronization fails', async () => {
