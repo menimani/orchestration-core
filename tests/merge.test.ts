@@ -341,6 +341,29 @@ describe('mergeTask', () => {
     expect(existsSync(guard)).toBe(false)
   })
 
+  it('treats a fresh merge guard with an unparseable owner file as active', async () => {
+    const taskId = '20260820_135042_004_user-fresh-malformed-guard'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mkdirSync(guard, { recursive: true })
+    const ownerFile = join(guard, 'owner.json')
+    writeFileSync(ownerFile, '{not json\n')
+    const onMergeSkipped = vi.fn()
+    const onMergeStart = vi.fn()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, onMergeSkipped, onMergeStart,
+    })).resolves.toEqual({ outcome: 'skipped', reason: 'active' })
+
+    expect(onMergeSkipped.mock.calls).toEqual([['active']])
+    expect(onMergeStart).not.toHaveBeenCalled()
+    expect(readFileSync(ownerFile, 'utf8')).toBe('{not json\n')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(true)
+  })
+
   it('fails safely when a stale merge guard cannot be removed', async () => {
     const taskId = '20260820_135042_003_user-blocked-stale-guard'
     await makeCompletedTask(taskId, { commit: true })
