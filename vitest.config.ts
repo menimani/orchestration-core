@@ -30,6 +30,9 @@ export default defineConfig({
     // drive the same git-heavy setup as the tests they precede.
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // Coverage stays opt-in through --coverage. When it is asked for, a run with a failing
+    // test still prints its table, so one failure does not hide coverage for the rest.
+    coverage: { reportOnFailure: true },
     // Almost all of a run is spent creating git child processes, which parallelizes, and
     // each file keeps its fixtures in its own temporary directories, so those files run
     // on several workers. The files in tests/sequentialSuites.ts wait on deadlines or
