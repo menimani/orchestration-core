@@ -67,6 +67,23 @@ vi.mock('../src/status.ts', async (importOriginal) => {
   }
 })
 
+const branchLookupFailure = vi.hoisted(() => ({ ref: undefined as string | undefined }))
+
+// Git runs unchanged unless a test names a ref whose existence check must fail with an
+// error other than "absent".
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  const execFileSync = ((...args: Parameters<typeof actual.execFileSync>) => {
+    const [file, gitArgs] = args
+    if (file === 'git' && Array.isArray(gitArgs) && gitArgs[0] === 'show-ref'
+      && branchLookupFailure.ref !== undefined && gitArgs.includes(branchLookupFailure.ref)) {
+      throw Object.assign(new Error('fatal: unable to read refs'), { status: 128 })
+    }
+    return actual.execFileSync(...args)
+  }) as typeof actual.execFileSync
+  return { ...actual, execFileSync }
+})
+
 registerLoopHooks()
 
 describe('completed task merge recovery', () => {
@@ -707,6 +724,43 @@ describe('completed task merge recovery', () => {
     expect(readStatus(paths, retryId)?.status).toBe('merged')
     for (const branch of kept) expect(git(['branch', '--list', branch])).toBe('')
     expect(readConflictedAttempts(paths, retryId)).toEqual([])
+  })
+
+  it('keeps the record of a kept branch whose existence cannot be checked', async () => {
+    const head = initializeGitRepo()
+    const retryId = '20260815_191000_199_user-rebase-conflict'
+    makeCompletedTask(retryId)
+    const kept = conflictBranchName('20260815_181908_198_user-rebase-conflict')
+    git(['branch', kept, head])
+    const attempts = [{
+      taskId: kept.replace(/^conflict\//, ''),
+      branch: kept,
+      runBranch: 'main',
+      runTip: head,
+      base: head,
+      taskTip: head,
+      conflictedFiles: ['tracked.txt'],
+      conflictingCommits: [],
+    }]
+    writeConflictedAttempts(paths, retryId, attempts)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    branchLookupFailure.ref = `refs/heads/${kept}`
+
+    try {
+      expect(await loop.poll()).toBe('continue')
+    } finally {
+      branchLookupFailure.ref = undefined
+    }
+
+    expect(readStatus(paths, retryId)?.status).toBe('merged')
+    expect(git(['branch', '--list', kept])).not.toBe('')
+    expect(readConflictedAttempts(paths, retryId)).toEqual(attempts)
+    expect(logText()).toContain(
+      `could not remove commits kept for ${shortTaskId(retryId)}: ${kept}: fatal: unable to read refs`,
+    )
   })
 
   it('hands a reclaimed issue the attempt that conflicted before it was released', async () => {
