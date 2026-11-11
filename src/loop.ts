@@ -3223,8 +3223,15 @@ export function createLoop(deps: LoopDeps) {
             if (!terminalized) {
               throw new Error(`task status changed before grouped merge abandonment`)
             }
-            await Promise.all(linkedIssues.map((issueNumber) =>
-              returnIssueToReady(forge, issueNumber, true)))
+            // A claim that lapsed while the merge gate ran may since belong to another
+            // account, whose live work releasing this task's issues must not strip.
+            if (cachedUser === undefined) cachedUser = await forge.currentUser()
+            const claimant = cachedUser
+            await Promise.all(linkedIssues.map(async (issueNumber) => {
+              if (!await returnIssueToReady(forge, issueNumber, true, claimant)) {
+                issueReleaseOptions.onClaimedElsewhere(issueNumber)
+              }
+            }))
             dropClaimedTaskMaterialization(paths, taskId)
             event('Released', shortTaskId(taskId), 'grouped merge abandoned')
           } catch (releaseError) {
