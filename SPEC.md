@@ -573,8 +573,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     live task process tree, since `npm ci` empties the `node_modules` those processes
     load from; each stopped task is reported failed as item 19 describes. If any tree
     survives the stop, the install is skipped rather than run underneath it: the loop
-    logs a `Skipped` orchestration deps event naming the surviving tree, keeps the
-    pending record, and stops with an error asking for a restart once the process is
+    logs a `Skipped` orchestration deps event naming the merge subject and a `WARN`
+    naming the surviving tree's short task id and PID, keeps the pending record, and stops with an error asking for a restart once the process is
     gone. A successful install records the lockfile hash under `node_modules`.
     At daemon startup, after ownership is acquired and before adapters are loaded, the
     same install runs when a pending record exists — even if the recorded hash matches —
@@ -1383,7 +1383,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     successful adoption logs aligned `Merging` and `Merged` events keyed by the short
     task id, with the latter naming the first eight characters of the merge commit;
     promotion closes the issue. A failure logs the aligned `Failed` event with the short
-    task id and merge-log name. It is
+    task id and merge-log name; a failure before the task id is known — a missing worker
+    branch report, a report naming an unavailable issue, or a grouped member reporting a
+    different branch — logs a `WARN` naming the issue instead. Either failure is
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed` — adding the
     failure label first and reading the issue back to confirm it holds that single
     lifecycle label, logging a WARN when it does not — and counts
