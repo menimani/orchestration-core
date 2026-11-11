@@ -538,6 +538,38 @@ function mergeWithVerifiedRecovery(
 }
 
 /** Bring a completed local task up to the run tip before any merge-gate work begins. */
+/**
+ * Return a task's commits to its own branch when the agent committed on a branch it
+ * created or on a detached HEAD. The merge takes the task branch, so commits left
+ * elsewhere would merge nothing. Only a clean worktree whose HEAD fast-forwards the task
+ * branch is adopted; anything else is left for the ordinary checks to report. The
+ * agent's branch stays: removing the worktree is cleanup's business, not this function's.
+ */
+function adoptStrandedTaskCommits(worktree: string, branch: string, io: MergeIo): void {
+  if (!existsSync(worktree)) return
+  let taskTip: string
+  try {
+    taskTip = git(worktree, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).trim()
+  } catch {
+    return
+  }
+  const headBranch = git(worktree, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+  if (headBranch === branch) return
+  if (git(worktree, ['status', '--porcelain']).trim() !== '') return
+  const head = git(worktree, ['rev-parse', 'HEAD']).trim()
+  if (head === taskTip) return
+  try {
+    git(worktree, ['merge-base', '--is-ancestor', taskTip, head])
+  } catch {
+    // Diverged from the task branch: adopting would discard the task branch's own commits.
+    return
+  }
+  git(worktree, ['switch', '--quiet', branch])
+  git(worktree, ['merge', '--quiet', '--ff-only', head])
+  const source = headBranch === 'HEAD' ? `detached HEAD ${head}` : headBranch
+  io.out(`=== Adopted task commits from ${source} onto ${branch} ===`)
+}
+
 function rebaseTaskOntoRunTip(
   worktree: string,
   currentBranch: string,
@@ -1317,6 +1349,7 @@ async function mergeTaskWithGuardHeld(
   const branch = branchName(taskId)
   const currentBranch = git(paths.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
 
+  adoptStrandedTaskCommits(worktree, branch, io)
   if (git(worktree, ['status', '--porcelain']).trim() !== '') {
     throw new MergeError(
       `The worktree has uncommitted changes: ${worktree}\n`

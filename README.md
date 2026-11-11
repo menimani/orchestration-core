@@ -287,7 +287,9 @@ promotion all use the integration branch. The project adapter's
 `integrationWorktreeSetup` commands install dependencies in that fresh checkout; the
 operator does not prepare it by hand. Human fixes made during the run should branch from
 and merge into the integration branch as well, where the next task can see them.
-Immediately before a completed local task enters its merge gate, the loop rebases that
+Immediately before a completed local task enters its merge gate, the loop first returns
+commits its agent left on a branch of its own, or on a detached HEAD, to the task branch
+when they fast-forward it, naming that branch in the merge log; then it rebases that
 task branch onto the current integration tip. Long-running tasks therefore test the work
 that has landed while they were running instead of repeatedly presenting the same stale
 branch to the gate. If every task commit becomes empty because that work already landed,
