@@ -12,7 +12,7 @@ import { dequeueBacklog, withBacklogLock } from '../src/backlog.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
 import { specFile } from '../src/tasks.ts'
-import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
+import { describeFixtureChild, lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -41,10 +41,15 @@ function completion(child: ChildProcess): Promise<void> {
   })
 }
 
-async function waitForFiles(files: string[]): Promise<void> {
+async function waitForFiles(files: string[], children: ChildProcess[]): Promise<void> {
   const deadline = Date.now() + 5_000
   while (!files.every((file) => existsSync(file))) {
-    if (Date.now() >= deadline) throw new Error('children did not reach the backlog mutation')
+    if (Date.now() >= deadline) {
+      const missing = files.flatMap((file, index) => existsSync(file)
+        ? []
+        : [`child ${index} (${describeFixtureChild(children[index]!)})`])
+      throw new Error(`children did not reach the backlog mutation: ${missing.join('; ')}`)
+    }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
@@ -356,7 +361,7 @@ describe('backlog process lock', () => {
     ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
     const completions = Promise.allSettled([completion(dequeue), completion(enqueue)])
 
-    await waitForFiles([dequeueReady, enqueueReady])
+    await waitForFiles([dequeueReady, enqueueReady], [dequeue, enqueue])
     expect(dequeue.exitCode).toBeNull()
     expect(enqueue.exitCode).toBeNull()
     expect(readFileSync(backlog, 'utf8')).toBe('first-task:0\n')
