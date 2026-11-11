@@ -525,8 +525,9 @@ export function createLoop(deps: LoopDeps) {
     const worktree = worktreeDir(paths, taskId)
     // The comparison base is the checkout's HEAD SHA, not its branch name: a detached
     // worker checkout has an empty branch name, which read as zero commits and left
-    // completed work permanently unpublished.
-    const baseSha = optionalGit(['rev-parse', 'HEAD']).trim()
+    // completed work permanently unpublished. A failed read throws so that publication is
+    // retried: an empty base would list no commits and close committed work unpublished.
+    const baseSha = git(['rev-parse', '--verify', 'HEAD^{commit}']).trim()
     if (gitIn(worktree, ['status', '--porcelain']).trim() !== '') {
       throw new UnpublishableWorkerTaskError(`${taskId} has uncommitted changes`)
     }

@@ -1156,6 +1156,28 @@ describe('completeTaskWithoutChanges refusals', () => {
     expect(git(repoRoot, ['rev-parse', branchName(taskId)]).trim()).toBe(taskHead)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
+
+  it('refuses an empty base instead of reading it as HEAD..HEAD', async () => {
+    const taskId = '20261111_181522_106_user-no-change-empty-base'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+
+    await expectRefusal(taskId, '', `${taskId} has no base to compare against.`)
+    expect(git(repoRoot, ['rev-parse', branchName(taskId)]).trim()).toBe(taskHead)
+  })
+
+  it('refuses a base that does not name a commit', async () => {
+    const taskId = '20261111_181522_107_user-no-change-unknown-base'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+
+    await expectRefusal(
+      taskId, 'refs/heads/missing', `${taskId} base refs/heads/missing does not name a commit.`,
+    )
+    expect(git(repoRoot, ['rev-parse', branchName(taskId)]).trim()).toBe(taskHead)
+  })
 })
 
 describe('mergeTask with commits left off the task branch', () => {

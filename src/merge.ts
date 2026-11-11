@@ -1080,6 +1080,14 @@ export async function completeTaskWithoutChanges(
   if (!noChangeMarkerPresent(paths, taskId)) {
     throw new MergeError(`${taskId} did not report NO_CHANGE_WARRANTED.`)
   }
+  // An empty or unresolvable base would read `..HEAD` as `HEAD..HEAD`, which lists no
+  // commits, and the branch holding the worker's commits would then be deleted.
+  if (baseRef.trim() === '') throw new MergeError(`${taskId} has no base to compare against.`)
+  try {
+    git(paths.repoRoot, ['rev-parse', '--verify', '--quiet', `${baseRef}^{commit}`])
+  } catch {
+    throw new MergeError(`${taskId} base ${baseRef} does not name a commit.`)
+  }
   if (status.pid !== null) stopCompletedRunner(paths, taskId, status.pid)
 
   const worktree = worktreeDir(paths, taskId)
