@@ -194,6 +194,31 @@ it('leaves an orphan created before the recycled launcher PID out of the startup
   expect(runtime.removeDirectory).toHaveBeenCalledOnce()
 })
 
+it('leaves an orphan created before the launch out of a startup tree that omits the launcher', async () => {
+  const runtime = testRuntime(() => {}, 20)
+  const alive = new Set([43210, 43211, 43212])
+  let now = 5_000
+  runtime.listProcesses = () => [
+    { pid: 43211, parentPid: 43210, createdAt: 1_000 },
+    { pid: 43212, parentPid: 43211, createdAt: 1_500 },
+  ]
+  runtime.probeProcess = (pid) => {
+    if (!alive.has(pid)) throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+  }
+  runtime.requestLauncherTreeTermination = vi.fn(() => {
+    alive.delete(43210)
+    return true
+  })
+  runtime.now = () => now
+  runtime.sleep = vi.fn(async (milliseconds: number) => { now += milliseconds })
+
+  // Had the orphans been adopted, they would outlive taskkill and fail the cleanup.
+  await expect(startWindowsProcess(options, runtime)).rejects.toThrow(
+    'never published a PID before startup timed out; startup cleanup found no live process tree',
+  )
+  expect(runtime.removeDirectory).toHaveBeenCalledOnce()
+})
+
 it('keeps a startup child whose creation time is unreadable in the tree', async () => {
   const runtime = testRuntime(() => {}, 20)
   const alive = new Set([43210, 43211])

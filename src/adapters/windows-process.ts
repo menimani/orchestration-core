@@ -182,6 +182,7 @@ function processIsAlive(runtime: WindowsProcessRuntime, pid: number): boolean {
 function launcherTreePids(
   runtime: WindowsProcessRuntime,
   launcherPid: number,
+  launchStartedAt: number,
 ): ReadonlySet<number> {
   const processes = runtime.listProcesses()
   const runningPids = new Set(processes.map(({ pid }) => pid))
@@ -189,6 +190,9 @@ function launcherTreePids(
   for (const { pid, createdAt } of processes) {
     if (createdAt !== undefined) createdAtByPid.set(pid, createdAt)
   }
+  // A launcher the snapshot omitted has no creation time, and every orphan still naming
+  // its PID would pass the check below. It cannot predate the spawn call that created it.
+  if (!runningPids.has(launcherPid)) createdAtByPid.set(launcherPid, launchStartedAt)
   const childrenByParent = new Map<number, number[]>()
   for (const { pid, parentPid, createdAt } of processes) {
     // Windows never updates ParentProcessId when a parent exits, so an orphan keeps
@@ -224,12 +228,13 @@ function anyProcessIsAlive(runtime: WindowsProcessRuntime, pids: ReadonlySet<num
 async function terminateLauncherTree(
   runtime: WindowsProcessRuntime,
   launcher: ChildProcess,
+  launchStartedAt: number,
 ): Promise<boolean> {
   if (launcher.pid === undefined) return runtime.requestLauncherTreeTermination(launcher)
 
   let trackedPids: ReadonlySet<number>
   try {
-    trackedPids = launcherTreePids(runtime, launcher.pid)
+    trackedPids = launcherTreePids(runtime, launcher.pid, launchStartedAt)
   } catch {
     // Process enumeration can fail independently of taskkill. The launcher is the
     // only PID available for a direct check in that case; do not trust taskkill's
@@ -313,6 +318,7 @@ export async function startWindowsProcess(
   }
   const encodedScript = Buffer.from(START_HIDDEN_PROCESS, 'utf16le').toString('base64')
   const encodedConfig = Buffer.from(JSON.stringify(launchConfig)).toString('base64')
+  const launchStartedAt = runtime.now()
   const launcher = runtime.spawnLauncher('powershell.exe', [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript,
   ], {
@@ -360,7 +366,7 @@ export async function startWindowsProcess(
   } catch (error) {
     let foundAlive: boolean
     try {
-      foundAlive = await terminateLauncherTree(runtime, launcher)
+      foundAlive = await terminateLauncherTree(runtime, launcher, launchStartedAt)
     } catch (cleanupError) {
       retainStartupState = true
       throw new WindowsStartupProcessRetainedError(root, cleanupError)

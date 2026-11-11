@@ -341,6 +341,29 @@ describe('mergeTask', () => {
     expect(existsSync(guard)).toBe(false)
   })
 
+  it('treats a fresh merge guard with an unparseable owner file as active', async () => {
+    const taskId = '20260820_135042_004_user-fresh-malformed-guard'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mkdirSync(guard, { recursive: true })
+    const ownerFile = join(guard, 'owner.json')
+    writeFileSync(ownerFile, '{not json\n')
+    const onMergeSkipped = vi.fn()
+    const onMergeStart = vi.fn()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, onMergeSkipped, onMergeStart,
+    })).resolves.toEqual({ outcome: 'skipped', reason: 'active' })
+
+    expect(onMergeSkipped.mock.calls).toEqual([['active']])
+    expect(onMergeStart).not.toHaveBeenCalled()
+    expect(readFileSync(ownerFile, 'utf8')).toBe('{not json\n')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(true)
+  })
+
   it('fails safely when a stale merge guard cannot be removed', async () => {
     const taskId = '20260820_135042_003_user-blocked-stale-guard'
     await makeCompletedTask(taskId, { commit: true })
@@ -1025,6 +1048,80 @@ describe('mergeTask', () => {
   })
 })
 
+describe('completeTaskWithoutChanges refusals', () => {
+  const noChangeMessage = 'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n'
+
+  async function expectRefusal(taskId: string, baseRef: string, message: string): Promise<void> {
+    const before = readStatus(paths, taskId)
+    const onNoChange = vi.fn(async () => {})
+
+    const failure = await completeTaskWithoutChanges(paths, taskId, baseRef, { onNoChange })
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(MergeError)
+    expect((failure as MergeError).message).toBe(message)
+    expect(onNoChange).not.toHaveBeenCalled()
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).not.toBe('')
+    expect(readStatus(paths, taskId)).toEqual(before)
+  }
+
+  it('refuses a task that has no status', async () => {
+    const taskId = '20261111_181522_101_user-no-change-unknown'
+    git(repoRoot, ['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expectRefusal(taskId, baseRef, `Task not found: ${taskId}`)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+  })
+
+  it('refuses a task whose status is not completed', async () => {
+    const taskId = '20261111_181522_102_user-no-change-failed'
+    await makeCompletedTask(taskId)
+    await writeStatus(paths, taskId, 'failed')
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expectRefusal(taskId, baseRef, "Task status is not 'completed' (current: failed).")
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+  })
+
+  it('refuses a task that did not report the no-change marker', async () => {
+    const taskId = '20261111_181522_103_user-no-change-unmarked'
+    await makeCompletedTask(taskId)
+    writeFileSync(finalMessageFile(paths, taskId), 'No implementation is needed.\nTASK_COMPLETE\n')
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expectRefusal(taskId, baseRef, `${taskId} did not report NO_CHANGE_WARRANTED.`)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('refuses a worktree with uncommitted changes', async () => {
+    const taskId = '20261111_181522_104_user-no-change-dirty'
+    const worktree = await makeCompletedTask(taskId, { dirty: true })
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expectRefusal(taskId, baseRef, `The worktree has uncommitted changes: ${worktree}`)
+    expect(existsSync(join(worktree, 'uncommitted.txt'))).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('refuses a task branch with commits ahead of the base', async () => {
+    const taskId = '20261111_181522_105_user-no-change-committed'
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+
+    await expectRefusal(
+      taskId, baseRef, `${taskId} has commits and cannot complete without changes.`,
+    )
+    expect(git(repoRoot, ['rev-parse', branchName(taskId)]).trim()).toBe(taskHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+})
+
 describe('mergeTask with commits left off the task branch', () => {
   const branchOf = (cwd: string): string => git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
   const tipOf = (ref: string): string => git(repoRoot, ['rev-parse', ref]).trim()
@@ -1077,6 +1174,33 @@ describe('mergeTask with commits left off the task branch', () => {
     expect(readFileSync(outputFile, 'utf8')).toContain(
       `=== Adopted task commits from detached HEAD ${agentCommit} onto ${branchName(taskId)} ===`,
     )
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('keeps detached commits on the task branch when the switch to it fails', async () => {
+    const taskId = '20261111_000000_006_user-detached-switch-fails'
+    const worktree = await makeCompletedTask(taskId)
+    git(worktree, ['switch', '-q', '--detach'])
+    const agentCommit = commitInWorktree(worktree, 'detached.txt')
+    const indexLock = git(worktree, ['rev-parse', '--path-format=absolute', '--git-path', 'index.lock']).trim()
+    writeFileSync(indexLock, '')
+    const outputFile = join(repoRoot, 'adopt-switch-fails.log')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+    })).rejects.toThrow()
+
+    expect(tipOf(branchName(taskId))).toBe(agentCommit)
+    expect(branchOf(worktree)).toBe('HEAD')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+
+    rmSync(indexLock)
+    const result = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+    })
+
+    expect(result.outcome).toBe('merged')
+    git(repoRoot, ['merge-base', '--is-ancestor', agentCommit, tipOf('main')])
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
@@ -1287,6 +1411,29 @@ describe('mergeRemoteTask', () => {
 
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(onMerged).not.toHaveBeenCalled()
+  })
+
+  it('adopts the branch when the inspection diff cannot be produced', async () => {
+    const branch = 'task/remote-inspection-diff-fails'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    // A failing external diff driver makes every patch-producing `git diff` exit non-zero.
+    git(repoRoot, ['config', 'diff.external', 'false'])
+    const onMerged = vi.fn()
+
+    const mergeCommit = await mergeRemoteTask(paths, 231, 'origin', branch, expectedHead, {
+      taskGate: 'light', project: noCheckProject, onMerged,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(mergeCommit)
+    expect(git(repoRoot, ['rev-parse', `${mergeCommit}^2`]).trim()).toBe(expectedHead)
+    expect(onMerged).toHaveBeenCalledWith(mergeCommit)
   })
 
   it('leaves issue-closing syntax to the forge adapter', async () => {

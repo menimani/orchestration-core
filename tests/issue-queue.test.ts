@@ -113,6 +113,14 @@ describe('fingerprintOf', () => {
     expect(a).not.toBe(c)
     expect(a.startsWith('text:')).toBe(true)
   })
+
+  it('keeps untagged findings naming different paths apart', () => {
+    const a = fingerprintOf('Fix null check in src/a.ts')
+    const b = fingerprintOf('Fix null check in src/b.ts')
+    expect(a.startsWith('text:')).toBe(true)
+    expect(b.startsWith('text:')).toBe(true)
+    expect(a).not.toBe(b)
+  })
 })
 
 describe('isDocumentationFinding', () => {
@@ -324,6 +332,31 @@ describe('issue body round-trip', () => {
       '',
       'Fix the scan finding.',
     ].join('\n'), 42)?.fingerprints).toEqual(['first', 'second'])
+  })
+
+  it('reads issue-reference metadata in its plain and its inline-code form alike', () => {
+    const plain = [
+      'Fingerprint: source:owner/app#7',
+      'Parent: import:Owner/App#7',
+      '',
+      '## Requirement',
+      '',
+      'Fix the imported issue.',
+    ].join('\n')
+    const coded = buildIssueBody(
+      'Fix the imported issue.', 'import:Owner/App#7', undefined, ['source:owner/app#7'],
+    )
+
+    expect(coded).toContain('Fingerprint: `source:owner/app#7`\nParent: `import:Owner/App#7`\n')
+    const fromPlain = parseIssueBody(plain, 42)
+    const fromCoded = parseIssueBody(coded, 43)
+    expect(fromPlain).toMatchObject({
+      fingerprint: 'source:owner/app#7',
+      fingerprints: ['source:owner/app#7'],
+      parentTaskId: 'import:Owner/App#7',
+    })
+    expect(fromCoded?.fingerprints).toEqual(fromPlain?.fingerprints)
+    expect(fromCoded?.parentTaskId).toBe(fromPlain?.parentTaskId)
   })
 
   it('ends the requirement at the next second-level heading and trims a heartbeat', () => {
@@ -712,6 +745,36 @@ describe('publishFinding', () => {
 
     expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
     expect((await forge.getIssue(second)).state).toBe('open')
+  })
+
+  it('treats an issue-reference fingerprint in either form as the same finding', async () => {
+    const requirement = 'Fix the imported issue.'
+    const plain = await forge.createIssue({
+      title: requirement,
+      body: [
+        'Fingerprint: source:owner/app#7',
+        'Parent: import:Owner/App#7',
+        '',
+        '## Requirement',
+        '',
+        requirement,
+        '',
+      ].join('\n'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const coded = await forge.createIssue({
+      title: requirement,
+      body: buildIssueBody(requirement, 'import:Owner/App#7', undefined, ['source:owner/app#7']),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
+
+    const states = [(await forge.getIssue(plain)).state, (await forge.getIssue(coded)).state]
+    expect(states.sort()).toEqual(['closed', 'open'])
+    const survivor = (await forge.getIssue(plain)).state === 'open' ? plain : coded
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`source:owner/app#7 ${survivor}\n`)
   })
 
   it('preserves a later claimed issue and closes only the older ready duplicate', async () => {
@@ -1533,6 +1596,71 @@ describe('claimIssueGroup', () => {
     expect(retained?.assignees).toEqual(['worker-a'])
     expect(retained?.labels).toContain(LABEL_IN_PROGRESS)
     expect(retained?.labels).not.toContain(LABEL_READY)
+  })
+
+  it('reports both task materialization and materialization cleanup failures', async () => {
+    const description = '[BUG] `src/a/b.ts` fails while discarding a partial task'
+    const issueNumber = await readyIssue(description)
+    const issue = await forge.getIssue(issueNumber)
+    const materializationFailure = new Error('append failed')
+    let failedTaskId: string | undefined
+
+    const failure = await claimIssueGroup(forge, paths, [issue], 'worker-a', (taskId) => {
+      failedTaskId = taskId
+      // A directory where the specification belongs cannot be removed without recursion,
+      // so discarding the partial task fails after the claim is already in place.
+      rmSync(specFile(paths, taskId))
+      mkdirSync(specFile(paths, taskId))
+      throw materializationFailure
+    }).then(() => undefined, (error: unknown) => error)
+
+    if (failedTaskId === undefined) throw new Error('expected append to be attempted')
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(failure).toMatchObject({
+      message: `Claim group materialization and compensation both failed for issues #${issueNumber}`,
+    })
+    const errors = (failure as AggregateError).errors
+    expect(errors).toHaveLength(2)
+    expect(errors[0]).toBe(materializationFailure)
+    expect(errors[1]).toBeInstanceOf(AggregateError)
+    expect(errors[1]).toMatchObject({
+      message: `Could not remove materialization for task ${failedTaskId}`,
+    })
+    expect((errors[1] as AggregateError).errors).toHaveLength(1)
+    expect(existsSync(specFile(paths, failedTaskId))).toBe(true)
+    const released = await forge.getIssue(issueNumber)
+    expect(released.assignees).toEqual([])
+    expect(released.labels).toContain(LABEL_READY)
+    expect(released.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
+  it.each([
+    ['an empty group', 0],
+    ['a group larger than four issues', 5],
+  ] as const)('rejects %s before any forge call', async (_description, size) => {
+    const issues = await Promise.all(Array.from({ length: size }, async (_unused, index) =>
+      forge.getIssue(await readyIssue(`[BUG] \`src/a/b${index}.ts\` belongs to an oversized group`))))
+    const accessed: string[] = []
+    const observedForge = new Proxy(forge, {
+      get(target, property, receiver) {
+        accessed.push(String(property))
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    const append = vi.fn()
+
+    await expect(claimIssueGroup(observedForge, paths, issues, 'worker-a', append))
+      .rejects.toThrow(new Error('A claim group must contain between 1 and 4 issues.'))
+
+    expect(accessed).toEqual([])
+    expect(append).not.toHaveBeenCalled()
+    for (const issue of issues) {
+      const after = await forge.getIssue(issue.number)
+      expect(after.assignees).toEqual([])
+      expect(after.labels).toContain(LABEL_READY)
+      expect(after.labels).not.toContain(LABEL_IN_PROGRESS)
+    }
+    expect(existsSync(paths.tasksDir) ? readdirSync(paths.tasksDir) : []).toEqual([])
   })
 
   it('quarantines an unparseable issue with an actionable reason', async () => {
@@ -3205,6 +3333,16 @@ describe('closePromotedIssues', () => {
     expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [closable], returned: [] })
   })
 
+  it('leaves a merged run pull request\'s issues to the merge commit without closeMerged', async () => {
+    const issueNumber = await promotedIssue('task-same-repo', 'a'.repeat(40), 'run/merged')
+    forge.prStatusValue = { state: 'merged', isDraft: false, url: 'u', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true, '', false))
+      .toEqual({ closed: [], returned: [] })
+    expect((await forge.getIssue(issueNumber)).state).toBe('open')
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-same-repo')
+  })
+
   it('returns the issues of a run pull request closed without merging to ready', async () => {
     const issueNumber = await forge.createIssue({
       title: 'task-abandoned', body: buildIssueBody('[BUG] task-abandoned', 'scan-1'),
@@ -3266,6 +3404,31 @@ describe('closePromotedIssues', () => {
       .toEqual({ closed: [], returned: [issueNumber] })
     expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
     expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+  })
+
+  it('does not repost a withdrawal whose author permission is undetermined', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'task-unread', body: buildIssueBody('[BUG] task-unread', 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-unread', [issueNumber])
+    recordIssuePromotions(paths, 'task-unread', 'a'.repeat(40), 'run/closed')
+    forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
+    const addLabel = forge.addLabel
+    forge.addLabel = async () => { throw new Error('rate limited') }
+    const withdrawal = issueUnpromotedComment('task-unread', 'a'.repeat(40), 'run/closed', 'pr-url')
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toThrow('rate limited')
+    forge.issueCommentAuthors.set(issueNumber, [
+      { login: 'worker-a', hasWriteAccess: false, permissionLookupFailed: true },
+    ])
+    forge.addLabel = addLabel
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: [], returned: [] })
+    expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-unread')
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
   })
 
   async function mergedRun(count: number): Promise<number[]> {

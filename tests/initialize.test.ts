@@ -1,13 +1,24 @@
 import { execFileSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve, win32 } from 'node:path'
+import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadProject, renderProjectAdapter } from '../src/adapters/project.ts'
-import { initializeRepository } from '../src/initialize.ts'
+import { initializeRepository, relativeImport } from '../src/initialize.ts'
 import { QUEUE_LABELS } from '../src/issueQueue.ts'
 import { fleetPaths, orchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
+
+function renderedSpecifier(source: string): string {
+  const file = ts.createSourceFile('project-consumer.ts', source, ts.ScriptTarget.Latest, true)
+  expect((file as unknown as { parseDiagnostics: unknown[] }).parseDiagnostics).toEqual([])
+  const declaration = file.statements.find(ts.isImportDeclaration)
+  if (declaration === undefined || !ts.isStringLiteral(declaration.moduleSpecifier)) {
+    throw new Error('rendered adapter has no string module specifier')
+  }
+  return declaration.moduleSpecifier.text
+}
 
 const packageRoot = resolve(import.meta.dirname, '..')
 const repositories: string[] = []
@@ -130,6 +141,35 @@ describe('repository initialization', () => {
     ]))
     expect(reports).toContain('CREATED: label project:example')
     expect(() => git(repository, ['config', '--local', '--get', 'core.hooksPath'])).toThrow()
+  })
+
+  it('reports an existing project scope label without creating it again', async () => {
+    const { repository, fleet, installedPackage } = fleetFixture()
+    const queue = makeFakeForge()
+    queue.labels.add('project:example')
+    const createLabel = queue.createLabel.bind(queue)
+    const created: string[] = []
+    queue.createLabel = async (name: string, description: string) => {
+      created.push(name)
+      return createLabel(name, description)
+    }
+    const reports: string[] = []
+    const paths = fleetPaths({
+      dir: fleet, project: 'example', repository: 'owner/example', issueRepository: 'owner/fleet',
+    }, repository, false)
+
+    const result = await initializeRepository(paths, queue, 'example', {
+      packageRoot: installedPackage,
+      report: (line) => reports.push(line),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(created).toEqual(QUEUE_LABELS.map((label) => label.name))
+    expect(queue.labels).toEqual(new Set([
+      ...QUEUE_LABELS.map((label) => label.name), 'project:example',
+    ]))
+    expect(reports).toContain('EXISTS: label project:example')
+    expect(reports).not.toContain('CREATED: label project:example')
   })
 
   it('leaves contract-complete project files unchanged when repaired', async () => {
@@ -308,5 +348,39 @@ describe('repository initialization', () => {
       .toBe(false)
     await expect(loadProject(join(repository, 'orchestration'), env))
       .resolves.toMatchObject({ name: 'custom' })
+  })
+})
+
+describe('adapter type import', () => {
+  it('keeps a backslash that is part of a POSIX directory name', () => {
+    expect(relativeImport('/srv/repo\\v2/project', '/srv/repo\\v2/core/project.ts', posix))
+      .toBe('../core/project.ts')
+    expect(relativeImport('/srv/repo/project', '/srv/core\\v2/src/adapters/project.ts', posix))
+      .toBe('../../core\\v2/src/adapters/project.ts')
+    expect(relativeImport('/srv/repo', '/srv/repo/core\\v2/project.ts', posix))
+      .toBe('./core\\v2/project.ts')
+  })
+
+  it('renders a POSIX core path into a specifier that parses back unchanged', () => {
+    for (const core of [
+      '/srv/core\\v2/src/adapters/project.ts',
+      '/srv/core\\xy/src/adapters/project.ts',
+      "/srv/core'v2/src/adapters/project.ts",
+    ]) {
+      const typeImport = relativeImport('/srv/repo/project', core, posix)
+      expect(renderedSpecifier(renderProjectAdapter('consumer', typeImport))).toBe(typeImport)
+    }
+  })
+
+  it('spells Windows separators as forward slashes', () => {
+    expect(relativeImport('C:\\repo\\project', 'C:\\core\\src\\adapters\\project.ts', win32))
+      .toBe('../../core/src/adapters/project.ts')
+    expect(relativeImport('C:\\repo', 'C:\\repo\\core\\project.ts', win32))
+      .toBe('./core/project.ts')
+  })
+
+  it('rejects a package on another Windows volume', () => {
+    expect(() => relativeImport('C:\\repo\\project', 'D:\\core\\project.ts', win32))
+      .toThrow('must be on the same filesystem volume')
   })
 })

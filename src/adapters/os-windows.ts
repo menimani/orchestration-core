@@ -214,10 +214,25 @@ function isAlive(runtime: WindowsOperatingSystemRuntime, pid: number): boolean {
   }
 }
 
+interface ProcessTree {
+  pids: ReadonlySet<number>
+  /** The parent through which the walk reached each PID; the root has none. */
+  parents: ReadonlyMap<number, number>
+  createdAt: ReadonlyMap<number, number>
+}
+
+/** The creation time behind a windowsProcessStartIdentity value, in epoch milliseconds. */
+function startIdentityMilliseconds(identity: string | undefined): number | undefined {
+  const match = /^windows:(\d+)$/.exec(identity ?? '')
+  if (match === null) return undefined
+  // .NET ticks count 100 ns intervals from 0001-01-01; the Unix epoch is this many ticks.
+  return Number((BigInt(match[1]!) - 621_355_968_000_000_000n) / 10_000n)
+}
+
 function processTreePids(
   runtime: WindowsOperatingSystemRuntime,
   rootPid: number,
-): ReadonlySet<number> | undefined {
+): ProcessTree | undefined {
   let processes: readonly WindowsProcess[]
   try {
     processes = runtime.listProcesses()
@@ -230,6 +245,12 @@ function processTreePids(
   const createdAtByPid = new Map<number, number>()
   for (const { pid, createdAt } of processes) {
     if (createdAt !== undefined) createdAtByPid.set(pid, createdAt)
+  }
+  if (!runningPids.has(rootPid)) {
+    // A root the snapshot omitted has no creation time, and every orphan still naming its
+    // PID would pass the check below. A live root's start time takes the snapshot's place.
+    const rootCreatedAt = startIdentityMilliseconds(runtime.processStartIdentity?.(rootPid))
+    if (rootCreatedAt !== undefined) createdAtByPid.set(rootPid, rootCreatedAt)
   }
   const childrenByParent = new Map<number, number[]>()
   for (const { pid, parentPid, createdAt } of processes) {
@@ -250,6 +271,7 @@ function processTreePids(
   // retain the root so its direct probe, rather than its presence in the snapshot,
   // decides whether the tree is alive and whether taskkill must be attempted.
   const treePids = new Set<number>([rootPid])
+  const parents = new Map<number, number>()
   const visited = new Set<number>()
   const pending = [rootPid]
   while (pending.length > 0) {
@@ -257,17 +279,33 @@ function processTreePids(
     if (visited.has(pid)) continue
     visited.add(pid)
     if (runningPids.has(pid)) treePids.add(pid)
-    pending.push(...(childrenByParent.get(pid) ?? []))
+    for (const child of childrenByParent.get(pid) ?? []) {
+      if (!visited.has(child) && !parents.has(child)) parents.set(child, pid)
+      pending.push(child)
+    }
   }
-  return treePids
+  return { pids: treePids, parents, createdAt: createdAtByPid }
+}
+
+/** The parent links that put pid in the tree, so a stale link can be identified. */
+function treeChain(tree: ProcessTree | undefined, pid: number): string {
+  const chain: number[] = [pid]
+  for (let parent = tree?.parents.get(pid); parent !== undefined; parent = tree?.parents.get(parent)) {
+    if (chain.includes(parent)) break
+    chain.unshift(parent)
+  }
+  return chain.map((link) => {
+    const createdAt = tree?.createdAt.get(link)
+    return `${link} (${createdAt === undefined ? 'creation time unknown' : `created ${new Date(createdAt).toISOString()}`})`
+  }).join(' -> ')
 }
 
 function anyProcessIsAlive(
   runtime: WindowsOperatingSystemRuntime,
-  pids: ReadonlySet<number> | undefined,
+  tree: ProcessTree | undefined,
 ): boolean {
-  if (pids === undefined) return true
-  return [...pids].some((pid) => isAlive(runtime, pid))
+  if (tree === undefined) return true
+  return [...tree.pids].some((pid) => isAlive(runtime, pid))
 }
 
 export function createOperatingSystem(
@@ -279,9 +317,10 @@ export function createOperatingSystem(
   const terminateProcessTree = (pid: number): boolean => {
     const trackedPids = processTreePids(runtime, pid)
     if (!anyProcessIsAlive(runtime, trackedPids)) return false
-    if (pid === process.pid || trackedPids?.has(process.pid)) {
+    if (pid === process.pid || trackedPids?.pids.has(process.pid)) {
       throw new Error(
-        `Refusing to stop process tree ${pid} because it contains the current process ${process.pid}.`,
+        `Refusing to stop process tree ${pid} because it contains the current process ${process.pid}`
+        + ` through ${treeChain(trackedPids, process.pid)}.`,
       )
     }
 

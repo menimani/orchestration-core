@@ -6,7 +6,7 @@
 // what English needs catches all of them.
 //
 // Run from the repository root: node checks/english-only.ts
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -155,7 +155,9 @@ export const main = (root = PACKAGE_ROOT): number => {
   return hits === 0 ? 0 : 1
 }
 
+// Node names this module by its real path, so an entry typed through a symlink or a
+// junction is compared by its real path too; otherwise the check would scan nothing.
 if (process.argv[1] !== undefined
-  && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   process.exit(main())
 }

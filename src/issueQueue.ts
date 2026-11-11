@@ -259,10 +259,30 @@ export function fingerprintOf(description: string): string {
   const advisory = description.toUpperCase().match(/GHSA(-[0-9A-Z]{4}){3}|CVE-\d{4}-\d{4,}/)
   if (advisory !== null) return `advisory:${advisory[0]}`
   const { tag, path } = findingParts(description)
-  const normalized = normalizedFindingText(description, tag, path)
+  const tagged = tag !== undefined && path !== undefined
+  // Only the tagged form carries the path outside the digest, so an untagged finding
+  // keeps its path among the terms that tell it apart.
+  const normalized = normalizedFindingText(description, tag, tagged ? path : undefined)
   const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 16)
-  if (tag !== undefined && path !== undefined) return `${tag}:${path}:${digest}`
+  if (tagged) return `${tag}:${path}:${digest}`
   return `text:${digest}`
+}
+
+/**
+ * A metadata value that holds an issue reference (`owner/repo#n` or `#n`) is written
+ * as inline code, since the forge links a bare reference and so backlinks the issue it
+ * names. Values without one stay plain, as bodies have always carried them.
+ */
+function metadataValue(value: string): string {
+  return value.includes('#') ? `\`${value}\`` : value
+}
+
+/** Reads a metadata value in either its plain form or its inline-code form. */
+function readMetadataValue(line: string, prefix: string): string {
+  const value = line.slice(prefix.length)
+  return value.length >= 2 && value.startsWith('`') && value.endsWith('`')
+    ? value.slice(1, -1)
+    : value
 }
 
 export function buildIssueBody(
@@ -274,8 +294,8 @@ export function buildIssueBody(
   depth?: number,
 ): string {
   return [
-    ...[...new Set(fingerprints)].map((fingerprint) => `Fingerprint: ${fingerprint}`),
-    `Parent: ${parentTaskId}`,
+    ...[...new Set(fingerprints)].map((fingerprint) => `Fingerprint: ${metadataValue(fingerprint)}`),
+    `Parent: ${metadataValue(parentTaskId)}`,
     ...(depth !== undefined ? [`Depth: ${depth}`] : []),
     ...(effort !== undefined ? [`Effort: ${effort}`] : []),
     ...(inspect ? ['Inspect: true'] : []),
@@ -304,11 +324,13 @@ type IssueBodyParseResult
 function inspectIssueBody(body: string, issueNumber: number): IssueBodyParseResult {
   const lines = body.split(/\r?\n/)
   const fingerprints = lines.filter((line) => line.startsWith('Fingerprint: '))
-    .map((line) => line.slice('Fingerprint: '.length))
+    .map((line) => readMetadataValue(line, 'Fingerprint: '))
   if (fingerprints.length === 0) fingerprints.push(`issue:${issueNumber}`)
   const fingerprint = fingerprints[0]!
-  const parentTaskId = lines.find((line) => line.startsWith('Parent: '))
-    ?.slice('Parent: '.length)
+  const parentLine = lines.find((line) => line.startsWith('Parent: '))
+  const parentTaskId = parentLine === undefined
+    ? undefined
+    : readMetadataValue(parentLine, 'Parent: ')
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const inspect = lines.includes('Inspect: true')
   const depthText = lines.find((line) => line.startsWith('Depth: '))?.slice('Depth: '.length)
@@ -884,9 +906,11 @@ export async function publishImportedIssue(
   const quoted = source.body.trim() === ''
     ? '> (no description)'
     : source.body.split(/\r?\n/).map((line) => `> ${line}`.trimEnd()).join('\n')
+  // The provenance line stays plain text: a mention or a repository#number reference
+  // would notify the source author and backlink their issue on every import.
   const requirement = [
     source.title,
-    `Imported from ${repository}#${source.number}, opened by @${source.author.login}.`,
+    `Imported from issue ${source.number} of ${repository}, opened by ${source.author.login}.`,
     quoted,
   ].join('\n\n')
   const ready = readyWhenTrusted && source.author.hasWriteAccess
@@ -1618,20 +1642,23 @@ export interface PromotedIssueOutcome {
 }
 
 /**
- * Close queue issues whose merged work has been promoted, for a queue kept apart from
- * the project's repository where no merge commit can close them. A run branch's pull
+ * Settle promotion records whose run pull request has finished. With `closeMerged`, for
+ * a queue kept apart from the project's repository where no merge commit can close
+ * them, close the issues whose merged work has been promoted: a run branch's pull
  * request that has merged carries every task merged into it up to its head, whichever
  * way the forge merged it, so that is the evidence; a merge commit the head does not
- * contain stays open for a later run. A run pull request closed without merging will
- * never land that work once its branch is abandoned, so its issues go back to ready
- * rather than waiting for good. The branch the loop still holds is not abandoned: its
- * merges remain on it and a person may reopen the pull request, so those issues wait.
+ * contain stays open for a later run. Without it the merge commit's own `closes #N`
+ * closes them. In either mode a run pull request closed without merging will never
+ * land that work once its branch is abandoned, so its issues go back to ready rather
+ * than waiting for good. The branch the loop still holds is not abandoned: its merges
+ * remain on it and a person may reopen the pull request, so those issues wait.
  */
 export async function closePromotedIssues(
   forge: Forge,
   paths: OrchPaths,
   contains: (ancestor: string, descendant: string) => boolean,
   heldBranch = '',
+  closeMerged = true,
 ): Promise<PromotedIssueOutcome> {
   const dir = promotionDir(paths)
   if (!existsSync(dir)) return { closed: [], returned: [] }
@@ -1651,16 +1678,17 @@ export async function closePromotedIssues(
       for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
         // The withdrawal lands before the issue is claimable again, and the record
         // stays until it is ready, so an interrupted return is retried next poll. A retry
-        // finds its own withdrawal already posted and does not post it again.
+        // finds its own withdrawal already posted and does not post it again. A matching
+        // withdrawal whose author's permission could not be read leaves the record for a
+        // later poll rather than posting a duplicate.
         try {
           const withdrawal = issueUnpromotedComment(
             promotion.taskId, promotion.mergeCommit, runBranch, pr.url,
           )
-          const comments = await forge.listIssueComments(promotion.issueNumber)
-          if (!comments.some((comment) =>
-            comment.author.hasWriteAccess && comment.body === withdrawal)) {
-            await forge.commentIssue(promotion.issueNumber, withdrawal)
-          }
+          const present = trustedCommentPresent(
+            await forge.listIssueComments(promotion.issueNumber), withdrawal)
+          if (present === undefined) continue
+          if (!present) await forge.commentIssue(promotion.issueNumber, withdrawal)
           await returnIssueToReady(forge, promotion.issueNumber)
         } catch (error) {
           if (!(error instanceof ForgeIssueNotFoundError)) throw error
@@ -1672,7 +1700,7 @@ export async function closePromotedIssues(
       }
       continue
     }
-    if (pr.state !== 'merged' || pr.headSha === '') continue
+    if (!closeMerged || pr.state !== 'merged' || pr.headSha === '') continue
     const contained = promotions.filter((candidate) =>
       candidate.runBranch === runBranch && contains(candidate.mergeCommit, pr.headSha))
     // Each close is several forge calls, so a merged run of a hundred issues would hold

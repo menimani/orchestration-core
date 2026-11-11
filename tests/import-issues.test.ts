@@ -50,8 +50,18 @@ describe('publishImportedIssue', () => {
     expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IMPORTED, LABEL_READY])
     expect(parseIssueBody(issue.body, 1)).toMatchObject({
       fingerprints: ['source:owner/app#7'],
-      requirement: 'Source issue 7\n\nImported from Owner/App#7, opened by @maintainer.\n\n> It breaks.',
+      requirement: 'Source issue 7\n\nImported from issue 7 of Owner/App, opened by maintainer.\n\n> It breaks.',
     })
+  })
+
+  it('writes no issue reference the forge would turn into a backlink', async () => {
+    await publishImportedIssue(queue, paths, REPOSITORY, source(7, 'It breaks.'), true)
+
+    const body = (await queue.getIssue(1)).body
+    expect(body.startsWith('Fingerprint: `source:owner/app#7`\nParent: `import:Owner/App#7`\n'))
+      .toBe(true)
+    const outsideInlineCode = body.replace(/`[^`\n]*`/g, '')
+    expect(outsideInlineCode).not.toMatch(/[\w.-]+\/[\w.-]+#\d+/)
   })
 
   it('leaves an issue by an outsider in triage whatever it was asked', async () => {

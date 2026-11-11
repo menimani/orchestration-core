@@ -2852,6 +2852,46 @@ describe('remote issue queue idle detection', () => {
     expect((await fakeForge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
   })
 
+  it('returns the issues of an old run pull request closed unmerged in a same-repository queue', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'abandoned fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'abandoned-task', [issueNumber])
+    recordIssuePromotions(paths, 'abandoned-task', mergeCommit, 'run/old')
+    const prStatusRefs: unknown[] = []
+    fakeForge.prStatus = async (ref) => {
+      prStatusRefs.push(ref)
+      return {
+        state: 'closed',
+        isDraft: false,
+        url: 'https://example.test/pull/9',
+        headSha: mergeCommit,
+        checks: [],
+      }
+    }
+
+    await loop.poll()
+
+    expect(prStatusRefs).toContainEqual({ kind: 'branch', value: 'run/old' })
+    expect(logText()).toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.state).toBe('open')
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
   async function promotedIssueLoop(headSha: string) {
     setPaths({
       ...paths,

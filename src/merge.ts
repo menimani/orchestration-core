@@ -170,8 +170,6 @@ export interface MergeOptions {
   onMerged?: ((mergeCommit: string) => void) | undefined
 }
 
-export type RemoteMergeOptions = MergeOptions
-
 export interface NoChangeOptions {
   outputFile?: string | undefined
   onNoChange?: (() => Promise<void>) | undefined
@@ -544,6 +542,10 @@ function mergeWithVerifiedRecovery(
  * elsewhere would merge nothing. Only a clean worktree whose HEAD fast-forwards the task
  * branch is adopted; anything else is left for the ordinary checks to report. The
  * agent's branch stays: removing the worktree is cleanup's business, not this function's.
+ *
+ * The task branch moves in one compare-and-swap ref update before the worktree switches
+ * to it, so a switch that fails (a held index lock, say) cannot strand detached commits
+ * behind the reflog; the next attempt finds HEAD at the task tip and only switches.
  */
 function adoptStrandedTaskCommits(worktree: string, branch: string, io: MergeIo): void {
   if (!existsSync(worktree)) return
@@ -557,17 +559,18 @@ function adoptStrandedTaskCommits(worktree: string, branch: string, io: MergeIo)
   if (headBranch === branch) return
   if (git(worktree, ['status', '--porcelain']).trim() !== '') return
   const head = git(worktree, ['rev-parse', 'HEAD']).trim()
-  if (head === taskTip) return
-  try {
-    git(worktree, ['merge-base', '--is-ancestor', taskTip, head])
-  } catch {
-    // Diverged from the task branch: adopting would discard the task branch's own commits.
-    return
+  if (head !== taskTip) {
+    try {
+      git(worktree, ['merge-base', '--is-ancestor', taskTip, head])
+    } catch {
+      // Diverged from the task branch: adopting would discard the task branch's own commits.
+      return
+    }
+    git(worktree, ['update-ref', `refs/heads/${branch}`, head, taskTip])
+    const source = headBranch === 'HEAD' ? `detached HEAD ${head}` : headBranch
+    io.out(`=== Adopted task commits from ${source} onto ${branch} ===`)
   }
   git(worktree, ['switch', '--quiet', branch])
-  git(worktree, ['merge', '--quiet', '--ff-only', head])
-  const source = headBranch === 'HEAD' ? `detached HEAD ${head}` : headBranch
-  io.out(`=== Adopted task commits from ${source} onto ${branch} ===`)
 }
 
 function rebaseTaskOntoRunTip(
@@ -1202,7 +1205,7 @@ function reclaimRetiredMergeGuard(dir: string): boolean {
 
 type MergeGuardAcquisition = { acquired: true; file: string; owner: MergeGuardOwner } | {
   acquired: false
-  reason: 'active' | 'succeeded'
+  reason: 'active'
 }
 
 function acquireMergeGuard(
@@ -1220,7 +1223,6 @@ function acquireMergeGuard(
     if (publishMergeGuard(dir, owner)) {
       return { acquired: true, file: dir, owner }
     }
-    if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
     if (existsSync(join(dir, 'retired'))) {
       reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       if (reclaimRetiredMergeGuard(dir)) {
@@ -1502,7 +1504,7 @@ export async function mergeRemoteTask(
   remote: string,
   branch: string,
   expectedHead: string,
-  options: RemoteMergeOptions,
+  options: MergeOptions,
 ): Promise<string> {
   if (!/^task\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(branch)) {
     throw new MergeError(`Issue #${issueNumber} reported an invalid task branch: ${branch}`)
@@ -1568,7 +1570,11 @@ export async function mergeRemoteTask(
       mergeRuntime,
     )
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
-    io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
+    try {
+      io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
+    } catch {
+      // an empty inspection diff is fine
+    }
     return runMergeChecks(worktree, currentBranch, options, io)
   })
 

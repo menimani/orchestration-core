@@ -502,6 +502,7 @@ describe('operating-system adapters', () => {
   function processTreeOs(
     processes: readonly WindowsProcess[],
     spawn: (command: string, args: readonly string[]) => void = () => {},
+    processStartIdentity?: (pid: number) => string | undefined,
   ) {
     const alive = new Set(processes.map(({ pid }) => pid))
     let now = 0
@@ -522,6 +523,7 @@ describe('operating-system adapters', () => {
         remove: () => {},
         now: () => now,
         sleep: (milliseconds) => { now += milliseconds },
+        ...(processStartIdentity === undefined ? {} : { processStartIdentity }),
       }),
     }
   }
@@ -574,6 +576,48 @@ describe('operating-system adapters', () => {
 
     expect(os.terminateProcessTree(431)).toBe(true)
     expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '431', '/T', '/F'])
+  })
+
+  it('names the parent chain that linked the current process into a refused tree', () => {
+    const spawn = vi.fn()
+    const { os } = processTreeOs([
+      { pid: 441, parentPid: 1, createdAt: 1_000 },
+      { pid: 442, parentPid: 441, createdAt: 2_000 },
+      { pid: process.pid, parentPid: 442, createdAt: 3_000 },
+    ], spawn)
+
+    expect(() => os.terminateProcessTree(441)).toThrow(
+      `Refusing to stop process tree 441 because it contains the current process ${process.pid}`
+      + ' through 441 (created 1970-01-01T00:00:01.000Z) -> 442 (created 1970-01-01T00:00:02.000Z)'
+      + ` -> ${process.pid} (created 1970-01-01T00:00:03.000Z).`,
+    )
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('dates a live root the snapshot omitted before trusting links to its PID', () => {
+    // 451 is alive but missing from the snapshot; 452 is an orphan of the PID's earlier owner.
+    const spawn = vi.fn()
+    const processStartIdentity = vi.fn((pid: number) => (
+      pid === 451 ? `windows:${621_355_968_000_000_000n + 5_000n * 10_000n}` : undefined
+    ))
+    const { alive, os } = processTreeOs([
+      { pid: 452, parentPid: 451, createdAt: 1_000 },
+      { pid: process.pid, parentPid: 452, createdAt: 2_000 },
+    ], spawn, processStartIdentity)
+    alive.add(451)
+
+    expect(os.terminateProcessTree(451)).toBe(true)
+    expect(processStartIdentity).toHaveBeenCalledWith(451)
+    expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '451', '/T', '/F'])
+  })
+
+  it('keeps links to an omitted root whose start time cannot be read', () => {
+    const { alive, os } = processTreeOs([
+      { pid: 462, parentPid: 461, createdAt: 1_000 },
+    ], () => {}, () => undefined)
+
+    expect(alive.has(461)).toBe(false)
+    expect(os.processTreeIsAlive(461)).toBe(true)
   })
 
   it('leaves worktree processes alone on POSIX', () => {
