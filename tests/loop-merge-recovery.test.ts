@@ -7,8 +7,8 @@ import type { ProjectAdapter } from '../src/adapters/project.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
 import {
   buildIssueBody, issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue,
-  issueReleaseIntentForTask, recordIssuesForTask, LABEL_FINDING, LABEL_IN_PROGRESS,
-  LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED,
+  issueReleaseIntentForTask, recordIssuesForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON,
+  LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED,
 } from '../src/issueQueue.ts'
 import { recordTaskIdForDesc, shortTaskId } from '../src/ids.ts'
 import {
@@ -1306,6 +1306,54 @@ describe('completed task merge recovery', () => {
 
     expect(readStatus(paths, taskId)?.status).toBe('failed')
     expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+  })
+
+  it('leaves a grouped issue claimed by another account when its merge is abandoned', async () => {
+    const taskId = '20260811_120000_068_auto-abandoned-group-reclaimed'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      maxParallel: 0,
+      maxConsecutiveMergeFailures: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const [ownIssue, reclaimedIssue] = await Promise.all([1, 2].map((number) =>
+      fakeForge.createIssue({
+        title: `grouped finding ${number}`,
+        body: '',
+        labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+        assignees: [fakeForge.user],
+      })))
+    recordIssuesForTask(paths, taskId, [ownIssue!, reclaimedIssue!])
+    // The lease lapsed while the merge gate ran, and another account claimed the issue.
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    let claimChecked = false
+    fakeForge.getIssue = async (number) => {
+      const issue = await getIssue(number)
+      if (number === reclaimedIssue && !claimChecked) {
+        claimChecked = true
+        await fakeForge.unassignIssue(number, fakeForge.user)
+        await fakeForge.assignIssue(number, 'other-account')
+      }
+      return issue
+    }
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    const own = await fakeForge.getIssue(ownIssue!)
+    expect(own.assignees).toEqual([])
+    expect(own.labels).toEqual(expect.arrayContaining([LABEL_READY, LABEL_GROUP_SINGLETON]))
+    expect(own.labels).not.toContain(LABEL_IN_PROGRESS)
+    const reclaimed = await fakeForge.getIssue(reclaimedIssue!)
+    expect(reclaimed.assignees).toEqual(['other-account'])
+    expect(reclaimed.labels).toContain(LABEL_IN_PROGRESS)
+    expect(reclaimed.labels).not.toContain(LABEL_READY)
+    expect(logText()).toMatch(
+      new RegExp(`Released #${reclaimedIssue} +claimed by another account since; left as it is`))
   })
 
   it('records a git failure in the merge log when the task worktree is missing', async () => {
