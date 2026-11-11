@@ -1,8 +1,8 @@
 import { execSync } from 'node:child_process'
 import {
-  copyFileSync, existsSync, mkdtempSync, renameSync, rmSync,
+  copyFileSync, existsSync, mkdtempSync, realpathSync, renameSync, rmSync,
 } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const INSTALL_INPUTS = ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', '.npmrc']
@@ -100,7 +100,9 @@ export function safeNpmCi(
   }
 }
 
+// Node names this module by its real path, so an entry typed through a symlink or a
+// junction is compared by its real path too; otherwise nothing would be installed.
 const invokedFile = process.argv[1]
-if (invokedFile !== undefined && resolve(invokedFile) === fileURLToPath(import.meta.url)) {
+if (invokedFile !== undefined && realpathSync(invokedFile) === fileURLToPath(import.meta.url)) {
   safeNpmCi()
 }

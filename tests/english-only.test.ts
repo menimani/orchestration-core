@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { main, scanText } from '../checks/english-only.ts'
 
@@ -66,6 +67,20 @@ describe('English-only source check', () => {
 
   it('checks every repository source during the normal test suite', () => {
     expect(main()).toBe(0)
+  })
+
+  it('runs when started through a symlink or junction to its directory', () => {
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-english-only-alias-'))
+    fixtures.push(linkDir)
+    const alias = join(linkDir, 'checks')
+    symlinkSync(resolve(import.meta.dirname, '..', 'checks'), alias, 'junction')
+
+    const output = execFileSync(process.execPath, [join(alias, 'english-only.ts')], {
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(output).toBe('All core sources are English.\n')
   })
 
   it('ignores retained dependency trees from safe npm cleanup failures', () => {

@@ -1,8 +1,10 @@
+import { spawnSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
+  writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { safeNpmCi, type SafeNpmCiRuntime } from '../scripts/safe-npm-ci.ts'
 
@@ -101,5 +103,36 @@ describe('safe npm clean install', () => {
     expect(readFileSync(join(root, backup!, 'old-dependency', 'marker.txt'), 'utf8'))
       .toBe('old\n')
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('esbuild.exe is busy'))
+  })
+
+  it('installs when started through a symlink or junction to its directory', () => {
+    const linkDir = mkdtempSync(join(tmpdir(), 'orch-safe-npm-ci-alias-'))
+    try {
+      const alias = join(linkDir, 'scripts')
+      symlinkSync(resolve(import.meta.dirname, '..', 'scripts'), alias, 'junction')
+      // A project with no dependencies: npm ci succeeds offline without creating
+      // node_modules, which the script reports, proving that it ran.
+      writeFileSync(join(root, 'package.json'), '{"name":"fixture","version":"1.0.0"}\n')
+      writeFileSync(join(root, 'package-lock.json'), JSON.stringify({
+        name: 'fixture',
+        version: '1.0.0',
+        lockfileVersion: 3,
+        requires: true,
+        packages: { '': { name: 'fixture', version: '1.0.0' } },
+      }))
+
+      const result = spawnSync(process.execPath, [join(alias, 'safe-npm-ci.ts')], {
+        cwd: root,
+        encoding: 'utf8',
+        windowsHide: true,
+      })
+
+      expect(result.stderr).toContain('npm ci completed without producing node_modules')
+      expect(result.status).toBe(1)
+      expect(readdirSync(root).filter((entry) => entry.startsWith('.orchestration-npm-ci-')))
+        .toEqual([])
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true })
+    }
   })
 })
