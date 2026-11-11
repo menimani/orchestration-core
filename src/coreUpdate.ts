@@ -37,6 +37,26 @@ function importSplit(message: string, prefix: string): string | undefined {
   return dir === prefix ? split : undefined
 }
 
+/**
+ * The split of the newest commit that records an import of exactly `prefix`. The grep
+ * matches substrings, so a newer commit for a longer prefix, or one that quotes such a
+ * line, must not hide an older exact import.
+ */
+function lastImportSplit(
+  repoRoot: string,
+  prefix: string,
+  runtime: CoreUpdateRuntime,
+): string | undefined {
+  const messages = runtime.git(repoRoot, [
+    'log', '--format=%B%x00', `--grep=git-subtree-dir: ${prefix}`, '--fixed-strings',
+  ]).split('\0')
+  for (const message of messages) {
+    const split = importSplit(message, prefix)
+    if (split !== undefined) return split
+  }
+  return undefined
+}
+
 function matchingUpstreamSplit(
   repoRoot: string,
   prefix: string,
@@ -223,9 +243,7 @@ export async function updateCoreBeforeCycle(
   let recordedImport: string | undefined
   try {
     upstream = runtime.git(paths.repoRoot, ['rev-parse', 'FETCH_HEAD']).trim()
-    recordedImport = importSplit(runtime.git(paths.repoRoot, [
-      'log', '-1', '--format=%B', `--grep=git-subtree-dir: ${prefix}`, '--fixed-strings',
-    ]), prefix)
+    recordedImport = lastImportSplit(paths.repoRoot, prefix, runtime)
     imported = matchingUpstreamSplit(paths.repoRoot, prefix, upstream, runtime)
       ?? recordedImport
   } catch (error) {

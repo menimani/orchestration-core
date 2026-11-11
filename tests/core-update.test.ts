@@ -252,6 +252,25 @@ describe('pre-cycle core update', () => {
     )
   })
 
+  it('finds the last exact import behind a newer commit for a longer prefix', async () => {
+    const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    writeFileSync(join(packageRoot, 'local.txt'), 'local change\n')
+    commit(repoRoot, 'chore: modify the core locally')
+    git(repoRoot, [
+      'commit', '--allow-empty', '-m', 'chore: record another import',
+      '-m', `git-subtree-dir: orchestration/ts-extra\ngit-subtree-split: ${oldCore}`,
+    ])
+    const newCore = advanceUpstream('version two\n')
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('restart')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
+      .toBe('version two\n')
+    expect(readFileSync(join(packageRoot, 'local.txt'), 'utf8'))
+      .toBe('local change\n')
+    expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
+  })
+
   it('updates integration source without restarting the fixed daemon', async () => {
     const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
     const newCore = advanceUpstream('version two\n')
