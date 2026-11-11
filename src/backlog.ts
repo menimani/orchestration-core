@@ -12,9 +12,14 @@ import {
 const LOCK_RETRY_MS = 10
 const LOCK_RETRY_MAX_MS = 250
 const OWNER_GRACE_MS = 30_000
+// While one acquisition waits, an unchanged owner verified as current is trusted this
+// long: on Windows each verification starts PowerShell, which can cost seconds.
+const OWNER_REVERIFY_MS = 1_000
 const sleepBuffer = new SharedArrayBuffer(4)
 const releasedOwnedLockTokens = new Set<string>()
 
+/** Owner text last verified as current, per lock path, during one acquisition. */
+type OwnerVerifications = Map<string, { owner: string, verifiedAt: number }>
 function ownerText(lockDir: string): string {
   try {
     return readFileSync(join(lockDir, 'owner'), 'utf8').trim()
@@ -23,7 +28,7 @@ function ownerText(lockDir: string): string {
   }
 }
 
-function lockOwnerIsStale(lockDir: string): boolean {
+function lockOwnerIsStale(lockDir: string, verified?: OwnerVerifications): boolean {
   // Release publishes this durable marker before attempting the directory rename.
   // Unlike the process-local token cache, it remains visible to other processes when
   // Windows refuses to rename a lock whose owning daemon is still alive.
@@ -38,7 +43,8 @@ function lockOwnerIsStale(lockDir: string): boolean {
   }
   // The creator may still be between mkdir and publishing its owner metadata. The
   // token is optional so locks created by an older installed core remain readable.
-  const [pidRaw, createdRaw, token, ...extra] = ownerText(lockDir).split(/\s+/)
+  const owner = ownerText(lockDir)
+  const [pidRaw, createdRaw, token, ...extra] = owner.split(/\s+/)
   const pid = Number(pidRaw)
   const created = Number(createdRaw)
   if (token !== undefined && releasedOwnedLockTokens.has(token)) return true
@@ -55,7 +61,20 @@ function lockOwnerIsStale(lockDir: string): boolean {
   const startIdentity = token?.startsWith('v2.')
     ? decodeProcessStartIdentity(token.split('.')[2])
     : undefined
-  if (lockOwnerIsCurrent(pid, startIdentity)) return false
+  // Only a current verdict is remembered, so staleness always comes from a fresh query.
+  const remembered = verified?.get(lockDir)
+  if (
+    remembered !== undefined
+    && remembered.owner === owner
+    && Date.now() - remembered.verifiedAt < OWNER_REVERIFY_MS
+  ) {
+    return false
+  }
+  if (lockOwnerIsCurrent(pid, startIdentity)) {
+    verified?.set(lockDir, { owner, verifiedAt: Date.now() })
+    return false
+  }
+  verified?.delete(lockDir)
   return Date.now() - created >= OWNER_GRACE_MS
 }
 
@@ -106,8 +125,8 @@ function releaseOwnedLock(lockDir: string, token: string): void {
 }
 
 /** Reclaim an abandoned recovery mutex without deleting a successor's owner token. */
-function recoverStaleMutex(mutexDir: string): boolean {
-  if (!lockOwnerIsStale(mutexDir)) return false
+function recoverStaleMutex(mutexDir: string, verified: OwnerVerifications): boolean {
+  if (!lockOwnerIsStale(mutexDir, verified)) return false
   const observedOwner = ownerText(mutexDir)
   const displaced = `${mutexDir}.${process.pid}-${randomUUID()}`
   try {
@@ -128,29 +147,35 @@ function recoverStaleMutex(mutexDir: string): boolean {
   return true
 }
 
-function tryAcquireRecoveryMutex(lockDir: string): string | undefined {
+function tryAcquireRecoveryMutex(
+  lockDir: string,
+  verified: OwnerVerifications,
+): string | undefined {
   const mutexDir = `${lockDir}.recovery`
   try {
     return ownedLock(mutexDir)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    recoverStaleMutex(mutexDir)
+    recoverStaleMutex(mutexDir, verified)
     return undefined
   }
 }
 
 /** Revalidate and remove a stale main lock while every new acquisition is serialized. */
-function recoverStaleLock(lockDir: string): boolean {
-  if (!lockOwnerIsStale(lockDir)) return false
+function recoverStaleLock(lockDir: string, verified: OwnerVerifications): boolean {
+  if (!lockOwnerIsStale(lockDir, verified)) return false
   operatingSystem.removeDirectory(lockDir)
   return true
 }
 
-function tryAcquireBacklogLock(lockDir: string): string | undefined {
-  const recoveryToken = tryAcquireRecoveryMutex(lockDir)
+function tryAcquireBacklogLock(
+  lockDir: string,
+  verified: OwnerVerifications,
+): string | undefined {
+  const recoveryToken = tryAcquireRecoveryMutex(lockDir, verified)
   if (recoveryToken === undefined) return undefined
   try {
-    if (existsSync(lockDir) && !recoverStaleLock(lockDir)) return undefined
+    if (existsSync(lockDir) && !recoverStaleLock(lockDir, verified)) return undefined
     try {
       return ownedLock(lockDir)
     } catch (error) {
@@ -172,9 +197,11 @@ export function withBacklogLock<T>(backlog: string, mutation: () => T): T {
   // Back off while the lock stays held: every attempt churns the recovery mutex and
   // re-reads the owner, so a fixed short delay turns a long hold into thousands of them.
   let delay = LOCK_RETRY_MS
+  // Spare a waiter one identity query per retry behind the same live owner.
+  const verified: OwnerVerifications = new Map()
   let lockToken: string
   for (;;) {
-    const acquired = tryAcquireBacklogLock(lockDir)
+    const acquired = tryAcquireBacklogLock(lockDir, verified)
     if (acquired !== undefined) {
       lockToken = acquired
       break

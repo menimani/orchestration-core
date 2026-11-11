@@ -148,6 +148,103 @@ describe('backlog process lock', () => {
     expect(existsSync(lockDir)).toBe(true)
   })
 
+  /** Record when each identity query for one of the given holder PIDs ran. */
+  function recordHolderQueries(
+    identities: (pid: number) => string | undefined,
+  ): { at: Array<{ pid: number, now: number }> } {
+    const queries = { at: [] as Array<{ pid: number, now: number }> }
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockImplementation((pid) => {
+      if (pid === process.pid) return 'waiter-start'
+      queries.at.push({ pid, now: Date.now() })
+      return identities(pid)
+    })
+    return queries
+  }
+
+  const holderPid = 2_000_001
+  const replacementPid = 2_000_002
+  const encoded = (identity: string): string => Buffer.from(identity).toString('base64url')
+
+  it('queries an unchanged live owner at most once per second while waiting', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    writeFileSync(
+      join(lockDir, 'owner'),
+      `${holderPid} ${Date.now()} v2.token.${encoded('holder-start')}\n`,
+    )
+    const clock = simulateClock()
+    const started = Date.now()
+    const queries = recordHolderQueries(() => 'holder-start')
+
+    expect(() => withBacklogLock(backlog, () => undefined))
+      .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+    expect(Date.now() - started).toBe(30_000)
+    expect(clock.sleeps()).toBeGreaterThan(100)
+    expect(queries.at.length).toBeLessThanOrEqual(31)
+    for (let index = 1; index < queries.at.length; index += 1) {
+      expect(queries.at[index]!.now - queries.at[index - 1]!.now).toBeGreaterThanOrEqual(1_000)
+    }
+    expect(existsSync(lockDir)).toBe(true)
+  })
+
+  it('reclaims a lock whose verified owner dies, from a fresh query after the grace period', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    const started = Date.now()
+    writeFileSync(
+      join(lockDir, 'owner'),
+      `${holderPid} ${started - 20_000} v2.token.${encoded('holder-start')}\n`,
+    )
+    let holderAlive = true
+    simulateClock((now) => {
+      if (now - started >= 5_000) holderAlive = false
+    })
+    const queries = recordHolderQueries(() => holderAlive ? 'holder-start' : undefined)
+    const processIsAlive = vi.spyOn(operatingSystem, 'processIsAlive')
+      .mockImplementation(() => holderAlive)
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    const reclaimedAt = Date.now() - started
+    expect(reclaimedAt).toBeGreaterThanOrEqual(10_000)
+    expect(reclaimedAt).toBeLessThan(10_500)
+    expect(queries.at.at(-1)!.now - started).toBe(reclaimedAt)
+    expect(processIsAlive).toHaveBeenCalledWith(holderPid)
+    expect(existsSync(lockDir)).toBe(false)
+  })
+
+  it('verifies a changed owner record at once', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    mkdirSync(lockDir)
+    const started = Date.now()
+    writeFileSync(
+      join(lockDir, 'owner'),
+      `${holderPid} ${started} v2.first.${encoded('holder-start')}\n`,
+    )
+    let replacedAt: number | undefined
+    simulateClock((now) => {
+      if (replacedAt === undefined && now - started >= 100) {
+        replacedAt = now
+        writeFileSync(
+          join(lockDir, 'owner'),
+          `${replacementPid} ${now} v2.second.${encoded('replacement-start')}\n`,
+        )
+      }
+    })
+    const queries = recordHolderQueries((pid) => (
+      pid === holderPid ? 'holder-start' : 'replacement-start'
+    ))
+
+    expect(() => withBacklogLock(backlog, () => undefined))
+      .toThrow(`Timed out waiting for the backlog lock: ${backlog}`)
+    const firstReplacementQuery = queries.at.find(({ pid }) => pid === replacementPid)
+    expect(queries.at.filter(({ pid }) => pid === holderPid)).toHaveLength(1)
+    expect(firstReplacementQuery?.now).toBe(replacedAt)
+    expect(existsSync(lockDir)).toBe(true)
+  })
+
   it('permits a later acquisition when released-lock removal fails', () => {
     const backlog = join(paths.queueDir, 'backlog.txt')
     const lockDir = `${backlog}.lock`
