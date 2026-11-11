@@ -3268,6 +3268,31 @@ describe('closePromotedIssues', () => {
     expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
   })
 
+  it('does not repost a withdrawal whose author permission is undetermined', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'task-unread', body: buildIssueBody('[BUG] task-unread', 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-unread', [issueNumber])
+    recordIssuePromotions(paths, 'task-unread', 'a'.repeat(40), 'run/closed')
+    forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
+    const addLabel = forge.addLabel
+    forge.addLabel = async () => { throw new Error('rate limited') }
+    const withdrawal = issueUnpromotedComment('task-unread', 'a'.repeat(40), 'run/closed', 'pr-url')
+
+    await expect(closePromotedIssues(forge, paths, () => true)).rejects.toThrow('rate limited')
+    forge.issueCommentAuthors.set(issueNumber, [
+      { login: 'worker-a', hasWriteAccess: false, permissionLookupFailed: true },
+    ])
+    forge.addLabel = addLabel
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: [], returned: [] })
+    expect(forge.issueComments.get(issueNumber)?.filter((body) => body === withdrawal)).toHaveLength(1)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-unread')
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
+  })
+
   async function mergedRun(count: number): Promise<number[]> {
     const issueNumbers: number[] = []
     for (let index = 0; index < count; index++) {
