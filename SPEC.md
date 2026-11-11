@@ -1211,9 +1211,12 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     specification and requires an exact `REQUIREMENT_COMPLETE: #N` final-response marker.
     The worker refuses to publish or merge the task until all linked issues have markers,
     so partial implementation cannot close an unaddressed finding. A grouped task that
-    fails, cannot start, or reaches abandoned merge handling returns every member to ready,
-    unassigned, with `loop:group-singleton`; those findings are claimed individually on
-    retry rather than recreating the failed group. A failed task parks a member instead
+    fails or cannot start returns every member to ready, unassigned, with
+    `loop:group-singleton`. One that reaches abandoned merge handling does the same for
+    each member that is unassigned or still assigned to the daemon's own forge account,
+    leaves a member now assigned only to another account as it is, and releases no member,
+    logging a warning, when the current forge user cannot be read. Released findings are
+    claimed individually on retry rather than recreating the failed group. A failed task parks a member instead
     once its per-issue retry bound is reached. Fingerprints and their ledger remain per
     finding.
 
