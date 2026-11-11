@@ -5049,6 +5049,27 @@ describe('documentation findings held for the cycle', () => {
     expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
   })
 
+  it('holds and releases a documentation finding with interior line separator characters', async () => {
+    const loop = makeLoop()
+    const scanId = '20250101_000000_036_scan'
+    const lineSeparator = String.fromCodePoint(0x2028)
+    const paragraphSeparator = String.fromCodePoint(0x2029)
+    const finding = `[DOCS] README.md names${lineSeparator}a removed${paragraphSeparator}flag in\rthe cleanup section`
+    writeFinal(scanId, `NEXT_TASK: ${finding}\n`)
+
+    await loop.scanForNextTasks(scanId, 0)
+    expect(taskIdsNow()).toEqual([])
+    expect(heldRecords()).toEqual([`1\t${scanId}\t${finding}`])
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    const [docsId] = taskIdsNow()
+    expect(taskIdsNow()).toHaveLength(1)
+    expect(readFileSync(specFile(paths, docsId!), 'utf8')).toContain(finding)
+    expect(heldRecords()).toEqual([])
+    expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
+  })
+
   it('counts a documentation-only scan as a finding scan and releases it when nothing else is open', async () => {
     initializeGitRepo()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
