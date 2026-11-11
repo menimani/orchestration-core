@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve, win32 } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadProject, renderProjectAdapter } from '../src/adapters/project.ts'
-import { initializeRepository } from '../src/initialize.ts'
+import { initializeRepository, relativeImport } from '../src/initialize.ts'
 import { QUEUE_LABELS } from '../src/issueQueue.ts'
 import { fleetPaths, orchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
@@ -337,5 +337,28 @@ describe('repository initialization', () => {
       .toBe(false)
     await expect(loadProject(join(repository, 'orchestration'), env))
       .resolves.toMatchObject({ name: 'custom' })
+  })
+})
+
+describe('adapter type import', () => {
+  it('keeps a backslash that is part of a POSIX directory name', () => {
+    expect(relativeImport('/srv/repo\\v2/project', '/srv/repo\\v2/core/project.ts', posix))
+      .toBe('../core/project.ts')
+    expect(relativeImport('/srv/repo/project', '/srv/core\\v2/src/adapters/project.ts', posix))
+      .toBe('../../core\\v2/src/adapters/project.ts')
+    expect(relativeImport('/srv/repo', '/srv/repo/core\\v2/project.ts', posix))
+      .toBe('./core\\v2/project.ts')
+  })
+
+  it('spells Windows separators as forward slashes', () => {
+    expect(relativeImport('C:\\repo\\project', 'C:\\core\\src\\adapters\\project.ts', win32))
+      .toBe('../../core/src/adapters/project.ts')
+    expect(relativeImport('C:\\repo', 'C:\\repo\\core\\project.ts', win32))
+      .toBe('./core/project.ts')
+  })
+
+  it('rejects a package on another Windows volume', () => {
+    expect(() => relativeImport('C:\\repo\\project', 'D:\\core\\project.ts', win32))
+      .toThrow('must be on the same filesystem volume')
   })
 })
