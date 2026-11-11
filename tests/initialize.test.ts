@@ -2,12 +2,23 @@ import { execFileSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, posix, resolve, win32 } from 'node:path'
+import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadProject, renderProjectAdapter } from '../src/adapters/project.ts'
 import { initializeRepository, relativeImport } from '../src/initialize.ts'
 import { QUEUE_LABELS } from '../src/issueQueue.ts'
 import { fleetPaths, orchPaths } from '../src/paths.ts'
 import { makeFakeForge } from './fakeForge.ts'
+
+function renderedSpecifier(source: string): string {
+  const file = ts.createSourceFile('project-consumer.ts', source, ts.ScriptTarget.Latest, true)
+  expect((file as unknown as { parseDiagnostics: unknown[] }).parseDiagnostics).toEqual([])
+  const declaration = file.statements.find(ts.isImportDeclaration)
+  if (declaration === undefined || !ts.isStringLiteral(declaration.moduleSpecifier)) {
+    throw new Error('rendered adapter has no string module specifier')
+  }
+  return declaration.moduleSpecifier.text
+}
 
 const packageRoot = resolve(import.meta.dirname, '..')
 const repositories: string[] = []
@@ -348,6 +359,17 @@ describe('adapter type import', () => {
       .toBe('../../core\\v2/src/adapters/project.ts')
     expect(relativeImport('/srv/repo', '/srv/repo/core\\v2/project.ts', posix))
       .toBe('./core\\v2/project.ts')
+  })
+
+  it('renders a POSIX core path into a specifier that parses back unchanged', () => {
+    for (const core of [
+      '/srv/core\\v2/src/adapters/project.ts',
+      '/srv/core\\xy/src/adapters/project.ts',
+      "/srv/core'v2/src/adapters/project.ts",
+    ]) {
+      const typeImport = relativeImport('/srv/repo/project', core, posix)
+      expect(renderedSpecifier(renderProjectAdapter('consumer', typeImport))).toBe(typeImport)
+    }
   })
 
   it('spells Windows separators as forward slashes', () => {
