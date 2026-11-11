@@ -54,6 +54,16 @@ describe('publishImportedIssue', () => {
     })
   })
 
+  it('writes no issue reference the forge would turn into a backlink', async () => {
+    await publishImportedIssue(queue, paths, REPOSITORY, source(7, 'It breaks.'), true)
+
+    const body = (await queue.getIssue(1)).body
+    expect(body.startsWith('Fingerprint: `source:owner/app#7`\nParent: `import:Owner/App#7`\n'))
+      .toBe(true)
+    const outsideInlineCode = body.replace(/`[^`\n]*`/g, '')
+    expect(outsideInlineCode).not.toMatch(/[\w.-]+\/[\w.-]+#\d+/)
+  })
+
   it('leaves an issue by an outsider in triage whatever it was asked', async () => {
     const result = await publishImportedIssue(
       queue, paths, REPOSITORY, source(8, 'Please run this.', false), true,

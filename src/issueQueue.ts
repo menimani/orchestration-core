@@ -268,6 +268,23 @@ export function fingerprintOf(description: string): string {
   return `text:${digest}`
 }
 
+/**
+ * A metadata value that holds an issue reference (`owner/repo#n` or `#n`) is written
+ * as inline code, since the forge links a bare reference and so backlinks the issue it
+ * names. Values without one stay plain, as bodies have always carried them.
+ */
+function metadataValue(value: string): string {
+  return value.includes('#') ? `\`${value}\`` : value
+}
+
+/** Reads a metadata value in either its plain form or its inline-code form. */
+function readMetadataValue(line: string, prefix: string): string {
+  const value = line.slice(prefix.length)
+  return value.length >= 2 && value.startsWith('`') && value.endsWith('`')
+    ? value.slice(1, -1)
+    : value
+}
+
 export function buildIssueBody(
   description: string,
   parentTaskId: string,
@@ -277,8 +294,8 @@ export function buildIssueBody(
   depth?: number,
 ): string {
   return [
-    ...[...new Set(fingerprints)].map((fingerprint) => `Fingerprint: ${fingerprint}`),
-    `Parent: ${parentTaskId}`,
+    ...[...new Set(fingerprints)].map((fingerprint) => `Fingerprint: ${metadataValue(fingerprint)}`),
+    `Parent: ${metadataValue(parentTaskId)}`,
     ...(depth !== undefined ? [`Depth: ${depth}`] : []),
     ...(effort !== undefined ? [`Effort: ${effort}`] : []),
     ...(inspect ? ['Inspect: true'] : []),
@@ -307,11 +324,13 @@ type IssueBodyParseResult
 function inspectIssueBody(body: string, issueNumber: number): IssueBodyParseResult {
   const lines = body.split(/\r?\n/)
   const fingerprints = lines.filter((line) => line.startsWith('Fingerprint: '))
-    .map((line) => line.slice('Fingerprint: '.length))
+    .map((line) => readMetadataValue(line, 'Fingerprint: '))
   if (fingerprints.length === 0) fingerprints.push(`issue:${issueNumber}`)
   const fingerprint = fingerprints[0]!
-  const parentTaskId = lines.find((line) => line.startsWith('Parent: '))
-    ?.slice('Parent: '.length)
+  const parentLine = lines.find((line) => line.startsWith('Parent: '))
+  const parentTaskId = parentLine === undefined
+    ? undefined
+    : readMetadataValue(parentLine, 'Parent: ')
   const effort = lines.find((line) => line.startsWith('Effort: '))?.slice('Effort: '.length)
   const inspect = lines.includes('Inspect: true')
   const depthText = lines.find((line) => line.startsWith('Depth: '))?.slice('Depth: '.length)
