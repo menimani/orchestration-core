@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import { TEST_LOCK_BUSY_EXIT_CODE } from '../src/merge.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
@@ -252,6 +253,82 @@ describe('completion marker output', () => {
       'ERROR could not update PR body: body update failed (repeated 2 times)',
     )
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  function configureUnopenedPrBranch(): void {
+    initializeGitRepoWithRemote()
+    git(['switch', '-c', 'feature/unopened-pr'])
+    git(['branch', '--set-upstream-to', 'origin/main'])
+    writeFileSync(join(repoRoot, 'feature.txt'), 'feature\n')
+    git(['add', 'feature.txt'])
+    git(['commit', '-m', 'feat: needs a new PR'])
+    setForgeStatus({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] })
+  }
+
+  it('stops after the draft PR cannot be created twice', async () => {
+    configureUnopenedPrBranch()
+    const loop = makeLoop()
+    let attempts = 0
+    fakeForge.createPr = async () => {
+      attempts += 1
+      throw new Error(`creation failed with diagnostic ${attempts}`)
+    }
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(logText()).toContain('WARN could not create PR: creation failed with diagnostic 1')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(logText()).toContain(
+      'ERROR could not create PR: creation failed with diagnostic 2 (repeated 2 times)',
+    )
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'pr-url.txt'))).toBe(false)
+  })
+
+  it('does not count a rate-limited draft PR creation as a gate failure', async () => {
+    configureUnopenedPrBranch()
+    const loop = makeLoop()
+    // A reset already in the past lifts the forge pause at once, so the next attempt
+    // reaches createPr and shows whether the rate limit was counted.
+    const failures = [new ForgeRateLimitError(new Date(0)), new Error('forge outage')]
+    const createPr = vi.fn(async (): Promise<string> => {
+      throw failures.shift()
+    })
+    fakeForge.createPr = createPr
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(logText()).not.toContain('could not create PR')
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+
+    expect(createPr).toHaveBeenCalledTimes(2)
+    expect(logged.filter((line) => line.includes('could not create PR'))).toEqual([
+      expect.stringContaining('WARN could not create PR: forge outage'),
+    ])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('clears the draft PR failure count once creation succeeds', async () => {
+    configureUnopenedPrBranch()
+    const loop = makeLoop()
+    const outcomes = ['first outage', 'created', 'second outage']
+    fakeForge.createPr = async () => {
+      const outcome = outcomes.shift()
+      if (outcome !== 'created') throw new Error(outcome)
+      return 'https://example.test/pull/1'
+    }
+
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+    expect(await loop.ensureDraftPr('cycle')).toBe(true)
+    expect(readFileSync(join(paths.queueDir, 'pr-url.txt'), 'utf8'))
+      .toBe('https://example.test/pull/1\n')
+    expect(await loop.ensureDraftPr('cycle')).toBe(false)
+
+    expect(logged.filter((line) => line.includes('could not create PR'))).toEqual([
+      expect.stringContaining('WARN could not create PR: first outage'),
+      expect.stringContaining('WARN could not create PR: second outage'),
+    ])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
   it('accepts a confirmed hand-edited PR body without overwriting it', async () => {
