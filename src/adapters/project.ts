@@ -228,11 +228,17 @@ function requiredMemberProblem(
   return undefined
 }
 
+// Escapes a path for a single-quoted string literal in generated source, so a backslash
+// that is part of a POSIX directory name reaches the module specifier unchanged.
+function singleQuotedLiteralText(path: string): string {
+  return path.replace(/[\\']/g, (character) => `\\${character}`)
+}
+
 export function renderProjectAdapter(projectName: string, typeImport: string): string {
   const renderMember = (member: RequiredMember, indent: string): string =>
     renderScaffoldMember(member, indent, '\n', projectName)
   const members = PROJECT_ADAPTER_CONTRACT.map((member) => renderMember(member, '  ')).join('\n\n')
-  return `import type { ProjectAdapter } from '${typeImport}'
+  return `import type { ProjectAdapter } from '${singleQuotedLiteralText(typeImport)}'
 
 export const project: ProjectAdapter = {
 ${members}
