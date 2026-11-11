@@ -399,7 +399,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     only once the task is terminal; documentation the task itself reports is held and
     released by the same rule within `MAX_GROWTH_DEPTH`. When the task limit or the depth bound refuses the combined task,
     the held findings are dropped with the WARN a single finding logs. The file survives
-    a daemon restart and is cleared with the rest of a run's state.
+    a daemon restart on the same branch and is cleared with the rest of a run's state,
+    including by the branch-change reset of item 24b.
 7. `DECISION_REQUIRED: <text>` is logged and carried into the PR risks, never queued.
    Dedup: a line naming a `GHSA-`/`CVE-` identifier matches on the identifier (a scan
    words the same advisory differently every cycle); a line naming neither matches on
@@ -595,7 +596,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `MAX_EMPTY_SCANS`, or when `SCAN_ENABLED` is `false`, since no scan can follow the
     cycle gate. The current cycle number lives in `queue/scan-count.txt` and is
     re-read every poll (this is also the documented lever for forcing an early final
-    cycle on a running loop). A missing persisted counter reads as zero; an existing
+    cycle on a running loop). The counter carries over a restart only on the same
+    branch: a daemon started on another branch resets it to zero (item 24b). A missing persisted counter reads as zero; an existing
     counter must contain base-10 digits representing a non-negative safe integer.
     Invalid contents, including an empty file, log the state path relative to the
     orchestration state root (for example, `queue/scan-count.txt`), write the stop file,
@@ -896,6 +898,22 @@ are not parsed by `loadConfig` and are not operator-file settings.
     are reassigned across a restart, and a survivor would otherwise refuse a startup or
     direct a termination at a stranger. A PID left in an older status record is never
     read back.
+24b. `queue/run-branch.txt` records the branch a run belongs to; a stopped loop's cycle
+    state belongs only to that branch. At startup, once the push target and issue queue
+    are initialized and before the first poll, a recorded branch that differs from the
+    checkout's current branch resets that state: the per-cycle markers (completion, suite
+    tip, resume, CI fix, review round and id, `failed-<cycle>`, scan yield and
+    expectation), `decisions.txt`, `pr-url.txt`, `held-documentation.txt`, and the
+    empty-scan count are removed, and `scan-count.txt` and `total-task-count.txt` are
+    reset to zero. Task statuses, the backlog, the description index, and the `scanned/`
+    announcement markers are kept, since status files span branches. A changed or
+    missing record also resets the merge-failure count to zero. A matching record keeps
+    every one of these, so a loop stopped mid-cycle resumes where it was; a current
+    branch that cannot be read fails startup with nothing reset. Startup then records the
+    current branch. Every poll, before it consumes the stop file (item 25), compares the
+    checkout's current branch with the recorded one; a mismatch logs `ERROR checkout
+    <current> does not match run branch <recorded>`, writes the stop file, and stops
+    before any task is started, merged, or marked scanned.
 25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
     /T /F` on Windows; on POSIX the detached process group gets SIGTERM, then SIGKILL if it
