@@ -480,6 +480,16 @@ are not parsed by `loadConfig` and are not operator-file settings.
    documented; the gate stops the loop rather than promote a failing tip.
    A missing-toolchain repair that fails also stops the gate and reports the adapter's
    remediation message without running the subsequent suite step.
+   When a step that will run (its `requires` path exists) declares `needsDocker`, the
+   gate first runs the adapter's `cycleSuiteDockerProbe` command once, bounded by its
+   `timeoutMs`, before any suite step. An adapter without a probe logs
+   `ERROR cycle suite infrastructure probe is not configured`, and a probe that does not
+   exit 0 logs the probe's `remediation` as an `ERROR`; either writes the stop file
+   without running a suite step. A failing suite step is diagnosed from this run's suite
+   log alone: the adapter's `classifyInfrastructureFailure` remediation when it
+   recognizes the output, `cycle suite tool missing` when the output reports a command
+   that could not be found, and `cycle suite failed` otherwise, each logged as an
+   `ERROR` with the log path before the stop file is written.
 9a. Dependency-isolation verification is opt-in per project adapter. When
     `verifyDependencyIsolation` is `true`, a merge check that passes counts only where its
     directory satisfies its own declared Node dependencies. A worktree sits inside the
@@ -697,7 +707,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 ## The cycle gate
 
 15. The gate runs only when nothing is queued or running. Sequence: report lost tasks
-    (loss note into `queue/decisions.txt`, deduped), run the cycle suite, ensure/update
+    (loss note into `queue/decisions.txt`, deduped), run the cycle suite (with its
+    Docker preflight and failure diagnosis, item 9), ensure/update
     the draft PR, emit `CYCLE_COMPLETE: <n>/<max>` with the PR URL to the machine-marker
     sink and a formatted copy to `loop.log`, then the CI gate,
     then review. Remote work defers the gate with a `Waiting remote` event when its
@@ -998,7 +1009,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
 31. Everything the orchestration knows about the repository it runs in — which staged
     paths select fast pre-commit checks, which commands verify a merge, which paths make
     each check relevant, which suites prove a cycle's
-    tip, which toolchain breakage a reinstall repairs, which repository- or
+    tip, which of those suites need Docker and the probe (command, timeout, remediation)
+    that confirms it is reachable before they run (item 9), which toolchain breakage a
+    reinstall repairs, which repository- or
     toolchain-specific command output identifies an infrastructure failure, and how
     commits and changed paths
     become pull-request sections, area labels, and risk bullets — lives in the project
