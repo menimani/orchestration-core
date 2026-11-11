@@ -1891,6 +1891,12 @@ async function restoreReadyAfterClaimDrift(
   await forge.unassignIssue(issueNumber, me)
   const current = await forge.getIssue(issueNumber)
   if (current.state !== 'open') return
+  // Another worker completed its claim between our ready read and our assignment.
+  // The in-progress claim is theirs, so relabelling would strip work they now own.
+  if (current.labels.includes(LABEL_IN_PROGRESS)
+    && current.assignees.some((assignee) => assignee !== me)) {
+    return
+  }
   if (!current.labels.includes(LABEL_READY)) {
     await forge.addLabel(issueNumber, LABEL_READY)
   }
