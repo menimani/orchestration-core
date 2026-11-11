@@ -1048,6 +1048,80 @@ describe('mergeTask', () => {
   })
 })
 
+describe('completeTaskWithoutChanges refusals', () => {
+  const noChangeMessage = 'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n'
+
+  async function expectRefusal(taskId: string, baseRef: string, message: string): Promise<void> {
+    const before = readStatus(paths, taskId)
+    const onNoChange = vi.fn(async () => {})
+
+    const failure = await completeTaskWithoutChanges(paths, taskId, baseRef, { onNoChange })
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(MergeError)
+    expect((failure as MergeError).message).toBe(message)
+    expect(onNoChange).not.toHaveBeenCalled()
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).not.toBe('')
+    expect(readStatus(paths, taskId)).toEqual(before)
+  }
+
+  it('refuses a task that has no status', async () => {
+    const taskId = '20261111_181522_101_user-no-change-unknown'
+    git(repoRoot, ['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expectRefusal(taskId, baseRef, `Task not found: ${taskId}`)
+    expect(readStatus(paths, taskId)).toBeUndefined()
+  })
+
+  it('refuses a task whose status is not completed', async () => {
+    const taskId = '20261111_181522_102_user-no-change-failed'
+    await makeCompletedTask(taskId)
+    await writeStatus(paths, taskId, 'failed')
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expectRefusal(taskId, baseRef, "Task status is not 'completed' (current: failed).")
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+  })
+
+  it('refuses a task that did not report the no-change marker', async () => {
+    const taskId = '20261111_181522_103_user-no-change-unmarked'
+    await makeCompletedTask(taskId)
+    writeFileSync(finalMessageFile(paths, taskId), 'No implementation is needed.\nTASK_COMPLETE\n')
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expectRefusal(taskId, baseRef, `${taskId} did not report NO_CHANGE_WARRANTED.`)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('refuses a worktree with uncommitted changes', async () => {
+    const taskId = '20261111_181522_104_user-no-change-dirty'
+    const worktree = await makeCompletedTask(taskId, { dirty: true })
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expectRefusal(taskId, baseRef, `The worktree has uncommitted changes: ${worktree}`)
+    expect(existsSync(join(worktree, 'uncommitted.txt'))).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('refuses a task branch with commits ahead of the base', async () => {
+    const taskId = '20261111_181522_105_user-no-change-committed'
+    const baseRef = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+
+    await expectRefusal(
+      taskId, baseRef, `${taskId} has commits and cannot complete without changes.`,
+    )
+    expect(git(repoRoot, ['rev-parse', branchName(taskId)]).trim()).toBe(taskHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+})
+
 describe('mergeTask with commits left off the task branch', () => {
   const branchOf = (cwd: string): string => git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
   const tipOf = (ref: string): string => git(repoRoot, ['rev-parse', ref]).trim()
