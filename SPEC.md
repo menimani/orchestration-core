@@ -251,6 +251,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `MAX_CI_FIX_ATTEMPTS` | `2` | ci-fix tasks generated for a failing CI gate before the loop stops (item 16). |
 | `MAX_BURST_FAILURES` | `3` | Task failures observed in one poll that stop the loop (item 19). |
 | `MAX_CONSECUTIVE_MERGE_FAILURES` | `3` | Merge failures in a row that stop the loop (item 10). |
+| `MAX_GATE_FIX_ATTEMPTS` | `1` | Handbacks a completed task gets when its own content fails merge verification twice in a row; `0` disables them (item 10). |
 | `SCAN_EFFORT` | `medium` | Reasoning effort for scans. Accepted values are `minimal`, `low`, `medium`, and `high` (item 14). |
 | `TASK_EFFORT` | `medium` | Reasoning effort for queued tasks without a per-task override; it does not replace the high effort of review-spawned fixes (item 14). |
 | `SCAN_MODEL` | empty | When non-empty, the runner model for scans (item 14). |
@@ -564,6 +565,34 @@ are not parsed by `loadConfig` and are not operator-file settings.
     ended: its exit status, also in hexadecimal when outside 0-255 as Windows reports a
     crashed process, or the signal that terminated it, so a runtime crash reads differently
     from a failing test.
+    A failure whose verification commands ran and failed (`Tests failed. Aborting merge.`)
+    may be the task's own content, which no unchanged retry can pass. The first such
+    failure of a local task is counted and retried unchanged, as above. When the same task
+    fails verification again with no other merge failure between, while it has used fewer
+    than `MAX_GATE_FIX_ATTEMPTS` (default 1) handbacks, that failure is not counted:
+    the task is handed back. Its runner starts again in the existing worktree and branch
+    from a follow-up specification that contains the task's original specification, states
+    that its commits are in place and failed verification after being combined with the
+    current run branch, carries the merge log's last at most 200 lines and 16 KiB inside
+    the untrusted repository-content framing as data to diagnose, and instructs it to make
+    the verification commands pass by correcting the change, to commit on the same branch,
+    and never to delete, skip, or weaken a test. A `Handback` event names the attempt
+    number. The task returns to `running` with a fresh `started_at`: it takes a parallel
+    slot, appears in `loop-status`, keeps its issue claim and lease heartbeat, obeys the
+    task deadline and the stop command, and when it completes its merge is attempted afresh
+    without filing findings again. No issue text is re-read or re-trusted on this path.
+    A handback waits, uncounted and without rerunning the gate, while every parallel slot
+    is taken. The number of handbacks used, whether the last attempt failed verification,
+    and a reserved handback not yet started are persisted under `queue/gate-fix/` before
+    the runner starts, so a daemon restart neither loses nor repeats an attempt; that state
+    and the follow-up specification are removed when the task merges, completes without
+    changes, or is cleaned up. A handback whose runner cannot be started spends the
+    attempt and counts the failure. Never handed back: a refusal for uncommitted changes,
+    a rebase or merge conflict, a failure the project adapter's
+    `classifyInfrastructureFailure` or the unreachable-registry diagnosis attributes to the
+    environment, a test-lock deferral, an adopted worker branch, or any failure after the
+    stop file exists. Once the handbacks are used, failures are counted exactly as above;
+    `MAX_GATE_FIX_ATTEMPTS=0` reproduces that behaviour event for event.
 10a. A failed merge or rebase is counted or retried only once its abort is confirmed to
     have left the tree where the attempt found it. A merge into the integration worktree
     or a prospective merge worktree, for a local task or an adopted worker branch, must

@@ -71,6 +71,7 @@ Settings:
 | `ISSUE_LEASE_HOURS` | 3 | Hours a claimed issue may sit untouched before its lease is reaped back to ready |
 | `CI_GATE_ENABLED` | false | Whether the gate waits for CI — a draft PR has no checks, so waiting would hang |
 | `MAX_CONSECUTIVE_MERGE_FAILURES` | 3 | Merges failing in a row before it stops — the task finished, its verification did not |
+| `MAX_GATE_FIX_ATTEMPTS` | 1 | Times a task failing verification twice in a row goes back to its agent to fix (0 = never) |
 | `SCAN_ENABLED` | true | Set false to work the existing queue without scanning |
 | `SCAN_PARALLEL` | 2 | Requested scans per cycle, splitting the checklist between them (1 = single full scan; requests above the numbered section count are reduced at launch) |
 | `SCAN_EFFORT` | medium | Codex reasoning effort for scan tasks |

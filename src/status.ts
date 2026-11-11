@@ -326,6 +326,7 @@ function writeStatusUnlocked(
   status: TaskState,
   pid?: number,
   metadata?: StatusMetadata,
+  restarted = false,
 ): void {
   const file = statusFile(paths, taskId)
   const temporaryFile = join(paths.statusDir, `.${taskId}.${process.pid}.tmp`)
@@ -343,7 +344,7 @@ function writeStatusUnlocked(
   const record: DurableTaskStatus = {
     task_id: taskId,
     status,
-    started_at: existing?.started_at ?? now,
+    started_at: restarted ? now : existing?.started_at ?? now,
     updated_at: now,
     worktree: worktreeDir(paths, taskId),
     branch: branchName(taskId),
@@ -411,6 +412,26 @@ export async function transitionStatus(
     const current = readStatus(paths, taskId)?.status
     if (current !== expected) return false
     writeStatusUnlocked(paths, taskId, next, pid)
+    return true
+  } finally {
+    releaseStatusLock(paths, taskId, owner)
+  }
+}
+
+/**
+ * Compare-and-swap a completed task back to running under a new runner, as a merge gate
+ * handback does. The start time becomes the new runner's, so the task deadline measures
+ * this attempt rather than the one that already finished.
+ */
+export async function resumeCompletedStatus(
+  paths: OrchPaths,
+  taskId: string,
+  pid: number,
+): Promise<boolean> {
+  const owner = await acquireStatusLock(paths, taskId)
+  try {
+    if (readStatus(paths, taskId)?.status !== 'completed') return false
+    writeStatusUnlocked(paths, taskId, 'running', pid, undefined, true)
     return true
   } finally {
     releaseStatusLock(paths, taskId, owner)
