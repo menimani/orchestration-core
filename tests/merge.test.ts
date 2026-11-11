@@ -1177,6 +1177,33 @@ describe('mergeTask with commits left off the task branch', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
+  it('keeps detached commits on the task branch when the switch to it fails', async () => {
+    const taskId = '20261111_000000_006_user-detached-switch-fails'
+    const worktree = await makeCompletedTask(taskId)
+    git(worktree, ['switch', '-q', '--detach'])
+    const agentCommit = commitInWorktree(worktree, 'detached.txt')
+    const indexLock = git(worktree, ['rev-parse', '--path-format=absolute', '--git-path', 'index.lock']).trim()
+    writeFileSync(indexLock, '')
+    const outputFile = join(repoRoot, 'adopt-switch-fails.log')
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+    })).rejects.toThrow()
+
+    expect(tipOf(branchName(taskId))).toBe(agentCommit)
+    expect(branchOf(worktree)).toBe('HEAD')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+
+    rmSync(indexLock)
+    const result = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+    })
+
+    expect(result.outcome).toBe('merged')
+    git(repoRoot, ['merge-base', '--is-ancestor', agentCommit, tipOf('main')])
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
   it('leaves a branch that diverged from the task branch to the ordinary checks', async () => {
     const taskId = '20261111_000000_003_user-diverged-branch'
     writeFileSync(join(repoRoot, 'second.txt'), 'second\n')
