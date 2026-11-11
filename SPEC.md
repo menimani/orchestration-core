@@ -170,7 +170,8 @@ comments and other items cite items by number, so a number is never reused.
   `merge <task-id> [--yes] [--test-cmd "<cmd>"]` merges `task/<task-id>` into the current
   branch as the loop's merge does (item 8 onwards). Without `--yes` it asks first, and
   any answer but `y` or `Y` prints `Aborted.` and exits zero. `--test-cmd` replaces
-  `TEST_CMD` for this merge; any other option is an error. A grouped task missing a
+  `TEST_CMD` for this merge, and without a command it prints the usage and exits 1; any
+  other option is an error. A grouped task missing a
   requirement's completion marker is refused before the merge. A completed merge resets the
   consecutive merge-failure count and, for an issue-born task, records the promotion and
   comments the merge on each linked issue, a failed comment being only a `WARN:`. A
