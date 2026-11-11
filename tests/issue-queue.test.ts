@@ -334,6 +334,31 @@ describe('issue body round-trip', () => {
     ].join('\n'), 42)?.fingerprints).toEqual(['first', 'second'])
   })
 
+  it('reads issue-reference metadata in its plain and its inline-code form alike', () => {
+    const plain = [
+      'Fingerprint: source:owner/app#7',
+      'Parent: import:Owner/App#7',
+      '',
+      '## Requirement',
+      '',
+      'Fix the imported issue.',
+    ].join('\n')
+    const coded = buildIssueBody(
+      'Fix the imported issue.', 'import:Owner/App#7', undefined, ['source:owner/app#7'],
+    )
+
+    expect(coded).toContain('Fingerprint: `source:owner/app#7`\nParent: `import:Owner/App#7`\n')
+    const fromPlain = parseIssueBody(plain, 42)
+    const fromCoded = parseIssueBody(coded, 43)
+    expect(fromPlain).toMatchObject({
+      fingerprint: 'source:owner/app#7',
+      fingerprints: ['source:owner/app#7'],
+      parentTaskId: 'import:Owner/App#7',
+    })
+    expect(fromCoded?.fingerprints).toEqual(fromPlain?.fingerprints)
+    expect(fromCoded?.parentTaskId).toBe(fromPlain?.parentTaskId)
+  })
+
   it('ends the requirement at the next second-level heading and trims a heartbeat', () => {
     expect(parseIssueBody([
       '## Requirement',
@@ -720,6 +745,36 @@ describe('publishFinding', () => {
 
     expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
     expect((await forge.getIssue(second)).state).toBe('open')
+  })
+
+  it('treats an issue-reference fingerprint in either form as the same finding', async () => {
+    const requirement = 'Fix the imported issue.'
+    const plain = await forge.createIssue({
+      title: requirement,
+      body: [
+        'Fingerprint: source:owner/app#7',
+        'Parent: import:Owner/App#7',
+        '',
+        '## Requirement',
+        '',
+        requirement,
+        '',
+      ].join('\n'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const coded = await forge.createIssue({
+      title: requirement,
+      body: buildIssueBody(requirement, 'import:Owner/App#7', undefined, ['source:owner/app#7']),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
+
+    const states = [(await forge.getIssue(plain)).state, (await forge.getIssue(coded)).state]
+    expect(states.sort()).toEqual(['closed', 'open'])
+    const survivor = (await forge.getIssue(plain)).state === 'open' ? plain : coded
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`source:owner/app#7 ${survivor}\n`)
   })
 
   it('preserves a later claimed issue and closes only the older ready duplicate', async () => {
