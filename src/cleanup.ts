@@ -161,6 +161,7 @@ export function cleanupTask(
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.depth`), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.publish-failures`), { force: true })
+  runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.findings-filed`), { force: true })
   runtime.remove(join(paths.queueDir, 'heartbeat', taskId), { force: true })
   if (announce) console.log(`Cleaned up ${taskId}.`)
 }

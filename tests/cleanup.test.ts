@@ -466,4 +466,14 @@ describe('cleanupTask', () => {
 
     expect(existsSync(counter)).toBe(false)
   })
+
+  it('forgets that a previous attempt already filed its findings', () => {
+    seedTask(null)
+    const marker = join(paths.queueDir, 'scanned', `${taskId}.findings-filed`)
+    writeFileSync(marker, '')
+
+    cleanupTask(paths, taskId, makeRuntime())
+
+    expect(existsSync(marker)).toBe(false)
+  })
 })
