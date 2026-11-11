@@ -18,7 +18,7 @@ import {
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
   NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
-  UnverifiedRunnerError, OrchestrationDepsInstallError,
+  UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterMerge,
   type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
@@ -256,6 +256,9 @@ export function createLoop(deps: LoopDeps) {
     comments: ForgeIssueComment[]
   }>()
   const reconciledCycleGates = new Set<number>()
+  // The merge marker each adopted issue was given this run, so a marker the listing does
+  // not yet show as trusted is waited for rather than posted again on every poll.
+  const postedMergeMarkers = new Map<number, string>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
   let gateWaitTarget: string | undefined
@@ -622,16 +625,37 @@ export function createLoop(deps: LoopDeps) {
     runBranch: string,
   ): Promise<void> {
     const comment = issueMergeComment(taskId, mergeCommit, runBranch)
-    const present = trustedCommentPresent(await commentsForIssue(issue), comment)
+    const posted = postedMergeMarkers.get(issue.number) === comment
+    // A marker posted earlier this run is re-read fresh: a cached listing may predate it.
+    let present = trustedCommentPresent(
+      posted ? await forge.listIssueComments(issue.number) : await commentsForIssue(issue),
+      comment,
+    )
+    if (present === false && !posted) {
+      await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
+      postedMergeMarkers.set(issue.number, comment)
+      present = trustedCommentPresent(await forge.listIssueComments(issue.number), comment)
+    }
+    // Without merge-ready the issue carries no lifecycle label, so nothing would revisit
+    // an unconfirmed promotion; keeping it lets a later poll confirm the marker.
+    const warningKey = `adopted-issue-${issue.number}`
     // The marker may already stand under an author whose permission could not be read.
-    // Keeping merge-ready retries this next poll instead of posting a duplicate now.
     if (present === undefined) {
-      throw new Error('merge marker author permission could not be read; deferring')
+      warning(warningKey, `updating adopted issue #${issue.number}`,
+        `could not update adopted issue #${issue.number}: `
+        + 'merge marker author permission could not be read; deferring')
+      return
     }
     if (!present) {
-      await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
+      warning(warningKey, `updating adopted issue #${issue.number}`,
+        `could not update adopted issue #${issue.number}: `
+        + 'merge comment is not visible after publishing it')
+      return
     }
+    confirmIssuePromotion(paths, issue.number)
     await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+    postedMergeMarkers.delete(issue.number)
+    warningLog.recovered(warningKey)
   }
 
   async function adoptRemoteTasks(openFindings?: readonly ForgeIssue[]): Promise<void> {
@@ -796,6 +820,12 @@ export function createLoop(deps: LoopDeps) {
             event('WARN', `could not persist adopted issue #${issue.number}; retrying next poll`)
             continue
           }
+          // mergeRemoteTask synchronizes dependencies only once onMerged returns, so the
+          // failed first attempt skipped it and later gates would run on stale packages.
+          syncOrchestrationDepsAfterMerge(
+            paths, mergeCommit, taskId, orchestrationDepsEvent, orchestrationDepsRuntime,
+            stopTaskProcessesBeforeDependencyInstall,
+          )
         }
         try {
           await Promise.all(adoptionIssues.map((candidate) =>
@@ -3212,8 +3242,15 @@ export function createLoop(deps: LoopDeps) {
             if (!terminalized) {
               throw new Error(`task status changed before grouped merge abandonment`)
             }
-            await Promise.all(linkedIssues.map((issueNumber) =>
-              returnIssueToReady(forge, issueNumber, true)))
+            // A claim that lapsed while the merge gate ran may since belong to another
+            // account, whose live work releasing this task's issues must not strip.
+            if (cachedUser === undefined) cachedUser = await forge.currentUser()
+            const claimant = cachedUser
+            await Promise.all(linkedIssues.map(async (issueNumber) => {
+              if (!await returnIssueToReady(forge, issueNumber, true, claimant)) {
+                issueReleaseOptions.onClaimedElsewhere(issueNumber)
+              }
+            }))
             dropClaimedTaskMaterialization(paths, taskId)
             event('Released', shortTaskId(taskId), 'grouped merge abandoned')
           } catch (releaseError) {

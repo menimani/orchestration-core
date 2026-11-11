@@ -901,15 +901,16 @@ export async function publishImportedIssue(
     return { outcome: 'existing', issueNumber: existing }
   }
 
-  // Quoting every imported line keeps the project's text from posing as this body's
-  // metadata lines or ending its requirement with a heading of its own.
-  const quoted = source.body.trim() === ''
-    ? '> (no description)'
-    : source.body.split(/\r?\n/).map((line) => `> ${line}`.trimEnd()).join('\n')
+  // Quoting every imported line, the title's included, keeps the project's text from
+  // posing as this body's metadata lines or ending its requirement with a heading of
+  // its own.
+  const quote = (text: string): string =>
+    text.split(/\r?\n/).map((line) => `> ${line}`.trimEnd()).join('\n')
+  const quoted = source.body.trim() === '' ? '> (no description)' : quote(source.body)
   // The provenance line stays plain text: a mention or a repository#number reference
   // would notify the source author and backlink their issue on every import.
   const requirement = [
-    source.title,
+    quote(source.title),
     `Imported from issue ${source.number} of ${repository}, opened by ${source.author.login}.`,
     quoted,
   ].join('\n\n')

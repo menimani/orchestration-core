@@ -32,7 +32,9 @@ import { issueConflictKey, writeConflictedAttempts } from '../src/conflictRetry.
 import { existingTaskIdForDesc, taskIdForDesc } from '../src/ids.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
-import { DelegatedTaskMutationError, newTaskSpec, specFile } from '../src/tasks.ts'
+import {
+  DelegatedTaskMutationError, delegateTaskVisible, newTaskSpec, specFile,
+} from '../src/tasks.ts'
 import { frameVerifiedRequirement } from '../src/templates.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -3138,6 +3140,68 @@ describe('publishDelegatedTask', () => {
       .toEqual(new Error('created issue re-read unavailable'))
     expect(forge.issues.size).toBe(1)
     expect(existsSync(join(paths.queueDir, 'issue-fingerprints'))).toBe(false)
+  })
+
+  it('reports the mutated issue when preflight reconciliation fails after closing a duplicate', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    for (const taskId of ['scan-a', 'scan-b', 'scan-c']) {
+      await forge.createIssue({
+        title: description,
+        body: buildIssueBody(description, taskId),
+        labels: [LABEL_FINDING, LABEL_READY],
+      })
+    }
+    const closeIssue = forge.closeIssue.bind(forge)
+    const closed: number[] = []
+    forge.closeIssue = async (issueNumber, comment) => {
+      // The first duplicate closes; the forge then refuses the second.
+      if (closed.length > 0) throw new Error('close refused')
+      closed.push(issueNumber)
+      return closeIssue(issueNumber, comment)
+    }
+    const createIssue = vi.fn(forge.createIssue.bind(forge))
+    forge.createIssue = createIssue
+
+    const failure = await publishDelegatedTask(forge, paths, description, 'user-task')
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(DelegatedTaskMutationError)
+    expect((failure as DelegatedTaskMutationError).issueNumber).toBe(3)
+    expect((failure as DelegatedTaskMutationError).message).toBe(
+      'Could not reconcile issue #3 after delegated work may have been published: close refused',
+    )
+    expect((failure as DelegatedTaskMutationError).cause).toEqual(new Error('close refused'))
+    expect(closed).toEqual([2])
+    expect((await forge.getIssue(2)).state).toBe('closed')
+    expect((await forge.getIssue(3)).state).toBe('open')
+    expect(createIssue).not.toHaveBeenCalled()
+
+    // The same failure reaching delegate must not fall back to a local-only task.
+    closed.length = 0
+    forge.closeIssue = async (issueNumber, comment) => {
+      if (closed.length > 0) throw new Error('close refused')
+      closed.push(issueNumber)
+      return closeIssue(issueNumber, comment)
+    }
+    await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-d'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    createIssue.mockClear()
+    const warnings: string[] = []
+
+    await expect(delegateTaskVisible(paths, description, {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge: async () => forge,
+      warn: (message) => warnings.push(message),
+    })).rejects.toThrow(new DelegatedTaskMutationError(new Error('close refused'), 4))
+
+    expect(closed).toEqual([3])
+    expect(createIssue).not.toHaveBeenCalled()
+    expect(warnings).toEqual([])
+    expect(existsSync(paths.tasksDir) ? readdirSync(paths.tasksDir) : []).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
   })
 })
 

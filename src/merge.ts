@@ -21,7 +21,7 @@ import {
 } from './processRegistry.ts'
 import { execShellSync } from './shell.ts'
 import { specFile } from './tasks.ts'
-import { specRequirements } from './templates.ts'
+import { requirementLead, specRequirements } from './templates.ts'
 import { noChangeMarkerPresent } from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
@@ -289,7 +289,7 @@ function installOrchestrationDeps(
   }
 }
 
-function syncOrchestrationDepsAfterMerge(
+export function syncOrchestrationDepsAfterMerge(
   paths: OrchPaths,
   mergeCommit: string,
   taskId: string,
@@ -948,14 +948,13 @@ function mergeSubject(message: string): string {
 // A requirement naming an advisory or tagged as security work describes a weakness that
 // stays exploitable wherever the fix has not landed yet, so its text stays out of history.
 function isSecurityRequirement(requirement: string): boolean {
-  return /^\s*\[SECURITY\]/i.test(requirement)
+  return /^\s*\[SECURITY\]/i.test(requirementLead(requirement))
     || /\b(?:GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}|CVE-\d{4}-\d{4,})\b/i.test(requirement)
 }
 
 function mergeReason(requirement: string): string {
   if (isSecurityRequirement(requirement)) return 'Why: security fix; details withheld.'
-  const firstParagraph = requirement.trim().split(/\r?\n\s*\r?\n/, 1)[0] ?? ''
-  const text = firstParagraph.replace(/\s+/g, ' ').trim()
+  const text = requirementLead(requirement).replace(/\s+/g, ' ').trim()
   return `Why: ${text.length > MAX_REASON_LENGTH ? `${text.slice(0, MAX_REASON_LENGTH - 3)}...` : text}`
 }
 

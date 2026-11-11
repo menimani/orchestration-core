@@ -184,7 +184,7 @@ describe('orphanedWorktreeDirectories', () => {
     expect(orphanedWorktreeDirectories(paths)).toEqual([orphan])
     expect(worktreeHolderHint(orphan, createWindowsOperatingSystem())).toContain('handle.exe')
     expect(worktreeHolderHint("/tmp/orphan's worktree", createPosixOperatingSystem()))
-      .toBe("Find holder: lsof +D -- '/tmp/orphan'\\''s worktree'")
+      .toBe("Find holder: lsof +D '/tmp/orphan'\\''s worktree'")
   })
 
   it('gives the holder lookup the absolute path of a fleet worktree outside the checkout', () => {

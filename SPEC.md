@@ -314,7 +314,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    When generating a task specification, the description's leading category selects a
    project pitfall list: `[TEST]` selects `templates/pitfalls/tests.md`, `[DOCS]` selects
    `templates/pitfalls/docs.md`, and every other description selects
-   `templates/pitfalls/code.md`. When the selected file exists, its contents follow the
+   `templates/pitfalls/code.md`. The category is read from the description's first
+   paragraph with the quote marker (`> ` or a bare `>`) removed from the start of each
+   line, so an imported issue's quoted title selects a list as its own tag would.
+   When the selected file exists, its contents follow the
    shared task requirements in the generated specification; when it does not exist, no
    pitfall list is added.
 4. Each task runs in its own worktree under `orchestration/worktrees/<id>` on branch
@@ -451,10 +454,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
 8a. A task's merge commit has the subject `Merge <task-id> via orchestration`, followed by
     the forge's closing text for each linked issue the merge may name. Its body records why
     the work exists, as one `Why:` line per distinct requirement: the first paragraph,
-    whitespace collapsed, cut at 300 characters. A local merge reads the requirements from
+    whitespace collapsed, cut at 300 characters. The tag and the paragraph are read with
+    the quote marker (`> ` or a bare `>`) removed from the start of each of its lines,
+    so an imported issue contributes its title. A local merge reads the requirements from
     the task's specification, framed requirements in order or else its `## Requirement`
     section; an adopted worker branch reads them from its issues. A requirement tagged
-    `[SECURITY]` or naming a GHSA or CVE identifier contributes only
+    `[SECURITY]`, an imported one by its quoted title, or naming a GHSA or CVE identifier
+    contributes only
     `Why: security fix; details withheld.`, because its text describes a weakness that
     stays exploitable wherever the fix has not landed. A retry recognizes a merge it
     already applied by the exact task head and the subject alone, since the requirement
@@ -573,8 +579,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     live task process tree, since `npm ci` empties the `node_modules` those processes
     load from; each stopped task is reported failed as item 19 describes. If any tree
     survives the stop, the install is skipped rather than run underneath it: the loop
-    logs a `Skipped` orchestration deps event naming the surviving tree, keeps the
-    pending record, and stops with an error asking for a restart once the process is
+    logs a `Skipped` orchestration deps event naming the merge subject and a `WARN`
+    naming the surviving tree's short task id and PID, keeps the pending record, and stops with an error asking for a restart once the process is
     gone. A successful install records the lockfile hash under `node_modules`.
     At daemon startup, after ownership is acquired and before adapters are loaded, the
     same install runs when a pending record exists — even if the recorded hash matches —
@@ -1211,9 +1217,12 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     specification and requires an exact `REQUIREMENT_COMPLETE: #N` final-response marker.
     The worker refuses to publish or merge the task until all linked issues have markers,
     so partial implementation cannot close an unaddressed finding. A grouped task that
-    fails, cannot start, or reaches abandoned merge handling returns every member to ready,
-    unassigned, with `loop:group-singleton`; those findings are claimed individually on
-    retry rather than recreating the failed group. A failed task parks a member instead
+    fails or cannot start returns every member to ready, unassigned, with
+    `loop:group-singleton`. One that reaches abandoned merge handling does the same for
+    each member that is unassigned or still assigned to the daemon's own forge account,
+    leaves a member now assigned only to another account as it is, and releases no member,
+    logging a warning, when the current forge user cannot be read. Released findings are
+    claimed individually on retry rather than recreating the failed group. A failed task parks a member instead
     once its per-issue retry bound is reached. Fingerprints and their ledger remain per
     finding.
 
@@ -1377,13 +1386,22 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     `--no-ff` and `closes #N` for every issue named by a grouped worker report, unless the
     queue is kept in a fleet's `issueRepository` (item 35). It persists
     a successful adoption for every member before updating the issues, so a later poll
-    retries failed metadata updates without merging again. These per-issue promotion
+    retries failed metadata updates without merging again. An adopted issue leaves
+    `loop:merge-ready`, and its promotion is confirmed, only once a fresh comment listing
+    shows its exact `MERGED:` marker from an account with write access; a marker from an
+    author whose access is undetermined does not count. Within one daemon run the marker is
+    posted at most once per issue and merge commit: later polls only re-read the comments,
+    and a marker still not visible as trusted, or one under an undetermined author, is
+    reported once through the deduplicated warning log, keyed by the issue, and logged as
+    recovered when the marker is confirmed. These per-issue promotion
     records use the schema and fail-closed repair behavior in item 35; malformed persisted
     state stops reconciliation rather than permitting a duplicate merge or issue release. A
     successful adoption logs aligned `Merging` and `Merged` events keyed by the short
     task id, with the latter naming the first eight characters of the merge commit;
     promotion closes the issue. A failure logs the aligned `Failed` event with the short
-    task id and merge-log name. It is
+    task id and merge-log name; a failure before the task id is known — a missing worker
+    branch report, a report naming an unavailable issue, or a grouped member reporting a
+    different branch — logs a `WARN` naming the issue instead. Either failure is
     commented on the issue, swaps `loop:merge-ready` for `loop:merge-failed` — adding the
     failure label first and reading the issue back to confirm it holds that single
     lifecycle label, logging a WARN when it does not — and counts
@@ -1421,10 +1439,11 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     until an operator relabels it ready. Only a fleet queue that imports needs those two
     labels, so a real run creates them in the queue repository itself and the shared set
     that `init` and `verify-setup` manage is unchanged. Its requirement is the issue title, a line naming
-    the source issue and its author, and the issue body with every line quoted, so the
-    project's text can neither pose as the queue issue's metadata lines nor end its
-    requirement with a heading. `--dry-run` prints `Would import:` lines and files
-    nothing; a real run prints `Imported:` lines naming the queue issue and whether it is
+    the source issue and its author, and the issue body, with every line of the title and
+    the body quoted, so the project's text can neither pose as the queue issue's metadata lines nor end its
+    requirement with a heading; the merge commit's `Why:` line, its security withholding,
+    and the pitfall list still read the quoted title's tag and text (item 8a). `--dry-run`
+    prints `Would import:` lines and files nothing; a real run prints `Imported:` lines naming the queue issue and whether it is
     ready. A claim records the source fingerprints of the issues it took, and the task's
     merge commit, local or adopted, carries the forge's closing text for those source
     issues of the project's own repository, the only issue numbers a merge in a fleet with

@@ -492,7 +492,9 @@ linked issue. When investigation proves an ordinary task needs no implementation
 `NO_CHANGE_WARRANTED` final-message marker terminalizes its clean, commit-free task and closes
 the linked issue directly instead of entering merge retries. A second machine runs execution-only with
 `worker <base-ref>` — it claims and executes, pushes finished branches, and never scans,
-reviews, or merges. Exactly one ordinary daemon owns the branch and adopts those pushes.
+reviews, or merges. Exactly one ordinary daemon owns the branch and adopts those pushes. An
+adopted issue leaves `loop:merge-ready` only after its merge marker is confirmed from an
+account with write access, and each run posts that marker at most once.
 
 Claims are gated on authorship. An issue is claimed only when its author holds write access
 to the repository the issue lives in — `write`, `maintain`, or `admin` — since those

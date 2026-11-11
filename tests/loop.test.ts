@@ -17,6 +17,7 @@ import {
   recordIssuesForTask, LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS,
   LABEL_MERGE_READY, LABEL_READY, LABEL_RETRY_EXHAUSTED, LABEL_UNTRUSTED_AUTHOR,
 } from '../src/issueQueue.ts'
+import { pitfallsFileForDesc } from '../src/gates.ts'
 import { existingTaskIdForDesc, shortTaskId } from '../src/ids.ts'
 import { cleanupTask } from '../src/cleanup.ts'
 import { runCleanupCommand } from '../src/cleanupCommand.ts'
@@ -4864,6 +4865,22 @@ describe('scanForNextTasks', () => {
     expect(spec).not.toContain('clearAllMocks keeps implementations')
   })
 
+  it('selects the pitfall list from the tag of an imported requirement', () => {
+    const imported = (title: string): string => [
+      `> ${title}`,
+      'Imported from issue 9 of acme/widget, opened by octo.',
+      '> The body.',
+    ].join('\n\n')
+    const pitfallsDir = join(paths.projectRoot, 'templates', 'pitfalls')
+
+    expect(pitfallsFileForDesc(paths, imported('[TEST] cover the retry path')))
+      .toBe(join(pitfallsDir, 'tests.md'))
+    expect(pitfallsFileForDesc(paths, imported('[DOCS] a stale README section')))
+      .toBe(join(pitfallsDir, 'docs.md'))
+    expect(pitfallsFileForDesc(paths, imported('[BUG] a defect')))
+      .toBe(join(pitfallsDir, 'code.md'))
+  })
+
   it('adds no pitfall list when the selected file is missing', async () => {
     rmSync(join(paths.root, 'templates', 'pitfalls', 'docs.md'))
     const loop = makeLoop()
@@ -5197,6 +5214,26 @@ describe('documentation findings held for the cycle', () => {
     expect(logText()).toContain('WARN task limit 1 ignored findings from 038_scan')
     expect(heldRecords()).toEqual([])
     expect(taskIdsNow()).toEqual([bugId])
+    expect(suiteRuns()).toBe(true)
+  })
+
+  it('drops held findings with the depth-limit warning when their depth exceeds the bound', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    // Recorded under a run whose bound allowed depth 2; the restarted loop allows only 1.
+    writeFileSync(heldFile(), [
+      '1\t20250101_000000_040_scan\t[DOCS] `README.md` names a removed flag',
+      '2\t20250101_000000_040_scan\t[DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n') + '\n')
+    const loop = makeLoop({ ...gateConfig, maxGrowthDepth: 1 }, gatedProject)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logText()).toContain('WARN growth depth limit 1 ignored findings from 040_scan')
+    expect(logText()).not.toContain('Released')
+    expect(heldRecords()).toEqual([])
+    expect(taskIdsNow()).toEqual([])
+    expect(backlogEntries()).toEqual([])
     expect(suiteRuns()).toBe(true)
   })
 
