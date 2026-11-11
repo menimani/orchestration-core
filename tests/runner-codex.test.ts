@@ -154,6 +154,41 @@ describe('createCodexRunner', () => {
     ].join('\n'))
   })
 
+  it('renders context commands and drops front matter in CRLF guidance', () => {
+    const repoRoot = join('fixture', 'repository')
+    const packageRoot = join(repoRoot, 'orchestration', 'ts')
+    const source = [
+      '---',
+      'name: example-skill',
+      'argument-hint: "<pr-number>"',
+      '---',
+      '',
+      '  !`gh pr view $ARGUMENTS --json title`  ',
+      '!`git status`',
+      '',
+    ].join('\r\n')
+
+    const rendered = createCodexRunner().sharedSkills.renderFile(
+      Buffer.from(source),
+      {
+        repoRoot,
+        packageRoot,
+        commandPrefixPlaceholder: '{{COMMAND_PREFIX}}',
+        packagePathPrefixPlaceholder: '{{PACKAGE_PATH_PREFIX}}',
+      },
+    ).toString('utf8')
+
+    expect(rendered).toBe([
+      '---',
+      'name: example-skill',
+      '---',
+      '',
+      '  Run `gh pr view <pr-number> --json title` and use its output as context before continuing.',
+      'Run `git status` and use its output as context before continuing.',
+      '',
+    ].join('\r\n'))
+  })
+
   it('uses Codex guidance and skill references only when their files are available', () => {
     const repoRoot = join('fixture', 'repository')
     const packageRoot = join(repoRoot, 'orchestration', 'ts')
