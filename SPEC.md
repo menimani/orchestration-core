@@ -861,7 +861,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the daemon starts — still recorded running but with no process id, as a graceful
     shutdown leaves its in-flight tasks — is likewise reported failed without counting
     toward the burst, since it is not fresh evidence of a broken environment; it still
-    counts toward its issues' consecutive failure counts.
+    counts toward its issues' consecutive failure counts. A task whose status is already
+    failed when the daemon starts, with no `.failed` flag and absent from the previous
+    run's announced failures (item 20) — as a `status` query after a crash or a run on
+    another branch leaves it — is treated the same way: announced once, recorded
+    against the cycle, and counted toward its issues' consecutive failure counts, but
+    not toward the burst. A task that fails after startup counts as before.
 19a. In issue-queue mode, every failed-task release increments a persistent per-issue
      consecutive failure count in the queue directory. Before `MAX_ISSUE_RETRIES`
      (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and

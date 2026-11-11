@@ -732,6 +732,14 @@ describe('loop daemon ownership', () => {
     await writeStatus(paths, taskId, 'failed')
     writeFileSync(daemonFile('run-branch.txt'), `${git(['branch', '--show-current']).trim()}\n`)
     writeFileSync(daemonFile('merge-failure-count.txt'), '2\n')
+    // A task already failed at startup no longer trips the burst guard, so a queued
+    // entry that keeps failing its startup stops the loop before the run can finish
+    // and clear its session counters.
+    const queuedId = '20260810_010204_032_auto-invalid-effort'
+    writeFileSync(join(paths.tasksDir, `${queuedId}.md`), '# spec\n')
+    mkdirSync(daemonFile('effort'), { recursive: true })
+    writeFileSync(join(daemonFile('effort'), queuedId), 'impossible\n')
+    writeFileSync(daemonFile('backlog.txt'), `${queuedId}:1\n`)
 
     const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,

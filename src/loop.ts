@@ -222,6 +222,21 @@ export function createLoop(deps: LoopDeps) {
   const tasksFailedBeforeStartup = new Set(existsSync(announcedFailuresFile)
     ? readFileSync(announcedFailuresFile, 'utf8').split(/\r?\n/).filter((taskId) => taskId !== '')
     : [])
+  // A task can also be failed before the first poll sees it: a status query after a
+  // crash fails running tasks whose runner is gone, and a run on another branch can
+  // leave failures it never announced. Each is still announced once and counted
+  // against its issues' retry budget, but it is not fresh evidence of a broken
+  // environment and therefore must not trip the burst guard either.
+  const tasksFailedAtStartup = new Set(listTaskIds(paths).filter((taskId) => {
+    try {
+      return readStatus(paths, taskId)?.status === 'failed'
+        && !existsSync(join(scannedDir, `${taskId}.failed`))
+        && !tasksFailedBeforeStartup.has(taskId)
+    } catch {
+      // The poll owns malformed-status reporting, as for the startup set above.
+      return false
+    }
+  }))
   // Trees stopped so a merged dependency change can be installed died for the loop's
   // own reason, not the task's. Like the startup set, they are reported failed and
   // their issues released, but they count toward neither an issue's retry budget nor
@@ -3164,6 +3179,7 @@ export function createLoop(deps: LoopDeps) {
         : before
       if (status === undefined) continue
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
+      const wasFailedAtStartup = tasksFailedAtStartup.delete(taskId)
       // A task can finish between the stop and this refresh; only once it leaves
       // running is the stop's verdict known, so the mark is kept until then.
       const wasStoppedByLoop = status !== 'running'
@@ -3242,7 +3258,9 @@ export function createLoop(deps: LoopDeps) {
           rmSync(join(paths.queueDir, `cycle-complete-${cycleNow}`), { force: true })
         }
         writeFileSync(failedFlag, '')
-        if (!wasDeadAtStartup && !wasStoppedByLoop) burstFailures += 1
+        if (!wasDeadAtStartup && !wasFailedAtStartup && !wasStoppedByLoop) {
+          burstFailures += 1
+        }
       }
 
       const scannedFlag = join(scannedDir, taskId)

@@ -3625,6 +3625,103 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
+  it('does not count tasks already failed at daemon startup as a failure burst', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    const taskIds = ['pre-f1', 'pre-f2', 'pre-f3']
+    for (const taskId of taskIds) writeRawStatus(taskId, 'failed')
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of taskIds) {
+      expect(logged.filter((line) =>
+        line === `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`))
+        .toHaveLength(1)
+    }
+    expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n'))
+      .toEqual(taskIds)
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    setLogged([])
+    expect(await loop.poll()).toBe('continue')
+    expect(logged.some((line) => line.startsWith('FAILED:'))).toBe(false)
+  })
+
+  it('still stops on a burst of fresh failures beside tasks failed at startup', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    for (const taskId of ['pre-f1', 'pre-f2', 'pre-f3']) writeRawStatus(taskId, 'failed')
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+
+    expect(await loop.poll()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    for (const taskId of ['new-f1', 'new-f2', 'new-f3']) writeRawStatus(taskId, 'running', null)
+    setLogged([])
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logText()).toContain('ERROR 3 tasks failed in one poll; stopping for environment repair')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('does not announce a startup failure already listed as announced', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeRawStatus('listed-f1', 'failed')
+    writeRawStatus('unlisted-f1', 'failed')
+    writeFileSync(join(paths.queueDir, 'announced-failures.txt'), 'listed-f1\n')
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 1 })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged.some((line) => line.startsWith('FAILED: listed-f1'))).toBe(false)
+    expect(logged).toContain(
+      `FAILED: unlisted-f1 — log: ${join(paths.logsDir, 'unlisted-f1.log')}`)
+    expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe('unlisted-f1\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('releases and counts the issue of a task already failed at startup', async () => {
+    initializeGitRepo()
+    // The released issue is ready again, so the restarted loop may claim it anew.
+    const runner = makeRunner()
+    const config = {
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+      maxBurstFailures: 1,
+    }
+    const first = makeLoop(config, stubProject, undefined, undefined, runner)
+    first.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: '[BUG] `src/stale.ts` failure before restart',
+      body: buildIssueBody('[BUG] `src/stale.ts` failure before restart', 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    await first.poll()
+    const failedTaskId = readdirSync(paths.statusDir)[0]!.replace(/\.json$/, '')
+    writeRawStatus(failedTaskId, 'failed')
+    setLogged([])
+
+    // A restarted daemon meets the same forge, so it reuses the first loop's fake.
+    const forge = fakeForge
+    const next = createLoop({
+      paths,
+      config: { ...loadConfig({}), taskDeadlineHours: 0, ...config },
+      forge,
+      runner,
+      project: stubProject,
+      log: (line) => logged.push(line),
+      now: () => new Date(2026, 7, 8, 12, 0, 0),
+    })
+    expect(await next.poll()).toBe('continue')
+
+    expect(logged).toContain(
+      `FAILED: ${failedTaskId} — log: ${join(paths.logsDir, `${failedTaskId}.log`)}`)
+    expect(logText()).toContain('grouped task failed')
+    expect(issueNumbersForTask(paths, failedTaskId)).toEqual([])
+    expect(readFileSync(join(paths.queueDir, 'issue-failure-count', String(issueNumber)), 'utf8'))
+      .toBe('1\n')
+    expect(logText()).not.toContain('tasks failed in one poll')
+  })
+
   it('neither announces nor counts failures left by a finished run', async () => {
     initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
