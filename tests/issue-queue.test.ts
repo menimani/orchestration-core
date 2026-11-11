@@ -1253,6 +1253,29 @@ describe('claimIssueGroup', () => {
     expect(after.labels).toContain(LABEL_READY)
   })
 
+  it('leaves a claim another worker completed before this worker assigned itself', async () => {
+    const issueNumber = await readyIssue('[BUG] `src/a/b.ts` is claimed elsewhere first')
+    const issue = await forge.getIssue(issueNumber)
+    const assignIssue = forge.assignIssue.bind(forge)
+    forge.assignIssue = async (number, assignee) => {
+      if (number === issueNumber && assignee === 'worker-a') {
+        // worker-z read the same ready issue and finished its whole claim first.
+        await assignIssue(number, 'worker-z')
+        await forge.addLabel(number, LABEL_IN_PROGRESS)
+        await forge.removeLabel(number, LABEL_READY)
+      }
+      await assignIssue(number, assignee)
+    }
+
+    const result = await claimIssueGroup(forge, paths, [issue], 'worker-a', appendRequirements)
+
+    expect(result).toEqual({ outcome: 'lost-race', issueNumber })
+    const after = await forge.getIssue(issueNumber)
+    expect(after.assignees).toEqual(['worker-z'])
+    expect(after.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+    expect(readdirSync(paths.tasksDir)).toEqual([])
+  })
+
   it.each([
     ['loses its lifecycle label', async (number: number) => {
       await forge.removeLabel(number, LABEL_READY)
