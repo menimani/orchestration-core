@@ -1092,18 +1092,47 @@ export function createLoop(deps: LoopDeps) {
     return retryId
   }
 
-  /** Once a retry lands, the commits kept for it are history: drop their branches. */
-  function retireConflictedAttempts(taskId: string, linkedIssues: number[]): void {
+  // Exit 1 is the only answer that means "absent". Any other failure is rethrown, because
+  // reading it as absent would drop the record of a branch that is still there.
+  function localBranchPresent(branch: string): boolean {
     try {
-      const keys = [taskId, ...linkedIssues.map(issueConflictKey)]
-      const branches = new Set(keys.flatMap((key) =>
-        readConflictedAttempts(paths, key).map(({ branch }) => branch)))
-      for (const branch of branches) {
-        if (optionalGit(['branch', '--list', branch]).trim() !== '') git(['branch', '-D', branch])
-      }
-      for (const key of keys) removeConflictedAttempts(paths, key)
+      git(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`])
+      return true
     } catch (error) {
-      event('WARN', `could not remove commits kept for ${shortTaskId(taskId)}: ${errorSummary(error)}`)
+      if ((error as { status?: number | null }).status === 1) return false
+      throw error
+    }
+  }
+
+  /**
+   * Once a retry lands, the commits kept for it are history: drop their branches. A record
+   * is removed only once every branch it names is confirmed gone, so a branch that could
+   * not be removed stays recorded and is reported rather than orphaned.
+   */
+  function retireConflictedAttempts(taskId: string, linkedIssues: number[]): void {
+    const failures: string[] = []
+    try {
+      const records = [taskId, ...linkedIssues.map(issueConflictKey)].map((key) => ({
+        key, branches: readConflictedAttempts(paths, key).map(({ branch }) => branch),
+      }))
+      const remaining = new Set<string>()
+      for (const branch of new Set(records.flatMap(({ branches }) => branches))) {
+        try {
+          if (localBranchPresent(branch)) git(['branch', '-D', branch])
+          if (localBranchPresent(branch)) throw new Error('branch is still present after deletion')
+        } catch (error) {
+          remaining.add(branch)
+          failures.push(`${branch}: ${errorSummary(error)}`)
+        }
+      }
+      for (const { key, branches } of records) {
+        if (branches.every((branch) => !remaining.has(branch))) removeConflictedAttempts(paths, key)
+      }
+    } catch (error) {
+      failures.push(errorSummary(error))
+    }
+    if (failures.length > 0) {
+      event('WARN', `could not remove commits kept for ${shortTaskId(taskId)}: ${failures.join('; ')}`)
     }
   }
 
