@@ -170,8 +170,6 @@ export interface MergeOptions {
   onMerged?: ((mergeCommit: string) => void) | undefined
 }
 
-export type RemoteMergeOptions = MergeOptions
-
 export interface NoChangeOptions {
   outputFile?: string | undefined
   onNoChange?: (() => Promise<void>) | undefined
@@ -1506,7 +1504,7 @@ export async function mergeRemoteTask(
   remote: string,
   branch: string,
   expectedHead: string,
-  options: RemoteMergeOptions,
+  options: MergeOptions,
 ): Promise<string> {
   if (!/^task\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(branch)) {
     throw new MergeError(`Issue #${issueNumber} reported an invalid task branch: ${branch}`)
