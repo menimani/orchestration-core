@@ -1207,7 +1207,7 @@ function reclaimRetiredMergeGuard(dir: string): boolean {
 
 type MergeGuardAcquisition = { acquired: true; file: string; owner: MergeGuardOwner } | {
   acquired: false
-  reason: 'active' | 'succeeded'
+  reason: 'active'
 }
 
 function acquireMergeGuard(
@@ -1225,7 +1225,6 @@ function acquireMergeGuard(
     if (publishMergeGuard(dir, owner)) {
       return { acquired: true, file: dir, owner }
     }
-    if (existsSync(join(dir, 'succeeded'))) return { acquired: false, reason: 'succeeded' }
     if (existsSync(join(dir, 'retired'))) {
       reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       if (reclaimRetiredMergeGuard(dir)) {
