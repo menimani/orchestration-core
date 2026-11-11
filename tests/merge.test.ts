@@ -1413,6 +1413,29 @@ describe('mergeRemoteTask', () => {
     expect(onMerged).not.toHaveBeenCalled()
   })
 
+  it('adopts the branch when the inspection diff cannot be produced', async () => {
+    const branch = 'task/remote-inspection-diff-fails'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    // A failing external diff driver makes every patch-producing `git diff` exit non-zero.
+    git(repoRoot, ['config', 'diff.external', 'false'])
+    const onMerged = vi.fn()
+
+    const mergeCommit = await mergeRemoteTask(paths, 231, 'origin', branch, expectedHead, {
+      taskGate: 'light', project: noCheckProject, onMerged,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(mergeCommit)
+    expect(git(repoRoot, ['rev-parse', `${mergeCommit}^2`]).trim()).toBe(expectedHead)
+    expect(onMerged).toHaveBeenCalledWith(mergeCommit)
+  })
+
   it('leaves issue-closing syntax to the forge adapter', async () => {
     const branch = 'task/remote-runner-neutral-message'
     git(repoRoot, ['switch', '-qc', branch])

@@ -1573,7 +1573,11 @@ export async function mergeRemoteTask(
       mergeRuntime,
     )
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
-    io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
+    try {
+      io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
+    } catch {
+      // an empty inspection diff is fine
+    }
     return runMergeChecks(worktree, currentBranch, options, io)
   })
 
