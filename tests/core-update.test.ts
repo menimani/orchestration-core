@@ -107,6 +107,23 @@ function makeLoop(
   return loop
 }
 
+/** One pre-cycle update outside the loop, so its outcome and events are all it reports. */
+function updateDirectly(
+  coreConfig: ReturnType<typeof config>,
+  runtime: CoreUpdateRuntime = { packageRoot, git },
+) {
+  return updateCoreBeforeCycle(
+    paths,
+    coreConfig,
+    makeFakeForge(),
+    { sharedSkills: fakeRunnerSharedSkills, start: async () => process.pid },
+    stubProject,
+    1,
+    event as CoreUpdateEvent,
+    runtime,
+  )
+}
+
 function useFixtureRoot(root: string): void {
   fixtureRoot = root
   repoRoot = join(root, 'consumer')
@@ -631,6 +648,178 @@ export const consumerProject: ProjectAdapter & Record<string, unknown> = {
     expect(git(repoRoot, ['status', '--porcelain'])).toBe('')
     expect(runnerStarts).toHaveLength(0)
     expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+  })
+
+  it('warns and continues on the old core when UPSTREAM_REMOTE is not configured', async () => {
+    advanceUpstream('version two\n')
+    const runtime = { packageRoot, git: vi.fn(git) }
+
+    expect(await updateDirectly({ ...config(), upstreamRemote: ' ' }, runtime)).toBe('continue')
+    expect(runtime.git).not.toHaveBeenCalledWith(repoRoot, expect.arrayContaining(['fetch']))
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8')).toBe('version one\n')
+    expect(events).toEqual(['WARN core update skipped: UPSTREAM_REMOTE is not configured'])
+  })
+
+  it('warns and continues on the old core when the upstream fetch fails', async () => {
+    advanceUpstream('version two\n')
+    const fetchFailureGit = (root: string, args: string[]): string => {
+      if (args[0] === 'fetch') throw new Error('simulated fetch failure')
+      return git(root, args)
+    }
+
+    expect(await updateDirectly(config(), { packageRoot, git: fetchFailureGit })).toBe('continue')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8')).toBe('version one\n')
+    expect(events).toEqual(['WARN core update fetch failed: simulated fetch failure'])
+  })
+
+  it('warns and continues on the old core when the import check fails', async () => {
+    advanceUpstream('version two\n')
+    const checkFailureGit = (root: string, args: string[]): string => {
+      if (args[0] === 'rev-parse' && args[1] === 'FETCH_HEAD') {
+        throw new Error('simulated check failure')
+      }
+      return git(root, args)
+    }
+
+    expect(await updateDirectly(config(), { packageRoot, git: checkFailureGit })).toBe('continue')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8')).toBe('version one\n')
+    expect(events).toEqual(['WARN core update check failed: simulated check failure'])
+  })
+
+  it('warns and continues on the old core when the prefix has no subtree import', async () => {
+    advanceUpstream('version two\n')
+    // No recorded import message and no upstream commit whose tree matches the subtree.
+    const noImportGit = (root: string, args: string[]): string => {
+      if (args[0] === 'log') return ''
+      return git(root, args)
+    }
+
+    expect(await updateDirectly(config(), { packageRoot, git: noImportGit })).toBe('continue')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8')).toBe('version one\n')
+    expect(events).toEqual(['WARN core update skipped: orchestration/ts has no git subtree import'])
+  })
+
+  it('warns and continues on the old core when the import is not behind upstream', async () => {
+    const imported = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    // Upstream history rewritten onto an unrelated root: the import is not its ancestor.
+    git(upstreamRoot, ['switch', '--orphan', 'rewritten'])
+    writeFileSync(join(upstreamRoot, 'core.txt'), 'rewritten\n')
+    commit(upstreamRoot, 'feat: rewritten core')
+    git(upstreamRoot, ['branch', '-f', 'main', 'rewritten'])
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+
+    expect(await updateDirectly(config())).toBe('continue')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(oldHead)
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8')).toBe('version one\n')
+    expect(events).toEqual([
+      `WARN core update skipped: imported ${imported.slice(0, 8)} is not behind main`,
+    ])
+  })
+
+  it('warns and continues on the old core when the status check fails', async () => {
+    const imported = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    const upstream = advanceUpstream('version two\n')
+    const statusFailureGit = (root: string, args: string[]): string => {
+      if (args[0] === 'status') throw new Error('simulated status failure')
+      return git(root, args)
+    }
+
+    expect(await updateDirectly(config(), { packageRoot, git: statusFailureGit })).toBe('continue')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8')).toBe('version one\n')
+    expect(events).toEqual([
+      'WARN core update status check failed: simulated status failure',
+      `Status core behind imported ${imported.slice(0, 8)} upstream ${upstream.slice(0, 8)}; `
+        + 'continuing on old code',
+    ])
+  })
+
+  it('reports a successful pull that left the subtree unchanged without restarting', async () => {
+    const imported = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    const upstream = advanceUpstream('version two\n')
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+    const noOpPullGit = (root: string, args: string[]): string => {
+      if (args[0] === 'subtree' && args[1] === 'pull') return ''
+      return git(root, args)
+    }
+
+    expect(await updateDirectly(config(), { packageRoot, git: noOpPullGit })).toBe('continue')
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(oldHead)
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8')).toBe('version one\n')
+    expect(events).toEqual([
+      `Status core behind imported ${imported.slice(0, 8)} upstream ${upstream.slice(0, 8)}; `
+        + 'continuing on old code: pull did not change the subtree',
+    ])
+  })
+
+  it('stops when a failed pull leaves a commit that recovery does not undo', async () => {
+    advanceUpstream('version two\n')
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+    let strayHead = ''
+    const movedHeadGit = (root: string, args: string[]): string => {
+      if (args[0] === 'subtree' && args[1] === 'pull') {
+        git(root, ['commit', '--allow-empty', '-m', 'chore: stray commit'])
+        strayHead = git(root, ['rev-parse', 'HEAD'])
+        throw new Error('simulated pull failure')
+      }
+      return git(root, args)
+    }
+
+    const failure = await updateDirectly(config(), { packageRoot, git: movedHeadGit })
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(strayHead).not.toBe('')
+    expect(strayHead).not.toBe(oldHead)
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe(
+      'core update pull failed and recovery did not restore the repository: expected HEAD '
+      + `${oldHead.slice(0, 8)}, found ${strayHead.slice(0, 8)}; working tree clean`,
+    )
+    expect(events).toEqual([])
+  })
+
+  it('stops when a failed pull leaves a dirty tree that recovery does not clean', async () => {
+    advanceUpstream('version two\n')
+    const oldHead = git(repoRoot, ['rev-parse', 'HEAD'])
+    const dirtyTreeGit = (root: string, args: string[]): string => {
+      if (args[0] === 'subtree' && args[1] === 'pull') {
+        writeFileSync(join(root, 'stray.txt'), 'stray\n')
+        throw new Error('simulated pull failure')
+      }
+      return git(root, args)
+    }
+
+    await expect(updateDirectly(config(), { packageRoot, git: dirtyTreeGit })).rejects.toThrow(
+      'core update pull failed and recovery did not restore the repository: expected HEAD '
+      + `${oldHead.slice(0, 8)}, found ${oldHead.slice(0, 8)}; working tree dirty (?? stray.txt)`,
+    )
+    expect(git(repoRoot, ['rev-parse', 'HEAD'])).toBe(oldHead)
+    expect(events).toEqual([])
+  })
+
+  it.each([
+    ['rev-parse', ['rev-parse', 'HEAD']],
+    ['status', ['status', '--porcelain']],
+  ])('stops when a failed pull cannot verify recovery because %s fails', async (_name, failing) => {
+    advanceUpstream('version two\n')
+    let pullFailed = false
+    const verificationFailureGit = (root: string, args: string[]): string => {
+      if (args[0] === 'subtree' && args[1] === 'pull') {
+        pullFailed = true
+        throw new Error('simulated pull failure')
+      }
+      if (pullFailed && args.join(' ') === failing.join(' ')) {
+        throw new Error('simulated verification failure')
+      }
+      return git(root, args)
+    }
+
+    await expect(updateDirectly(config(), { packageRoot, git: verificationFailureGit }))
+      .rejects.toThrow(
+        'core update pull failed and recovery could not be verified: '
+        + 'simulated verification failure; pull failure: simulated pull failure',
+      )
+    expect(pullFailed).toBe(true)
+    expect(events).toEqual([])
   })
 
   it('skips the check and the skill sync entirely when CORE_AUTO_UPDATE=false', async () => {
