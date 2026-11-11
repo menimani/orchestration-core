@@ -52,7 +52,9 @@ import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { interruptedScansFileName } from './scanRecovery.ts'
-import { heldFindingsFileName, readHeldFindings, writeHeldFindings } from './heldFindings.ts'
+import {
+  clearHeldFindings, heldFindingsFileName, readHeldFindings, writeHeldFindings,
+} from './heldFindings.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
@@ -64,7 +66,7 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   isDocumentationFinding, isReadyToClaim,
   issueSourcesForTask, markIssueMergeFailed, missingRequirementCompletionMarkers, parseIssueBody,
-  publishFinding,
+  openFindingFingerprints, publishFinding,
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
@@ -1367,9 +1369,34 @@ export function createLoop(deps: LoopDeps) {
    * finding of their greatest depth. Returns true while the gate must wait: the combined
    * task now exists, or filing it failed and a later poll retries. The holding file is
    * truncated only once the task or issue exists, or when the growth bounds drop it.
+   *
+   * Filing can fail after the issue already exists, which keeps the holding file. A held
+   * finding an open trusted issue (or, locally, an outstanding task) already carries is
+   * therefore dropped first, so a retry never files the same findings a second time.
    */
-  async function releaseHeldDocumentation(): Promise<boolean> {
-    const held = readHeldFindings(paths)
+  async function releaseHeldDocumentation(
+    openFindings: readonly ForgeIssue[] | undefined,
+  ): Promise<boolean> {
+    let held = readHeldFindings(paths)
+    if (held.length === 0) return false
+    const covered = config.issueQueueEnabled ? openFindingFingerprints(openFindings ?? []) : undefined
+    const survivors = held.filter(({ finding }) => covered === undefined
+      ? outstandingFindingTask(finding, 'auto') === undefined
+      : !covered.has(fingerprintOf(finding)))
+    if (survivors.length < held.length) {
+      event(
+        'Deduplicated',
+        'docs',
+        `${held.length - survivors.length} held documentation finding(s) already carried by an open ${covered === undefined ? 'task' : 'issue'}`,
+      )
+      if (survivors.length === 0) {
+        clearHeldFindings(paths)
+        previousGateFailures.delete('release-documentation')
+        return false
+      }
+      writeHeldFindings(paths, survivors)
+      held = survivors
+    }
     const first = held[0]
     if (first === undefined) return false
     const findings = held.map(({ finding }) => finding)
@@ -2416,6 +2443,7 @@ export function createLoop(deps: LoopDeps) {
       gateWaitTarget = 'completion scan'
       return 'continue'
     }
+    let gateOpenFindings: readonly ForgeIssue[] | undefined
     if (config.issueQueueEnabled) {
       if (knownOpenFindings === null) {
         gateWaitTarget = 'finding status'
@@ -2423,6 +2451,7 @@ export function createLoop(deps: LoopDeps) {
       }
       try {
         const openFindings = knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING)
+        gateOpenFindings = openFindings
         const openIssues = openFindings.filter((issue) =>
           !issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)
             && issue.labels.some((label) => [
@@ -2510,7 +2539,7 @@ export function createLoop(deps: LoopDeps) {
     }
     // Every other task of the cycle is terminal, so the documentation held meanwhile
     // describes the code it will ship with. Its one task closes the cycle instead.
-    if (await releaseHeldDocumentation()) return 'continue'
+    if (await releaseHeldDocumentation(gateOpenFindings)) return 'continue'
 
     const currentScans = readCount(scanCountFile)
     const expectedScanFile = join(paths.queueDir, `scan-expected-${currentScans}`)

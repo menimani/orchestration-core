@@ -390,7 +390,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
     counts as a finding of its scan, so a scan reporting only documentation is not empty.
     When the cycle gate (item 15) finds nothing queued, running, or awaiting its merge
     and, in issue mode, no finding of the run open, claimed, or awaiting merge, a non-empty
-    holding file is released before the cycle suite and review: one task whose
+    holding file is released before the cycle suite and review. A held finding whose
+    fingerprint an open finding issue from an author with write access already carries
+    (in issue mode, even one whose fix has merged and awaits promotion), or that a
+    queued, running, completed, or failed task already carries (locally), is dropped first: the survivors
+    are rewritten atomically, one `Deduplicated docs <n> held documentation finding(s)
+    already carried by an open issue` (or `task`) event is logged, and when none
+    survive the file is removed and nothing is released. A filing that created its
+    issue before a later forge call failed therefore never files the same findings
+    again. What remains is released as one task whose
     description is the finding itself when one is held, otherwise a numbered list
     `1. <finding>` in the order held, at the greatest held depth. It is queued locally, or
     filed as one issue; an issue combining several findings is titled `Documentation
