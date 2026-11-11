@@ -52,7 +52,9 @@ import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { interruptedScansFileName } from './scanRecovery.ts'
-import { heldFindingsFileName, readHeldFindings, writeHeldFindings } from './heldFindings.ts'
+import {
+  clearHeldFindings, heldFindingsFileName, readHeldFindings, writeHeldFindings,
+} from './heldFindings.ts'
 import {
   updateCoreBeforeCycle, type CoreUpdateOutcome,
 } from './coreUpdate.ts'
@@ -64,7 +66,7 @@ import {
   issueHasExactlyLifecycleLabel, issueNumberForTask, issueNumbersForTask, issuePromotionForIssue,
   isDocumentationFinding, isReadyToClaim,
   issueSourcesForTask, markIssueMergeFailed, missingRequirementCompletionMarkers, parseIssueBody,
-  publishFinding,
+  openFindingCoversHeld, publishFinding,
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
@@ -222,6 +224,21 @@ export function createLoop(deps: LoopDeps) {
   const tasksFailedBeforeStartup = new Set(existsSync(announcedFailuresFile)
     ? readFileSync(announcedFailuresFile, 'utf8').split(/\r?\n/).filter((taskId) => taskId !== '')
     : [])
+  // A task can also be failed before the first poll sees it: a status query after a
+  // crash fails running tasks whose runner is gone, and a run on another branch can
+  // leave failures it never announced. Each is still announced once and counted
+  // against its issues' retry budget, but it is not fresh evidence of a broken
+  // environment and therefore must not trip the burst guard either.
+  const tasksFailedAtStartup = new Set(listTaskIds(paths).filter((taskId) => {
+    try {
+      return readStatus(paths, taskId)?.status === 'failed'
+        && !existsSync(join(scannedDir, `${taskId}.failed`))
+        && !tasksFailedBeforeStartup.has(taskId)
+    } catch {
+      // The poll owns malformed-status reporting, as for the startup set above.
+      return false
+    }
+  }))
   // Trees stopped so a merged dependency change can be installed died for the loop's
   // own reason, not the task's. Like the startup set, they are reported failed and
   // their issues released, but they count toward neither an issue's retry budget nor
@@ -1352,9 +1369,35 @@ export function createLoop(deps: LoopDeps) {
    * finding of their greatest depth. Returns true while the gate must wait: the combined
    * task now exists, or filing it failed and a later poll retries. The holding file is
    * truncated only once the task or issue exists, or when the growth bounds drop it.
+   *
+   * Filing can fail after the issue already exists, which keeps the holding file. A held
+   * finding an open trusted issue covers (or, locally, an outstanding task carries) is
+   * therefore dropped first, so a retry never files the same findings a second time,
+   * while a finding observed again after an earlier fix merged is still filed.
    */
-  async function releaseHeldDocumentation(): Promise<boolean> {
-    const held = readHeldFindings(paths)
+  async function releaseHeldDocumentation(
+    openFindings: readonly ForgeIssue[] | undefined,
+  ): Promise<boolean> {
+    let held = readHeldFindings(paths)
+    if (held.length === 0) return false
+    const heldParents = new Set(held.map(({ parentTaskId }) => parentTaskId))
+    const survivors = held.filter(({ finding }) => config.issueQueueEnabled
+      ? !openFindingCoversHeld(paths, openFindings ?? [], fingerprintOf(finding), heldParents)
+      : outstandingFindingTask(finding, 'auto') === undefined)
+    if (survivors.length < held.length) {
+      event(
+        'Deduplicated',
+        'docs',
+        `${held.length - survivors.length} held documentation finding(s) already carried by an open ${config.issueQueueEnabled ? 'issue' : 'task'}`,
+      )
+      if (survivors.length === 0) {
+        clearHeldFindings(paths)
+        previousGateFailures.delete('release-documentation')
+        return false
+      }
+      writeHeldFindings(paths, survivors)
+      held = survivors
+    }
     const first = held[0]
     if (first === undefined) return false
     const findings = held.map(({ finding }) => finding)
@@ -2401,6 +2444,7 @@ export function createLoop(deps: LoopDeps) {
       gateWaitTarget = 'completion scan'
       return 'continue'
     }
+    let gateOpenFindings: readonly ForgeIssue[] | undefined
     if (config.issueQueueEnabled) {
       if (knownOpenFindings === null) {
         gateWaitTarget = 'finding status'
@@ -2408,6 +2452,7 @@ export function createLoop(deps: LoopDeps) {
       }
       try {
         const openFindings = knownOpenFindings ?? await forge.listOpenIssues(LABEL_FINDING)
+        gateOpenFindings = openFindings
         const openIssues = openFindings.filter((issue) =>
           !issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)
             && issue.labels.some((label) => [
@@ -2495,7 +2540,7 @@ export function createLoop(deps: LoopDeps) {
     }
     // Every other task of the cycle is terminal, so the documentation held meanwhile
     // describes the code it will ship with. Its one task closes the cycle instead.
-    if (await releaseHeldDocumentation()) return 'continue'
+    if (await releaseHeldDocumentation(gateOpenFindings)) return 'continue'
 
     const currentScans = readCount(scanCountFile)
     const expectedScanFile = join(paths.queueDir, `scan-expected-${currentScans}`)
@@ -3164,6 +3209,7 @@ export function createLoop(deps: LoopDeps) {
         : before
       if (status === undefined) continue
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
+      const wasFailedAtStartup = tasksFailedAtStartup.delete(taskId)
       // A task can finish between the stop and this refresh; only once it leaves
       // running is the stop's verdict known, so the mark is kept until then.
       const wasStoppedByLoop = status !== 'running'
@@ -3242,7 +3288,9 @@ export function createLoop(deps: LoopDeps) {
           rmSync(join(paths.queueDir, `cycle-complete-${cycleNow}`), { force: true })
         }
         writeFileSync(failedFlag, '')
-        if (!wasDeadAtStartup && !wasStoppedByLoop) burstFailures += 1
+        if (!wasDeadAtStartup && !wasFailedAtStartup && !wasStoppedByLoop) {
+          burstFailures += 1
+        }
       }
 
       const scannedFlag = join(scannedDir, taskId)

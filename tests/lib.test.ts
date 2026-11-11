@@ -50,6 +50,17 @@ async function waitForFiles(files: string[]): Promise<void> {
   }
 }
 
+async function waitForChildrenLoaded(markers: string[]): Promise<void> {
+  const deadline = Date.now() + CHILD_START_TIMEOUT_MS
+  while (!markers.every((marker) => existsSync(marker))) {
+    if (Date.now() >= deadline) {
+      const missing = markers.flatMap((marker, index) => existsSync(marker) ? [] : [`child ${index}`])
+      throw new Error(`modules not loaded within ${CHILD_START_TIMEOUT_MS} ms by ${missing.join(', ')}`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
 beforeEach(() => {
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-lib-'))
   paths = orchPaths(repoRoot)
@@ -416,17 +427,27 @@ describe('task ids', () => {
     const idsModule = pathToFileURL(join(process.cwd(), 'src', 'ids.ts')).href
     const pathsModule = pathToFileURL(join(process.cwd(), 'src', 'paths.ts')).href
     const readyFiles = Array.from({ length: 4 }, (_, index) => join(repoRoot, `desc-ready-${index}`))
-    const children = readyFiles.map((readyFile) => testProcesses.spawn(process.execPath, [
+    const loadedFiles = Array.from({ length: 4 }, (_, index) => join(repoRoot, `desc-loaded-${index}`))
+    const goFile = join(repoRoot, 'desc-go')
+    // Each child's lock deadline starts at its first acquisition attempt, so the children
+    // load their modules first and attempt only once every sibling has loaded; the slowest
+    // Node startup no longer eats into the others' budget.
+    const children = readyFiles.map((readyFile, index) => testProcesses.spawn(process.execPath, [
       '--input-type=module', '--eval',
       [
         lockContentionProbeScript(4, 3),
-        `const [{ writeFileSync }, { join }, { taskIdForDesc }, { orchPaths }] = await Promise.all([import('node:fs'), import('node:path'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})])`,
+        `const [{ existsSync, writeFileSync }, { join }, { taskIdForDesc }, { orchPaths }] = await Promise.all([import('node:fs'), import('node:path'), import(${JSON.stringify(idsModule)}), import(${JSON.stringify(pathsModule)})])`,
+        "writeFileSync(process.argv[5], '')",
+        `const goDeadline = Date.now() + ${CHILD_START_TIMEOUT_MS * 2}`,
+        "while (!existsSync(process.argv[6])) { if (Date.now() >= goDeadline) throw new Error('no go signal'); await new Promise((resolve) => setTimeout(resolve, 10)) }",
         "const paths = orchPaths(process.argv[1]); const id = taskIdForDesc(paths, 'auto', process.argv[2]); writeFileSync(join(paths.tasksDir, id + '.md'), '# spec\\n'); console.log(id)",
       ].join('\n'),
-      repoRoot, 'the same concurrent finding', readyFile, lockDir,
+      repoRoot, 'the same concurrent finding', readyFile, lockDir, loadedFiles[index]!, goFile,
     ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }))
     const outputs = Promise.allSettled(children.map(childOutput))
 
+    await waitForChildrenLoaded(loadedFiles)
+    writeFileSync(goFile, '')
     await waitForFiles(readyFiles)
     expect(children.every((child) => child.exitCode === null)).toBe(true)
     rmSync(lockDir, { recursive: true })

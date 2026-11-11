@@ -390,7 +390,21 @@ are not parsed by `loadConfig` and are not operator-file settings.
     counts as a finding of its scan, so a scan reporting only documentation is not empty.
     When the cycle gate (item 15) finds nothing queued, running, or awaiting its merge
     and, in issue mode, no finding of the run open, claimed, or awaiting merge, a non-empty
-    holding file is released before the cycle suite and review: one task whose
+    holding file is released before the cycle suite and review. A held finding is dropped
+    first when, in issue mode, an open finding issue from an author with write access
+    carries its fingerprint and either suppresses it by the rule the dispatch duplicate
+    checks apply (an issue whose fix has merged suppresses only an advisory fingerprint)
+    or names in its `Parent:` line a task whose findings are held, which makes it the
+    issue a release of this file filed and counts it whether ready, in progress, or
+    merged and awaiting promotion; or, locally, when a queued, running, completed, or
+    failed task already carries it. An issue filed for an earlier observation whose fix
+    has merged does not count, so a finding observed again after that fix is filed
+    again. The survivors
+    are rewritten atomically, one `Deduplicated docs <n> held documentation finding(s)
+    already carried by an open issue` (or `task`) event is logged, and when none
+    survive the file is removed and nothing is released. A filing that created its
+    issue before a later forge call failed therefore never files the same findings
+    again. What remains is released as one task whose
     description is the finding itself when one is held, otherwise a numbered list
     `1. <finding>` in the order held, at the greatest held depth. It is queued locally, or
     filed as one issue; an issue combining several findings is titled `Documentation
@@ -861,7 +875,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the daemon starts — still recorded running but with no process id, as a graceful
     shutdown leaves its in-flight tasks — is likewise reported failed without counting
     toward the burst, since it is not fresh evidence of a broken environment; it still
-    counts toward its issues' consecutive failure counts.
+    counts toward its issues' consecutive failure counts. A task whose status is already
+    failed when the daemon starts, with no `.failed` flag and absent from the previous
+    run's announced failures (item 20) — as a `status` query after a crash or a run on
+    another branch leaves it — is treated the same way: announced once, recorded
+    against the cycle, and counted toward its issues' consecutive failure counts, but
+    not toward the burst. A task that fails after startup counts as before.
 19a. In issue-queue mode, every failed-task release increments a persistent per-issue
      consecutive failure count in the queue directory. Before `MAX_ISSUE_RETRIES`
      (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and

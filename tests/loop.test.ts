@@ -3625,6 +3625,103 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
+  it('does not count tasks already failed at daemon startup as a failure burst', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    const taskIds = ['pre-f1', 'pre-f2', 'pre-f3']
+    for (const taskId of taskIds) writeRawStatus(taskId, 'failed')
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of taskIds) {
+      expect(logged.filter((line) =>
+        line === `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`))
+        .toHaveLength(1)
+    }
+    expect(readFileSync(join(paths.queueDir, 'failed-4'), 'utf8').trim().split('\n'))
+      .toEqual(taskIds)
+    expect(logText()).not.toContain('tasks failed in one poll')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    setLogged([])
+    expect(await loop.poll()).toBe('continue')
+    expect(logged.some((line) => line.startsWith('FAILED:'))).toBe(false)
+  })
+
+  it('still stops on a burst of fresh failures beside tasks failed at startup', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    for (const taskId of ['pre-f1', 'pre-f2', 'pre-f3']) writeRawStatus(taskId, 'failed')
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
+
+    expect(await loop.poll()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    for (const taskId of ['new-f1', 'new-f2', 'new-f3']) writeRawStatus(taskId, 'running', null)
+    setLogged([])
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logText()).toContain('ERROR 3 tasks failed in one poll; stopping for environment repair')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+  })
+
+  it('does not announce a startup failure already listed as announced', async () => {
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeRawStatus('listed-f1', 'failed')
+    writeRawStatus('unlisted-f1', 'failed')
+    writeFileSync(join(paths.queueDir, 'announced-failures.txt'), 'listed-f1\n')
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 1 })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged.some((line) => line.startsWith('FAILED: listed-f1'))).toBe(false)
+    expect(logged).toContain(
+      `FAILED: unlisted-f1 — log: ${join(paths.logsDir, 'unlisted-f1.log')}`)
+    expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe('unlisted-f1\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('releases and counts the issue of a task already failed at startup', async () => {
+    initializeGitRepo()
+    // The released issue is ready again, so the restarted loop may claim it anew.
+    const runner = makeRunner()
+    const config = {
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+      maxBurstFailures: 1,
+    }
+    const first = makeLoop(config, stubProject, undefined, undefined, runner)
+    first.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: '[BUG] `src/stale.ts` failure before restart',
+      body: buildIssueBody('[BUG] `src/stale.ts` failure before restart', 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    await first.poll()
+    const failedTaskId = readdirSync(paths.statusDir)[0]!.replace(/\.json$/, '')
+    writeRawStatus(failedTaskId, 'failed')
+    setLogged([])
+
+    // A restarted daemon meets the same forge, so it reuses the first loop's fake.
+    const forge = fakeForge
+    const next = createLoop({
+      paths,
+      config: { ...loadConfig({}), taskDeadlineHours: 0, ...config },
+      forge,
+      runner,
+      project: stubProject,
+      log: (line) => logged.push(line),
+      now: () => new Date(2026, 7, 8, 12, 0, 0),
+    })
+    expect(await next.poll()).toBe('continue')
+
+    expect(logged).toContain(
+      `FAILED: ${failedTaskId} — log: ${join(paths.logsDir, `${failedTaskId}.log`)}`)
+    expect(logText()).toContain('grouped task failed')
+    expect(issueNumbersForTask(paths, failedTaskId)).toEqual([])
+    expect(readFileSync(join(paths.queueDir, 'issue-failure-count', String(issueNumber)), 'utf8'))
+      .toBe('1\n')
+    expect(logText()).not.toContain('tasks failed in one poll')
+  })
+
   it('neither announces nor counts failures left by a finished run', async () => {
     initializeGitRepoWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
@@ -4952,6 +5049,27 @@ describe('documentation findings held for the cycle', () => {
     expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
   })
 
+  it('holds and releases a documentation finding with interior line separator characters', async () => {
+    const loop = makeLoop()
+    const scanId = '20250101_000000_036_scan'
+    const lineSeparator = String.fromCodePoint(0x2028)
+    const paragraphSeparator = String.fromCodePoint(0x2029)
+    const finding = `[DOCS] README.md names${lineSeparator}a removed${paragraphSeparator}flag in\rthe cleanup section`
+    writeFinal(scanId, `NEXT_TASK: ${finding}\n`)
+
+    await loop.scanForNextTasks(scanId, 0)
+    expect(taskIdsNow()).toEqual([])
+    expect(heldRecords()).toEqual([`1\t${scanId}\t${finding}`])
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    const [docsId] = taskIdsNow()
+    expect(taskIdsNow()).toHaveLength(1)
+    expect(readFileSync(specFile(paths, docsId!), 'utf8')).toContain(finding)
+    expect(heldRecords()).toEqual([])
+    expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
+  })
+
   it('counts a documentation-only scan as a finding scan and releases it when nothing else is open', async () => {
     initializeGitRepo()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
@@ -5096,6 +5214,153 @@ describe('documentation findings held for the cycle', () => {
     expect(combined.body).toContain('Depth: 1')
     expect(heldRecords()).toEqual([])
     expect(suiteRuns()).toBe(false)
+  })
+
+  it('does not file held findings again when listing fails after their issue was created', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    let current = new Date(2026, 7, 11, 14, 0, 0)
+    const resetAt = new Date(2026, 7, 11, 14, 40, 0)
+    const loop = makeLoop(
+      { ...gateConfig, issueQueueEnabled: true }, gatedProject, undefined, () => current,
+    )
+    writeFinal('20250101_000000_042_scan', [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    await loop.scanForNextTasks('20250101_000000_042_scan', 0)
+    expect(heldRecords()).toHaveLength(2)
+
+    // The forge creates the combined issue, then rate-limits the listing that follows.
+    const listOpenIssues = fakeForge.listOpenIssues.bind(fakeForge)
+    let limited = false
+    fakeForge.listOpenIssues = async (label) => {
+      if (fakeForge.issues.size === 1 && !limited) {
+        limited = true
+        throw new ForgeRateLimitError(resetAt)
+      }
+      return listOpenIssues(label)
+    }
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(limited).toBe(true)
+    expect(fakeForge.issues.size).toBe(1)
+    expect(heldRecords()).toHaveLength(2)
+
+    // Once the limit clears, the gate waits on the open, unmerged issue.
+    current = new Date(2026, 7, 11, 14, 41, 0)
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    expect(heldRecords()).toHaveLength(2)
+    expect(logged).toContain('Waiting remote      issues #1')
+
+    // Merged into the run branch, the open issue already carries every held finding.
+    recordIssuesForTask(paths, 'docs-task', [1])
+    recordIssuePromotions(paths, 'docs-task', 'abc123', 'feature/run-1')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    expect(existsSync(heldFile())).toBe(false)
+    expect(logged).toContain(
+      'Deduplicated docs        2 held documentation finding(s) already carried by an open issue',
+    )
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([])
+
+    await fakeForge.closeIssue(1, 'promoted')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    expect(existsSync(heldFile())).toBe(false)
+  })
+
+  it('releases only the held finding that no open issue carries', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    const scanId = '20250101_000000_043_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    await loop.scanForNextTasks(scanId, 0)
+    expect(heldRecords()).toHaveLength(2)
+    // An earlier release of this holding file filed the first finding; its fix merged.
+    const covering = await fakeForge.createIssue({
+      title: 'merged documentation fix',
+      body: buildIssueBody('[DOCS] `README.md` names a removed flag', scanId),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, 'other-task', [covering])
+    recordIssuePromotions(paths, 'other-task', 'abc123', 'feature/run-1')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logged).toContain(
+      'Deduplicated docs        1 held documentation finding(s) already carried by an open issue',
+    )
+    expect(fakeForge.issues.size).toBe(2)
+    const released = await fakeForge.getIssue(covering + 1)
+    expect(released.title).toBe('[DOCS] `SPEC.md` misstates the retry bound')
+    expect(released.body).not.toContain('README.md')
+    expect(released.body.match(/^Fingerprint: /gm)).toHaveLength(1)
+    expect(heldRecords()).toEqual([])
+    expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
+  })
+
+  it('files a finding observed again after its earlier fix merged and awaits promotion', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    const finding = '[DOCS] `README.md` names a removed flag'
+    writeFinal('20250101_000000_045_scan', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_045_scan', 0)
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    const first = await fakeForge.getIssue(1)
+    expect(first.body).toContain('Parent: 20250101_000000_045_scan')
+    expect(heldRecords()).toEqual([])
+    recordIssuesForTask(paths, 'docs-task', [1])
+    recordIssuePromotions(paths, 'docs-task', 'abc123', 'feature/run-1')
+
+    // The first fix was incomplete: a later scan reports the same finding again.
+    writeFinal('20250101_000000_046_scan', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_046_scan', 0)
+    expect(heldRecords()).toEqual([`1\t20250101_000000_046_scan\t${finding}`])
+    expect(logged).toContain(
+      "Deferred 046_scan    1 documentation finding(s) until the cycle's other tasks finish",
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logged.filter((line) => line.startsWith('Deduplicated'))).toEqual([])
+    expect(fakeForge.issues.size).toBe(2)
+    const second = await fakeForge.getIssue(2)
+    expect(second.title).toBe(finding)
+    expect(second.body).toContain('Parent: 20250101_000000_046_scan')
+    expect(second.body.match(/^Fingerprint: .*$/m)?.[0]).toBe(first.body.match(/^Fingerprint: .*$/m)?.[0])
+    expect(heldRecords()).toEqual([])
+  })
+
+  it('does not count an open issue from an author without write access as coverage', async () => {
+    initializeGitRepo()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    const finding = '[DOCS] `README.md` names a removed flag'
+    writeFinal('20250101_000000_044_scan', `NEXT_TASK: ${finding}\n`)
+    await loop.scanForNextTasks('20250101_000000_044_scan', 0)
+    expect(heldRecords()).toHaveLength(1)
+    const outside = await fakeForge.createIssue({
+      title: 'outside documentation claim',
+      body: buildIssueBody(finding, 'outside'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    fakeForge.issues.get(outside)!.author = { login: 'drive-by-user', hasWriteAccess: false }
+    recordIssuesForTask(paths, 'outside-task', [outside])
+    recordIssuePromotions(paths, 'outside-task', 'abc123', 'feature/run-1')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(logged.filter((line) => line.startsWith('Deduplicated'))).toEqual([])
+    expect(fakeForge.issues.size).toBe(2)
+    expect((await fakeForge.getIssue(outside + 1)).title).toBe(finding)
+    expect(heldRecords()).toEqual([])
   })
 
   it('leaves the findings of a review task on their combined path', async () => {
