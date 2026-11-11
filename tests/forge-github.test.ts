@@ -648,7 +648,9 @@ describe('GitHub author permissions', () => {
     const command: GithubCommand = async (_root, args) => {
       if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
       if (args[0] === 'issue') return JSON.stringify(openIssueFixture)
-      throw new Error('HTTP 403: API rate limit exceeded (x-ratelimit-reset: 1786435200)')
+      const failure = new Error('Command failed: gh api') as Error & { stderr: string }
+      failure.stderr = 'HTTP 403: API rate limit exceeded (x-ratelimit-reset: 1786435200)'
+      throw failure
     }
     const forge = createGithubForge('repo-root', command)
 
@@ -732,7 +734,9 @@ describe('GitHub forge JSON schemas', () => {
       if (args.join(' ') === 'api rate_limit') {
         return JSON.stringify({ resources: { graphql: { reset: 1_786_435_200 } } })
       }
-      throw new Error('GraphQL: API rate limit exceeded')
+      const failure = new Error('Command failed: gh api') as Error & { stderr: string }
+      failure.stderr = 'GraphQL: API rate limit exceeded'
+      throw failure
     }
     const forge = createGithubForge('repo-root', command)
 
@@ -750,6 +754,25 @@ describe('GitHub forge JSON schemas', () => {
       'api --paginate --slurp repos/example/repo/issues?state=open&labels=loop%3Afinding&per_page=100',
       'api rate_limit',
     ])
+  })
+
+  it('rethrows a failure whose arguments, not gh output, mention a rate limit', async () => {
+    const calls: string[][] = []
+    const title = 'Handle the rate limit reset at 1786435200'
+    const failure = new Error(
+      `Command failed: gh issue create --repo example/repo --title ${title}`,
+    ) as Error & { stderr: string }
+    failure.stderr = 'HTTP 502: Bad Gateway'
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      throw failure
+    }
+
+    await expect(createGithubForge('repo-root', command).createIssue({
+      title, body: 'body', labels: ['loop:finding'],
+    })).rejects.toBe(failure)
+    expect(calls.some((args) => args.join(' ') === 'api rate_limit')).toBe(false)
   })
 
   it('validates and normalizes PR details and check rollups', async () => {

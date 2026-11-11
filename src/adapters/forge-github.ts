@@ -210,6 +210,16 @@ function commandErrorText(error: unknown): string {
     .join('\n')
 }
 
+// execFile's message repeats every argument, and a --title or --body carries forge text,
+// so only what gh itself printed may decide a rate limit or its reset.
+function commandOutputText(error: unknown): string {
+  if (!(error instanceof Error)) return ''
+  const commandError = error as Error & { stdout?: unknown; stderr?: unknown }
+  return [commandError.stdout, commandError.stderr]
+    .filter((part): part is string => typeof part === 'string')
+    .join('\n')
+}
+
 function reportedResetAt(text: string): Date | undefined {
   const epoch = /(?:x-ratelimit-reset|reset(?:s|ting)?(?: at)?)[^\d]{0,8}(\d{10})/i.exec(text)?.[1]
   if (epoch !== undefined) return new Date(Number(epoch) * 1000)
@@ -219,7 +229,7 @@ function reportedResetAt(text: string): Date | undefined {
 }
 
 function isRateLimitFailure(error: unknown): boolean {
-  return /rate.?limit|HTTP 429/i.test(commandErrorText(error))
+  return /rate.?limit|HTTP 429/i.test(commandOutputText(error))
 }
 
 function isMissingPrFailure(error: unknown): boolean {
@@ -257,7 +267,7 @@ export function createGithubForge(
       return await runGh(root, args)
     } catch (error) {
       if (!isRateLimitFailure(error)) throw error
-      let resetAt = reportedResetAt(commandErrorText(error))
+      let resetAt = reportedResetAt(commandOutputText(error))
       if (resetAt === undefined) {
         try {
           const rateLimitArgs = ['api', 'rate_limit']
