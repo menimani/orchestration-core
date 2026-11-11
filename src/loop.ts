@@ -256,6 +256,9 @@ export function createLoop(deps: LoopDeps) {
     comments: ForgeIssueComment[]
   }>()
   const reconciledCycleGates = new Set<number>()
+  // The merge marker each adopted issue was given this run, so a marker the listing does
+  // not yet show as trusted is waited for rather than posted again on every poll.
+  const postedMergeMarkers = new Map<number, string>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
   let gateWaitTarget: string | undefined
@@ -622,21 +625,37 @@ export function createLoop(deps: LoopDeps) {
     runBranch: string,
   ): Promise<void> {
     const comment = issueMergeComment(taskId, mergeCommit, runBranch)
-    let present = trustedCommentPresent(await commentsForIssue(issue), comment)
-    if (present === false) {
+    const posted = postedMergeMarkers.get(issue.number) === comment
+    // A marker posted earlier this run is re-read fresh: a cached listing may predate it.
+    let present = trustedCommentPresent(
+      posted ? await forge.listIssueComments(issue.number) : await commentsForIssue(issue),
+      comment,
+    )
+    if (present === false && !posted) {
       await commentOnIssueMerge(forge, issue.number, taskId, mergeCommit, runBranch)
+      postedMergeMarkers.set(issue.number, comment)
       present = trustedCommentPresent(await forge.listIssueComments(issue.number), comment)
     }
-    // The marker may already stand under an author whose permission could not be read.
-    // Keeping merge-ready retries this next poll instead of posting a duplicate now.
-    if (present === undefined) {
-      throw new Error('merge marker author permission could not be read; deferring')
-    }
     // Without merge-ready the issue carries no lifecycle label, so nothing would revisit
-    // an unconfirmed promotion; keeping it retries the check next poll.
-    if (!present) throw new Error('merge comment is not visible after publishing it')
+    // an unconfirmed promotion; keeping it lets a later poll confirm the marker.
+    const warningKey = `adopted-issue-${issue.number}`
+    // The marker may already stand under an author whose permission could not be read.
+    if (present === undefined) {
+      warning(warningKey, `updating adopted issue #${issue.number}`,
+        `could not update adopted issue #${issue.number}: `
+        + 'merge marker author permission could not be read; deferring')
+      return
+    }
+    if (!present) {
+      warning(warningKey, `updating adopted issue #${issue.number}`,
+        `could not update adopted issue #${issue.number}: `
+        + 'merge comment is not visible after publishing it')
+      return
+    }
     confirmIssuePromotion(paths, issue.number)
     await forge.removeLabel(issue.number, LABEL_MERGE_READY)
+    postedMergeMarkers.delete(issue.number)
+    warningLog.recovered(warningKey)
   }
 
   async function adoptRemoteTasks(openFindings?: readonly ForgeIssue[]): Promise<void> {

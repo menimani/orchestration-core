@@ -685,6 +685,16 @@ describe('remote task adoption', () => {
     expect(logged.join('\n')).toContain(
       `could not update adopted issue #${issueNumber}: merge comment is not visible after publishing it`)
 
+    await loop.adoptRemoteTasks()
+    await loop.adoptRemoteTasks()
+
+    expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
+      .toHaveLength(1)
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_READY)
+    expect(logged.filter((line) => line.includes(
+      `could not update adopted issue #${issueNumber}: merge comment is not visible`))).toHaveLength(1)
+
     markerVisible = true
     await loop.adoptRemoteTasks()
 
@@ -693,6 +703,50 @@ describe('remote task adoption', () => {
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
     expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
       .toHaveLength(1)
+    expect(logged.at(-1)).toMatch(/^Recovered updating adopted issue #\d+ after \d+ minutes$/)
+  })
+
+  it('keeps an adopted issue merge-ready while its merge marker author\'s access is undetermined', async () => {
+    const task = pushWorkerBranch('20260809_000000_021_auto-undetermined-marker')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const commentIssue = forge.commentIssue.bind(forge)
+    forge.commentIssue = async (number, comment) => {
+      await commentIssue(number, comment)
+      if (comment.startsWith('MERGED: ')) {
+        forge.issueCommentAuthors.get(number)!.splice(-1, 1,
+          { login: 'merger', hasWriteAccess: false, permissionLookupFailed: true })
+      }
+    }
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    const mergedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({ mergeCommit: mergedHead })
+    expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
+      .toHaveLength(1)
+
+    // A new run finds the marker already standing under the undetermined author.
+    logged = []
+    const loop = makeLoop(stubProject)
+    await loop.adoptRemoteTasks()
+    await loop.adoptRemoteTasks()
+
+    expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
+      .toHaveLength(1)
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_READY)
+    expect(logged.filter((line) => line.includes(`could not update adopted issue #${issueNumber}: `
+      + 'merge marker author permission could not be read; deferring'))).toHaveLength(1)
+
+    const authors = forge.issueCommentAuthors.get(issueNumber)!
+    authors[authors.length - 1] = { login: 'merger', hasWriteAccess: true }
+    await loop.adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(mergedHead)
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+    expect(forge.issueComments.get(issueNumber)?.filter((comment) => comment.startsWith('MERGED: ')))
+      .toHaveLength(1)
+    expect(logged.at(-1)).toMatch(/^Recovered updating adopted issue #\d+ after \d+ minutes$/)
   })
 
   it('retries promotion persistence after the remote merge was already applied', async () => {
