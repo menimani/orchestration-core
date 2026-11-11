@@ -884,9 +884,11 @@ export async function publishImportedIssue(
   const quoted = source.body.trim() === ''
     ? '> (no description)'
     : source.body.split(/\r?\n/).map((line) => `> ${line}`.trimEnd()).join('\n')
+  // The provenance line stays plain text: a mention or a repository#number reference
+  // would notify the source author and backlink their issue on every import.
   const requirement = [
     source.title,
-    `Imported from ${repository}#${source.number}, opened by @${source.author.login}.`,
+    `Imported from issue ${source.number} of ${repository}, opened by ${source.author.login}.`,
     quoted,
   ].join('\n\n')
   const ready = readyWhenTrusted && source.author.hasWriteAccess
