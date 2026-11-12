@@ -1,6 +1,11 @@
 import { operatingSystem } from './adapters/os.ts'
 import { lockOwnerIsCurrent } from './processOwner.ts'
 
+// A Windows identity query answers "unknown" after a five-second timeout, so three
+// attempts stay near sixteen seconds, well inside the thirty-second start-up deadline.
+const PROCESS_MARKER_IDENTITY_ATTEMPTS = 3
+const PROCESS_MARKER_IDENTITY_RETRY_MS = 250
+
 export interface ProcessMarker {
   pid: number
   startIdentity: string
@@ -8,16 +13,24 @@ export interface ProcessMarker {
 
 /** Record enough process identity to distinguish a live owner from a reused PID. */
 export function processMarker(pid: number): ProcessMarker {
-  let startIdentity: string | undefined
-  try {
-    startIdentity = operatingSystem.processStartIdentity(pid)
-  } catch {
-    startIdentity = undefined
+  // A slow query on a loaded machine answers "unknown" without proving anything, so a
+  // daemon start or restart handover asks again before giving up.
+  for (let attempt = 1; ; attempt++) {
+    let startIdentity: string | undefined
+    try {
+      startIdentity = operatingSystem.processStartIdentity(pid)
+    } catch {
+      startIdentity = undefined
+    }
+    if (startIdentity !== undefined && startIdentity !== '') return { pid, startIdentity }
+    if (attempt >= PROCESS_MARKER_IDENTITY_ATTEMPTS) {
+      throw new Error(
+        `Could not determine process-start identity for PID ${pid}: the identity query`
+        + ` timed out or failed ${attempt} times.`,
+      )
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, PROCESS_MARKER_IDENTITY_RETRY_MS)
   }
-  if (startIdentity === undefined || startIdentity === '') {
-    throw new Error(`Could not determine process-start identity for PID ${pid}`)
-  }
-  return { pid, startIdentity }
 }
 
 export function processMarkerText(marker: ProcessMarker): string {

@@ -660,6 +660,47 @@ describe('operating-system adapters', () => {
     expect(os.processTreeIsAlive(461)).toBe(true)
   })
 
+  it('leaves an orphan alone when stopping an omitted root whose start time cannot be read', () => {
+    // 471 is alive but omitted and its identity query timed out; 472 is a dated orphan of
+    // the PID's earlier owner, while 473 lost its creation time and 474 descends from it.
+    const processes: readonly WindowsProcess[] = [
+      { pid: 472, parentPid: 471, createdAt: 1_000 },
+      { pid: 473, parentPid: 471 },
+      { pid: 474, parentPid: 473, createdAt: 3_000 },
+    ]
+    const stoppedOs = (killed: readonly number[]) => {
+      const alive = new Set([471, 472, 473, 474])
+      let now = 0
+      const spawn = vi.fn((command: string) => {
+        if (command === 'taskkill') killed.forEach((pid) => alive.delete(pid))
+      })
+      const os = createWindowsOperatingSystem({
+        spawn,
+        listProcesses: () => processes,
+        probeProcess: (pid) => {
+          if (alive.has(pid)) return
+          const error = new Error('gone') as NodeJS.ErrnoException
+          error.code = 'ESRCH'
+          throw error
+        },
+        remove: () => {},
+        now: () => now,
+        sleep: (milliseconds) => { now += milliseconds },
+        processStartIdentity: () => undefined,
+      })
+      return { alive, os, spawn }
+    }
+
+    const stopped = stoppedOs([471, 473, 474])
+    expect(stopped.os.terminateProcessTree(471)).toBe(true)
+    expect(stopped.spawn).toHaveBeenCalledWith('taskkill', ['/PID', '471', '/T', '/F'])
+    expect(stopped.alive).toEqual(new Set([472]))
+
+    const survivor = stoppedOs([471, 473])
+    expect(() => survivor.os.terminateProcessTree(471))
+      .toThrow('Could not stop process tree 471. Still running: PID 474.')
+  })
+
   it('leaves worktree processes alone on POSIX', () => {
     const signalProcessGroup = vi.fn()
     const os = createPosixOperatingSystem({

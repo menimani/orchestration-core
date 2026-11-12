@@ -998,7 +998,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
 
 24. A PID lock (`queue/loop.pid`) keeps the loop single-instance per repository; a stale
     stop file is cleared on startup, after the PID lock is taken (never before — it may
-    be another instance's signal). Before task or issue work begins, startup refuses any
+    be another instance's signal). The lock, a restart handover, and the issue-mode marker
+    record the owner's process-start identity; a query that answers "unknown" (on Windows,
+    one that times out) is asked up to three times in all, 250 ms apart, so a slow
+    query never fails a daemon start or handover that a later attempt can answer, and only
+    then fails with an error naming the timed-out or failed query. Before task or issue work begins, startup refuses any
     live PID an earlier daemon left in the task process registry (item 24a). A worktree with no corresponding
     task status also blocks startup and is reported with an OS-specific handle diagnostic.
     A run which publishes work also refuses to start when its branch has no unambiguous
@@ -1035,7 +1039,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     On Windows the tree is one process snapshot of parent links and creation times, and
     a process created before the process now holding its recorded parent PID is an orphan
     of an exited parent: it and its descendants are outside the tree, so a recycled PID
-    never adopts them. A link whose creation times are unreadable is kept. A snapshot
+    never adopts them. A link whose creation times are unreadable is kept. A root the
+    snapshot omitted is dated by its start identity; when that query times out or fails,
+    a stop leaves out every child with a creation time still naming the root, because
+    an unknown identity never widens the set beyond what a known one would confirm,
+    while a liveness check keeps those links and answers `alive`. A snapshot
     that cannot be taken is taken again while waiting for the tree to exit; a tree still
     unlisted at the deadline fails as `Could not stop process tree <pid>. Its processes
     could not be listed.`, and one with survivors names them as `Still running: PID <pid>`.
