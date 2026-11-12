@@ -174,6 +174,31 @@ describe('ready finding groups', () => {
     expect(fingerprintOf(first.title).startsWith('text:')).toBe(true)
   })
 
+  it('leaves findings whose dotted segment continues past its extension single', async () => {
+    const titles = [
+      '[BUG] `src/adapters/v1.2/` resolves the wrong adapter',
+      '[BUG] `src/adapters/v1.2/` skips the fallback',
+      '[BUG] `orchestration/ts-1.2/scripts` resolves the wrong adapter',
+      '[BUG] `orchestration/ts-1.2/scripts` skips the fallback',
+      '[BUG] the 1.x/2.x-era adapters resolve the wrong path',
+      '[BUG] the 1.x/2.x-era adapters skip the fallback',
+    ]
+    const findings = await Promise.all(titles.map((title) => finding(title)))
+
+    expect(groupReadyFindings(findings).map((group) =>
+      group.map((issue) => issue.number))).toEqual(findings.map((issue) => [issue.number]))
+    for (const title of titles) expect(fingerprintOf(title).startsWith('text:')).toBe(true)
+  })
+
+  it('groups findings whose path ends a sentence with the same path elsewhere', async () => {
+    const first = await finding('[BUG] the fallback is missing in src/shared.ts.')
+    const second = await finding('[TEST] `src/shared.ts` lacks coverage')
+
+    expect(groupReadyFindings([first, second]).map((group) =>
+      group.map((issue) => issue.number))).toEqual([[first.number, second.number]])
+    expect(fingerprintOf(first.title).startsWith('bug:src/shared.ts:')).toBe(true)
+  })
+
   it('does not regroup same-file findings released from a failed group', async () => {
     const first = await finding('[BUG] `src/shared.ts` first retry')
     const second = await finding('[TEST] `src/shared.ts` second retry')
