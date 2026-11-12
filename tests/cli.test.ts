@@ -1162,7 +1162,7 @@ describe('manually promoted run ending', () => {
     expect(result.status).toBe(0)
     const logged = readFileSync(join(paths.logsDir, 'loop.log'), 'utf8')
     expect(logged).toMatch(
-      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 12\/12\] Completed {2}Loop {8}PR #322\r?\n$/,
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 12\/12\] Completed {4}Loop {8}PR #322\r?\n$/,
     )
     expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
       .toBe('LOOP_DONE: #322\n')
@@ -1202,7 +1202,7 @@ describe('manually promoted run ending', () => {
 
     expect(result.status).toBe(0)
     expect(readFileSync(join(paths.logsDir, 'loop.log'), 'utf8')).toMatch(
-      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 05\/08\] Completed {2}Loop {8}PR https:\/\/example\.test\/pull\/323\r?\n$/,
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 05\/08\] Completed {4}Loop {8}PR https:\/\/example\.test\/pull\/323\r?\n$/,
     )
     expect(readFileSync(join(paths.logsDir, 'loop-markers.log'), 'utf8'))
       .toBe('LOOP_DONE: https://example.test/pull/323\n')
