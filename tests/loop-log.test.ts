@@ -103,13 +103,13 @@ describe('loopLogLines', () => {
 
   it('keeps a multiline error to one summarized loop-log line', () => {
     expect(loopLogLines('WARN git failed\nraw stderr\n', context)).toEqual([
-      '2026-08-10 01:02:03 [loop 04/12] WARN       git failed',
+      '2026-08-10 01:02:03 [loop 04/12] WARN         git failed',
     ])
   })
 
   it('puts the timestamp first and zero-pads the cycle tag', () => {
     expect(loopLogLines('Started 030_scan    scan 1/4', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Started    030_scan    scan 1/4')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Started      030_scan    scan 1/4')
 
     expect(loopLogLines('WARN waiting', { ...context, currentCycle: 0 })[0])
       .toContain('[loop 00/12]')
@@ -117,23 +117,23 @@ describe('loopLogLines', () => {
 
   it('uses the frozen single-word verb column', () => {
     expect(loopLogLines('Failed 031_auto    log 031_auto.log', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Failed     031_auto    log 031_auto.log')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Failed       031_auto    log 031_auto.log')
   })
 
   it('keeps the frozen remote-wait and cycle-suite start lines', () => {
     expect(loopLogLines('Waiting remote  issues #349 #351', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Waiting    remote  issues #349 #351')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Waiting      remote  issues #349 #351')
     expect(loopLogLines('Started Suite  cycle 6', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Started    Suite  cycle 6')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Started      Suite  cycle 6')
   })
 
   it('aligns the core update and restart transition', () => {
     expect(loopLogLines('Updated core        12345678..abcdef01', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Updated    core        12345678..abcdef01')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Updated      core        12345678..abcdef01')
     expect(loopLogLines('Restarting core        for cycle 5', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Restarting core        for cycle 5')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Restarting   core        for cycle 5')
     expect(loopLogLines('Restarted core        replacement PID 123', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] Restarted  core        replacement PID 123')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] Restarted    core        replacement PID 123')
   })
 
   it('aligns subjects for verbs of different lengths', () => {
@@ -141,6 +141,14 @@ describe('loopLogLines', () => {
     const decision = loopLogLines('Decision choose a database', context)[0]!
 
     expect(scan.indexOf('030_scan')).toBe(decision.indexOf('choose a database'))
+  })
+
+  it('fits the longest event name inside the event column', () => {
+    const started = loopLogLines('Started 030_scan    scan 1/4', context)[0]!
+    const deduplicated = loopLogLines('Deduplicated #12         against 031_auto', context)[0]!
+
+    expect(deduplicated.indexOf('#12')).toBe(started.indexOf('030_scan'))
+    expect(deduplicated.indexOf('against 031_auto')).toBe(started.indexOf('scan 1/4'))
   })
 
   it('starts details at the same column for different subjects', () => {
@@ -169,9 +177,9 @@ describe('loopLogLines', () => {
     expect(loopLogLines('CYCLE_COMPLETE: 4/12 PR:https://example.test/pull/322', context)[0])
       .toBe('2026-08-10 01:02:03 [loop 04/12] CYCLE_COMPLETE: 4/12 PR:https://example.test/pull/322')
     expect(loopLogLines('FAILED: 20260810_010203_031_auto — log: logs/task.log', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] FAILED:    20260810_010203_031_auto — log: logs/task.log')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] FAILED:      20260810_010203_031_auto — log: logs/task.log')
     expect(loopLogLines('LOOP_DONE: https://example.test/pull/322', context)[0])
-      .toBe('2026-08-10 01:02:03 [loop 04/12] LOOP_DONE: https://example.test/pull/322')
+      .toBe('2026-08-10 01:02:03 [loop 04/12] LOOP_DONE:   https://example.test/pull/322')
   })
 
   it('preserves an over-length message intact', () => {
@@ -194,7 +202,7 @@ describe('loopLogLines', () => {
       `WARN ${'a'.repeat(81)}\n${'b'.repeat(80)}\n${'c'.repeat(100)}`,
       context,
     )).toEqual([
-      `2026-08-10 01:02:03 [loop 04/12] WARN       ${'a'.repeat(81)}`,
+      `2026-08-10 01:02:03 [loop 04/12] WARN         ${'a'.repeat(81)}`,
     ])
   })
 })

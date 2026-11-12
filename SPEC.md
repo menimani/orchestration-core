@@ -70,7 +70,7 @@ comments and other items cite items by number, so a number is never reused.
   output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
   `LOOP_DONE:`, and `FAILED:`). Loop daemon events in `loop.log` use
   `YYYY-MM-DD HH:mm:ss [loop <cycle>/<cap>] <event> <subject> <detail>`: cycle and cap
-  are zero-padded, event names occupy a ten-character column, and subjects shorter than
+  are zero-padded, event names occupy a twelve-character column, and subjects shorter than
   twelve characters are padded so details align. Events preserve their complete first
   line; multiline traces and command output belong in the referenced task or suite log.
   A recoverable warning is deduplicated by its call site and full message: the first
