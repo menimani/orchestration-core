@@ -39,8 +39,10 @@ import {
   syncOrchestrationDepsAtStartup,
 } from './merge.ts'
 import { deploy } from './deploy.ts'
+import { retireConflictedAttempts } from './conflictRetry.ts'
+import { removeGateFixState } from './gateFix.ts'
 import {
-  absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isScanTaskId,
+  absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isInspectionTaskId, isScanTaskId,
   issueQueueIsSeparate, locationArgs, logFile, orchPaths, PACKAGE_ROOT, packageCommandPrefix,
   packageFile, type OrchPaths,
 } from './paths.ts'
@@ -772,6 +774,24 @@ const cmdMerge: Command = async (paths, args) => {
     const forge = linkedIssues.length === 0
       ? undefined
       : await loadPathsForge(config.forge, paths)
+    // The loop's post-merge bookkeeping, so a hand merge during a run leaves no state the
+    // loop would act on as if the task had never landed.
+    const clearCycleFlags = (names: readonly string[]): void => {
+      if (isInspectionTaskId(paths, taskId)) return
+      const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+      const cycle = existsSync(scanCountFile)
+        ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
+        : 0
+      if (cycle <= 0) return
+      for (const name of names) rmSync(join(paths.queueDir, `${name}-${cycle}`), { force: true })
+    }
+    const retireTaskState = (): void => {
+      const failures = retireConflictedAttempts(paths, taskId, linkedIssues)
+      if (failures.length > 0) {
+        console.error(`WARN: could not remove commits kept for ${taskId}: ${failures.join('; ')}`)
+      }
+      removeGateFixState(paths, taskId)
+    }
     const mergeResult = await mergeTask(paths, taskId, {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
@@ -783,6 +803,9 @@ const cmdMerge: Command = async (paths, args) => {
         : sourceIssueNumbers(issueSourcesForTask(paths, taskId), paths.fleet.repository),
       forge,
       onMergeStart: () => console.log(`Merging ${taskId}`),
+      // Commits merged after the gate passed must be pushed and verified again before
+      // promotion, so the cycle's gate flags go before the merged status is written.
+      beforeMergeRecorded: () => clearCycleFlags(['cycle-complete', 'cycle-resume']),
       onMergeSkipped: (reason) => console.log(
         `Skipped ${taskId}: ${reason === 'active' ? 'merge already in progress' : 'merge already succeeded'}`,
       ),
@@ -807,6 +830,11 @@ const cmdMerge: Command = async (paths, args) => {
       // A completed manual merge proves the previous failures are no longer consecutive.
       // Clear the durable streak immediately, before optional forge bookkeeping can fail.
       writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+      retireTaskState()
+    }
+    if (mergeResult.outcome === 'no-change') {
+      retireTaskState()
+      clearCycleFlags(['cycle-complete'])
     }
     if (mergeResult.outcome === 'merged' && linkedIssues.length > 0) {
       const mergeCommit = mergeResult.mergeCommit

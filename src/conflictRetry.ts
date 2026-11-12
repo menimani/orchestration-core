@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -82,6 +83,64 @@ export function writeConflictedAttempts(
 
 export function removeConflictedAttempts(paths: OrchPaths, key: string): void {
   rmSync(recordFile(paths, key), { force: true })
+}
+
+function failureText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.trim() || 'unknown error'
+}
+
+// Exit 1 is the only answer that means "absent". Any other failure is rethrown, because
+// reading it as absent would drop the record of a branch that is still there.
+function localBranchPresent(repoRoot: string, branch: string): boolean {
+  try {
+    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    })
+    return true
+  } catch (error) {
+    if ((error as { status?: number | null }).status === 1) return false
+    throw error
+  }
+}
+
+/**
+ * Once a retry lands, the commits kept for it are history: drop their branches. A record
+ * is removed only once every branch it names is confirmed gone, so a branch that could
+ * not be removed stays recorded and is reported rather than orphaned. Returns one line
+ * per failure; empty when everything kept for the task is gone.
+ */
+export function retireConflictedAttempts(
+  paths: OrchPaths,
+  taskId: string,
+  linkedIssues: readonly number[],
+): string[] {
+  const failures: string[] = []
+  try {
+    const records = [taskId, ...linkedIssues.map(issueConflictKey)].map((key) => ({
+      key, branches: readConflictedAttempts(paths, key).map(({ branch }) => branch),
+    }))
+    const remaining = new Set<string>()
+    for (const branch of new Set(records.flatMap(({ branches }) => branches))) {
+      try {
+        if (localBranchPresent(paths.repoRoot, branch)) {
+          execFileSync('git', ['branch', '-D', branch], {
+            cwd: paths.repoRoot, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+          })
+        }
+        if (localBranchPresent(paths.repoRoot, branch)) throw new Error('branch is still present after deletion')
+      } catch (error) {
+        remaining.add(branch)
+        failures.push(`${branch}: ${failureText(error)}`)
+      }
+    }
+    for (const { key, branches } of records) {
+      if (branches.every((branch) => !remaining.has(branch))) removeConflictedAttempts(paths, key)
+    }
+  } catch (error) {
+    failures.push(failureText(error))
+  }
+  return failures
 }
 
 /**
