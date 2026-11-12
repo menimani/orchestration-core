@@ -802,6 +802,12 @@ const cmdMerge: Command = async (paths, args) => {
         ? undefined
         : sourceIssueNumbers(issueSourcesForTask(paths, taskId), paths.fleet.repository),
       forge,
+      // npm ci empties the node_modules every live runner loads from, whether `start` or
+      // a running loop launched it, so they stop first; a survivor leaves the install
+      // pending rather than run underneath it.
+      beforeOrchestrationDepsInstall: () => reportTaskProcessTermination(
+        terminateLiveTaskProcesses(paths), console.log, false,
+      ),
       onMergeStart: () => console.log(`Merging ${taskId}`),
       // Commits merged after the gate passed must be pushed and verified again before
       // promotion, so the cycle's gate flags go before the merged status is written.
