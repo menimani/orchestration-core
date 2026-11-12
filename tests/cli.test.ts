@@ -5,8 +5,9 @@ import {
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ForgeIssueNotFoundError } from '../src/adapters/forge.ts'
+import { operatingSystem } from '../src/adapters/os.ts'
 import { readConflictedAttempts, writeConflictedAttempts } from '../src/conflictRetry.ts'
 import { readGateFixState, writeGateFixState } from '../src/gateFix.ts'
 import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
@@ -19,6 +20,13 @@ import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import {
   CLI, CLI_TIMEOUT_MS, CORE_ENV, extraRoots, git, INHERITED_ENV, repoRoot,
 } from './cliHarness.ts'
+import { TestProcessRegistry } from './testProcess.ts'
+
+const testProcesses = new TestProcessRegistry()
+
+afterEach(async () => {
+  await testProcesses.cleanup()
+})
 
 describe('command registry', () => {
   it('lists deploy as an available command', () => {
@@ -1246,6 +1254,90 @@ describe('manual merge', () => {
       for (const name of Object.keys(process.env)) delete process.env[name]
       Object.assign(process.env, previousEnv)
       vi.doUnmock('../src/adapters/forge.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
+  })
+
+  it('stops a live task process tree before installing dependencies a merge changed', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'package.json'), '{"private":true}\n')
+    writeFileSync(join(repoRoot, 'package-lock.json'), '{"lockfileVersion":3}\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: add dependency manifests'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20261112_175409_042_user-manual-dependency-merge'
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(
+      join(worktree, 'package-lock.json'),
+      '{"lockfileVersion":3,"packages":{"node_modules/new-dependency":{}}}\n',
+    )
+    git(['add', '-A'], worktree)
+    git(['commit', '-qm', 'fix: update dependencies'], worktree)
+    await writeStatus(paths, taskId, 'completed')
+
+    // A runner `start` launched is still loading from the node_modules npm ci replaces.
+    const runner = testProcesses.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore', windowsHide: true,
+    })
+    const runnerPid = runner.pid
+    if (runnerPid === undefined) throw new Error('Runner did not publish a PID.')
+    runner.unref()
+    const runnerTaskId = '20261112_175400_041_user-parallel-runner'
+    await writeStatus(paths, runnerTaskId, 'running', runnerPid)
+    expect(operatingSystem.processTreeIsAlive(runnerPid)).toBe(true)
+
+    const runnerAliveAtInstall: boolean[] = []
+    const install = vi.fn(() => {
+      runnerAliveAtInstall.push(operatingSystem.processTreeIsAlive(runnerPid))
+    })
+    vi.doMock('../src/merge.ts', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/merge.ts')>()
+      return {
+        ...actual,
+        mergeTask: (...args: Parameters<typeof actual.mergeTask>) => actual.mergeTask(
+          args[0], args[1], { ...args[2], orchestrationDepsRuntime: { install, packageRoot: repoRoot } },
+        ),
+      }
+    })
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    try {
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV)
+      process.argv = [process.execPath, CLI, 'merge', taskId, '--yes']
+
+      await import('../src/cli.ts')
+
+      expect(process.exitCode).toBe(0)
+      expect(install).toHaveBeenCalledOnce()
+      expect(runnerAliveAtInstall).toEqual([false])
+      expect(readFileSync(join(paths.statusDir, `${taskId}.json`), 'utf8')).toContain('"merged"')
+    } finally {
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      vi.doUnmock('../src/merge.ts')
       vi.doUnmock('node:child_process')
       vi.resetModules()
     }
