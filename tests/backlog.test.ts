@@ -423,6 +423,50 @@ describe('backlog process lock', () => {
     expect(existsSync(`${lockDir}.recovery`)).toBe(false)
   })
 
+  it('serializes simultaneous recovery of one stale lock displaced by rename', async () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    const counter = join(repoRoot, 'mutation-count')
+    const recoveries = join(repoRoot, 'recoveries')
+    mkdirSync(lockDir)
+    writeFileSync(join(lockDir, 'owner'), `999999999 ${Date.now() - 31_000}\n`)
+    writeFileSync(counter, '0\n')
+    writeFileSync(recoveries, '')
+
+    // Recovery breaks the stale lock by renaming it into the recoverer's fence, so the
+    // delay sits on that rename, and each one that succeeds is recorded.
+    const backlogModule = pathToFileURL(join(process.cwd(), 'src', 'backlog.ts')).href
+    const script = [
+      "import fs from 'node:fs'",
+      "import { basename } from 'node:path'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalRenameSync = fs.renameSync',
+      'fs.renameSync = function (from, to, ...args) {',
+      '  if (from !== process.argv[2]) return originalRenameSync.call(this, from, to, ...args)',
+      '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150)',
+      '  const result = originalRenameSync.call(this, from, to, ...args)',
+      "  if (basename(to) === 'stale') fs.appendFileSync(process.argv[4], `${process.pid}\\n`)",
+      '  return result',
+      '}',
+      'syncBuiltinESMExports()',
+      `const { withBacklogLock } = await import(${JSON.stringify(backlogModule)})`,
+      'withBacklogLock(process.argv[1], () => {',
+      "  const value = Number(fs.readFileSync(process.argv[3], 'utf8'))",
+      '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)',
+      "  fs.writeFileSync(process.argv[3], `${value + 1}\\n`)",
+      '})',
+    ].join('\n')
+    const children = Array.from({ length: 2 }, () => testProcesses.spawn(process.execPath, [
+      '--input-type=module', '--eval', script, backlog, lockDir, counter, recoveries,
+    ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }))
+
+    await Promise.all(children.map(completion))
+
+    expect(readFileSync(recoveries, 'utf8').split('\n').filter(Boolean)).toHaveLength(1)
+    expect(readFileSync(counter, 'utf8')).toBe('2\n')
+    expect(existsSync(`${lockDir}.recovery`)).toBe(false)
+  })
+
   it('serializes a dequeue rewrite with a concurrent enqueue', async () => {
     const backlog = join(paths.queueDir, 'backlog.txt')
     writeFileSync(backlog, 'first-task:0\n')

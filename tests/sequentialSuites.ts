@@ -28,4 +28,5 @@ export const SEQUENTIAL_SUITES: string[] = [
   'tests/test-process.test.ts',
   'tests/test-linux.test.ts',
   'tests/typecheck-config.test.ts',
+  'tests/loop-gate-fix.test.ts',
 ]

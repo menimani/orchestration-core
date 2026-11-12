@@ -1347,7 +1347,7 @@ describe('runAutoReview', () => {
       ...paths,
       root: join(stateRepoRoot, 'orchestration'),
     })
-    const packagePrefix = shellPathSpelling(relative(stateRepoRoot, PACKAGE_ROOT))
+    const packagePrefix = relative(stateRepoRoot, PACKAGE_ROOT).replaceAll('\\', '/')
 
     expect(makeLoop({ integrationBranch: 'integration/run' }).runAutoReview(7, false))
       .toBe(false)
@@ -1357,6 +1357,9 @@ describe('runAutoReview', () => {
       `Changes under \`${packagePrefix}/\` belong to the vendored core repository`,
     )
     expect(spec).toContain(` -- . ':(top,exclude,literal)${packagePrefix}'`)
+    expect(spec).toContain(
+      ` -- . ':(top,exclude,literal)${shellPathSpelling(relative(stateRepoRoot, PACKAGE_ROOT))}'`,
+    )
   })
 
   it('dispatches a review on first entry and resumes after a clean one', () => {

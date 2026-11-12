@@ -288,11 +288,14 @@ describe('status files', () => {
 describe('package script commands', () => {
   it('renders a repository-specific command that is independent of the working directory', () => {
     const packageRoot = join(repoRoot, 'orchestration', 'core package')
-    const expectedPackageRoot = shellPathSpelling(packageRoot)
-    const expectedRepoRoot = shellPathSpelling(repoRoot)
+    const expectedPackageRoot = packageRoot.replaceAll('\\', '/')
+    const expectedRepoRoot = repoRoot.replaceAll('\\', '/')
 
     expect(absolutePackageScriptCommand(repoRoot, 'loop-status', packageRoot))
       .toBe(`npm run -C '${expectedPackageRoot}' loop-status -- --repo '${expectedRepoRoot}'`)
+    expect(absolutePackageScriptCommand(repoRoot, 'loop-status', packageRoot)).toBe(
+      `npm run -C '${shellPathSpelling(packageRoot)}' loop-status -- --repo '${shellPathSpelling(repoRoot)}'`,
+    )
   })
 
   it('names the subtree in the spelling Git stores, whatever spelling the package root has', () => {
