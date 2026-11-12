@@ -6,12 +6,13 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { ForgeIssueNotFoundError } from '../src/adapters/forge.ts'
 import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
 import {
   branchName, finalMessageFile, orchPaths, shellPathSpelling, worktreeDir,
 } from '../src/paths.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
-import { writeStatus } from '../src/status.ts'
+import { readTaskState, writeStatus } from '../src/status.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import {
   CLI, CLI_TIMEOUT_MS, CORE_ENV, extraRoots, git, INHERITED_ENV, repoRoot,
@@ -1084,6 +1085,78 @@ describe('manual merge', () => {
 
       expect(process.exitCode).toBe(0)
       expect(issueState).toBe('closed')
+      expect(issueCompletionForIssue(paths, issueNumber)).toEqual({
+        taskId, issueNumber, outcome: 'no-change',
+      })
+    } finally {
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      vi.doUnmock('../src/adapters/forge.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
+  })
+
+  it('treats a deleted linked issue as closed for a no-change outcome', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20261112_175409_043_user-deleted-issue-no-change'
+    const issueNumber = 219
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The requested behavior is already present.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    await writeStatus(paths, taskId, 'completed')
+    recordIssuesForTask(paths, taskId, [issueNumber])
+
+    // The CLI loads a fresh forge module, so the fake throws that module's error class.
+    let IssueNotFound = ForgeIssueNotFoundError
+    const closeIssue = vi.fn(async () => {})
+    const forge = {
+      issueClosingCommitMessage: (message: string) => message,
+      getIssue: async (number: number): Promise<never> => { throw new IssueNotFound(number) },
+      closeIssue,
+      removeLabel: async () => {},
+    }
+    vi.doMock('../src/adapters/forge.ts', async (importOriginal) => {
+      const original = await importOriginal<typeof import('../src/adapters/forge.ts')>()
+      IssueNotFound = original.ForgeIssueNotFoundError
+      return { ...original, loadForge: async () => forge }
+    })
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    try {
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV)
+      process.argv = [process.execPath, CLI, 'merge', taskId, '--yes']
+
+      await import('../src/cli.ts')
+
+      expect(process.exitCode).toBe(0)
+      expect(closeIssue).not.toHaveBeenCalled()
+      expect(readTaskState(paths, taskId)).toBe('no-change')
       expect(issueCompletionForIssue(paths, issueNumber)).toEqual({
         taskId, issueNumber, outcome: 'no-change',
       })
