@@ -85,12 +85,13 @@ comments and other items cite items by number, so a number is never reused.
   twelve characters are padded so details align. Events preserve their complete first
   line; multiline traces and command output belong in the referenced task or suite log.
   A recoverable warning is deduplicated by its call site and full message: the first
-  occurrence writes `WARN <first line>` to `loop.log` and its full text, timestamped, to
-  `logs/warn-detail.log`. Further occurrences are counted, and once ten minutes have
-  passed since the last line for that warning, `loop.log` receives
-  `WARN <first line> repeated <n> times` and the count restarts. Warnings from different
-  call sites are tracked independently. When the call site next succeeds, its warnings
-  are cleared and `loop.log` receives one `Recovered <operation> after <n> minutes`
+  occurrence writes `WARN         <first line>` to `loop.log` and its full text,
+  timestamped, to `logs/warn-detail.log`. Further occurrences are counted, and once ten
+  minutes have passed since the last line for that warning, `loop.log` receives
+  `WARN         <first line> repeated <n> times` and the count restarts. Warnings from
+  different call sites are tracked independently. When the call site next succeeds, its
+  warnings are cleared and `loop.log` receives one
+  `Recovered    <operation> after <n> minutes`
   event, the whole minutes since the earliest of them first occurred; a call site with
   no active warning records nothing.
   The three machine markers
@@ -539,7 +540,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
    When a step that will run (its `requires` path exists) declares `needsDocker`, the
    gate first runs the adapter's `cycleSuiteDockerProbe` command once, bounded by its
    `timeoutMs`, before any suite step. An adapter without a probe logs
-   `ERROR cycle suite infrastructure probe is not configured`, and a probe that does not
+   `ERROR        cycle suite infrastructure probe is not configured`, and a probe that does not
    exit 0 logs the probe's `remediation` as an `ERROR`; either writes the stop file
    without running a suite step. A failing suite step is diagnosed from this run's suite
    log alone: the adapter's `classifyInfrastructureFailure` remediation when it
@@ -746,8 +747,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
     previous cycle gate has closed and while no task is running, the daemon first compares
     the selected project adapter with the exact source loaded at startup. A changed,
-    missing, or unreadable adapter logs `Restarting adapter     for cycle <n>` and replaces
-    the daemon before continuing, so every adapter consumer changes atomically at the same
+    missing, or unreadable adapter logs `Restarting   adapter     for cycle <n>` and
+    replaces the daemon before continuing, so every adapter consumer changes atomically at the same
     restart-safe boundary. In integration mode the monitored source is the adapter in the
     integration worktree. The daemon then fetches the configured core upstream. It
     recovers the imported revision by first matching the current subtree tree against
@@ -757,7 +758,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     prefix. It compares the recovered revision with the upstream tip and, if it is behind,
     runs `git subtree pull --squash`.
     A package-file change logs an aligned `Updated      core        <old8>..<new8>` event.
-    In direct layout only, it also logs `Restarting core        for cycle <n>`, releases
+    In direct layout only, it also logs `Restarting   core        for cycle <n>`, releases
     daemon ownership, and starts the package's absolute CLI entry point from the package
     directory, retaining the remaining arguments, environment, and run branch. The parent
     waits for the replacement to finish daemon initialization and logs `Restarted`; a
@@ -1040,8 +1041,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     every one of these, so a loop stopped mid-cycle resumes where it was; a current
     branch that cannot be read fails startup with nothing reset. Startup then records the
     current branch. Every poll, before it consumes the stop file (item 25), compares the
-    checkout's current branch with the recorded one; a mismatch logs `ERROR checkout
-    <current> does not match run branch <recorded>`, writes the stop file, and stops
+    checkout's current branch with the recorded one; a mismatch logs
+    `ERROR        checkout <current> does not match run branch <recorded>`, writes the
+    stop file, and stops
     before any task is started, merged, or marked scanned.
 25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
     outcomes, and daemon termination signals stop every live task process tree (`taskkill

@@ -463,6 +463,8 @@ describe('fleet project selection', () => {
     expect(result.stdout).toContain('Installed: .claude/skills/git-commit')
     expect(result.stdout).toContain('Installed: .agents/skills/git-commit')
     expect(readFileSync(join(home, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
+      .toContain(`ORCHESTRATION_FLEET='${fleet.replaceAll('\\', '/')}' npm run -C `)
+    expect(readFileSync(join(home, '.claude', 'skills', 'loop-start', 'SKILL.md'), 'utf8'))
       .toContain(`ORCHESTRATION_FLEET='${shellPathSpelling(fleet)}' npm run -C `)
   })
 
