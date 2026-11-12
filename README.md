@@ -326,9 +326,13 @@ of its merge log framed as untrusted repository output. The runner must make the
 verification pass by correcting the change, commit on the same branch, and never delete,
 skip, or weaken a test. The handed-back task is an ordinary running task — it takes a
 parallel slot, keeps its issue claim alive, and obeys the task deadline and the stop
-command — and its merge is attempted afresh when it completes. Uncommitted changes, rebase
-conflicts, failures diagnosed as infrastructure, test-lock deferrals, adopted worker
-branches, and anything after a stop are never handed back. Once the handbacks are used, or
+command — and its merge is attempted afresh when it completes. A waiting handback takes
+the next free slot ahead of new claims and the backlog, and never starts while a manual
+`merge` of the task is running. A handed-back runner that ends without completing returns
+the task to completed as it was, with its commits, its attempt used, and its issue still
+claimed. Only implementation tasks are handed back: scans and reviews never are, nor are
+uncommitted changes, rebase conflicts, failures diagnosed as infrastructure, test-lock
+deferrals, adopted worker branches, and anything after a stop. Once the handbacks are used, or
 with `MAX_GATE_FIX_ATTEMPTS=0`, failures count toward `MAX_CONSECUTIVE_MERGE_FAILURES` as
 before.
 

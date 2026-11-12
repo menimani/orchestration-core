@@ -1533,6 +1533,27 @@ export async function mergeTask(
   }
 }
 
+/**
+ * Run an operation on a task's worktree under the merge guard mergeTask takes, so no merge
+ * of the task, by the daemon or the CLI, can run meanwhile. Returns false without running
+ * it when another operation holds the guard.
+ */
+export async function withMergeGuard(
+  paths: OrchPaths,
+  taskId: string,
+  operation: () => Promise<void>,
+): Promise<boolean> {
+  const acquisition = acquireMergeGuard(paths, taskId)
+  const acquired = acquisition instanceof Promise ? await acquisition : acquisition
+  if (!acquired.acquired) return false
+  try {
+    await operation()
+    return true
+  } finally {
+    finishMergeGuard(acquired)
+  }
+}
+
 /** Merge an already-fetched worker branch through the same selected checks as a local task. */
 export async function mergeRemoteTask(
   paths: OrchPaths,

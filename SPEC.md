@@ -589,7 +589,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     from a failing test.
     A failure whose verification commands ran and failed (`Tests failed. Aborting merge.`)
     may be the task's own content, which no unchanged retry can pass. The first such
-    failure of a local task is counted and retried unchanged, as above. When the same task
+    failure of a local task is counted and retried unchanged, as above. Only an ordinary
+    implementation task is handed back: a scan, a review, or a task marked as an inspection
+    is counted as above on every verification failure. When the same implementation task
     fails verification again with no other merge failure between, while it has used fewer
     than `MAX_GATE_FIX_ATTEMPTS` (default 1) handbacks, that failure is not counted:
     the task is handed back. Its runner starts again in the existing worktree and branch
@@ -612,7 +614,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
     task deadline and the stop command, and when it completes its merge is attempted afresh
     without filing findings again. No issue text is re-read or re-trusted on this path.
     A handback waits, uncounted and without rerunning the gate, while every parallel slot
-    is taken. The number of handbacks used, whether the last attempt failed verification,
+    is taken; a reserved handback counts as running when a poll sizes its claims and
+    backlog starts, so it takes the next free slot ahead of both. The reservation and the
+    start of a handback hold the task's merge guard, the one every merge of the task takes:
+    while a manual `merge` of the task holds it, the poll leaves the handback for a later
+    poll and starts no runner in the worktree being merged. A handed-back runner that ends
+    without completing — it fails, passes the task deadline, is stopped, loses its process,
+    or dies with the daemon — returns the task to `completed` as the handback found it:
+    its commits and earlier final message in place, the attempt used, and its issue still
+    claimed. It is neither reported failed nor released; uncommitted changes the fix run
+    left stay in the worktree, and its next merge failure is counted as above. The number
+    of handbacks used, whether the last attempt failed verification,
     and a reserved handback not yet started are persisted under `queue/gate-fix/` before
     the runner starts, so a daemon restart neither loses nor repeats an attempt; that state
     and the follow-up specification are removed when the task merges, completes without
