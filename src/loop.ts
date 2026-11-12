@@ -2074,6 +2074,14 @@ export function createLoop(deps: LoopDeps) {
 
       const cycles = new Set(entries.map((entry) => entry.cycle))
       const currentCycle = readCount(scanCountFile)
+      // The counter is rewound only after every other recovery step, so a marker one
+      // cycle ahead of it means a previous start finished recovery but could not remove
+      // the marker; nothing is left to do but remove it.
+      if (cycles.size === 1 && cycles.has(currentCycle + 1)) {
+        rmSync(marker, { force: true })
+        event('Recovered', 'scan cycle', `${currentCycle + 1} after operator stop`)
+        return true
+      }
       if (cycles.size !== 1 || !cycles.has(currentCycle)) {
         event('ERROR', `stopped-scan recovery does not match current cycle ${currentCycle}; stopping the loop`)
         writeFileSync(stopFile, '')

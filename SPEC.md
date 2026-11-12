@@ -660,7 +660,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     A scan interrupted by the operator `stop` command is the exception: the command
     records the live scan before terminating it, and the next daemon discards that scan's
     task state, rewinds the incomplete cycle, and dispatches the cycle's full scan set
-    again. A scan that dies without that stop record remains a failure.
+    again. A stop record one cycle ahead of the counter belongs to a recovery that
+    rewound the cycle but could not remove the record, so the daemon only removes it.
+    A scan that dies without that stop record remains a failure.
     For parallel scans, sections in the rendered `scan-template.md` are Markdown ATX
     headings whose text begins with a number and period (for example, `### 1. Tests`),
     and every section number must be unique; headings inside fenced code blocks do not

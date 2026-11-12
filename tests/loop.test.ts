@@ -2042,6 +2042,30 @@ describe('cycle gate', () => {
     expect(logText()).not.toContain('did not receive every expected scan yield')
   })
 
+  it('removes a marker left behind after its cycle was already rewound and starts', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const interrupted = '20260809_000000_004_scan'
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(marker, `2\t${interrupted}\n`)
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(runnerStarts).toHaveLength(1)
+    expect(logText()).toContain('Recovered scan cycle  2 after operator stop')
+    expect(logText()).not.toContain('does not match current cycle')
+  })
+
   it('stops and retains a malformed interrupted-scan marker without rewinding', async () => {
     initializeGitRepo()
     const marker = join(paths.queueDir, 'stop-interrupted-scans')
