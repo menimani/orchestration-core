@@ -687,7 +687,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     records the live scan before terminating it, and the next daemon discards that scan's
     task state, rewinds the incomplete cycle, and dispatches the cycle's full scan set
     again. A stop record one cycle ahead of the counter belongs to a recovery that
-    rewound the cycle but could not remove the record, so the daemon only removes it.
+    rewound the cycle but could not remove the record, or to a first-cycle scan stopped
+    before a start on another branch reset the counter: either way the daemon discards
+    the task state of every scan the record names, tolerating scans already gone, then
+    removes the record, so none of them counts as a failure of the new run.
     A scan that dies without that stop record remains a failure.
     For parallel scans, sections in the rendered `scan-template.md` are Markdown ATX
     headings whose text begins with a number and period (for example, `### 1. Tests`),
