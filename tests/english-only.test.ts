@@ -48,12 +48,15 @@ describe('English-only source check', () => {
   it('reports non-English code points hidden in source escapes', () => {
     const slash = characters(92)
     const fromCodePoint = 'String.fromCodePoint'
+    const fromCharCode = 'String.fromCharCode'
     const violations = scanText([
       `${slash}u65e5${slash}u672c${slash}u8a9e`,
       `${slash}u{1f4a1}${slash}ufe0f`,
       `${slash}xD7`,
       `${fromCodePoint}(0x65e5, 0x672c)`,
       `${fromCodePoint}(0x3002)`,
+      `${fromCharCode}(0xe9, 0x41)`,
+      `${fromCharCode}(65533)`,
     ].join('\n'))
 
     expect(violations.map((violation) => violation.codePoints)).toEqual([
@@ -62,6 +65,8 @@ describe('English-only source check', () => {
       ['U+00D7'],
       ['U+65E5', 'U+672C'],
       ['U+3002'],
+      ['U+00E9'],
+      ['U+FFFD'],
     ])
   })
 
