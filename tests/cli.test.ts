@@ -16,6 +16,7 @@ import {
 } from '../src/paths.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import { readTaskState, writeStatus } from '../src/status.ts'
+import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import {
   CLI, CLI_TIMEOUT_MS, CORE_ENV, extraRoots, git, INHERITED_ENV, repoRoot,
@@ -1341,6 +1342,164 @@ describe('manual merge', () => {
       vi.doUnmock('node:child_process')
       vi.resetModules()
     }
+  })
+
+  /**
+   * Commits a lockfile change on a completed task and leaves behind the state a manual
+   * merge's bookkeeping must clear: a failure streak, gate fix state, and a kept branch.
+   */
+  async function prepareDependencyChangeWithBookkeeping(taskId: string, keptBranch: string): Promise<void> {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'package.json'), '{"private":true}\n')
+    writeFileSync(join(repoRoot, 'package-lock.json'), '{"lockfileVersion":3}\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: add dependency manifests'])
+
+    const paths = orchPaths(repoRoot)
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(
+      join(worktree, 'package-lock.json'),
+      '{"lockfileVersion":3,"packages":{"node_modules/new-dependency":{}}}\n',
+    )
+    git(['add', '-A'], worktree)
+    git(['commit', '-qm', 'fix: update dependencies'], worktree)
+    await writeStatus(paths, taskId, 'completed')
+    git(['branch', keptBranch])
+    writeConflictedAttempts(paths, taskId, [{
+      taskId: '20261112_200000_001_user-earlier-attempt',
+      branch: keptBranch,
+      runBranch: 'main', runTip: 'a', base: 'b', taskTip: 'c',
+      conflictedFiles: ['package-lock.json'], conflictingCommits: [],
+    }])
+    writeGateFixState(paths, taskId, { attempts: 1, verificationFailed: true, pending: false })
+    mkdirSync(paths.queueDir, { recursive: true })
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '3\n')
+  }
+
+  /**
+   * Runs `merge <task> --yes` in this process with the dependency install and the task
+   * process termination replaced, and returns the exit code and the errors it printed.
+   */
+  async function manualMergeInProcess(
+    taskId: string,
+    install: () => void,
+    termination: TaskProcessTermination,
+  ): Promise<{ exitCode: typeof process.exitCode; errors: string }> {
+    vi.doMock('../src/merge.ts', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/merge.ts')>()
+      return {
+        ...actual,
+        mergeTask: (...args: Parameters<typeof actual.mergeTask>) => actual.mergeTask(
+          args[0], args[1], { ...args[2], orchestrationDepsRuntime: { install, packageRoot: repoRoot } },
+        ),
+      }
+    })
+    vi.doMock('../src/taskProcesses.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/taskProcesses.ts')>(),
+      terminateLiveTaskProcesses: () => termination,
+    }))
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const errors: string[] = []
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.join(' '))
+    })
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    try {
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV)
+      process.argv = [process.execPath, CLI, 'merge', taskId, '--yes']
+
+      await import('../src/cli.ts')
+
+      return { exitCode: process.exitCode, errors: errors.join('\n') }
+    } finally {
+      consoleError.mockRestore()
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      vi.doUnmock('../src/merge.ts')
+      vi.doUnmock('../src/taskProcesses.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
+  }
+
+  function expectMergeBookkeepingSettledAndRerunSkipped(taskId: string, keptBranch: string): void {
+    const paths = orchPaths(repoRoot)
+    expect(readFileSync(join(paths.statusDir, `${taskId}.json`), 'utf8')).toContain('"merged"')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('0\n')
+    expect(readGateFixState(paths, taskId)).toBeUndefined()
+    expect(readConflictedAttempts(paths, taskId)).toEqual([])
+    expect(git(['branch', '--list', keptBranch]).trim()).toBe('')
+
+    const rerun = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(rerun.status).toBe(0)
+    expect(rerun.stdout).toContain(`Skipped ${taskId}: merge already succeeded`)
+    expect(rerun.stderr).toBe('')
+  }
+
+  it('settles the merge bookkeeping when the dependency install after the merge fails', async () => {
+    const taskId = '20261112_203829_051_user-manual-install-failure'
+    const keptBranch = 'orchestration/conflict/install-failure-attempt'
+    await prepareDependencyChangeWithBookkeeping(taskId, keptBranch)
+    const install = vi.fn(() => {
+      throw new Error('npm ci exited 1')
+    })
+
+    const result = await manualMergeInProcess(taskId, install, { terminated: [], failures: [] })
+
+    expect(result.exitCode).toBe(1)
+    expect(install).toHaveBeenCalledOnce()
+    expect(result.errors).toContain('Orchestration dependency installation after 051_user failed in')
+    expectMergeBookkeepingSettledAndRerunSkipped(taskId, keptBranch)
+  })
+
+  it('settles the merge bookkeeping when a surviving task process skips the install', async () => {
+    const taskId = '20261112_203829_052_user-manual-install-skipped'
+    const keptBranch = 'orchestration/conflict/install-skipped-attempt'
+    await prepareDependencyChangeWithBookkeeping(taskId, keptBranch)
+    const install = vi.fn()
+
+    const result = await manualMergeInProcess(taskId, install, {
+      terminated: [],
+      failures: [{
+        taskId: '20261112_203800_049_user-parallel-runner', pid: 43122,
+        error: 'Could not stop process tree 43122.',
+      }],
+    })
+
+    expect(result.exitCode).toBe(1)
+    expect(install).not.toHaveBeenCalled()
+    expect(result.errors).toContain(
+      'Orchestration dependency installation after 052_user remains pending in',
+    )
+    expectMergeBookkeepingSettledAndRerunSkipped(taskId, keptBranch)
   })
 
   it('forwards failed check output before reporting the merge failure', async () => {

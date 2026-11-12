@@ -765,11 +765,17 @@ export function createLoop(deps: LoopDeps) {
         }
 
         // Read before the merge, and checked: a promotion recorded without its run branch
-        // is malformed, and every later reconcile would fail on it.
-        const runBranch = git(['branch', '--show-current']).trim()
+        // is malformed, and every later reconcile would fail on it. A lookup that fails or
+        // answers nothing once is asked again; after that the adoption waits for a later
+        // poll, and git's reason is never posted to the issue.
+        const runBranch = optionalGit(['branch', '--show-current']).trim()
+          || optionalGit(['branch', '--show-current']).trim()
         if (runBranch === '') {
-          throw new MergeError(`Could not adopt ${report.branch}: the checkout is not on a branch.`)
+          warning('adoption-run-branch', 'reading the run branch',
+            'remote adoption deferred: the run branch could not be read')
+          continue
         }
+        warningLog.recovered('adoption-run-branch')
         let appliedMergeCommit: string | undefined
         let promotionPersistenceError: unknown
         const persistPromotion = (mergedCommit: string): void => {
