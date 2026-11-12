@@ -730,7 +730,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     back to the last `git-subtree-split` whose `git-subtree-dir` matches this package's
     prefix. It compares the recovered revision with the upstream tip and, if it is behind,
     runs `git subtree pull --squash`.
-    A package-file change logs an aligned `Updated    core        <old8>..<new8>` event.
+    A package-file change logs an aligned `Updated      core        <old8>..<new8>` event.
     In direct layout only, it also logs `Restarting core        for cycle <n>`, releases
     daemon ownership, and starts the package's absolute CLI entry point from the package
     directory, retaining the remaining arguments, environment, and run branch. The parent
@@ -1420,7 +1420,7 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     with the reason in its task log. Rate-limit errors are not counted, and operator
     `cleanup` resets the count, so a re-run of the same task starts afresh.
     Its poll status uses the shared
-    `Running    Status      Task=<n>  Queue=<n>` event while work is active and, when
+    `Running      Status      Task=<n>  Queue=<n>` event while work is active and, when
     idle, the shared `Idle` event of item 15, whose `Status` subject is followed by
     `Task=0`, `Queue=0`, the idle duration, and `Waiting=open finding`; because workers
     never scan, their loop-log prefix
