@@ -70,6 +70,30 @@ describe('English-only source check', () => {
     ])
   })
 
+  it('decodes character codes the way the language truncates them, in every numeric literal form', () => {
+    const fromCodePoint = 'String.fromCodePoint'
+    const fromCharCode = 'String.fromCharCode'
+    const violations = scanText([
+      'const ascii = true',
+      `${fromCharCode}(0x165e5)`,
+      `${fromCharCode}(91621)`,
+      `${fromCharCode}(0o305236)`,
+      `${fromCharCode}(0b10011000000000010)`,
+      `${fromCharCode}(0x10041)`,
+      `${fromCodePoint}(0x1f4a1)`,
+      `${fromCodePoint}(0o30002, 0b11000000001100)`,
+    ].join('\n'))
+
+    expect(violations.map((violation) => [violation.line, violation.codePoints])).toEqual([
+      [2, ['U+65E5']],
+      [3, ['U+65E5']],
+      [4, ['U+8A9E']],
+      [5, ['U+3002']],
+      [7, ['U+1F4A1']],
+      [8, ['U+3002', 'U+300C']],
+    ])
+  })
+
   it('checks every repository source during the normal test suite', () => {
     expect(main()).toBe(0)
   })
