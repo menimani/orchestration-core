@@ -199,7 +199,7 @@ export interface OrchestrationDepsRuntime {
 }
 
 export type OrchestrationDepsEvent = (
-  name: 'Installed' | 'Skipped', subject: string,
+  name: 'Installed' | 'Skipped' | 'WARN', subject: string,
 ) => void
 
 const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
@@ -1021,10 +1021,18 @@ async function finalizeLocalMerge(
   options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   options.onMerged?.(mergeCommit)
-  syncOrchestrationDepsAfterMerge(
-    paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
-    options.beforeOrchestrationDepsInstall,
-  )
+  try {
+    syncOrchestrationDepsAfterMerge(
+      paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+      options.beforeOrchestrationDepsInstall,
+    )
+  } catch (error) {
+    if (error instanceof OrchestrationDepsInstallError) throw error
+    // The merge is already recorded, so a failure to read what it changed is not a merge
+    // failure: rethrowing it would count against the loop and skip the cleanup below.
+    depsEvent('WARN', `could not check ${shortTaskId(taskId)} for orchestration dependency `
+      + `changes: ${commandFailureSummary(error)}`)
+  }
 
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
   // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
