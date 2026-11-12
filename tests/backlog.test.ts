@@ -5,7 +5,7 @@ import {
 } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dequeueBacklog, withBacklogLock } from '../src/backlog.ts'
@@ -468,5 +468,286 @@ describe('backlog process lock', () => {
     expect(results.filter((result) => result.status === 'rejected')).toEqual([])
 
     expect(readFileSync(backlog, 'utf8')).toBe('second-task:0\n')
+  })
+})
+
+describe('backlog lock races', () => {
+  const originals = { renameSync: fs.renameSync, writeFileSync: fs.writeFileSync }
+
+  afterEach(() => {
+    fs.renameSync = originals.renameSync
+    fs.writeFileSync = originals.writeFileSync
+    syncBuiltinESMExports()
+  })
+
+  /** Run every rename through `replacement`, which calls the real one when it should happen. */
+  function interceptRename(replacement: (source: string, destination: string) => void): void {
+    fs.renameSync = function (source, destination) {
+      replacement(String(source), String(destination))
+    }
+    syncBuiltinESMExports()
+  }
+
+  /** Run every file write through `replacement` before the real write. */
+  function interceptWrite(replacement: (file: string) => void): void {
+    fs.writeFileSync = (file, ...args) => {
+      replacement(String(file))
+      originals.writeFileSync(file, ...args)
+    }
+    syncBuiltinESMExports()
+  }
+
+  function lostRaceError(code: string): NodeJS.ErrnoException {
+    const error = new Error(`simulated ${code}`) as NodeJS.ErrnoException
+    error.code = code
+    return error
+  }
+
+  /** A lock, its recovery mutex, or a private remnant of either still beside the backlog. */
+  function lockRemnants(backlog: string): string[] {
+    const name = `${basename(backlog)}.lock`
+    return fs.readdirSync(dirname(backlog)).filter((entry) => entry.startsWith(name))
+  }
+
+  function writeStaleOwner(dir: string): void {
+    mkdirSync(dir)
+    writeFileSync(join(dir, 'owner'), `999999999 ${Date.now() - 31_000}\n`)
+  }
+
+  function ownerOf(dir: string): string {
+    return readFileSync(join(dir, 'owner'), 'utf8').trim()
+  }
+
+  it.each(['ENOENT', 'EPERM', 'EEXIST', 'ENOTEMPTY', 'EBUSY'])(
+    'treats %s from restoring a displaced foreign lock as a lost race',
+    (code) => {
+      const backlog = join(paths.queueDir, 'backlog.txt')
+      const lockDir = `${backlog}.lock`
+      let restoreFailed = false
+      interceptRename((source, destination) => {
+        if (source === lockDir && destination.startsWith(`${lockDir}.released.`)) {
+          // An older core replaced the lock just before this release displaced it.
+          writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()} foreign-token\n`)
+        }
+        if (source.startsWith(`${lockDir}.released.`) && destination === lockDir) {
+          restoreFailed = true
+          throw lostRaceError(code)
+        }
+        originals.renameSync(source, destination)
+      })
+
+      expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+      expect(restoreFailed).toBe(true)
+      expect(lockRemnants(backlog)).toEqual([])
+    },
+  )
+
+  it('propagates an unexpected error from restoring a displaced foreign lock', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    interceptRename((source, destination) => {
+      if (source === lockDir && destination.startsWith(`${lockDir}.released.`)) {
+        writeFileSync(join(lockDir, 'owner'), `${process.pid} ${Date.now()} foreign-token\n`)
+      }
+      if (source.startsWith(`${lockDir}.released.`) && destination === lockDir) {
+        throw lostRaceError('EIO')
+      }
+      originals.renameSync(source, destination)
+    })
+
+    expect(() => withBacklogLock(backlog, () => 'mutated')).toThrow('simulated EIO')
+  })
+
+  it('publishes the retired marker only after the release rename fails', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    const markedAtRename: boolean[] = []
+    interceptRename((source, destination) => {
+      if (source === lockDir) {
+        markedAtRename.push(existsSync(join(lockDir, 'retired')))
+        if (markedAtRename.length === 1) throw lostRaceError('EPERM')
+      }
+      originals.renameSync(source, destination)
+    })
+
+    expect(withBacklogLock(backlog, () => 'first')).toBe('first')
+    expect(existsSync(join(lockDir, 'retired'))).toBe(true)
+    expect(withBacklogLock(backlog, () => 'second')).toBe('second')
+    // The failed release came first; the second acquisition then broke the retired lock.
+    expect(markedAtRename.slice(0, 2)).toEqual([false, true])
+    expect(lockRemnants(backlog)).toEqual([])
+  })
+
+  it('does not let a mutex holder displaced mid-recovery break the lock', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    const mutexDir = `${lockDir}.recovery`
+    writeStaleOwner(mutexDir)
+    writeStaleOwner(lockDir)
+    simulateClock()
+    const mutations: string[] = []
+    let pending: { source: string, destination: string } | undefined
+    let fencedStepFailed = false
+    interceptRename((source, destination) => {
+      if (
+        source === mutexDir && pending === undefined
+        && !destination.startsWith(`${mutexDir}.released.`)
+      ) {
+        // This acquisition observed the stale mutex. Before its rename, another process
+        // recovers that mutex and a successor acquires it and starts breaking the lock.
+        rmSync(mutexDir, { recursive: true })
+        pending = { source, destination }
+        withBacklogLock(backlog, () => {
+          expect(ownerOf(lockDir)).toMatch(new RegExp(`^${process.pid} `))
+          mutations.push('successor')
+        })
+        return
+      }
+      if (
+        source === lockDir && pending !== undefined && !fencedStepFailed
+        && destination.startsWith(join(mutexDir, 'fence.'))
+      ) {
+        // The rename observed earlier lands between the successor's verdict and its step.
+        originals.renameSync(pending.source, pending.destination)
+        try {
+          originals.renameSync(source, destination)
+        } catch (error) {
+          fencedStepFailed = true
+          throw error
+        }
+        throw new Error('a displaced mutex holder broke the lock')
+      }
+      originals.renameSync(source, destination)
+    })
+
+    expect(withBacklogLock(backlog, () => {
+      expect(ownerOf(lockDir)).toMatch(new RegExp(`^${process.pid} `))
+      mutations.push('displacer')
+      return 'mutated'
+    })).toBe('mutated')
+    expect(fencedStepFailed).toBe(true)
+    expect(mutations).toEqual(['successor', 'displacer'])
+    expect(lockRemnants(backlog)).toEqual([])
+  })
+
+  it('tolerates a displaced mutex removed by another process', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const mutexDir = `${backlog}.lock.recovery`
+    writeStaleOwner(mutexDir)
+    simulateClock()
+    let removedConcurrently = false
+    interceptRename((source, destination) => {
+      originals.renameSync(source, destination)
+      if (
+        source === mutexDir && !removedConcurrently
+        && !destination.startsWith(`${mutexDir}.released.`)
+      ) {
+        rmSync(destination, { recursive: true })
+        removedConcurrently = true
+      }
+    })
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    expect(removedConcurrently).toBe(true)
+    expect(lockRemnants(backlog)).toEqual([])
+  })
+
+  it('tolerates a released lock removed by another process', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const lockDir = `${backlog}.lock`
+    let removedConcurrently = false
+    interceptRename((source, destination) => {
+      originals.renameSync(source, destination)
+      if (source === lockDir && destination.startsWith(`${lockDir}.released.`)) {
+        rmSync(destination, { recursive: true })
+        removedConcurrently = true
+      }
+    })
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    expect(removedConcurrently).toBe(true)
+    expect(lockRemnants(backlog)).toEqual([])
+  })
+
+  it.each(['EPERM', 'EBUSY'])(
+    'treats %s from removing a recovered mutex as a lost race',
+    (code) => {
+      const backlog = join(paths.queueDir, 'backlog.txt')
+      const mutexDir = `${backlog}.lock.recovery`
+      writeStaleOwner(mutexDir)
+      simulateClock()
+      const removeDirectory = operatingSystem.removeDirectory.bind(operatingSystem)
+      let removalFailed = false
+      vi.spyOn(operatingSystem, 'removeDirectory').mockImplementation((path) => {
+        if (
+          !removalFailed && path.startsWith(`${mutexDir}.`)
+          && !path.startsWith(`${mutexDir}.released.`)
+        ) {
+          removalFailed = true
+          throw lostRaceError(code)
+        }
+        removeDirectory(path)
+      })
+
+      expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+      expect(removalFailed).toBe(true)
+      expect(existsSync(`${backlog}.lock`)).toBe(false)
+      expect(existsSync(mutexDir)).toBe(false)
+    },
+  )
+
+  it('propagates an unexpected error from removing a recovered mutex', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const mutexDir = `${backlog}.lock.recovery`
+    writeStaleOwner(mutexDir)
+    vi.spyOn(operatingSystem, 'removeDirectory').mockImplementation(() => {
+      throw lostRaceError('EIO')
+    })
+
+    expect(() => withBacklogLock(backlog, () => 'mutated')).toThrow('simulated EIO')
+  })
+
+  it('retries when its new lock directory is displaced before the owner is published', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const mutexDir = `${backlog}.lock.recovery`
+    simulateClock()
+    let displaced = false
+    interceptWrite((file) => {
+      if (!displaced && file === join(mutexDir, 'owner')) {
+        displaced = true
+        rmSync(mutexDir, { recursive: true })
+      }
+    })
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    expect(displaced).toBe(true)
+    expect(lockRemnants(backlog)).toEqual([])
+  })
+
+  it('leaves a recreated name to the successor that published its owner first', () => {
+    const backlog = join(paths.queueDir, 'backlog.txt')
+    const mutexDir = `${backlog}.lock.recovery`
+    const successorOwner = `${process.pid} ${Date.now()} successor-token`
+    const successorHeldAtSleep: boolean[] = []
+    simulateClock(() => {
+      if (successorHeldAtSleep.length > 0) return
+      successorHeldAtSleep.push(ownerOf(mutexDir) === successorOwner)
+      rmSync(mutexDir, { recursive: true })
+    })
+    let recreated = false
+    interceptWrite((file) => {
+      if (!recreated && file === join(mutexDir, 'owner')) {
+        // Another process displaced the new directory and a successor recreated the name.
+        recreated = true
+        rmSync(mutexDir, { recursive: true })
+        mkdirSync(mutexDir)
+        originals.writeFileSync(join(mutexDir, 'owner'), `${successorOwner}\n`)
+      }
+    })
+
+    expect(withBacklogLock(backlog, () => 'mutated')).toBe('mutated')
+    expect(recreated).toBe(true)
+    expect(successorHeldAtSleep).toEqual([true])
+    expect(lockRemnants(backlog)).toEqual([])
   })
 })
