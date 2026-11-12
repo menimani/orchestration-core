@@ -60,6 +60,8 @@ const ESCAPED_NON_ENGLISH_FIXTURE_LINES: ReadonlyMap<string, ReadonlySet<string>
   ['tests/loop-gate-fix.test.ts', new Set([
     `const accented = String.fromCharCode(${'0xe9'}).repeat(50)`,
     `expect(tail).not.toContain(String.fromCharCode(${'0xfffd'}))`,
+    // A frame marker split by an invisible character must still be recognised.
+    `const zeroWidthSpace = String.fromCharCode(${'0x200b'})`,
   ])],
 ])
 
