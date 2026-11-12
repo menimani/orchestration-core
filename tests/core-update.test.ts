@@ -288,6 +288,23 @@ describe('pre-cycle core update', () => {
     expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
   })
 
+  it('finds the last exact import behind a commit with a long import line', async () => {
+    const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
+    writeFileSync(join(packageRoot, 'local.txt'), 'local change\n')
+    commit(repoRoot, 'chore: modify the core locally')
+    const message = join(repoRoot, '..', 'long-import-message.txt')
+    writeFileSync(message, 'chore: quote an import line\n\n'
+      + `git-subtree-dir: orchestration/ts ${' '.repeat(1_000_000)}x\ngit-subtree-split: ${oldCore}\n`)
+    git(repoRoot, ['commit', '--allow-empty', '-F', message])
+    const newCore = advanceUpstream('version two\n')
+    const loop = makeLoop(config())
+
+    expect(await loop.poll(), events.join('\n')).toBe('restart')
+    expect(readFileSync(join(packageRoot, 'core.txt'), 'utf8'))
+      .toBe('version two\n')
+    expect(events).toContain(`Updated core ${oldCore.slice(0, 8)}..${newCore.slice(0, 8)}`)
+  })
+
   it('updates integration source without restarting the fixed daemon', async () => {
     const oldCore = git(upstreamRoot, ['rev-parse', 'HEAD'])
     const newCore = advanceUpstream('version two\n')
