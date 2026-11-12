@@ -93,7 +93,7 @@ describe('terminateLiveTaskProcesses', () => {
     expect(spawn).toHaveBeenNthCalledWith(2, 'taskkill', ['/PID', '102', '/T', '/F'])
     expect(result.terminated).toEqual([{ taskId: 'second-task', pid: 102 }])
     expect(result.failures).toEqual([{
-      taskId: 'first-task', pid: 101, error: 'Could not stop process tree 101.',
+      taskId: 'first-task', pid: 101, error: 'Could not stop process tree 101. Still running: PID 101.',
     }])
     // Stopping is what makes a recorded identifier false, so a stopped task releases it
     // and one that resisted keeps it: something is still running under that number.
@@ -357,7 +357,48 @@ describe('process-group liveness', () => {
     }
 
     expect(() => createWindowsOperatingSystem(runtime).terminateProcessTree(4321))
-      .toThrow('Could not stop process tree 4321.')
+      .toThrow(new Error('Could not stop process tree 4321. Still running: PID 4322.'))
     expect(listProcesses).toHaveBeenCalledTimes(1)
+  })
+
+  it('lists a Windows tree again when its first snapshot failed', () => {
+    let alive = true
+    let now = 0
+    const listProcesses = vi.fn((): { pid: number, parentPid: number }[] => {
+      if (listProcesses.mock.calls.length === 1) throw new Error('CIM query failed')
+      return alive ? [{ pid: 4321, parentPid: 1 }] : []
+    })
+    const spawn = vi.fn(() => { alive = false })
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn,
+      listProcesses,
+      probeProcess: () => {
+        if (!alive) throw gone()
+      },
+      remove: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+    }
+
+    expect(createWindowsOperatingSystem(runtime).terminateProcessTree(4321)).toBe(true)
+    expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '4321', '/T', '/F'])
+    expect(listProcesses).toHaveBeenCalledTimes(2)
+    expect(now).toBe(50)
+  })
+
+  it('reports a Windows tree that could never be listed as not stopped', () => {
+    let now = 0
+    const runtime: WindowsOperatingSystemRuntime = {
+      spawn: () => {},
+      listProcesses: () => { throw new Error('CIM query failed') },
+      probeProcess: () => { throw gone() },
+      remove: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+    }
+
+    expect(() => createWindowsOperatingSystem(runtime).terminateProcessTree(4321))
+      .toThrow(new Error('Could not stop process tree 4321. Its processes could not be listed.'))
+    expect(now).toBe(5_000)
   })
 })

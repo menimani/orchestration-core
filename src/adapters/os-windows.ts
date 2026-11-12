@@ -318,7 +318,7 @@ export function createOperatingSystem(
     anyProcessIsAlive(runtime, processTreePids(runtime, pid))
   )
   const terminateProcessTree = (pid: number): boolean => {
-    const trackedPids = processTreePids(runtime, pid)
+    let trackedPids = processTreePids(runtime, pid)
     if (!anyProcessIsAlive(runtime, trackedPids)) return false
     if (pid === process.pid || trackedPids?.pids.has(process.pid)) {
       throw new Error(
@@ -335,10 +335,19 @@ export function createOperatingSystem(
 
     const deadline = runtime.now() + PROCESS_EXIT_TIMEOUT_MS
     while (anyProcessIsAlive(runtime, trackedPids) && runtime.now() < deadline) {
+      // A failed snapshot can never be confirmed stopped, so a tree taskkill did end would
+      // still be reported as a survivor. Listing again lets a later snapshot settle it.
       runtime.sleep(PROCESS_EXIT_POLL_MS)
+      trackedPids ??= processTreePids(runtime, pid)
     }
-    if (anyProcessIsAlive(runtime, trackedPids)) {
-      throw new Error(`Could not stop process tree ${pid}.`)
+    if (trackedPids === undefined) {
+      throw new Error(`Could not stop process tree ${pid}. Its processes could not be listed.`)
+    }
+    const survivors = [...trackedPids.pids].filter((survivor) => isAlive(runtime, survivor))
+    if (survivors.length > 0) {
+      throw new Error(
+        `Could not stop process tree ${pid}. Still running: ${survivors.map((survivor) => `PID ${survivor}`).join(', ')}.`,
+      )
     }
     return true
   }
