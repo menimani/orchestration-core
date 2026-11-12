@@ -155,7 +155,9 @@ const FINDING_ORDER_TERMS = new Set([
 function findingParts(description: string): { tag: string | undefined; path: string | undefined } {
   return {
     tag: /^\[([A-Z]+)\]/.exec(description)?.[1]?.toLowerCase(),
-    path: description.match(/[A-Za-z0-9_./-]*\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/)?.[0],
+    // The extension must end the path, so `src/v1.2/` stays a directory, while a period
+    // that ends the sentence after `src/a.ts.` does not continue it.
+    path: description.match(/[A-Za-z0-9_./-]*\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+(?!\.?[A-Za-z0-9_/-])/)?.[0],
   }
 }
 
