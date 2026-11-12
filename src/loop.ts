@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync,
+  writeFileSync,
 } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import {
@@ -19,7 +20,7 @@ import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
   NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
   UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterRecordedMerge,
-  VerificationFailedError, type OrchestrationDepsRuntime,
+  VerificationFailedError, withMergeGuard, type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, issueQueueIsSeparate, logFile,
@@ -31,14 +32,15 @@ import {
   writeConflictedAttempts, type ConflictedAttempt,
 } from './conflictRetry.ts'
 import {
-  gateFixSpecFile, gateFixSpecification, mergeLogTail, readGateFixState, removeGateFixState,
+  gateFixFinalMessageFile, gateFixRunActive, gateFixSpecFile, gateFixSpecification,
+  markGateFixRunActive, mergeLogTail, readGateFixState, removeGateFixState,
   writeGateFixState,
 } from './gateFix.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import {
   refreshTask, listTaskIds, noChangeMarkerPresent, type DeadlineVerdict,
 } from './refresh.ts'
-import { readStatus, readTaskState, transitionStatus } from './status.ts'
+import { readStatus, readTaskState, transitionStatus, type TaskState } from './status.ts'
 import {
   resumeTask, startTask, StartupOwnershipUnknownError, StartupProcessRetainedError,
 } from './start.ts'
@@ -925,6 +927,14 @@ export function createLoop(deps: LoopDeps) {
         && readTaskState(paths, taskId) === 'running').length
   }
 
+  // A reserved handback is owed the next free slot. Counted only once its runner started,
+  // it waited while every slot freed during a poll was refilled from claims and the backlog.
+  function countReservedHandbacks(): number {
+    if (config.maxGateFixAttempts === 0) return 0
+    return listTaskIds(paths).filter((taskId) => readTaskState(paths, taskId) === 'completed'
+      && readGateFixState(paths, taskId)?.pending === true).length
+  }
+
   function queueLength(): number {
     if (!existsSync(queueFile)) return 0
     return readFileSync(queueFile, 'utf8').split(/\r?\n/).filter((line) => line !== '').length
@@ -1586,7 +1596,9 @@ export function createLoop(deps: LoopDeps) {
     error: unknown,
     mergeLog: string,
   ): Promise<boolean> {
-    if (config.maxGateFixAttempts === 0) return false
+    // Only an implementation task is handed back: a scan or review commits nothing a
+    // follow-up asking it to correct its change was written for.
+    if (config.maxGateFixAttempts === 0 || isInspectionTaskId(paths, taskId)) return false
     const state = readGateFixState(paths, taskId)
     const contentFailure = error instanceof VerificationFailedError
       && !existsSync(stopFile) && infrastructureDiagnosis(mergeLog) === ''
@@ -1604,21 +1616,31 @@ export function createLoop(deps: LoopDeps) {
     }
     if (state.attempts >= config.maxGateFixAttempts) return false
     // Reserved before the runner starts, so a restart in between resumes this attempt
-    // instead of losing it or granting another.
-    writeGateFixState(paths, taskId, {
-      attempts: state.attempts + 1, verificationFailed: false, pending: true,
+    // instead of losing it or granting another. Both happen under the task's merge guard:
+    // a manual merge holding it is merging this worktree, and this poll leaves it alone.
+    await withMergeGuard(paths, taskId, async () => {
+      writeGateFixState(paths, taskId, {
+        attempts: state.attempts + 1, verificationFailed: false, pending: true,
+      })
+      await startHandbackWithGuardHeld(taskId)
     })
-    await startHandback(taskId)
     return true
   }
 
   /**
-   * Start a reserved handback's runner once a parallel slot is free. While it waits, the
-   * task stays completed and each poll comes back here instead of running the gate again.
+   * Start a reserved handback's runner once a parallel slot is free and no merge of the
+   * task holds its merge guard. While it waits, the task stays completed and each poll
+   * comes back here instead of running the gate again.
    */
   async function startHandback(taskId: string): Promise<void> {
+    await withMergeGuard(paths, taskId, () => startHandbackWithGuardHeld(taskId))
+  }
+
+  async function startHandbackWithGuardHeld(taskId: string): Promise<void> {
     const state = readGateFixState(paths, taskId)
     if (state?.pending !== true) return
+    // A merge that finished before the guard was taken leaves nothing to hand back.
+    if (readTaskState(paths, taskId) !== 'completed') return
     if (existsSync(stopFile) || countRunningTasks() >= config.maxParallel) return
     const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
     const followUpSpec = gateFixSpecFile(paths, taskId)
@@ -1636,6 +1658,12 @@ export function createLoop(deps: LoopDeps) {
     const effort = existsSync(effortFile)
       ? readFileSync(effortFile, 'utf8').replace(/[\s\r\n]/g, '')
       : config.taskEffort
+    // The completed run's final message is kept, and the handback marked active before the
+    // runner starts, so a fix run that ends without completing, even across a restart,
+    // returns the task to completed as it was.
+    const finalMessage = finalMessageFile(paths, taskId)
+    if (existsSync(finalMessage)) copyFileSync(finalMessage, gateFixFinalMessageFile(paths, taskId))
+    markGateFixRunActive(paths, taskId, true)
     try {
       await resumeTaskImpl(paths, runner, taskId, followUpSpec, {
         effort: effort as 'medium',
@@ -1651,6 +1679,7 @@ export function createLoop(deps: LoopDeps) {
       }
       // The attempt is spent, and the failure it was meant to fix is counted after all.
       writeGateFixState(paths, taskId, { ...state, pending: false })
+      markGateFixRunActive(paths, taskId, false)
       event('WARN', `${shortTaskId(taskId)} handback could not start: ${errorSummary(error)}`)
       noteMergeFailure(mergeLog)
       return
@@ -1658,6 +1687,42 @@ export function createLoop(deps: LoopDeps) {
     writeGateFixState(paths, taskId, { ...state, pending: false })
     event('Handback', shortTaskId(taskId),
       `attempt ${state.attempts}/${config.maxGateFixAttempts}  verification failed twice; runner restarted`)
+  }
+
+  /**
+   * Settle a handed-back runner that has left running. One that completed is merged as
+   * any completed task is. One that failed, hit the task deadline, was stopped, or died
+   * with the daemon leaves the task as the handback found it: completed with its commits
+   * and earlier final message, the attempt spent, and its issue still claimed, so its next
+   * merge failure is counted as before rather than the task being reported failed.
+   * Changes the fix run left uncommitted stay in the worktree, as for any stopped run.
+   */
+  async function settleHandback(taskId: string, status: TaskState): Promise<TaskState> {
+    if (config.maxGateFixAttempts === 0 || (status !== 'completed' && status !== 'failed')) {
+      return status
+    }
+    if (!gateFixRunActive(paths, taskId)) return status
+    const state = readGateFixState(paths, taskId)
+    if (state === undefined) return status
+    if (status === 'completed') {
+      // A reservation not yet started is still waiting for its slot.
+      if (!state.pending) markGateFixRunActive(paths, taskId, false)
+      return status
+    }
+    const savedFinalMessage = gateFixFinalMessageFile(paths, taskId)
+    if (existsSync(savedFinalMessage)) {
+      copyFileSync(savedFinalMessage, finalMessageFile(paths, taskId))
+    }
+    if (!await transitionStatus(paths, taskId, 'failed', 'completed')) {
+      return readTaskState(paths, taskId) ?? status
+    }
+    writeGateFixState(paths, taskId, { ...state, verificationFailed: false, pending: false })
+    markGateFixRunActive(paths, taskId, false)
+    appendFileSync(logFile(paths, taskId),
+      '\nMerge gate handback ended without completing; task returned to completed.\n')
+    event('Handback', shortTaskId(taskId),
+      `attempt ${state.attempts}/${config.maxGateFixAttempts}  fix run ended without completing; task returned to completed`)
+    return 'completed'
   }
 
   function noteIssueReleaseFailure(error: IssueReleaseReconciliationError): void {
@@ -3372,14 +3437,15 @@ export function createLoop(deps: LoopDeps) {
       // Only a running task needs its process; refreshTask makes that one full read.
       const before = readTaskState(paths, taskId)
       if (before === undefined) continue
-      const status = before === 'running'
+      const refreshed = before === 'running'
         ? (await refreshTask(paths, taskId, {
           taskDeadlineHours: config.taskDeadlineHours,
           now: () => now().getTime(),
           onDeadline: reportTaskDeadline,
         }))?.status
         : before
-      if (status === undefined) continue
+      if (refreshed === undefined) continue
+      const status = await settleHandback(taskId, refreshed)
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
       const wasFailedAtStartup = tasksFailedAtStartup.delete(taskId)
       // A task can finish between the stop and this refresh; only once it leaves
@@ -3594,7 +3660,7 @@ export function createLoop(deps: LoopDeps) {
       await adoptRemoteTasks(openFindings)
     }
 
-    let running = countRunningTasks()
+    let running = countRunningTasks() + countReservedHandbacks()
 
     // Nothing new starts while a stop is pending: without this the burst detector above
     // would fill the parallel slots with the very outage it just stopped for.

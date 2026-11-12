@@ -44,6 +44,31 @@ export function gateFixSpecFile(paths: OrchPaths, taskId: string): string {
   return join(gateFixDir(paths), `${taskId}.md`)
 }
 
+/** The final message of the run that completed, set aside while a handback runs. */
+export function gateFixFinalMessageFile(paths: OrchPaths, taskId: string): string {
+  return join(gateFixDir(paths), `${taskId}.final.md`)
+}
+
+// Present from just before a handed-back runner starts until it leaves running, so a fix
+// run that ends without completing, even across a daemon restart, can be told apart from
+// a task that failed for any other reason.
+function activeFile(paths: OrchPaths, taskId: string): string {
+  return join(gateFixDir(paths), `${taskId}.active`)
+}
+
+export function gateFixRunActive(paths: OrchPaths, taskId: string): boolean {
+  return existsSync(activeFile(paths, taskId))
+}
+
+export function markGateFixRunActive(paths: OrchPaths, taskId: string, active: boolean): void {
+  if (!active) {
+    rmSync(activeFile(paths, taskId), { force: true })
+    return
+  }
+  mkdirSync(gateFixDir(paths), { recursive: true })
+  writeFileSync(activeFile(paths, taskId), '')
+}
+
 function isState(value: unknown): value is GateFixState {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
@@ -81,6 +106,8 @@ export function writeGateFixState(paths: OrchPaths, taskId: string, state: GateF
 export function removeGateFixState(paths: OrchPaths, taskId: string): void {
   rmSync(stateFile(paths, taskId), { force: true })
   rmSync(gateFixSpecFile(paths, taskId), { force: true })
+  rmSync(gateFixFinalMessageFile(paths, taskId), { force: true })
+  rmSync(activeFile(paths, taskId), { force: true })
 }
 
 /**

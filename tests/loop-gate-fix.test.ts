@@ -1,21 +1,31 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { operatingSystem } from '../src/adapters/os.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
+import type { Runner } from '../src/adapters/runner.ts'
 import { cleanupTask } from '../src/cleanup.ts'
-import type { LoopConfig } from '../src/config.ts'
+import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
   GATE_FIX_LOG_MAX_BYTES, GATE_FIX_LOG_MAX_LINES, gateFixSpecFile, gateFixSpecification,
   mergeLogTail, readGateFixState, writeGateFixState,
 } from '../src/gateFix.ts'
 import { shortTaskId } from '../src/ids.ts'
-import { LABEL_IN_PROGRESS, recordIssuesForTask } from '../src/issueQueue.ts'
-import { statusFile, worktreeDir } from '../src/paths.ts'
+import {
+  issueFailureCount, issueMergeComment, issueNumbersForTask, issuePromotionForIssue,
+  recordIssuesForTask, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_READY,
+} from '../src/issueQueue.ts'
+import { createLoop } from '../src/loop.ts'
+import { mergeTask } from '../src/merge.ts'
+import { branchName, finalMessageFile, statusFile, worktreeDir } from '../src/paths.ts'
+import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { forgetTaskProcess } from '../src/processRegistry.ts'
 import { readStatus } from '../src/status.ts'
+import { enqueueTask } from '../src/tasks.ts'
 import {
-  fakeForge, initializeGitRepo, logged, makeCompletedTask, makeLoop, paths, registerLoopHooks,
-  runnerStarts, setLogged, stubProject, writeFinal, writeRawStatus,
+  backlogEntries, fakeForge, git, initializeGitRepo, logged, logText, makeCompletedTask, makeLoop,
+  makeRunner, paths, registerLoopHooks, runnerStarts, setLogged, stubProject, writeFinal,
+  writeRawStatus,
 } from './loopHarness.ts'
 
 registerLoopHooks()
@@ -78,7 +88,106 @@ function taskEvents(taskId: string): string[] {
     && !line.startsWith('Idle ') && !line.startsWith('Running ')))
 }
 
+/**
+ * A runner PID no process owns, answered as a live process with a stable start identity
+ * until \`end\` is called or its tree is terminated, so a test decides when the run ends.
+ */
+function controlledProcess(): { pid: number; end: () => void; runner: Runner } {
+  const pid = process.pid + 1_000_000
+  let alive = true
+  const { processStartIdentity, processIsAlive, processTreeIsAlive, terminateProcessTree } =
+    operatingSystem
+  vi.spyOn(operatingSystem, 'processStartIdentity').mockImplementation((probed) =>
+    (probed === pid ? 'controlled-start' : processStartIdentity(probed)))
+  vi.spyOn(operatingSystem, 'processIsAlive').mockImplementation((probed) =>
+    (probed === pid ? alive : processIsAlive(probed)))
+  vi.spyOn(operatingSystem, 'processTreeIsAlive').mockImplementation((probed) =>
+    (probed === pid ? alive : processTreeIsAlive(probed)))
+  vi.spyOn(operatingSystem, 'terminateProcessTree').mockImplementation((probed) => {
+    if (probed !== pid) return terminateProcessTree(probed)
+    alive = false
+    return true
+  })
+  return {
+    pid,
+    end: () => { alive = false },
+    runner: {
+      ...makeRunner(),
+      start: async (options) => {
+        runnerStarts.push(options.specFile)
+        return pid
+      },
+    },
+  }
+}
+
+/** Stand in for a manual merge command holding the task's merge guard. */
+function holdMergeGuard(taskId: string): string {
+  const guardDir = join(paths.queueDir, 'merge-guards', taskId)
+  mkdirSync(guardDir, { recursive: true })
+  writeFileSync(join(guardDir, 'owner.json'), `${JSON.stringify({
+    state: 'active',
+    pid: process.pid,
+    startIdentity: currentProcessStartIdentity(),
+  })}\n`)
+  return guardDir
+}
+
+const issueGateConfig: Partial<LoopConfig> = { ...gateConfig, issueQueueEnabled: true }
+
+/** A task with a claimed issue, handed back after two verification failures. */
+async function handBackClaimedTask(
+  taskId: string,
+  runner: Runner,
+  config: Partial<LoopConfig> = {},
+  clock?: () => Date,
+): Promise<{ loop: ReturnType<typeof makeLoop>; issueNumber: number; tip: string }> {
+  initializeGitRepo()
+  makeTask(taskId)
+  const tip = git(['rev-parse', branchName(taskId)]).trim()
+  const loop = makeLoop({ ...issueGateConfig, ...config }, scriptedGate(['fail']), undefined,
+    clock, runner)
+  loop.initializeSessionStateForBranch()
+  const issueNumber = await fakeForge.createIssue({
+    title: 'handed back fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    assignees: [fakeForge.user],
+  })
+  recordIssuesForTask(paths, taskId, [issueNumber])
+
+  await loop.poll()
+  await loop.poll()
+  expect(runnerStarts).toEqual([gateFixSpecFile(paths, taskId)])
+  return { loop, issueNumber, tip }
+}
+
+/** The task as the handback found it: completed, its commits and claim intact, the attempt used. */
+async function expectReturnedToCompleted(
+  taskId: string,
+  tip: string,
+  issueNumber: number,
+): Promise<void> {
+  expect(readStatus(paths, taskId)?.status).toBe('completed')
+  expect(git(['rev-parse', branchName(taskId)]).trim()).toBe(tip)
+  expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+  expect(readFileSync(finalMessageFile(paths, taskId), 'utf8')).toBe('TASK_COMPLETE\n')
+  expect(readGateFixState(paths, taskId)?.attempts).toBe(1)
+  expect(readGateFixState(paths, taskId)?.pending).toBe(false)
+  expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
+  expect(issueFailureCount(paths, issueNumber)).toBe(0)
+  const issue = await fakeForge.getIssue(issueNumber)
+  expect(issue.state).toBe('open')
+  expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+  expect(issue.labels).not.toContain(LABEL_READY)
+  expect(logged.some((line) => line.startsWith(`FAILED: ${taskId}`))).toBe(false)
+  expect(logText()).not.toContain('Released')
+}
+
 describe('merge gate handback', () => {
+  // Tests that control a runner process restore the operating system afterwards.
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('hands a task back after its second verification failure and merges its fix', async () => {
     const taskId = '20261112_090000_301_auto-gate-fix'
     initializeGitRepo()
@@ -329,6 +438,232 @@ describe('merge gate handback', () => {
       expect(specification).toContain(`REQUIREMENT_COMPLETE: #${issueNumber}`)
     }
   })
+
+  it('defers a handback while a manual merge holds the task merge guard', async () => {
+    const taskId = '20261112_090000_311_auto-gate-fix-guarded'
+    const busyId = '20261112_090000_312_auto-gate-fix-guarded-busy'
+    initializeGitRepo()
+    makeTask(taskId)
+    const tip = git(['rev-parse', branchName(taskId)]).trim()
+    // Another task holds the only parallel slot, so the handback is reserved and waits.
+    writeRawStatus(busyId, 'running', process.pid)
+    const loop = makeLoop(gateConfig, scriptedGate(['fail']))
+    loop.initializeSessionStateForBranch()
+    await loop.poll()
+    await loop.poll()
+    expect(readGateFixState(paths, taskId)).toEqual({
+      attempts: 1, verificationFailed: false, pending: true,
+    })
+
+    // The slot frees while a manual merge of the task holds its merge guard.
+    rmSync(statusFile(paths, busyId))
+    forgetTaskProcess(paths, busyId)
+    const guardDir = holdMergeGuard(taskId)
+    await loop.poll()
+
+    expect(runnerStarts).toEqual([])
+    expect(handbacks()).toEqual([])
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(readGateFixState(paths, taskId)?.pending).toBe(true)
+    expect(git(['rev-parse', branchName(taskId)]).trim()).toBe(tip)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    // The manual merge goes on to merge exactly the commits the handback left alone.
+    rmSync(guardDir, { recursive: true, force: true })
+    const result = await mergeTask(paths, taskId, {
+      taskGate: 'full',
+      project: scriptedGate(['pass']),
+      outputFile: join(paths.logsDir, `${taskId}.manual.log`),
+    })
+    expect(result.outcome).toBe('merged')
+    expect(git(['rev-parse', 'HEAD^2']).trim()).toBe(tip)
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+
+    await loop.poll()
+    expect(runnerStarts).toEqual([])
+    expect(handbacks()).toEqual([])
+  })
+
+  it('starts a reserved handback in the first free slot ahead of the backlog', async () => {
+    const taskId = '20261112_090000_313_auto-gate-fix-slot'
+    const busyId = '20261112_090000_314_auto-gate-fix-slot-busy'
+    const queuedId = '20261112_090000_315_auto-gate-fix-slot-queued'
+    initializeGitRepo()
+    makeTask(taskId)
+    const busy = controlledProcess()
+    writeRawStatus(busyId, 'running', busy.pid)
+    writeFileSync(join(paths.tasksDir, `${queuedId}.md`), '# spec\n')
+    expect(enqueueTask(paths, queuedId).outcome).toBe('enqueued')
+    const loop = makeLoop(gateConfig, scriptedGate(['fail']))
+    loop.initializeSessionStateForBranch()
+    await loop.poll()
+    await loop.poll()
+    expect(readGateFixState(paths, taskId)?.pending).toBe(true)
+    expect(runnerStarts).toEqual([])
+
+    // The busy runner ends; the sweep reaches it only after the waiting handback.
+    busy.end()
+    await loop.poll()
+
+    expect(readStatus(paths, busyId)?.status).toBe('failed')
+    expect(runnerStarts).toEqual([])
+    expect(backlogEntries()).toHaveLength(1)
+
+    await loop.poll()
+
+    expect(runnerStarts).toEqual([gateFixSpecFile(paths, taskId)])
+    expect(handbacks()).toEqual([
+      'Handback 313_auto    attempt 1/1  verification failed twice; runner restarted',
+    ])
+    expect(backlogEntries()).toHaveLength(1)
+    expect(readStatus(paths, queuedId)).toBeUndefined()
+  })
+
+  it('never hands back a scan task that fails verification', async () => {
+    const taskId = '20261112_090000_316_scan'
+    initializeGitRepo()
+    makeTask(taskId)
+    const loop = makeLoop(gateConfig, scriptedGate(['fail']))
+    loop.initializeSessionStateForBranch()
+
+    for (let poll = 0; poll < 3; poll += 1) await loop.poll()
+
+    expect(logged.filter((line) => line.startsWith('Failed 316_scan'))).toHaveLength(3)
+    expect(handbacks()).toEqual([])
+    expect(runnerStarts).toEqual([])
+    expect(readGateFixState(paths, taskId)).toBeUndefined()
+    expect(existsSync(gateFixSpecFile(paths, taskId))).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('returns a task whose handed-back runner fails to completed', async () => {
+    const taskId = '20261112_090000_317_auto-gate-fix-runner-failed'
+    const fixRun = controlledProcess()
+    const { loop, issueNumber, tip } = await handBackClaimedTask(taskId, fixRun.runner)
+    expect(readStatus(paths, taskId)?.status).toBe('running')
+    expect(failureCount()).toBe('1\n')
+
+    fixRun.end()
+    await loop.poll()
+
+    await expectReturnedToCompleted(taskId, tip, issueNumber)
+    expect(handbacks()).toContain(
+      'Handback 317_auto    attempt 1/1  fix run ended without completing; task returned to completed')
+    // The returned task is merged again at once, and that failure is counted as before.
+    expect(failureCount()).toBe('2\n')
+    expect(runnerStarts).toHaveLength(1)
+    await loop.poll()
+    expect(failureCount()).toBe('3\n')
+    expect(runnerStarts).toHaveLength(1)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    await expectReturnedToCompleted(taskId, tip, issueNumber)
+  })
+
+  it('returns a task whose handed-back runner passes the task deadline to completed', async () => {
+    const taskId = '20261112_090000_318_auto-gate-fix-deadline'
+    const fixRun = controlledProcess()
+    const { loop, issueNumber, tip } = await handBackClaimedTask(
+      taskId, fixRun.runner, { taskDeadlineHours: 4 }, () => new Date('2026-08-08T07:00:00Z'),
+    )
+    // The fix run has been going since four hours before the loop clock's present.
+    writeRawStatus(taskId, 'running', fixRun.pid)
+
+    await loop.poll()
+
+    expect(operatingSystem.terminateProcessTree).toHaveBeenCalledWith(fixRun.pid)
+    expect(readFileSync(join(paths.logsDir, `${taskId}.log`), 'utf8'))
+      .toContain('Task deadline exceeded')
+    await expectReturnedToCompleted(taskId, tip, issueNumber)
+  })
+
+  it('leaves a task whose handed-back runner cannot start completed', async () => {
+    const taskId = '20261112_090000_319_auto-gate-fix-no-start'
+    const runner: Runner = {
+      ...makeRunner(),
+      start: async (options) => {
+        runnerStarts.push(options.specFile)
+        throw new Error('runner executable not found')
+      },
+    }
+    const { issueNumber, tip } = await handBackClaimedTask(taskId, runner)
+
+    expect(logged).toContain(
+      'WARN 319_auto handback could not start: runner executable not found')
+    expect(failureCount()).toBe('2\n')
+    await expectReturnedToCompleted(taskId, tip, issueNumber)
+  })
+
+  it('returns a task whose fix run dies with the daemon to completed after a restart', async () => {
+    const taskId = '20261112_090000_320_auto-gate-fix-daemon-restart'
+    const { issueNumber, tip } = await handBackClaimedTask(taskId, makeRunner())
+    expect(readStatus(paths, taskId)?.status).toBe('running')
+
+    // A graceful shutdown stops the runner and drops its PID record; the status stays running.
+    writeRawStatus(taskId, 'running', null)
+    setLogged([])
+    const forge = fakeForge
+    const restarted = createLoop({
+      paths,
+      config: { ...loadConfig({}), taskDeadlineHours: 0, ...issueGateConfig },
+      forge,
+      runner: makeRunner(),
+      project: scriptedGate(['fail']),
+      log: (line) => logged.push(line),
+      now: () => new Date(2026, 7, 8, 12, 0, 0),
+    })
+    await restarted.poll()
+
+    await expectReturnedToCompleted(taskId, tip, issueNumber)
+    expect(runnerStarts).toHaveLength(1)
+  })
+
+  it('merges a handed-back task and reports its issue as an ordinary merge does', async () => {
+    const ordinaryId = '20261112_090000_321_auto-gate-fix-ordinary'
+    const taskId = '20261112_090000_322_auto-gate-fix-linked'
+    initializeGitRepo()
+    makeTask(ordinaryId)
+    makeTask(taskId)
+    // The ordinary task passes at once; the other fails twice and passes after its fix.
+    const loop = makeLoop(issueGateConfig, scriptedGate(['pass', 'fail', 'fail', 'pass']))
+    loop.initializeSessionStateForBranch()
+    const issueFor = async (title: string, linkedTask: string): Promise<number> => {
+      const issueNumber = await fakeForge.createIssue({
+        title, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+        assignees: [fakeForge.user],
+      })
+      recordIssuesForTask(paths, linkedTask, [issueNumber])
+      return issueNumber
+    }
+    const ordinaryIssue = await issueFor('ordinary fix', ordinaryId)
+    const issueNumber = await issueFor('handed back fix', taskId)
+
+    await loop.poll()
+    await loop.poll()
+    expect(handbacks()).toHaveLength(1)
+    finishHandback(taskId)
+    await loop.poll()
+    await loop.poll()
+
+    const runBranch = git(['branch', '--show-current']).trim()
+    const mergeMessage = (linkedTask: string): string => git(
+      ['log', '-1', '--format=%B', readStatus(paths, linkedTask)!.merge_commit!],
+    ).replaceAll(linkedTask, '<task>').trim()
+    expect(mergeMessage(taskId)).toBe(mergeMessage(ordinaryId))
+    for (const [linkedTask, linkedIssue] of [[ordinaryId, ordinaryIssue], [taskId, issueNumber]] as const) {
+      const status = readStatus(paths, linkedTask)
+      expect(status?.status).toBe('merged')
+      expect(issuePromotionForIssue(paths, linkedIssue)?.taskId).toBe(linkedTask)
+      expect(fakeForge.issueComments.get(linkedIssue))
+        .toContain(issueMergeComment(linkedTask, status!.merge_commit!, runBranch))
+    }
+    const ordinary = await fakeForge.getIssue(ordinaryIssue)
+    const handedBack = await fakeForge.getIssue(issueNumber)
+    expect(handedBack.state).toBe(ordinary.state)
+    expect([...handedBack.labels].sort()).toEqual([...ordinary.labels].sort())
+    expect(handedBack.assignees).toEqual(ordinary.assignees)
+    expect(readGateFixState(paths, taskId)).toBeUndefined()
+  })
+
 
   it('removes the handback state when the task is cleaned up', () => {
     const taskId = '20261112_090000_309_auto-gate-fix-cleanup'
