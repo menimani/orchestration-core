@@ -595,7 +595,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
     current run branch, carries the merge log's last at most 200 lines and 16 KiB inside
     the untrusted repository-content framing as data to diagnose, and instructs it to make
     the verification commands pass by correcting the change, to commit on the same branch,
-    and never to delete, skip, or weaken a test. A `Handback` event names the attempt
+    and never to delete, skip, or weaken a test. The log's frame markers carry an
+    identifier drawn from the crypto API for each follow-up and stated once before the
+    frame; after truncation, every log line that matches either marker regardless of
+    case, whitespace, and invisible characters is shown neutralised with a
+    `[frame-like line]` prefix, so no log text can end the frame, and no log text appears
+    outside it. The earlier final message is discarded, so the follow-up states that no
+    completion line from the earlier attempt counts and, for a task linked to several
+    issues, names each `REQUIREMENT_COMPLETE: #N` line it must print again besides its
+    completion marker. A `Handback` event names the attempt
     number. The task returns to `running` with a fresh `started_at`: it takes a parallel
     slot, appears in `loop-status`, keeps its issue claim and lease heartbeat, obeys the
     task deadline and the stop command, and when it completes its merge is attempted afresh

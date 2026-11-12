@@ -1624,6 +1624,7 @@ export function createLoop(deps: LoopDeps) {
       maxAttempts: config.maxGateFixAttempts,
       specification: readFileSync(specFile(paths, taskId), 'utf8'),
       mergeLogTail: existsSync(mergeLog) ? mergeLogTail(readFileSync(mergeLog)) : '',
+      issueNumbers: issueNumbersForTask(paths, taskId),
     }))
     const effortFile = join(paths.queueDir, 'effort', taskId)
     const effort = existsSync(effortFile)
