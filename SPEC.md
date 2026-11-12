@@ -1044,8 +1044,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; any other selector loads an external package, file URL, absolute
     path, or consumer-repository-relative module). A consumer-repository-relative
-    selector must begin with `./` or `../`; an unprefixed value such as
-    `custom/forge.mjs` remains a package specifier. External modules export a `Forge`
+    selector must begin with `./`, `../`, `.\`, or `..\` on every platform; an
+    unprefixed value such as `custom/forge.mjs` remains a package specifier. External
+    modules export a `Forge`
     as default or `forge`, or a `createForge(repoRoot, report, target)` factory, so gitea/gitlab
     implementations can be added without touching the core. The target names the
     repository for branches, pull requests, and workflow runs and the repository for the
@@ -1072,8 +1073,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     replaces an issue's title, and project bridges use it rather than the loop core.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`; any other selector
-    resolves like an external forge module, including the required `./` or `../` prefix
-    for a consumer-repository-relative module). External modules export a `Runner` as
+    resolves like an external forge module, including the required `./`, `../`, `.\`, or
+    `..\` prefix for a consumer-repository-relative module). External modules export a `Runner` as
     default or `runner`, or a `createRunner(options)` factory. The runner contract is
     the output markers — `TASK_COMPLETE`,
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
