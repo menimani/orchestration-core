@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { join, resolve, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { externalAdapterSpecifier } from '../src/adapters/external.ts'
 import { loadForge } from '../src/adapters/forge.ts'
 import { loadRunner } from '../src/adapters/runner.ts'
 
@@ -18,6 +20,17 @@ function fixtureRoot(): string {
 }
 
 describe('external adapter selectors', () => {
+  it('resolves a backslash-prefixed relative selector to a file URL on every platform', () => {
+    const root = fixtureRoot()
+    const selector = '.\\custom\\forge.mjs'
+
+    const specifier = externalAdapterSpecifier(selector, root)
+
+    expect(specifier).toBe(pathToFileURL(resolve(root, selector)).href)
+    expect(specifier.startsWith('file:')).toBe(true)
+    expect(externalAdapterSpecifier('custom\\forge.mjs', root)).toBe('custom\\forge.mjs')
+  })
+
   it('loads a forge factory from a path relative to the repository', async () => {
     const root = fixtureRoot()
     writeFileSync(join(root, 'forge.mjs'), `
