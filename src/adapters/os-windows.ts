@@ -235,6 +235,7 @@ function startIdentityMilliseconds(identity: string | undefined): number | undef
 function processTreePids(
   runtime: WindowsOperatingSystemRuntime,
   rootPid: number,
+  stopping = false,
 ): ProcessTree | undefined {
   let processes: readonly WindowsProcess[]
   try {
@@ -249,11 +250,13 @@ function processTreePids(
   for (const { pid, createdAt } of processes) {
     if (createdAt !== undefined) createdAtByPid.set(pid, createdAt)
   }
+  let rootUndated = false
   if (!runningPids.has(rootPid)) {
     // A root the snapshot omitted has no creation time, and every orphan still naming its
     // PID would pass the check below. A live root's start time takes the snapshot's place.
     const rootCreatedAt = startIdentityMilliseconds(runtime.processStartIdentity?.(rootPid))
     if (rootCreatedAt !== undefined) createdAtByPid.set(rootPid, rootCreatedAt)
+    else rootUndated = true
   }
   const childrenByParent = new Map<number, number[]>()
   for (const { pid, parentPid, createdAt } of processes) {
@@ -265,6 +268,11 @@ function processTreePids(
     if (createdAt !== undefined && parentCreatedAt !== undefined && createdAt < parentCreatedAt) {
       continue
     }
+    // An omitted root whose identity query timed out or failed leaves a dated child's
+    // link uncomparable. A stop drops it, so an unknown identity never widens the set
+    // beyond what a known one would confirm; a liveness check keeps it, since answering
+    // "alive" there is the safe verdict. An undated child is kept under either identity.
+    if (stopping && rootUndated && parentPid === rootPid && createdAt !== undefined) continue
     const children = childrenByParent.get(parentPid) ?? []
     children.push(pid)
     childrenByParent.set(parentPid, children)
@@ -318,7 +326,7 @@ export function createOperatingSystem(
     anyProcessIsAlive(runtime, processTreePids(runtime, pid))
   )
   const terminateProcessTree = (pid: number): boolean => {
-    let trackedPids = processTreePids(runtime, pid)
+    let trackedPids = processTreePids(runtime, pid, true)
     if (!anyProcessIsAlive(runtime, trackedPids)) return false
     if (pid === process.pid || trackedPids?.pids.has(process.pid)) {
       throw new Error(
@@ -338,7 +346,7 @@ export function createOperatingSystem(
       // A failed snapshot can never be confirmed stopped, so a tree taskkill did end would
       // still be reported as a survivor. Listing again lets a later snapshot settle it.
       runtime.sleep(PROCESS_EXIT_POLL_MS)
-      trackedPids ??= processTreePids(runtime, pid)
+      trackedPids ??= processTreePids(runtime, pid, true)
     }
     if (trackedPids === undefined) {
       throw new Error(`Could not stop process tree ${pid}. Its processes could not be listed.`)
