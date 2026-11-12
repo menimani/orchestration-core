@@ -195,10 +195,14 @@ comments and other items cite items by number, so a number is never reused.
   any answer but `y` or `Y` prints `Aborted.` and exits zero. `--test-cmd` replaces
   `TEST_CMD` for this merge, and without a command it prints the usage and exits 1; any
   other option is an error. A grouped task missing a
-  requirement's completion marker is refused before the merge. A completed merge resets the
-  consecutive merge-failure count and, for an issue-born task, records the promotion and
-  comments the merge on each linked issue, a failed comment being only a `WARN:`. A
-  merge refusal prints its reason and exits non-zero.
+  requirement's completion marker is refused before the merge. A completed merge clears the
+  current cycle's gate-complete and resume flags before its status is recorded, resets the
+  consecutive merge-failure count, removes the task's gate fix state and the branches kept
+  from its conflicted attempts, a branch that cannot be removed being only a `WARN:`, and,
+  for an issue-born task, records the promotion and comments the merge on each linked
+  issue, a failed comment being only a `WARN:`. A `no-change` outcome removes the same
+  gate fix state and kept branches and clears the cycle's gate-complete flag. A merge
+  refusal prints its reason and exits non-zero.
 
 ### Retained runtime configuration
 

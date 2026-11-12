@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { ForgeIssueNotFoundError } from '../src/adapters/forge.ts'
+import { readConflictedAttempts, writeConflictedAttempts } from '../src/conflictRetry.ts'
+import { readGateFixState, writeGateFixState } from '../src/gateFix.ts'
 import { issueCompletionForIssue, recordIssuesForTask } from '../src/issueQueue.ts'
 import {
   branchName, finalMessageFile, orchPaths, shellPathSpelling, worktreeDir,
@@ -993,6 +995,84 @@ describe('manual merge', () => {
       mergeCommit,
       runBranch,
     })
+  })
+
+  it('clears the cycle gate flags, gate fix state, and kept conflict commits a merge leaves behind', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20261112_190000_001_user-manual-bookkeeping'
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(join(worktree, 'work.txt'), 'done\n')
+    git(['add', '-A'], worktree)
+    git(['commit', '-qm', 'fix: complete bookkeeping task'], worktree)
+    await writeStatus(paths, taskId, 'completed')
+    const keptBranch = 'orchestration/conflict/kept-attempt'
+    git(['branch', keptBranch])
+    writeConflictedAttempts(paths, taskId, [{
+      taskId: '20261112_180000_001_user-earlier-attempt',
+      branch: keptBranch,
+      runBranch: 'main', runTip: 'a', base: 'b', taskTip: 'c',
+      conflictedFiles: ['work.txt'], conflictingCommits: [],
+    }])
+    writeGateFixState(paths, taskId, { attempts: 1, verificationFailed: true, pending: false })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-2'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-2'), '')
+
+    const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-2'))).toBe(false)
+    expect(readGateFixState(paths, taskId)).toBeUndefined()
+    expect(readConflictedAttempts(paths, taskId)).toEqual([])
+    expect(git(['branch', '--list', keptBranch]).trim()).toBe('')
+  })
+
+  it('clears the cycle-complete flag and gate fix state for a no-change outcome', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20261112_190000_002_user-no-change-bookkeeping'
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The requested behavior is already present.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    await writeStatus(paths, taskId, 'completed')
+    writeGateFixState(paths, taskId, { attempts: 1, verificationFailed: true, pending: false })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '3\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-3'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-3'), '')
+
+    const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-3'))).toBe(false)
+    // As in the loop, a no-change outcome adds no commits the gate has not verified.
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-3'))).toBe(true)
+    expect(readGateFixState(paths, taskId)).toBeUndefined()
   })
 
   it('preserves the merge failure streak for a no-change outcome', async () => {
