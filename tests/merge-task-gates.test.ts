@@ -601,6 +601,45 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
+  it('keeps a recorded merge and cleans up when the dependency check cannot read it', async () => {
+    const taskId = '20260808_000000_015_user-unreadable-merge'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const install = vi.fn()
+    const events: Array<[string, string]> = []
+    const previousGitDir = process.env.GIT_DIR
+    const restoreGitDir = (): void => {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR
+      else process.env.GIT_DIR = previousGitDir
+    }
+
+    try {
+      const result = await mergeTask(paths, taskId, {
+        taskGate: 'light',
+        project: noCheckProject,
+        orchestrationDepsRuntime: { install, packageRoot: join(repoRoot, 'orchestration', 'ts') },
+        // Every git call the dependency check makes now fails; the warning restores git
+        // so the cleanup that follows runs against the real repository.
+        onMerged: () => { process.env.GIT_DIR = join(repoRoot, 'missing-git-dir') },
+        onOrchestrationDepsEvent: (name, subject) => {
+          restoreGitDir()
+          events.push([name, subject])
+        },
+      })
+
+      expect(result).toMatchObject({ outcome: 'merged' })
+    } finally {
+      restoreGitDir()
+    }
+
+    expect(install).not.toHaveBeenCalled()
+    expect(events).toHaveLength(1)
+    expect(events[0]?.[0]).toBe('WARN')
+    expect(events[0]?.[1]).toContain('could not check 015_user for orchestration dependency changes')
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(repoRoot, ['branch', '--list', `task/${taskId}`]).trim()).toBe('')
+  })
+
   it('stops when a failed local merge cannot prove that the worktree was restored', async () => {
     const taskId = '20260824_084607_019_auto-merge-recovery'
     await makeCompletedTask(taskId, { commit: true })

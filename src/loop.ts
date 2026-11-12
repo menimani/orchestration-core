@@ -386,7 +386,11 @@ export function createLoop(deps: LoopDeps) {
     return true
   }
 
-  function orchestrationDepsEvent(name: 'Installed' | 'Skipped', subject: string): void {
+  function orchestrationDepsEvent(name: 'Installed' | 'Skipped' | 'WARN', subject: string): void {
+    if (name === 'WARN') {
+      event(name, subject)
+      return
+    }
     event(name, 'orchestration deps', subject)
   }
 
