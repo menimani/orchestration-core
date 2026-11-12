@@ -2051,8 +2051,14 @@ export function createLoop(deps: LoopDeps) {
       const currentCycle = readCount(scanCountFile)
       // The counter is rewound only after every other recovery step, so a marker one
       // cycle ahead of it means a previous start finished recovery but could not remove
-      // the marker; nothing is left to do but remove it.
+      // the marker. A new run branch also resets the counter, so a stop during a live
+      // first-cycle scan lands here with its scans untouched; cleanup is idempotent, so
+      // the named scans are discarded before the marker goes, or the new run would count
+      // them as its own failures.
       if (cycles.size === 1 && cycles.has(currentCycle + 1)) {
+        for (const taskId of new Set(entries.map((entry) => entry.taskId))) {
+          cleanupTask(paths, taskId, undefined, false, log)
+        }
         rmSync(marker, { force: true })
         event('Recovered', 'scan cycle', `${currentCycle + 1} after operator stop`)
         return true
