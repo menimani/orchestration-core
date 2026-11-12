@@ -116,6 +116,44 @@ describe('fingerprintOf', () => {
     expect(a.startsWith('text:')).toBe(true)
   })
 
+  it.each([
+    ['[LAYOUT] Remove the close buttons from `src/frontend/src/pages/CalendarPage.tsx`',
+      'src/frontend/src/pages/CalendarPage.tsx'],
+    ['[LAYOUT] `src/frontend/styles.css`: Remove empty .live-event-form rules (#448).',
+      'src/frontend/styles.css'],
+    ['[BUG] `src/order.ts` requires foo before bar', 'src/order.ts'],
+    ['[BUG] the fallback is missing in src/shared.ts.', 'src/shared.ts'],
+    ['[TEST] `src/shared.ts` lacks coverage', 'src/shared.ts'],
+    ['[BUG] src/a.ts and src/b.ts disagree', 'src/a.ts'],
+    ['[BUG] ./src/a.test.ts fails', './src/a.test.ts'],
+    ['[BUG] src/a.ts.bak is stale', 'src/a.ts.bak'],
+    ['[BUG] src/a.ts..', 'src/a.ts'],
+    ['[BUG] src/a.ts/b is a directory', undefined],
+    ['[BUG] src/a.ts_old is stale', undefined],
+    ['[BUG] `src/adapters/v1.2/` resolves the wrong adapter', undefined],
+    ['[BUG] `orchestration/ts-1.2/scripts` resolves the wrong adapter', undefined],
+    ['[BUG] the 1.x/2.x-era adapters resolve the wrong path', undefined],
+    ['[DOCS] `README.md` claims a missing command', undefined],
+    ['[BUG] `.githooks/pre-commit` skips the subject check', undefined],
+    ['[BUG] finding without a path', undefined],
+  ])('reads the primary path of %s', (title, path) => {
+    const fingerprint = fingerprintOf(title)
+    if (path === undefined) expect(fingerprint.startsWith('text:')).toBe(true)
+    else expect(fingerprint.startsWith(`${/^\[([A-Z]+)\]/.exec(title)![1]!.toLowerCase()}:${path}:`)).toBe(true)
+  })
+
+  it('reads a primary path in linear time from a long run of path characters', () => {
+    expect(fingerprintOf(`[BUG] ${'/'.repeat(100_000)}`).startsWith('text:')).toBe(true)
+    expect(fingerprintOf(`[BUG] ${'a/.'.repeat(33_000)} src/a.ts`).startsWith('bug:src/a.ts:'))
+      .toBe(true)
+  })
+
+  it('removes issue references in linear time after a long whitespace run', () => {
+    const fingerprint = fingerprintOf(`[BUG] \`src/a.ts\` issue${' '.repeat(1_000_000)}x`)
+
+    expect(fingerprint).toBe(fingerprintOf('[BUG] `src/a.ts` issue x'))
+  })
+
   it('keeps untagged findings naming different paths apart', () => {
     const a = fingerprintOf('Fix null check in src/a.ts')
     const b = fingerprintOf('Fix null check in src/b.ts')

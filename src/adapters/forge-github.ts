@@ -223,7 +223,7 @@ function commandOutputText(error: unknown): string {
 function reportedResetAt(text: string): Date | undefined {
   const epoch = /(?:x-ratelimit-reset|reset(?:s|ting)?(?: at)?)[^\d]{0,8}(\d{10})/i.exec(text)?.[1]
   if (epoch !== undefined) return new Date(Number(epoch) * 1000)
-  const iso = /(?:reset(?:s|ting)?(?: at)?|until)\s*:?\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/i
+  const iso = /(?:reset(?:s|ting)?(?: at)?|until)\s*(?::\s*)?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/i
     .exec(text)?.[1]
   return iso === undefined ? undefined : new Date(iso)
 }
