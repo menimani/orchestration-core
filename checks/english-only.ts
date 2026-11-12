@@ -77,12 +77,13 @@ const decodedEscapes = (line: string): string => line.replace(
   },
 ).replace(
   // Code points or UTF-16 code units spelled as integer literals name the same text an
-  // escape would.
-  /String\.(fromCodePoint|fromCharCode)\(\s*((?:0[xX][\da-fA-F]+|\d+)(?:\s*,\s*(?:0[xX][\da-fA-F]+|\d+))*)\s*\)/g,
+  // escape would. fromCharCode keeps only the low 16 bits of each argument, as the
+  // language does.
+  /String\.(fromCodePoint|fromCharCode)\(\s*((?:0[xX][\da-fA-F]+|0[oO][0-7]+|0[bB][01]+|\d+)(?:\s*,\s*(?:0[xX][\da-fA-F]+|0[oO][0-7]+|0[bB][01]+|\d+))*)\s*\)/g,
   (call, method: string, literals: string) => {
     const values = literals.split(',').map((literal) => Number(literal.trim()))
     if (method === 'fromCharCode') {
-      return values.every((codeUnit) => codeUnit <= 0xffff) ? String.fromCharCode(...values) : call
+      return String.fromCharCode(...values.map((codeUnit) => codeUnit & 0xffff))
     }
     return values.every((codePoint) => codePoint <= 0x10ffff) ? String.fromCodePoint(...values) : call
   },
