@@ -812,6 +812,14 @@ const cmdMerge: Command = async (paths, args) => {
       // Commits merged after the gate passed must be pushed and verified again before
       // promotion, so the cycle's gate flags go before the merged status is written.
       beforeMergeRecorded: () => clearCycleFlags(['cycle-complete', 'cycle-resume']),
+      // Runs before the dependency sync, as in the loop: an install that fails or is
+      // skipped afterwards exits 1, and a rerun that finds the task merged never comes
+      // back to this point.
+      onMerged: () => {
+        // A completed manual merge proves the previous failures are no longer consecutive.
+        writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+        retireTaskState()
+      },
       onMergeSkipped: (reason) => console.log(
         `Skipped ${taskId}: ${reason === 'active' ? 'merge already in progress' : 'merge already succeeded'}`,
       ),
@@ -832,12 +840,6 @@ const cmdMerge: Command = async (paths, args) => {
         recordIssueCompletions(paths, taskId, 'no-change')
       },
     })
-    if (mergeResult.outcome === 'merged') {
-      // A completed manual merge proves the previous failures are no longer consecutive.
-      // Clear the durable streak immediately, before optional forge bookkeeping can fail.
-      writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
-      retireTaskState()
-    }
     if (mergeResult.outcome === 'no-change') {
       retireTaskState()
       clearCycleFlags(['cycle-complete'])

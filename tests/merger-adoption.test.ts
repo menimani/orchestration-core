@@ -20,6 +20,35 @@ vi.mock('node:fs', async (importOriginal) => {
   }
 })
 
+const runBranchReads = vi.hoisted(() => ({
+  failures: 0,
+  answer: '' as string | Error,
+  // The poll's own checkout check reads through optionalGit; a test of a later read
+  // leaves it alone so the poll gets that far.
+  includeOptional: true,
+}))
+
+// The loop's run-branch lookups run unchanged unless a test makes the next ones fail.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  const execFileSync = ((...args: Parameters<typeof actual.execFileSync>) => {
+    const [file, gitArgs] = args
+    if (file === 'git' && Array.isArray(gitArgs) && gitArgs.join(' ') === 'branch --show-current'
+      && runBranchReads.failures > 0) {
+      // Only a lookup the loop itself runs; gitRemote.ts reads the branch on its behalf.
+      const callers = (new Error().stack ?? '').split(/\r?\n/).slice(2, 5)
+      if (/[\\/]src[\\/]loop\.ts/.test(callers[0] ?? '')
+        && (runBranchReads.includeOptional || !callers.some((frame) => /\boptionalGit\b/.test(frame)))) {
+        runBranchReads.failures -= 1
+        if (runBranchReads.answer instanceof Error) throw runBranchReads.answer
+        return runBranchReads.answer
+      }
+    }
+    return actual.execFileSync(...args)
+  }) as typeof actual.execFileSync
+  return { ...actual, execFileSync }
+})
+
 import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { Runner } from '../src/adapters/runner.ts'
@@ -135,6 +164,9 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  runBranchReads.failures = 0
+  runBranchReads.answer = ''
+  runBranchReads.includeOptional = true
   rmSync(tempRoot, { recursive: true, force: true })
 })
 
@@ -615,6 +647,84 @@ describe('remote task adoption', () => {
 
     expect(issuePromotionForIssue(paths, issueNumber)).toBeDefined()
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+  })
+
+  it('adopts a worker branch when the run branch reads empty once', async () => {
+    const task = pushWorkerBranch('20260809_000000_021_auto-transient-run-branch')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const loop = makeLoop(stubProject)
+    runBranchReads.failures = 1
+
+    await loop.adoptRemoteTasks()
+
+    expect(runBranchReads.failures).toBe(0)
+    const mergeCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({
+      issueNumber, mergeCommit, runBranch: 'main',
+    })
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_FAILED)
+    expect(logged.join('\n')).not.toContain('the run branch could not be read')
+  })
+
+  it('defers adoption with one warning and posts no git output while the run branch is unreadable', async () => {
+    const task = pushWorkerBranch('20260809_000000_022_auto-unreadable-run-branch')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const loop = makeLoop(stubProject)
+    runBranchReads.failures = Number.POSITIVE_INFINITY
+    runBranchReads.answer = Object.assign(
+      new Error('Command failed: git branch --show-current\nfatal: unable to read HEAD-secret-detail'),
+      { status: 128, stderr: 'fatal: unable to read HEAD-secret-detail' },
+    )
+
+    await loop.adoptRemoteTasks()
+    await loop.adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+    const comments = forge.issueComments.get(issueNumber)?.join('\n') ?? ''
+    expect(comments).not.toContain('Remote task adoption failed')
+    expect(comments).not.toContain('HEAD-secret-detail')
+    expect(existsSync(join(paths.queueDir, 'merge-failure-count.txt'))
+      ? readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()
+      : '0').toBe('0')
+    expect(logged.filter((line) =>
+      line.includes('remote adoption deferred: the run branch could not be read'))).toHaveLength(1)
+    expect(logged.join('\n')).not.toContain('HEAD-secret-detail')
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+
+    runBranchReads.failures = 0
+    await loop.adoptRemoteTasks()
+
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({ runBranch: 'main' })
+    expect(logged.some((line) => line.startsWith('Recovered reading the run branch'))).toBe(true)
+  })
+
+  it('leaves a closed run pull request\'s issues alone while the held branch is unreadable', async () => {
+    const task = pushWorkerBranch('20260809_000000_023_auto-unreadable-held-branch')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const loop = makeLoop(stubProject)
+    await loop.adoptRemoteTasks()
+    const promotion = issuePromotionForIssue(paths, issueNumber)
+    expect(promotion).toMatchObject({ runBranch: 'main' })
+    forge.prStatusValue = {
+      state: 'closed', isDraft: false, url: 'https://example.test/pull/1', headSha: '', checks: [],
+    }
+    runBranchReads.failures = Number.POSITIVE_INFINITY
+    runBranchReads.answer = ''
+    runBranchReads.includeOptional = false
+
+    expect(await loop.poll()).toBe('continue')
+
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.state).toBe('open')
+    expect(issue.labels).not.toContain(LABEL_READY)
+    expect(forge.issueComments.get(issueNumber)?.join('\n')).not.toContain('UNPROMOTED:')
+    expect(issuePromotionForIssue(paths, issueNumber)).toEqual(promotion)
+    expect(logged.join('\n'))
+      .toContain('could not close promoted issues: the checkout is not on a branch')
   })
 
   it('retries issue updates for a persisted adoption without merging it again', async () => {

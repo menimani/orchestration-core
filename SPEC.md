@@ -200,7 +200,10 @@ comments and other items cite items by number, so a number is never reused.
   consecutive merge-failure count, removes the task's gate fix state and the branches kept
   from its conflicted attempts, a branch that cannot be removed being only a `WARN:`, and,
   for an issue-born task, records the promotion and comments the merge on each linked
-  issue, a failed comment being only a `WARN:`. A `no-change` outcome removes the same
+  issue, a failed comment being only a `WARN:`. The failure count, gate fix state, and
+  kept branches are settled as soon as the merged status is recorded, so a dependency
+  install that then fails or is skipped still exits non-zero but leaves nothing for a
+  rerun, which reports the merge as already succeeded. A `no-change` outcome removes the same
   gate fix state and kept branches and clears the cycle's gate-complete flag. A merge
   refusal prints its reason and exits non-zero.
 
@@ -1487,6 +1490,10 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     report-shaped comment on a member comes from an author whose access is undetermined
     (see the trust model), the adoption is deferred the same way, with a WARN naming the
     issue, and that issue's comments are not cached, so the next poll asks again.
+    The run branch the promotion records is read before the merge and asked a second time
+    when the first lookup fails or answers nothing; when neither answers, the adoption is
+    deferred the same way, with one deduplicated WARN that the run branch could not be read
+    and nothing posted to the issue, since an empty run branch is never recorded.
     A grouped member still claimed — `loop:in-progress` and not `loop:ready` — is still
     being published, even when it carries a report from an earlier task, so the poll
     skips the group and leaves every member as it is; only an unclaimed member reporting
