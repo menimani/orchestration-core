@@ -318,6 +318,28 @@ export function syncOrchestrationDepsAfterMerge(
   )
 }
 
+/**
+ * Synchronizes dependencies after a merge that is already recorded. Only a failed install
+ * stops the loop; a failure to read what the merge changed is not a merge failure, since
+ * rethrowing it would count against the loop and skip what follows the recorded merge.
+ */
+export function syncOrchestrationDepsAfterRecordedMerge(
+  paths: OrchPaths,
+  mergeCommit: string,
+  taskId: string,
+  event: OrchestrationDepsEvent,
+  runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
+  beforeInstall?: (() => boolean) | undefined,
+): void {
+  try {
+    syncOrchestrationDepsAfterMerge(paths, mergeCommit, taskId, event, runtime, beforeInstall)
+  } catch (error) {
+    if (error instanceof OrchestrationDepsInstallError) throw error
+    event('WARN', `could not check ${shortTaskId(taskId)} for orchestration dependency `
+      + `changes: ${commandFailureSummary(error)}`)
+  }
+}
+
 function orchestrationDepsMissing(root: string): boolean {
   const manifestFile = join(root, 'package.json')
   if (!existsSync(manifestFile)) return false
@@ -1021,18 +1043,10 @@ async function finalizeLocalMerge(
   options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   options.onMerged?.(mergeCommit)
-  try {
-    syncOrchestrationDepsAfterMerge(
-      paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
-      options.beforeOrchestrationDepsInstall,
-    )
-  } catch (error) {
-    if (error instanceof OrchestrationDepsInstallError) throw error
-    // The merge is already recorded, so a failure to read what it changed is not a merge
-    // failure: rethrowing it would count against the loop and skip the cleanup below.
-    depsEvent('WARN', `could not check ${shortTaskId(taskId)} for orchestration dependency `
-      + `changes: ${commandFailureSummary(error)}`)
-  }
+  syncOrchestrationDepsAfterRecordedMerge(
+    paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
+    options.beforeOrchestrationDepsInstall,
+  )
 
   // Removing the worktree is tidying, not part of the merge. On Windows a handle held
   // by an editor or a scanner makes the removal fail with EBUSY, and letting that abort
@@ -1577,7 +1591,7 @@ export async function mergeRemoteTask(
       throw new MergeError(`${branch} has no new commits relative to ${currentBranch}.`)
     }
     options.onMerged?.(appliedCommit)
-    syncOrchestrationDepsAfterMerge(
+    syncOrchestrationDepsAfterRecordedMerge(
       paths, appliedCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
       options.beforeOrchestrationDepsInstall,
     )
@@ -1614,7 +1628,7 @@ export async function mergeRemoteTask(
     throw new MergeError(`Adopting ${branch} created no commit on ${currentBranch}.`)
   }
   options.onMerged?.(mergeCommit)
-  syncOrchestrationDepsAfterMerge(
+  syncOrchestrationDepsAfterRecordedMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     options.beforeOrchestrationDepsInstall,
   )

@@ -18,7 +18,7 @@ import {
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
   NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
-  UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterMerge,
+  UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterRecordedMerge,
   VerificationFailedError, type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
@@ -838,7 +838,7 @@ export function createLoop(deps: LoopDeps) {
           }
           // mergeRemoteTask synchronizes dependencies only once onMerged returns, so the
           // failed first attempt skipped it and later gates would run on stale packages.
-          syncOrchestrationDepsAfterMerge(
+          syncOrchestrationDepsAfterRecordedMerge(
             paths, mergeCommit, taskId, orchestrationDepsEvent, orchestrationDepsRuntime,
             stopTaskProcessesBeforeDependencyInstall,
           )
