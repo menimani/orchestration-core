@@ -28,6 +28,17 @@ comments and other items cite items by number, so a number is never reused.
   comes from a fresh read and a fresh query. On Windows that query is bounded at five
   seconds, and a query that times out answers "unknown", which falls back to whether the
   recorded PID is alive.
+- Contenders for the backlog lock tolerate one another's moves. A holder marks its lock
+  retired only after renaming it away has failed, never before. A lock's owner record is
+  created exclusively, so of two processes that each created the directory standing at
+  the name, at most one becomes its owner. The main lock is broken only by moving it into
+  a directory private to the recovery mutex its breaker holds, so a holder whose mutex
+  another process displaced can no longer break it. A displaced mutex is removed, never
+  put back. A rename, owner write, or removal that finds its path gone or taken
+  (`ENOENT`, `EPERM`, `EEXIST`, `ENOTEMPTY`, or `EBUSY`) is a lost race: the attempt
+  counts as not acquired and is retried, any other error propagates, and a private
+  remnant left by the race is removed when it can be. A process running an older core
+  can still race by acquiring without the mutex.
 - Before a foreground loop enters its first cycle, or a background launcher spawns its
   daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
   runner models and reasoning efforts, and every setting whose resolved value differs
