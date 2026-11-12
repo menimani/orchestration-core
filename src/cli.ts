@@ -6,7 +6,7 @@ import {
 } from 'node:fs'
 import { join, relative, resolve, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
-import { loadForge, type Forge } from './adapters/forge.ts'
+import { ForgeIssueNotFoundError, loadForge, type Forge } from './adapters/forge.ts'
 import { projectScopeLabel, scopeForgeToProject } from './issueScope.ts'
 import {
   loadRunner, type ReasoningEffort, type Runner, type RunnerSharedSkills,
@@ -788,9 +788,15 @@ const cmdMerge: Command = async (paths, args) => {
       ),
       onNoChange: async () => {
         if (linkedIssues.length > 0) {
-          await Promise.all(linkedIssues.map((linkedIssue) =>
-            closeIssueAndRemoveLifecycleLabels(forge!, linkedIssue,
-              `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+          await Promise.all(linkedIssues.map(async (linkedIssue) => {
+            try {
+              await closeIssueAndRemoveLifecycleLabels(forge!, linkedIssue,
+                `Task ${taskId} completed without commits after reporting that no change was warranted.`)
+            } catch (error) {
+              // A deleted issue cannot be closed, and nothing remains open to close.
+              if (!(error instanceof ForgeIssueNotFoundError)) throw error
+            }
+          }))
         }
         // Keep completion persistence inside the retryable reconciliation phase. Once
         // mergeTask writes no-change and removes the worktree there is no merge retry.
