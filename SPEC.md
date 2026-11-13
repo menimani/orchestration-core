@@ -99,6 +99,13 @@ comments and other items cite items by number, so a number is never reused.
   marker as an exact standalone line, while a background loop writes that exact line to
   `logs/loop-markers.log`. The corresponding result is represented separately by an
   aligned display event in `loop.log`.
+  `logs/loop.log.branch` records the run branch `loop.log` belongs to. Before a
+  background loop opens `loop.log`, it compares that record with the run branch; when
+  they differ, or the record is missing, an existing `loop.log` is renamed to
+  `logs/loop-<branch>-<YYYYMMDD_HHMMSS>.log`, named after the recorded branch (or, without
+  a record, the one in `queue/run-branch.txt`) with characters outside `[A-Za-z0-9._-]`
+  replaced by `-`, and an empty `loop.log` is started. The record is then rewritten
+  with the run branch. A foreground loop does not rotate the log.
 - Every command except `install-skills`, whose own item below states its single option,
   accepts a global `--repo <path>` option. When present, Git resolves the
   named path to its repository root and the CLI verifies both that it is a Git repository
@@ -900,6 +907,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     appended to the generated task, so a consumer's template that predates the
     placeholder still carries the accepted limits, and the numbered sections that
     `SCAN_PARALLEL` splits are unchanged.
+    A review that finds nothing prints `NO_FINDINGS` on its own line instead of any
+    `NEXT_TASK` line (item 30). A round is clean only because its final message has no
+    actionable `NEXT_TASK` finding; `NO_FINDINGS` never makes it clean, and a final
+    message carrying both logs
+    `WARN         final message has NO_FINDINGS and NEXT_TASK; keeping findings` and
+    keeps the findings.
     A clean review round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle. An ordinary
     cycle that still has findings at that bound logs a warning and resumes. A review
     that ends failed, or in an unknown state, without a verdict says nothing about the
@@ -1041,7 +1054,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     reset to zero. Task statuses, the backlog, the description index, and the `scanned/`
     announcement markers are kept, since status files span branches. A changed or
     missing record also resets the merge-failure count to zero. A matching record keeps
-    every one of these, so a loop stopped mid-cycle resumes where it was; a current
+    every one of these, so a loop stopped mid-cycle resumes where it was. Separately, a
+    background launch archives `loop.log` to `logs/loop-<branch>-<YYYYMMDD_HHMMSS>.log`
+    and starts it empty when `logs/loop.log.branch` names another branch (see the
+    `loop.log` format above); a foreground run never rotates it. A current
     branch that cannot be read fails startup with nothing reset. Startup then records the
     current branch. Every poll, before it consumes the stop file (item 25), compares the
     checkout's current branch with the recorded one; a mismatch logs
@@ -1131,9 +1147,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `..\` prefix for a consumer-repository-relative module). External modules export a `Runner` as
     default or `runner`, or a `createRunner(options)` factory. The runner contract is
     the output markers — `TASK_COMPLETE`,
-    `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
+    `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `NO_FINDINGS`, `DECISION_REQUIRED:` in the
+    final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
-    rendering behavior inside the adapter. Any runner honoring the contract is
+    rendering behavior inside the adapter. `NO_FINDINGS`, a standalone line, is an
+    explicit empty result from a review; it never overrides a `NEXT_TASK:` line in
+    the same final message (item 17). Any runner honoring the contract is
     substitutable. Additional interactive-agent skill destinations and rendering are
     selected by the consumer's project adapter rather than assumed by the core. The Claude
     runner and an interactive Claude adapter may share a destination, which is deduplicated.
