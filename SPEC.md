@@ -1011,7 +1011,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
 
 24. A PID lock (`queue/loop.pid`) keeps the loop single-instance per repository; a stale
     stop file is cleared on startup, after the PID lock is taken (never before — it may
-    be another instance's signal). The lock, a restart handover, and the issue-mode marker
+    be another instance's signal). A replacement that takes over its predecessor's lock
+    keeps the stop file, and a stop file present when any poll other than one that
+    finished the run returns stops the daemon, so a stop sent while a poll restarts it
+    exits instead of handing over. The lock, a restart handover, and the issue-mode marker
     record the owner's process-start identity; a query that answers "unknown" (on Windows,
     one that times out) is asked up to three times in all, 250 ms apart, so a slow
     query never fails a daemon start or handover that a later attempt can answer, and only

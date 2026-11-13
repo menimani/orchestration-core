@@ -1545,8 +1545,9 @@ async function runLoopDaemon(
     ))
 
     // A stale stop file is cleared only after the PID lock is taken, so another
-    // instance's signal is never removed.
-    rmSync(stopFile, { force: true })
+    // instance's signal is never removed. A replacement inherits its predecessor's
+    // lock, so a stop sent during the handover is that run's signal and must survive.
+    if (!usesRestartReservation) rmSync(stopFile, { force: true })
     if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
     writeFileSync(cycleCapFile, `${config.maxScanCycles}\n`)
 
@@ -1628,7 +1629,9 @@ async function runLoopDaemon(
         wake.cancel()
         throw error
       }
-      if (outcome === 'continue' && existsSync(stopFile)) outcome = 'stopped'
+      // poll() checks for a stop only at its start; one sent while it ran must still
+      // win over continuing or handing over to a replacement.
+      if (outcome !== 'done' && existsSync(stopFile)) outcome = 'stopped'
       if (outcome !== 'continue') {
         wake.cancel()
         await wake.outcome

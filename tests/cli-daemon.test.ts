@@ -869,6 +869,100 @@ describe('loop daemon ownership', () => {
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('Started      core        auto-update off')
   })
+
+  async function runDaemonInProcess(
+    poll: () => Promise<'stopped' | 'done' | 'continue' | 'restart'>,
+    env: Record<string, string> = {},
+  ): Promise<{ exitCode: number, startLoopReplacement: ReturnType<typeof vi.fn> }> {
+    const startLoopReplacement = vi.fn(async () => ({ ok: true, pid: 1 }))
+    vi.doMock('../src/adapters/runner.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/adapters/runner.ts')>(),
+      loadRunner: async () => ({ sharedSkills: fakeRunnerSharedSkills, start: vi.fn() }),
+    }))
+    vi.doMock('../src/loop.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/loop.ts')>(),
+      createLoop: () => ({
+        validatePushTarget: () => true,
+        initializeIssueQueue: async () => {},
+        initializeSessionStateForBranch: () => {},
+        poll,
+        restartSubject: () => 'core',
+      }),
+    }))
+    vi.doMock('../src/restart.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/restart.ts')>(),
+      startLoopReplacement,
+    }))
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV, {
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+      }, env)
+      process.exitCode = undefined
+      process.argv = [process.execPath, CLI, 'loop', '--approve-mode', 'local']
+
+      await import('../src/cli.ts')
+
+      return { exitCode: process.exitCode ?? 0, startLoopReplacement }
+    } finally {
+      logs.mockRestore()
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      vi.doUnmock('../src/adapters/runner.ts')
+      vi.doUnmock('../src/loop.ts')
+      vi.doUnmock('../src/restart.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
+  }
+
+  it('exits instead of handing over when a stop arrives during a restarting poll', async () => {
+    const result = await runDaemonInProcess(async () => {
+      writeFileSync(daemonFile('stop'), '')
+      return 'restart'
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.startLoopReplacement).not.toHaveBeenCalled()
+  })
+
+  it('keeps a stop sent during the handover when a replacement takes over the PID lock', async () => {
+    mkdirSync(dirname(daemonFile('stop')), { recursive: true })
+    writeFileSync(daemonFile('loop.pid'), processMarkerText(processMarker(process.pid)))
+    writeFileSync(daemonFile('stop'), '')
+    const outcomes: string[] = []
+
+    const result = await runDaemonInProcess(async () => {
+      const outcome = existsSync(daemonFile('stop')) ? 'stopped' : 'done'
+      outcomes.push(outcome)
+      return outcome
+    }, { ORCHESTRATION_LOOP_RESTART_PREDECESSOR_PID: `${process.pid}` })
+
+    expect(result.exitCode).toBe(0)
+    expect(outcomes).toEqual(['stopped'])
+  })
 })
 
 describe('stop', () => {
