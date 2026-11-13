@@ -7,8 +7,8 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { cleanupTask } from '../src/cleanup.ts'
 import { loadConfig, type LoopConfig } from '../src/config.ts'
 import {
-  GATE_FIX_LOG_MAX_BYTES, GATE_FIX_LOG_MAX_LINES, gateFixSpecFile, gateFixSpecification,
-  mergeLogTail, readGateFixState, writeGateFixState,
+  GATE_FIX_LOG_MAX_BYTES, GATE_FIX_LOG_MAX_LINES, gateFixRunActive, gateFixSpecFile,
+  gateFixSpecification, mergeLogTail, readGateFixState, writeGateFixState,
 } from '../src/gateFix.ts'
 import { shortTaskId } from '../src/ids.ts'
 import {
@@ -591,6 +591,86 @@ describe('merge gate handback', () => {
       'WARN 319_auto handback could not start: runner executable not found')
     expect(failureCount()).toBe('2\n')
     await expectReturnedToCompleted(taskId, tip, issueNumber)
+  })
+
+  it('stops the loop and keeps the task when a handed-back runner returns no usable PID', async () => {
+    const taskId = '20261112_090000_323_auto-gate-fix-no-pid'
+    const runner: Runner = {
+      ...makeRunner(),
+      start: async (options) => {
+        runnerStarts.push(options.specFile)
+        return 0
+      },
+    }
+    const { loop, issueNumber, tip } = await handBackClaimedTask(taskId, runner)
+
+    expect(logged).toContain('ERROR 323_auto    handback runner could not be accounted for; '
+      + 'task retained and loop stopped: '
+      + 'Runner returned invalid PID 0; process ownership could not be established.')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(readFileSync(join(paths.logsDir, `${taskId}.log`), 'utf8'))
+      .toContain('Task handback ownership is unknown:\nStartupOwnershipUnknownError: '
+        + 'Runner returned invalid PID 0; process ownership could not be established.')
+    // Not counted as a merge failure, and the attempt stays reserved and marked active.
+    expect(failureCount()).toBe('1\n')
+    expect(logged.some((line) => line.includes('handback could not start'))).toBe(false)
+    expect(handbacks()).toEqual([])
+    expect(readGateFixState(paths, taskId)).toEqual({
+      attempts: 1, verificationFailed: false, pending: true,
+    })
+    expect(gateFixRunActive(paths, taskId)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', branchName(taskId)]).trim()).toBe(tip)
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
+    expect((await fakeForge.getIssue(issueNumber)).labels).toContain(LABEL_IN_PROGRESS)
+
+    // The stopped loop neither merges nor hands the task back again.
+    await loop.poll()
+    expect(runnerStarts).toHaveLength(1)
+    expect(failureCount()).toBe('1\n')
+  })
+
+  it('stops the loop and keeps the task when a handed-back runner tree survives cleanup', async () => {
+    const taskId = '20261112_090000_324_auto-gate-fix-retained'
+    const fixRun = controlledProcess()
+    // The handback loses the task before it can mark it running, and the tree will not die.
+    const runner: Runner = {
+      ...fixRun.runner,
+      start: async (options) => {
+        writeRawStatus(taskId, 'failed')
+        return fixRun.runner.start(options)
+      },
+    }
+    vi.mocked(operatingSystem.terminateProcessTree).mockImplementation(() => true)
+    const { loop, issueNumber, tip } = await handBackClaimedTask(taskId, runner)
+
+    expect(operatingSystem.terminateProcessTree).toHaveBeenCalledWith(fixRun.pid)
+    expect(logged).toContain('ERROR 324_auto    handback runner could not be accounted for; '
+      + 'task retained and loop stopped: '
+      + `Task startup failed and process tree ${fixRun.pid} could not be stopped.`)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    const taskLog = readFileSync(join(paths.logsDir, `${taskId}.log`), 'utf8')
+    expect(taskLog).toContain(`Task handback failed:\nError: Task ${taskId} left completed `
+      + 'before its handback started.')
+    expect(taskLog).toContain(
+      `Process tree cleanup failed:\nError: Process tree ${fixRun.pid} is still alive.`)
+    // Not counted as a merge failure, and the attempt stays reserved and marked active.
+    expect(failureCount()).toBe('1\n')
+    expect(logged.some((line) => line.includes('handback could not start'))).toBe(false)
+    expect(handbacks()).toEqual([])
+    expect(readGateFixState(paths, taskId)).toEqual({
+      attempts: 1, verificationFailed: false, pending: true,
+    })
+    expect(gateFixRunActive(paths, taskId)).toBe(true)
+    expect(git(['rev-parse', branchName(taskId)]).trim()).toBe(tip)
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
+    expect((await fakeForge.getIssue(issueNumber)).labels).toContain(LABEL_IN_PROGRESS)
+
+    await loop.poll()
+    expect(runnerStarts).toHaveLength(1)
+    expect(failureCount()).toBe('1\n')
   })
 
   it('returns a task whose fix run dies with the daemon to completed after a restart', async () => {
