@@ -276,6 +276,8 @@ export function createLoop(deps: LoopDeps) {
   const postedMergeMarkers = new Map<number, string>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
+  // The check names the previous CI gate poll saw, for the PR and head it saw them on.
+  let previousCiPoll: { url: string; headSha: string; names: string[] } | undefined
   let gateWaitTarget: string | undefined
   let idleLogState: {
     startedAt: number
@@ -2394,6 +2396,8 @@ export function createLoop(deps: LoopDeps) {
 
   /** The CI verdict for the cycle gate: success / failure / pending / unknown. */
   async function checkPrCiStatus(): Promise<'success' | 'failure' | 'pending' | 'unknown'> {
+    const previous = previousCiPoll
+    previousCiPoll = undefined
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     if (prUrl === '') return 'unknown'
     let status
@@ -2421,7 +2425,18 @@ export function createLoop(deps: LoopDeps) {
       // project that explicitly declares it expects no CI checks may clear this gate.
       return project.ciChecksExpected === false ? 'success' : 'unknown'
     }
+    // A job that waits on another, or an external status, can appear only after the
+    // checks already listed have finished, so a verdict needs the same check names on
+    // two polls in a row for the same head.
+    const names = checks.map((check) => check.name)
+    previousCiPoll = { url: prUrl, headSha: status.headSha, names }
+    const stable = previous !== undefined
+      && previous.url === prUrl
+      && previous.headSha === status.headSha
+      && previous.names.length === names.length
+      && previous.names.every((name, index) => name === names[index])
     if (checks.some((check) => check.conclusion === 'pending')) return 'pending'
+    if (!stable) return 'pending'
     if (checks.some((check) => check.conclusion === 'failure')) return 'failure'
     return 'success'
   }
