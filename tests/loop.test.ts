@@ -986,11 +986,14 @@ describe('checkPrCiStatus', () => {
       { name: 'a', conclusion: 'success', startedAt: '' },
       { name: 'b', conclusion: 'success', startedAt: '' },
     ]
+    expect(await loop.checkPrCiStatus()).toBe('pending')
     expect(await loop.checkPrCiStatus()).toBe('success')
     expect(fakeForge.prStatusRefs).toEqual([
       { kind: 'url', value: 'https://example.test/pull/1' },
+      { kind: 'url', value: 'https://example.test/pull/1' },
     ])
     forgeStatus.checks = [{ name: 'a', conclusion: 'failure', startedAt: '' }]
+    expect(await loop.checkPrCiStatus()).toBe('pending')
     expect(await loop.checkPrCiStatus()).toBe('failure')
   })
 
@@ -1011,6 +1014,7 @@ describe('checkPrCiStatus', () => {
       { name: 'backend', conclusion: 'success', startedAt: '2026-08-14T01:30:00Z' },
     ]
 
+    expect(await loop.checkPrCiStatus()).toBe('pending')
     expect(await loop.checkPrCiStatus()).toBe('success')
   })
 
@@ -1025,6 +1029,7 @@ describe('checkPrCiStatus', () => {
         { name: 'frontend', conclusion: 'success', startedAt },
       ]
 
+      expect(await loop.checkPrCiStatus()).toBe('pending')
       expect(await loop.checkPrCiStatus()).toBe('failure')
     })
 
@@ -1041,7 +1046,34 @@ describe('checkPrCiStatus', () => {
     expect(await loop.checkPrCiStatus()).toBe('pending')
 
     setForgeStatus({ ...forgeStatus, headSha })
+    expect(await loop.checkPrCiStatus()).toBe('pending')
     expect(await loop.checkPrCiStatus()).toBe(verdict)
+  })
+
+  it('waits for a check that appears only after the listed ones finish', async () => {
+    const loop = makeLoop()
+    forgeStatus.checks = [{ name: 'build', conclusion: 'success', startedAt: '' }]
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+
+    forgeStatus.checks = [
+      { name: 'build', conclusion: 'success', startedAt: '' },
+      { name: 'deploy', conclusion: 'failure', startedAt: '' },
+    ]
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+    expect(await loop.checkPrCiStatus()).toBe('failure')
+  })
+
+  it('needs the check names again after a failed status read', async () => {
+    const loop = makeLoop()
+    forgeStatus.checks = [{ name: 'a', conclusion: 'success', startedAt: '' }]
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+    const prStatus = fakeForge.prStatus
+    fakeForge.prStatus = async () => { throw new Error('checks unavailable') }
+    expect(await loop.checkPrCiStatus()).toBe('unknown')
+    fakeForge.prStatus = prStatus
+
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+    expect(await loop.checkPrCiStatus()).toBe('success')
   })
 
   it('judges a closed PR by its checks even when its head is not the local HEAD', async () => {
@@ -1052,6 +1084,7 @@ describe('checkPrCiStatus', () => {
       headSha: 'f'.repeat(40),
       checks: [{ name: 'a', conclusion: 'failure', startedAt: '' }],
     })
+    expect(await loop.checkPrCiStatus()).toBe('pending')
     expect(await loop.checkPrCiStatus()).toBe('failure')
   })
 
@@ -2543,6 +2576,11 @@ describe('cycle gate', () => {
     return { attemptFile, completeFlag }
   }
 
+  // The gate gives a verdict only once two polls in a row list the same check names.
+  async function observeCiChecks(loop: ReturnType<typeof makeLoop>): Promise<void> {
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+  }
+
   it.each([
     ['pending', [{ name: 'frontend', conclusion: 'pending', startedAt: '' }]],
     ['unknown', []],
@@ -2583,6 +2621,7 @@ describe('cycle gate', () => {
       maxCiFixAttempts: 2,
     }, stubProject, undefined, undefined, undefined, enqueue)
     const { attemptFile, completeFlag } = prepareFailedCiGate()
+    await observeCiChecks(loop)
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(enqueue).toHaveBeenCalledTimes(1)
@@ -2617,6 +2656,7 @@ describe('cycle gate', () => {
       { name: hostileName, conclusion: 'failure', startedAt: '' },
       { name: 'backend', conclusion: 'success', startedAt: '' },
     ]
+    await observeCiChecks(loop)
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     const taskId = enqueue.mock.calls[0]?.[1]
@@ -2639,6 +2679,7 @@ describe('cycle gate', () => {
       maxCiFixAttempts: 1,
     }, stubProject, undefined, undefined, undefined, enqueue)
     const { attemptFile, completeFlag } = prepareFailedCiGate()
+    await observeCiChecks(loop)
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(enqueue).toHaveBeenCalledTimes(1)
@@ -2663,6 +2704,7 @@ describe('cycle gate', () => {
       maxCiFixAttempts: 3,
     }, stubProject, undefined, undefined, undefined, enqueue)
     const { attemptFile, completeFlag } = prepareFailedCiGate()
+    await observeCiChecks(loop)
     const stopFile = join(paths.queueDir, 'stop')
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
@@ -2690,6 +2732,7 @@ describe('cycle gate', () => {
       maxCiFixAttempts: 3,
     }, stubProject, undefined, undefined, undefined, enqueue)
     const { attemptFile, completeFlag } = prepareFailedCiGate()
+    await observeCiChecks(loop)
     const stopFile = join(paths.queueDir, 'stop')
     const resumeFlag = join(paths.queueDir, 'cycle-resume-1')
 
@@ -2727,6 +2770,7 @@ describe('cycle gate', () => {
     }, stubProject, undefined, undefined, undefined, enqueue)
     const { attemptFile } = prepareFailedCiGate()
     writeFileSync(attemptFile, 'corrupt\n')
+    await observeCiChecks(loop)
 
     await expect(loop.triggerScanIfIdle())
       .rejects.toThrow('persisted counter queue/ci-fix-emitted-1 is invalid')
@@ -2748,6 +2792,7 @@ describe('cycle gate', () => {
       maxCiFixAttempts: 1,
     }, stubProject, undefined, undefined, undefined, enqueue)
     const { attemptFile, completeFlag } = prepareFailedCiGate()
+    await observeCiChecks(loop)
     const stopFile = join(paths.queueDir, 'stop')
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')

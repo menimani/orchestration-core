@@ -872,7 +872,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     second in a row logs `ERROR` and writes the stop file, a successful read resets the
     count, and a forge rate limit is not counted. An open
     PR whose reported head commit is not the local `HEAD` is pending, whatever its
-    checks say, because the forge can still report the previous head after a push. A PR with
+    checks say, because the forge can still report the previous head after a push. A
+    success or failure verdict also needs the same check names on two consecutive polls
+    of the same head, because a dependent job or an external status can appear only
+    after the listed checks finish; until then the gate is pending. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
     explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
