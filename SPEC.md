@@ -39,6 +39,13 @@ comments and other items cite items by number, so a number is never reused.
   counts as not acquired and is retried, any other error propagates, and a private
   remnant left by the race is removed when it can be. A process running an older core
   can still race by acquiring without the mutex.
+- Between polls the daemon sleeps for at most `POLL_INTERVAL` seconds while watching the
+  queue directory, and it starts the next poll early, after a half-second debounce, when
+  `queue/backlog.txt` or `queue/wake` changes. It begins watching before each poll, so
+  a change made while that poll runs still shortens the sleep that follows. A local
+  enqueue changes the backlog; `delegate` in issue-queue mode publishes only to the
+  forge, so it writes the current time to `queue/wake` instead. A failed write of the
+  wake file is ignored and costs at most one poll interval.
 - Before a foreground loop enters its first cycle, or a background launcher spawns its
   daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
   runner models and reasoning efforts, and every setting whose resolved value differs
@@ -103,8 +110,9 @@ comments and other items cite items by number, so a number is never reused.
   background loop opens `loop.log`, it compares that record with the run branch; when
   they differ, or the record is missing, an existing `loop.log` is renamed to
   `logs/loop-<branch>-<YYYYMMDD_HHMMSS>.log`, named after the recorded branch (or, without
-  a record, the one in `queue/run-branch.txt`) with characters outside `[A-Za-z0-9._-]`
-  replaced by `-`, and an empty `loop.log` is started. The record is then rewritten
+  a record, the one in `queue/run-branch.txt`) with each run of characters outside
+  `[A-Za-z0-9._-]` collapsed into one `-`, dashes trimmed from both ends, and `unknown`
+  when nothing is left, and an empty `loop.log` is started. The record is then rewritten
   with the run branch. A foreground loop does not rotate the log.
 - Every command except `install-skills`, whose own item below states its single option,
   accepts a global `--repo <path>` option. When present, Git resolves the
@@ -341,7 +349,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
    whose indexed task failed and still holds its worktree or branch creates a fresh task
    and updates the index. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
-   creates a fresh task and updates the index; completed advisories remain deduplicated.
+   creates a fresh task and updates the index; completed advisories remain deduplicated,
+   except that a task whose run pull request closed without merging is forgotten (item
+   35), so its returning issue gets a fresh task.
    A worker never merges, so in worker mode a completed task counts as finished here: a
    finding that returns to ready after it was published claims a fresh task, and a
    returning advisory is closed as a duplicate.
@@ -1404,8 +1414,11 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     issue-queue mode, separate or not, a run pull
     request closed without merging will never land its work once a later run has left its
     branch, so the merger then comments `UNPROMOTED: <task-id>` on each issue recorded
-    for that run branch, naming the merge commit, run branch, and pull request, returns the issue to ready and unassigned, drops
-    its promotion record the same way, and logs a `Released` event. The comment withdraws
+    for that run branch, naming the merge commit, run branch, and pull request, deletes the
+    abandoned task's issue-completion record for that issue and every `queue/desc-index`
+    entry that names the task, so the returned issue is claimed as a fresh task rather
+    than deduplicated against work that never landed, returns the issue to ready and
+    unassigned, drops its promotion record the same way, and logs a `Released` event. The comment withdraws
     the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. Workers never
     close promoted issues. Immediately after merging, the merger comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
@@ -1592,4 +1605,8 @@ flags, CI outcomes, review rounds, final promotion, and stop conditions.
 `README.md` to the defaults the source resolves. The suite's global setup removes this
 suite's own fixture directories older than six hours from the OS temporary directory,
 writing a `stop` file into any that holds an `orchestration/queue` first, and never
-touches newer or foreign entries.
+touches newer or foreign entries. It then prints the platform-only suites this platform
+leaves uncollected and why, from `tests/platformCoverage.ts`, so a run that skipped a
+suite says so. The files listed in `tests/sequentialSuites.ts` launch long-lived
+processes or wait on deadlines; they run one at a time after the rest of the suite has
+run in parallel.
