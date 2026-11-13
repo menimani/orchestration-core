@@ -2237,6 +2237,34 @@ describe('issue claim release', () => {
     expect(issueNumbersForTask(paths, 'task-release')).toEqual([])
   })
 
+  it('reports a cleanup failure after a full release without keeping the released issues', async () => {
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `grouped claim ${index}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [forge.user],
+    })))
+    recordIssuesForTask(paths, 'task-release', issueNumbers)
+    recordIssueReleaseIntent(paths, 'task-release', issueNumbers, true)
+    // A non-empty directory where a file is expected makes the local cleanup throw.
+    const heartbeat = join(paths.queueDir, 'heartbeat', 'task-release')
+    mkdirSync(heartbeat, { recursive: true })
+    writeFileSync(join(heartbeat, 'held'), '')
+
+    const failures = await reconcileIssueReleaseIntent(forge, paths, 'task-release')
+
+    expect(failures.map(({ issueNumber }) => issueNumber)).toEqual(issueNumbers)
+    expect(failures.every(({ error }) => error instanceof AggregateError)).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(false)
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.assignees).toEqual([])
+      expect(issue.labels).toEqual(expect.arrayContaining([LABEL_READY, LABEL_GROUP_SINGLETON]))
+    }
+    // The next reconcile finds nothing to hand back a second time.
+    forge.issues.get(issueNumbers[0]!)!.assignees = ['worker-b']
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-release')).resolves.toEqual([])
+    expect((await forge.getIssue(issueNumbers[0]!)).assignees).toEqual(['worker-b'])
+  })
+
   it('leaves alone an issue another account claimed after this claim was lost', async () => {
     const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
       title: `reclaimed issue ${index}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
