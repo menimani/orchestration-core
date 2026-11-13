@@ -3570,6 +3570,25 @@ describe('closePromotedIssues', () => {
     expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [], returned: [] })
   })
 
+  it('drops the record of a deleted issue and still returns the promotions after it of a closed run pull request', async () => {
+    const deleted = await promotedIssue('task-deleted', 'a'.repeat(40), 'run/closed')
+    const returnable = await promotedIssue('task-returnable', 'c'.repeat(40), 'run/closed')
+    forge.issues.delete(deleted)
+    forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: [], returned: [returnable] })
+    expect(issuePromotionForIssue(paths, deleted)).toBeUndefined()
+    expect(existsSync(join(paths.queueDir, 'issue-promotion', `${deleted}.json`))).toBe(false)
+    expect(forge.issueComments.get(deleted)).toBeUndefined()
+    expect(issuePromotionForIssue(paths, returnable)).toBeUndefined()
+    expect((await forge.getIssue(returnable)).labels).toContain(LABEL_READY)
+    expect(forge.issueComments.get(returnable)).toEqual([
+      issueUnpromotedComment('task-returnable', 'c'.repeat(40), 'run/closed', 'pr-url'),
+    ])
+    expect(await closePromotedIssues(forge, paths, () => true)).toEqual({ closed: [], returned: [] })
+  })
+
   it('keeps the issues of a closed run pull request whose branch the loop still holds', async () => {
     const issueNumber = await promotedIssue('task-held', 'a'.repeat(40), 'run/held')
     forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
