@@ -4,9 +4,9 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ForgeIssue } from '../src/adapters/forge.ts'
 import {
-  claimIssueGroup, importedIssues, issueSourcesForTask, LABEL_FINDING, LABEL_IMPORTED,
-  LABEL_READY, LABEL_TRIAGE, parseIssueBody, publishImportedIssue, sourceFingerprint,
-  sourceIssueNumbers,
+  buildIssueBody, claimIssueGroup, importedIssues, issueSourcesForTask, LABEL_FINDING,
+  LABEL_IMPORTED, LABEL_READY, LABEL_TRIAGE, LABEL_UNTRUSTED_AUTHOR, parseIssueBody,
+  publishImportedIssue, sourceFingerprint, sourceIssueNumbers,
 } from '../src/issueQueue.ts'
 import { fleetPaths, type OrchPaths } from '../src/paths.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
@@ -122,6 +122,35 @@ describe('publishImportedIssue', () => {
     expect(queue.issues.size).toBe(1)
     expect(await importedIssues(queue))
       .toEqual(new Map([[sourceFingerprint(REPOSITORY, 11), first.issueNumber]]))
+  })
+
+  it('ignores a source fingerprint on an imported issue from an untrusted author', async () => {
+    const outsider = await queue.createIssue({
+      title: 'Posing as an import',
+      body: buildIssueBody('Posing as an import', 'import:Owner/App#13', undefined, [
+        sourceFingerprint(REPOSITORY, 13),
+      ]),
+      labels: [LABEL_FINDING, LABEL_IMPORTED],
+    })
+    queue.issues.get(outsider)!.author = { login: 'stranger', hasWriteAccess: false }
+    await queue.closeIssue(outsider, 'Closed')
+    const flagged = await queue.createIssue({
+      title: 'Flagged import',
+      body: buildIssueBody('Flagged import', 'import:Owner/App#14', undefined, [
+        sourceFingerprint(REPOSITORY, 14),
+      ]),
+      labels: [LABEL_FINDING, LABEL_IMPORTED, LABEL_UNTRUSTED_AUTHOR],
+    })
+
+    expect(await importedIssues(queue)).toEqual(new Map())
+    expect(await publishImportedIssue(queue, paths, REPOSITORY, source(13, 'Body'), true))
+      .toEqual({ outcome: 'imported', issueNumber: flagged + 1, ready: true })
+    expect(await publishImportedIssue(queue, paths, REPOSITORY, source(14, 'Body'), true))
+      .toEqual({ outcome: 'imported', issueNumber: flagged + 2, ready: true })
+    expect(await importedIssues(queue)).toEqual(new Map([
+      [sourceFingerprint(REPOSITORY, 13), flagged + 1],
+      [sourceFingerprint(REPOSITORY, 14), flagged + 2],
+    ]))
   })
 })
 
