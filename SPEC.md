@@ -1565,9 +1565,17 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     issue, and that issue's comments are not cached, so the next poll asks again.
     A failure that says nothing about the pushed work — a comment listing the forge
     fails to answer for any reason but a rate limit, or a fetch of the reported branch
-    that fails without git reporting the remote ref missing — defers the adoption the
-    same way, with a WARN naming the issue and git's or the forge's reason kept in the
-    merge log. Only a reported branch the remote does not have counts as a failure.
+    that fails without git reporting the remote ref missing, matched without regard to
+    case — defers the adoption the same way, with a deduplicated WARN keyed by the issue,
+    logged as recovered when the adoption proceeds, and git's or the forge's reason kept
+    in the merge log. Only a reported branch the remote does not have counts as a failure.
+    These deferrals are counted per issue in memory; the count clears when the issue's
+    adoption gets past the fetch, succeeds, fails for another reason, or the issue leaves
+    `loop:merge-ready`. The twentieth consecutive deferral of one issue — about ten
+    minutes at the default poll interval — logs an `ERROR` naming the issue and the kind
+    of failure, never git's or the forge's text, and stops the loop through the same stop
+    file a burst of merge failures uses, without relabelling or commenting on the issue.
+    A rate-limited comment listing is not counted.
     The run branch the promotion records is read before the merge and asked a second time
     when the first lookup fails or answers nothing; when neither answers, the adoption is
     deferred the same way, with one deduplicated WARN that the run branch could not be read

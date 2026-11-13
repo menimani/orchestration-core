@@ -28,11 +28,18 @@ const runBranchReads = vi.hoisted(() => ({
   includeOptional: true,
 }))
 
+// A fetch of a worker branch runs unchanged unless a test sets the message git fails with.
+const workerFetches = vi.hoisted(() => ({ failure: undefined as string | undefined }))
+
 // The loop's run-branch lookups run unchanged unless a test makes the next ones fail.
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   const execFileSync = ((...args: Parameters<typeof actual.execFileSync>) => {
     const [file, gitArgs] = args
+    if (file === 'git' && Array.isArray(gitArgs) && gitArgs[0] === 'fetch'
+      && workerFetches.failure !== undefined) {
+      throw new Error(`Command failed: git ${gitArgs.join(' ')}\n${workerFetches.failure}`)
+    }
     if (file === 'git' && Array.isArray(gitArgs) && gitArgs.join(' ') === 'branch --show-current'
       && runBranchReads.failures > 0) {
       // Only a lookup the loop itself runs; gitRemote.ts reads the branch on its behalf.
@@ -167,6 +174,7 @@ afterEach(() => {
   runBranchReads.failures = 0
   runBranchReads.answer = ''
   runBranchReads.includeOptional = true
+  workerFetches.failure = undefined
   rmSync(tempRoot, { recursive: true, force: true })
 })
 
@@ -715,6 +723,165 @@ describe('remote task adoption', () => {
 
     expect(issuePromotionForIssue(paths, issueNumber)).toBeDefined()
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+  })
+
+  it('stops the loop on the twentieth consecutive fetch deferral of one issue', async () => {
+    const task = pushWorkerBranch('20260809_000000_023_auto-fetch-never-clears')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const labelsBefore = (await forge.getIssue(issueNumber)).labels
+    const commentsBefore = [...forge.issueComments.get(issueNumber)!]
+    git(repoRoot, ['remote', 'set-url', 'origin', join(tempRoot, 'unreachable.git')])
+    const loop = makeLoop(stubProject)
+    const stopFile = join(paths.queueDir, 'stop')
+
+    for (let poll = 1; poll < 20; poll += 1) await loop.adoptRemoteTasks()
+
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logged.filter((line) => line.includes('adoption deferred'))).toEqual([
+      expect.stringContaining(
+        `issue #${issueNumber} adoption deferred: could not fetch ${task.branch} from origin`),
+    ])
+    expect(logged.join('\n')).not.toContain('ERROR')
+
+    await loop.adoptRemoteTasks()
+
+    expect(existsSync(stopFile)).toBe(true)
+    const errors = logged.filter((line) => line.includes('ERROR'))
+    expect(errors).toEqual([expect.stringContaining(
+      `issue #${issueNumber} adoption deferred 20 consecutive times (fetch failed); stopping the loop`)])
+    expect(errors[0]).not.toContain('unreachable.git')
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    expect((await forge.getIssue(issueNumber)).labels).toEqual(labelsBefore)
+    expect(forge.issueComments.get(issueNumber)).toEqual(commentsBefore)
+    expect(existsSync(join(paths.queueDir, 'merge-failure-count.txt'))
+      ? readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()
+      : '0').toBe('0')
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+  })
+
+  it('resets the deferral count and logs recovery once the adoption gets past the fetch', async () => {
+    const task = pushWorkerBranch('20260809_000000_024_auto-fetch-recovers')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    // A busy test lock keeps the issue merge-ready after the fetch succeeds, so the
+    // deferrals that follow show whether the count started again.
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'adoption-deferral-reset',
+      mergeChecks: () => [{
+        label: 'Locked suite',
+        cwd: '',
+        command: `node -e "process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+      }],
+    }
+    const loop = makeLoop(project)
+    const stopFile = join(paths.queueDir, 'stop')
+    workerFetches.failure = 'fatal: unable to access the remote: Could not resolve host'
+
+    for (let poll = 0; poll < 19; poll += 1) await loop.adoptRemoteTasks()
+    workerFetches.failure = undefined
+    await loop.adoptRemoteTasks()
+
+    expect(logged.filter((line) => line.includes('Recovered'))).toEqual([
+      expect.stringContaining(`Recovered adopting issue #${issueNumber}`),
+    ])
+    expect(logged.join('\n')).toContain('adoption deferred: the repository test lock stayed busy')
+
+    workerFetches.failure = 'fatal: unable to access the remote: Could not resolve host'
+    for (let poll = 0; poll < 19; poll += 1) await loop.adoptRemoteTasks()
+
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logged.join('\n')).not.toContain('ERROR')
+    expect(logged.filter((line) => line.includes(`issue #${issueNumber} adoption deferred`)))
+      .toHaveLength(2)
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_READY)
+  })
+
+  it('counts the deferrals of two issues separately', async () => {
+    const first = await mergeReadyIssue('task/20260809_000000_027_auto-first-deferred', 'c'.repeat(40))
+    const second = await mergeReadyIssue('task/20260809_000000_028_auto-second-deferred', 'd'.repeat(40))
+    workerFetches.failure = 'fatal: unable to access the remote: Could not resolve host'
+    const loop = makeLoop(stubProject)
+    const stopFile = join(paths.queueDir, 'stop')
+
+    for (let poll = 0; poll < 10; poll += 1) await loop.adoptRemoteTasks()
+    // Twenty deferrals in all, but only ten of either issue.
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logged.join('\n')).not.toContain('ERROR')
+
+    for (let poll = 0; poll < 10; poll += 1) await loop.adoptRemoteTasks()
+
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logged.filter((line) => line.includes('ERROR'))).toEqual([
+      expect.stringContaining(`issue #${first} adoption deferred 20 consecutive times (fetch failed)`),
+    ])
+    expect(logged.filter((line) => line.includes('adoption deferred:'))).toEqual([
+      expect.stringContaining(`issue #${first} adoption deferred:`),
+      expect.stringContaining(`issue #${second} adoption deferred:`),
+    ])
+    for (const issueNumber of [first, second]) {
+      expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_READY)
+    }
+  })
+
+  it('stops the loop on the twentieth consecutive comment-listing deferral', async () => {
+    const task = pushWorkerBranch('20260809_000000_029_auto-comments-never-clear')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const labelsBefore = (await forge.getIssue(issueNumber)).labels
+    const commentsBefore = [...forge.issueComments.get(issueNumber)!]
+    forge.listIssueComments = async () => {
+      throw new Error('HTTP 502: Bad Gateway')
+    }
+    const loop = makeLoop(stubProject)
+    const stopFile = join(paths.queueDir, 'stop')
+
+    for (let poll = 1; poll < 20; poll += 1) await loop.adoptRemoteTasks()
+
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logged.filter((line) => line.includes('adoption deferred'))).toHaveLength(1)
+
+    await loop.adoptRemoteTasks()
+
+    expect(existsSync(stopFile)).toBe(true)
+    const errors = logged.filter((line) => line.includes('ERROR'))
+    expect(errors).toEqual([expect.stringContaining(
+      `issue #${issueNumber} adoption deferred 20 consecutive times (comment listing failed); stopping the loop`)])
+    expect(errors[0]).not.toContain('Bad Gateway')
+    expect((await forge.getIssue(issueNumber)).labels).toEqual(labelsBefore)
+    expect(forge.issueComments.get(issueNumber)).toEqual(commentsBefore)
+  })
+
+  it('does not count a rate-limited comment listing as a deferral', async () => {
+    const task = pushWorkerBranch('20260809_000000_030_auto-comments-rate-limited')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    forge.listIssueComments = async () => {
+      throw new ForgeRateLimitError(new Date('2026-08-09T12:05:00Z'))
+    }
+    const loop = makeLoop(stubProject)
+
+    for (let poll = 0; poll < 25; poll += 1) await loop.adoptRemoteTasks()
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged.join('\n')).not.toContain('adoption deferred')
+    expect(logged.join('\n')).not.toContain('ERROR')
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_READY)
+  })
+
+  it.each([
+    'fatal: Couldn\'t find remote ref',
+    'fatal: couldn\'t find remote ref',
+  ])('fails the adoption at once as a missing branch when git prints %s', async (reason) => {
+    const branch = 'task/20260809_000000_031_auto-missing-ref-case'
+    const issueNumber = await mergeReadyIssue(branch, 'e'.repeat(40))
+    workerFetches.failure = `${reason} refs/heads/${branch}`
+
+    await makeLoop(stubProject).adoptRemoteTasks()
+
+    expect(logged.join('\n')).not.toContain('adoption deferred')
+    expect(forge.issueComments.get(issueNumber)?.at(-1))
+      .toBe(`Remote task adoption failed: Could not fetch ${branch} from origin.`)
+    expect((await forge.getIssue(issueNumber)).labels).toContain(LABEL_MERGE_FAILED)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('1')
   })
 
   it('adopts a worker branch when the run branch reads empty once', async () => {
