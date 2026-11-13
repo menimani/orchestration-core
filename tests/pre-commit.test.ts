@@ -185,6 +185,38 @@ describe('project pre-commit checks', () => {
       expect.stringContaining('NG: could not resolve the repository default branch:'),
     )
   })
+
+  it('accepts commits on a detached HEAD without resolving the default branch', () => {
+    const { root, remote } = repository()
+    git(root, ['switch', '--quiet', '--detach'])
+    git(root, ['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
+    rmSync(remote, { recursive: true, force: true })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(branchAcceptsCommits(root)).toBe(true)
+    expect(log.mock.calls).toEqual([['OK: detached HEAD accepts commits because it is not a branch']])
+    expect(error).not.toHaveBeenCalled()
+  })
+
+  it('accepts commits on a topic branch other than the advertised default', () => {
+    const { root } = repository()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(branchAcceptsCommits(root)).toBe(true)
+    expect(log.mock.calls).toEqual([["OK: branch 'topic' accepts commits; 'origin' advertises 'trunk'."]])
+    expect(error).not.toHaveBeenCalled()
+  })
+
+  it('passes and reports the skip when the adapter declares no checks', () => {
+    const { root } = repository()
+    const project: ProjectAdapter = { ...stubProject, preCommitChecks: [] }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(runPreCommitChecks(root, project)).toBe(true)
+    expect(log.mock.calls).toEqual([['SKIP: project pre-commit checks; adapter declares none']])
+  })
 })
 
 describe('pre-commit without a project adapter', () => {
