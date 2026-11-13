@@ -156,6 +156,12 @@ class UndeterminedWorkerReportError extends Error {
   }
 }
 
+// A forge read or a fetch that failed for a reason that says nothing about the worker's
+// pushed work, such as a forge outage or a network error. Marking the issue failed would
+// quarantine finished work until a person relabels it, so the adoption waits for a later
+// poll instead.
+class TransientAdoptionError extends Error {}
+
 function formatIdleDuration(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000)
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -713,7 +719,16 @@ export function createLoop(deps: LoopDeps) {
       let adoptionIssues = [issue]
       try {
         const remote = currentBranchPushRemote(paths.repoRoot)
-        const report = workerBranchReport(await commentsForIssue(issue))
+        const adoptionComments = async (candidate: ForgeIssue): Promise<ForgeIssueComment[]> => {
+          try {
+            return await commentsForIssue(candidate)
+          } catch (error) {
+            if (error instanceof ForgeRateLimitError) throw error
+            appendFileSync(mergeLog, `${errorSummary(error)}\n`)
+            throw new TransientAdoptionError(`could not read the comments on issue #${candidate.number}`)
+          }
+        }
+        const report = workerBranchReport(await adoptionComments(issue))
         if (report === 'undetermined') throw new UndeterminedWorkerReportError(issue.number)
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
@@ -737,7 +752,7 @@ export function createLoop(deps: LoopDeps) {
             stillPublishing = true
             break
           }
-          const candidateReport = workerBranchReport(await commentsForIssue(candidate))
+          const candidateReport = workerBranchReport(await adoptionComments(candidate))
           if (candidateReport === 'undetermined') {
             throw new UndeterminedWorkerReportError(candidate.number)
           }
@@ -756,6 +771,8 @@ export function createLoop(deps: LoopDeps) {
             `+refs/heads/${report.branch}:refs/remotes/${remote}/${report.branch}`,
           ], {
             cwd: paths.repoRoot,
+            // git's reason is matched below, so it must not be translated.
+            env: { ...process.env, LC_ALL: 'C' },
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
@@ -763,6 +780,11 @@ export function createLoop(deps: LoopDeps) {
           // git's reason stays in the local log: it can quote the remote URL, and the
           // MergeError text is also posted to the issue.
           appendFileSync(mergeLog, `${errorSummary(error)}\n`)
+          // Only a branch the remote definitely lacks fails the worker's work; any other
+          // fetch failure may clear by the next poll.
+          if (!/couldn't find remote ref/.test(errorSummary(error))) {
+            throw new TransientAdoptionError(`could not fetch ${report.branch} from ${remote}`)
+          }
           throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
 
@@ -875,8 +897,9 @@ export function createLoop(deps: LoopDeps) {
           continue
         }
         // Not a failure either: a transient permission lookup says nothing about the
-        // report, so every member stays merge-ready for the next poll.
-        if (error instanceof UndeterminedWorkerReportError) {
+        // report, and a forge or network error says nothing about the pushed work, so
+        // every member stays merge-ready for the next poll.
+        if (error instanceof UndeterminedWorkerReportError || error instanceof TransientAdoptionError) {
           event('WARN', `issue #${issue.number} adoption deferred: ${message}`)
           continue
         }

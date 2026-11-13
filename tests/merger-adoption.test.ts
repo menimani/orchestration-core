@@ -649,6 +649,74 @@ describe('remote task adoption', () => {
     expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
   })
 
+  it('defers adoption without counting a failure when the forge cannot list the comments', async () => {
+    const task = pushWorkerBranch('20260809_000000_021_auto-comments-unavailable')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const listIssueComments = forge.listIssueComments.bind(forge)
+    let outage = true
+    forge.listIssueComments = async (number) => {
+      if (outage) throw new Error('HTTP 502: Bad Gateway')
+      return listIssueComments(number)
+    }
+    const loop = makeLoop(stubProject)
+
+    await loop.adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .not.toContain('Remote task adoption failed')
+    expect(existsSync(join(paths.queueDir, 'merge-failure-count.txt'))
+      ? readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()
+      : '0').toBe('0')
+    expect(logged.filter((line) => line.includes('adoption deferred'))).toEqual([
+      expect.stringContaining(
+        `issue #${issueNumber} adoption deferred: could not read the comments on issue #${issueNumber}`),
+    ])
+    expect(readFileSync(join(paths.logsDir, `issue-${issueNumber}.merge.log`), 'utf8'))
+      .toContain('HTTP 502: Bad Gateway')
+
+    outage = false
+    await loop.adoptRemoteTasks()
+
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeDefined()
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+  })
+
+  it('defers adoption without counting a failure when the push remote is unreachable', async () => {
+    const task = pushWorkerBranch('20260809_000000_022_auto-remote-unreachable')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['remote', 'set-url', 'origin', join(tempRoot, 'unreachable.git')])
+    const loop = makeLoop(stubProject)
+
+    await loop.adoptRemoteTasks()
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .not.toContain('Remote task adoption failed')
+    expect(existsSync(join(paths.queueDir, 'merge-failure-count.txt'))
+      ? readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()
+      : '0').toBe('0')
+    expect(logged.filter((line) => line.includes('adoption deferred'))).toEqual([
+      expect.stringContaining(
+        `issue #${issueNumber} adoption deferred: could not fetch ${task.branch} from origin`),
+    ])
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+
+    git(repoRoot, ['remote', 'set-url', 'origin', origin])
+    await loop.adoptRemoteTasks()
+
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeDefined()
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
+  })
+
   it('adopts a worker branch when the run branch reads empty once', async () => {
     const task = pushWorkerBranch('20260809_000000_021_auto-transient-run-branch')
     const issueNumber = await mergeReadyIssue(task.branch, task.head)
