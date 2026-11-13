@@ -734,7 +734,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     cycle gate. The current cycle number lives in `queue/scan-count.txt` and is
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop). The counter carries over a restart only on the same
-    branch: a daemon started on another branch resets it to zero (item 24b). A missing persisted counter reads as zero; an existing
+    branch: a daemon started on another branch resets it to zero (item 24b). A missing persisted counter reads as zero, except
+    to the `stop` command while a scan is live, which refuses instead (item 25); an existing
     counter must contain base-10 digits representing a non-negative safe integer.
     Invalid contents, including an empty file, log the state path relative to the
     orchestration state root (for example, `queue/scan-count.txt`), write the stop file,
@@ -1106,7 +1107,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Other platforms stop the runner's detached process group and do nothing further.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
-    the intentional termination as a missing scan yield.
+    the intentional termination as a missing scan yield. That record names the scan's
+    cycle, so while any scan is live `stop` requires `queue/scan-count.txt` to hold a
+    positive safe integer. When the file is missing, or holds anything else (including
+    zero), `stop` exits 1 with an error beginning `Cannot stop live scans:` that names
+    the file's defect and ends `no stop file was created.`: it writes neither the stop
+    file nor the interrupted-scan record, terminates no task, and leaves the scan and the
+    loop running. The operator repairs the counter to the running cycle number and runs
+    `stop` again. With no live scan the counter is not read.
 26. The daemon holds the code it started with; `loop`, once it has launched the daemon in
     the background, prints where the log lives and how to stop.
 27. `prune [--days N]` deletes logs/status/generated specs/queue markers of tasks finished
