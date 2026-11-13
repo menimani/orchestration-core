@@ -1798,4 +1798,70 @@ describe('completed task merge recovery', () => {
     expect(logged.indexOf('Claimed 064_auto    #1'))
       .toBeLessThan(logged.indexOf('Merging 064_auto'))
   })
+
+  it('rolls back a claim whose issue holds a malformed conflict retry record', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'retry from kept commits',
+      body: buildIssueBody('[BUG] `src/shared.ts` retry from kept commits', 'scan-task'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const record = join(paths.queueDir, 'conflict-retry', `${issueConflictKey(issueNumber)}.json`)
+    mkdirSync(dirname(record), { recursive: true })
+    writeFileSync(record, '[]\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    // The claim reads the record only after the issue is taken, so it is handed back
+    // ready and unassigned, and no task starts without the attempts it should carry.
+    expect(logged).toContain(
+      `WARN issue queue unreachable: Malformed conflict retry record ${record}; repair or remove it`,
+    )
+    expect(logged.some((line) => line.startsWith('Claimed '))).toBe(false)
+    expect(runnerStarts).toEqual([])
+    expect(backlogEntries()).toEqual([])
+    await expect(fakeForge.getIssue(issueNumber)).resolves.toMatchObject({
+      state: 'open', assignees: [], labels: [LABEL_FINDING, LABEL_READY],
+    })
+    expect(readFileSync(record, 'utf8')).toBe('[]\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged.some((line) => line.startsWith('Claimed '))).toBe(false)
+    expect(runnerStarts).toEqual([])
+    expect(readFileSync(record, 'utf8')).toBe('[]\n')
+  })
+
+  it('keeps a conflicted task for a person when its conflict retry record is malformed', async () => {
+    const taskId = '20260815_181908_191_user-rebase-conflict'
+    const { runHead, taskTip } = makeConflictingLocalTask(taskId)
+    const record = join(paths.queueDir, 'conflict-retry', `${taskId}.json`)
+    mkdirSync(dirname(record), { recursive: true })
+    writeFileSync(record, '{"taskId": ')
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged).toContain(
+      'WARN 191_user rebase conflict was abandoned but cleanup or issue release failed: '
+      + `Malformed conflict retry record ${record}; repair or remove it`,
+    )
+    expect(logged.some((line) => line.startsWith('Merged 191_user'))).toBe(false)
+    expect(logged.some((line) => line.startsWith('Requeued 191_user'))).toBe(false)
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    // The record could not be read, so cleanup never ran: the task branch, its worktree,
+    // and the record itself stay for a person, and no retry is queued from a guess.
+    expect(git(['rev-parse', branchName(taskId)])).toBe(taskTip)
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(backlogEntries()).toEqual([])
+    expect(readFileSync(record, 'utf8')).toBe('{"taskId": ')
+  })
 })

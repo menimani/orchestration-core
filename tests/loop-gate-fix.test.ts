@@ -536,6 +536,33 @@ describe('merge gate handback', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
+  it('stops the poll before merging a task whose gate fix record is malformed', async () => {
+    const taskId = '20261112_090000_330_auto-gate-fix-malformed'
+    initializeGitRepo()
+    makeTask(taskId)
+    const head = git(['rev-parse', 'HEAD']).trim()
+    const tip = git(['rev-parse', branchName(taskId)]).trim()
+    const record = join(paths.queueDir, 'gate-fix', `${taskId}.json`)
+    mkdirSync(join(paths.queueDir, 'gate-fix'), { recursive: true })
+    writeFileSync(record, '{"attempts": ')
+    const loop = makeLoop(gateConfig, scriptedGate(['pass']))
+    loop.initializeSessionStateForBranch()
+
+    // Merging would discard whether these commits are owed a handback, so the error
+    // leaves the poll and the daemon stops for a person to repair the record.
+    await expect(loop.poll()).rejects.toThrow(
+      new Error(`Malformed gate fix record ${record}; repair or remove it`),
+    )
+
+    expect(logged).toEqual(['Completed 330_auto'])
+    expect(runnerStarts).toEqual([])
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD']).trim()).toBe(head)
+    expect(git(['rev-parse', branchName(taskId)]).trim()).toBe(tip)
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(readFileSync(record, 'utf8')).toBe('{"attempts": ')
+  })
+
   it('returns a task whose handed-back runner fails to completed', async () => {
     const taskId = '20261112_090000_317_auto-gate-fix-runner-failed'
     const fixRun = controlledProcess()
