@@ -8,7 +8,7 @@ import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
-import { recordTaskProcess } from './processRegistry.ts'
+import { forgetTaskProcess, recordTaskProcess } from './processRegistry.ts'
 import { readStatus, resumeCompletedStatus, writeStatus } from './status.ts'
 import { specFile } from './tasks.ts'
 
@@ -162,6 +162,7 @@ export async function startTask(
         )
         throw new StartupProcessRetainedError(launchedPid, error, terminationError)
       }
+      forgetTaskProcess(paths, taskId)
     }
     appendFileSync(log, `Task startup failed:\n${detail}\n`)
     await writeStatus(paths, taskId, 'failed')
@@ -242,6 +243,7 @@ export async function resumeTask(
         )
         throw new StartupProcessRetainedError(launchedPid, error, terminationError)
       }
+      forgetTaskProcess(paths, taskId)
     }
     appendFileSync(log, `Task handback failed:\n${detail}\n`)
     if (earlierFinal !== undefined) writeFileSync(finalMessage, earlierFinal)
