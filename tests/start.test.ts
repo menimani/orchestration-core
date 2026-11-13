@@ -192,6 +192,23 @@ describe('startTask', () => {
     },
   )
 
+  it('records no process entry when the runner fails to start', async () => {
+    const taskId = '20260814_000000_004_runner-start-failure'
+    writeFileSync(specFile(paths, taskId), '# runner start failure\n')
+    const terminateProcessTree = vi.spyOn(operatingSystem, 'terminateProcessTree')
+
+    await expect(startTask(paths, {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: vi.fn(async () => { throw new Error('runner spawn failed') }),
+    }, taskId, { effort: 'medium' })).rejects.toThrow('runner spawn failed')
+
+    expect(terminateProcessTree).not.toHaveBeenCalled()
+    expect(taskProcessRecorded(paths, taskId)).toBe(false)
+    expect(statusMocks.writeStatus.mock.calls).toEqual([[paths, taskId, 'failed']])
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('Task startup failed:')
+  })
+
   it('stops and verifies a launched process tree before recording status persistence failure', async () => {
     const taskId = '20260814_000000_001_status-failure'
     const pid = 54321
@@ -279,5 +296,55 @@ describe('resumeTask', () => {
     expect(taskProcessRecorded(paths, taskId)).toBe(false)
     expect(readFileSync(finalMessageFile(paths, taskId), 'utf8')).toBe('earlier final\n')
     expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('Task handback failed:')
+  })
+
+  it('records no process entry and keeps the task completed when the runner fails to restart', async () => {
+    const taskId = '20260814_000000_004_handback-start-failure'
+    mkdirSync(worktreeDir(paths, taskId), { recursive: true })
+    await statusMocks.actualWriteStatus!(paths, taskId, 'completed')
+    writeFileSync(finalMessageFile(paths, taskId), 'earlier final\n')
+    const followUpSpec = join(paths.tasksDir, `${taskId}.handback.md`)
+    writeFileSync(followUpSpec, '# follow-up\n')
+    const terminateProcessTree = vi.spyOn(operatingSystem, 'terminateProcessTree')
+
+    await expect(resumeTask(paths, {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: vi.fn(async () => { throw new Error('runner spawn failed') }),
+    }, taskId, followUpSpec, { effort: 'medium' }))
+      .rejects.toThrow('runner spawn failed')
+
+    expect(terminateProcessTree).not.toHaveBeenCalled()
+    expect(taskProcessRecorded(paths, taskId)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(readFileSync(finalMessageFile(paths, taskId), 'utf8')).toBe('earlier final\n')
+    expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('Task handback failed:')
+  })
+
+  it('keeps the process entry when a failed handback process tree remains alive', async () => {
+    const taskId = '20260814_000000_005_handback-cleanup-failure'
+    const pid = 54324
+    mkdirSync(worktreeDir(paths, taskId), { recursive: true })
+    await statusMocks.actualWriteStatus!(paths, taskId, 'completed')
+    const followUpSpec = join(paths.tasksDir, `${taskId}.handback.md`)
+    writeFileSync(followUpSpec, '# follow-up\n')
+    vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
+    vi.spyOn(operatingSystem, 'processStartIdentity').mockReturnValue('runner-start')
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+
+    await expect(resumeTask(paths, {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: vi.fn(async () => {
+        await statusMocks.actualWriteStatus!(paths, taskId, 'failed')
+        return pid
+      }),
+    }, taskId, followUpSpec, { effort: 'medium' })).rejects.toMatchObject({
+      name: 'StartupProcessRetainedError',
+      pid,
+      message: `Task startup failed and process tree ${pid} could not be stopped.`,
+    } satisfies Partial<StartupProcessRetainedError>)
+
+    expect(taskProcessPid(paths, taskId)).toBe(pid)
+    expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('Process tree cleanup failed')
   })
 })
