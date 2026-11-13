@@ -5461,6 +5461,117 @@ describe('documentation findings held for the cycle', () => {
     expect(suiteRuns()).toBe(false)
   })
 
+  it('keeps the held findings and waits when filing their issue fails, then files them once', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const scanId = '20250101_000000_047_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    await loop.scanForNextTasks(scanId, 0)
+    const held = heldRecords()
+    expect(held).toEqual([
+      `1\t${scanId}\t[DOCS] \`README.md\` names a removed flag`,
+      `1\t${scanId}\t[DOCS] \`SPEC.md\` misstates the retry bound`,
+    ])
+
+    const createIssue = fakeForge.createIssue.bind(fakeForge)
+    fakeForge.createIssue = async () => {
+      throw new Error('temporary publication failure')
+    }
+    expect(await loop.poll()).toBe('continue')
+
+    expect(fakeForge.issues.size).toBe(0)
+    expect(heldRecords()).toEqual(held)
+    expect(logText()).toContain(
+      'WARN could not file held documentation findings: temporary publication failure',
+    )
+    expect(logged).toContain('Idle Status      Task=0  Queue=0  0s  Waiting=documentation release')
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(suiteRuns()).toBe(false)
+
+    fakeForge.createIssue = createIssue
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(fakeForge.issues.size).toBe(1)
+    const combined = await fakeForge.getIssue(1)
+    expect(combined.title).toBe('Documentation fixes (cycle 1)')
+    expect(combined.body).toContain([
+      '1. [DOCS] `README.md` names a removed flag',
+      '2. [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    expect(heldRecords()).toEqual([])
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([
+      'Released docs        2 documentation finding(s) as one task',
+    ])
+    expect(suiteRuns()).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    expect(logged.filter((line) => line.startsWith('Released'))).toHaveLength(1)
+  })
+
+  it('keeps the held findings and waits when the local enqueue fails, then releases them once', async () => {
+    initializeGitRepo()
+    let failEnqueue = true
+    const loop = makeLoop(
+      gateConfig, gatedProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
+      (queuePaths, taskId, depth) => {
+        if (failEnqueue) throw new Error('temporary local queue failure')
+        return enqueueTask(queuePaths, taskId, depth)
+      },
+    )
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const scanId = '20250101_000000_048_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    await loop.scanForNextTasks(scanId, 0)
+    const held = heldRecords()
+    expect(held).toHaveLength(2)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(backlogEntries()).toEqual([])
+    expect(heldRecords()).toEqual(held)
+    expect(logText()).toContain(
+      'WARN could not enqueue finding from 048_scan: temporary local queue failure',
+    )
+    expect(logged).toContain('Idle Status      Task=0  Queue=0  0s  Waiting=documentation release')
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(suiteRuns()).toBe(false)
+
+    failEnqueue = false
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    const [docsId] = taskIdsNow()
+    expect(taskIdsNow()).toHaveLength(1)
+    expect(backlogEntries()).toEqual([`${docsId}:1`])
+    expect(readFileSync(specFile(paths, docsId!), 'utf8')).toContain([
+      '## Requirement',
+      '',
+      '1. [DOCS] `README.md` names a removed flag',
+      '2. [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    expect(heldRecords()).toEqual([])
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([
+      'Released docs        2 documentation finding(s) as one task',
+    ])
+    expect(suiteRuns()).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(taskIdsNow()).toEqual([docsId])
+    expect(backlogEntries()).toEqual([`${docsId}:1`])
+    expect(logged.filter((line) => line.startsWith('Released'))).toHaveLength(1)
+  })
+
   it('does not file held findings again when listing fails after their issue was created', async () => {
     initializeGitRepo()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
