@@ -24,7 +24,7 @@ import { runCleanupCommand } from '../src/cleanupCommand.ts'
 import { createLoop, formatEventLine, type Loop } from '../src/loop.ts'
 import { pendingOrchestrationDepsFile, syncOrchestrationDepsAtStartup } from '../src/merge.ts'
 import {
-  branchName, finalMessageFile, PACKAGE_ROOT, statusFile, worktreeDir,
+  branchName, finalMessageFile, PACKAGE_ROOT, shellPathSpelling, statusFile, worktreeDir,
 } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { refreshAll } from '../src/refresh.ts'
@@ -1357,6 +1357,9 @@ describe('runAutoReview', () => {
       `Changes under \`${packagePrefix}/\` belong to the vendored core repository`,
     )
     expect(spec).toContain(` -- . ':(top,exclude,literal)${packagePrefix}'`)
+    expect(spec).toContain(
+      ` -- . ':(top,exclude,literal)${shellPathSpelling(relative(stateRepoRoot, PACKAGE_ROOT))}'`,
+    )
   })
 
   it('dispatches a review on first entry and resumes after a clean one', () => {
@@ -2040,6 +2043,67 @@ describe('cycle gate', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logText()).toContain('Recovered scan cycle  2 after operator stop')
     expect(logText()).not.toContain('did not receive every expected scan yield')
+  })
+
+  it('removes a marker left behind after its cycle was already rewound and starts', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const interrupted = '20260809_000000_004_scan'
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(marker, `2\t${interrupted}\n`)
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(runnerStarts).toHaveLength(1)
+    expect(logText()).toContain('Recovered scan cycle  2 after operator stop')
+    expect(logText()).not.toContain('does not match current cycle')
+  })
+
+  it('discards first-cycle scans stopped before a new run branch reset the counter', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const live = '20260809_000000_005_scan'
+    const gone = '20260809_000000_006_scan'
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    writeFileSync(join(paths.queueDir, 'run-branch.txt'), 'previous-run\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    writeFileSync(marker, `1\t${live}\n1\t${gone}\n`)
+    writeRawStatus(live, 'running', null)
+    const liveWorktree = worktreeDir(paths, live)
+    git(['worktree', 'add', '-q', liveWorktree, '-b', branchName(live)])
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false, maxBurstFailures: 1 })
+    loop.initializeSessionStateForBranch()
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of [live, gone]) {
+      expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
+      expect(git(['branch', '--list', branchName(taskId)]).trim()).toBe('')
+      expect(existsSync(statusFile(paths, taskId))).toBe(false)
+      expect(logged.join('\n')).not.toContain(`FAILED: ${taskId}`)
+    }
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'failed-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(runnerStarts).toHaveLength(1)
+    expect(logText()).toContain('Recovered scan cycle  1 after operator stop')
+    expect(logText()).not.toContain('tasks failed in one poll')
   })
 
   it('stops and retains a malformed interrupted-scan marker without rewinding', async () => {

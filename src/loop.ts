@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync,
+  writeFileSync,
 } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import {
@@ -18,8 +19,8 @@ import {
 import {
   completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
   NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
-  UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterMerge,
-  type OrchestrationDepsRuntime,
+  UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterRecordedMerge,
+  VerificationFailedError, withMergeGuard, type OrchestrationDepsRuntime,
 } from './merge.ts'
 import {
   finalMessageFile, isInspectionTaskId, isReviewTaskId, isScanTaskId, issueQueueIsSeparate, logFile,
@@ -27,15 +28,21 @@ import {
 } from './paths.ts'
 import {
   conflictRetriesExhausted, conflictRetrySection, issueConflictKey, readConflictedAttempts,
-  removeConflictedAttempts, writeConflictedAttempts, type ConflictedAttempt,
+  removeConflictedAttempts, retireConflictedAttempts as retireKeptConflictedAttempts,
+  writeConflictedAttempts, type ConflictedAttempt,
 } from './conflictRetry.ts'
+import {
+  gateFixFinalMessageFile, gateFixRunActive, gateFixSpecFile, gateFixSpecification,
+  markGateFixRunActive, mergeLogTail, readGateFixState, removeGateFixState,
+  writeGateFixState,
+} from './gateFix.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import {
   refreshTask, listTaskIds, noChangeMarkerPresent, type DeadlineVerdict,
 } from './refresh.ts'
-import { readStatus, readTaskState, transitionStatus } from './status.ts'
+import { readStatus, readTaskState, transitionStatus, type TaskState } from './status.ts'
 import {
-  startTask, StartupOwnershipUnknownError, StartupProcessRetainedError,
+  resumeTask, startTask, StartupOwnershipUnknownError, StartupProcessRetainedError,
 } from './start.ts'
 import { enqueueTask, newTaskSpec, specFile } from './tasks.ts'
 import {
@@ -97,6 +104,7 @@ export interface LoopDeps {
   terminateTaskProcesses?: (() => TaskProcessTermination) | undefined
   enqueueTask?: typeof enqueueTask
   startTask?: typeof startTask
+  resumeTask?: typeof resumeTask
   updateCoreBeforeCycle?: (cycle: number) => Promise<CoreUpdateOutcome>
   projectAdapterChanged?: () => boolean
   branchGuard?: (() => string | undefined) | undefined
@@ -184,6 +192,7 @@ export function createLoop(deps: LoopDeps) {
     terminateTaskProcesses = () => terminateLiveTaskProcesses(paths),
     enqueueTask: enqueueTaskImpl = enqueueTask,
     startTask: startTaskImpl = startTask,
+    resumeTask: resumeTaskImpl = resumeTask,
     os = operatingSystem,
   } = deps
   const queueFile = join(paths.queueDir, 'backlog.txt')
@@ -380,7 +389,11 @@ export function createLoop(deps: LoopDeps) {
     return true
   }
 
-  function orchestrationDepsEvent(name: 'Installed' | 'Skipped', subject: string): void {
+  function orchestrationDepsEvent(name: 'Installed' | 'Skipped' | 'WARN', subject: string): void {
+    if (name === 'WARN') {
+      event(name, subject)
+      return
+    }
     event(name, 'orchestration deps', subject)
   }
 
@@ -525,8 +538,9 @@ export function createLoop(deps: LoopDeps) {
     const worktree = worktreeDir(paths, taskId)
     // The comparison base is the checkout's HEAD SHA, not its branch name: a detached
     // worker checkout has an empty branch name, which read as zero commits and left
-    // completed work permanently unpublished.
-    const baseSha = optionalGit(['rev-parse', 'HEAD']).trim()
+    // completed work permanently unpublished. A failed read throws so that publication is
+    // retried: an empty base would list no commits and close committed work unpublished.
+    const baseSha = git(['rev-parse', '--verify', 'HEAD^{commit}']).trim()
     if (gitIn(worktree, ['status', '--porcelain']).trim() !== '') {
       throw new UnpublishableWorkerTaskError(`${taskId} has uncommitted changes`)
     }
@@ -752,7 +766,18 @@ export function createLoop(deps: LoopDeps) {
           throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
 
+        // Read before the merge, and checked: a promotion recorded without its run branch
+        // is malformed, and every later reconcile would fail on it. A lookup that fails or
+        // answers nothing once is asked again; after that the adoption waits for a later
+        // poll, and git's reason is never posted to the issue.
         const runBranch = optionalGit(['branch', '--show-current']).trim()
+          || optionalGit(['branch', '--show-current']).trim()
+        if (runBranch === '') {
+          warning('adoption-run-branch', 'reading the run branch',
+            'remote adoption deferred: the run branch could not be read')
+          continue
+        }
+        warningLog.recovered('adoption-run-branch')
         let appliedMergeCommit: string | undefined
         let promotionPersistenceError: unknown
         const persistPromotion = (mergedCommit: string): void => {
@@ -822,7 +847,7 @@ export function createLoop(deps: LoopDeps) {
           }
           // mergeRemoteTask synchronizes dependencies only once onMerged returns, so the
           // failed first attempt skipped it and later gates would run on stale packages.
-          syncOrchestrationDepsAfterMerge(
+          syncOrchestrationDepsAfterRecordedMerge(
             paths, mergeCommit, taskId, orchestrationDepsEvent, orchestrationDepsRuntime,
             stopTaskProcessesBeforeDependencyInstall,
           )
@@ -900,6 +925,14 @@ export function createLoop(deps: LoopDeps) {
     return listTaskIds(paths)
       .filter((taskId) => !isScanTaskId(taskId)
         && readTaskState(paths, taskId) === 'running').length
+  }
+
+  // A reserved handback is owed the next free slot. Counted only once its runner started,
+  // it waited while every slot freed during a poll was refilled from claims and the backlog.
+  function countReservedHandbacks(): number {
+    if (config.maxGateFixAttempts === 0) return 0
+    return listTaskIds(paths).filter((taskId) => readTaskState(paths, taskId) === 'completed'
+      && readGateFixState(paths, taskId)?.pending === true).length
   }
 
   function queueLength(): number {
@@ -1122,45 +1155,8 @@ export function createLoop(deps: LoopDeps) {
     return retryId
   }
 
-  // Exit 1 is the only answer that means "absent". Any other failure is rethrown, because
-  // reading it as absent would drop the record of a branch that is still there.
-  function localBranchPresent(branch: string): boolean {
-    try {
-      git(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`])
-      return true
-    } catch (error) {
-      if ((error as { status?: number | null }).status === 1) return false
-      throw error
-    }
-  }
-
-  /**
-   * Once a retry lands, the commits kept for it are history: drop their branches. A record
-   * is removed only once every branch it names is confirmed gone, so a branch that could
-   * not be removed stays recorded and is reported rather than orphaned.
-   */
   function retireConflictedAttempts(taskId: string, linkedIssues: number[]): void {
-    const failures: string[] = []
-    try {
-      const records = [taskId, ...linkedIssues.map(issueConflictKey)].map((key) => ({
-        key, branches: readConflictedAttempts(paths, key).map(({ branch }) => branch),
-      }))
-      const remaining = new Set<string>()
-      for (const branch of new Set(records.flatMap(({ branches }) => branches))) {
-        try {
-          if (localBranchPresent(branch)) git(['branch', '-D', branch])
-          if (localBranchPresent(branch)) throw new Error('branch is still present after deletion')
-        } catch (error) {
-          remaining.add(branch)
-          failures.push(`${branch}: ${errorSummary(error)}`)
-        }
-      }
-      for (const { key, branches } of records) {
-        if (branches.every((branch) => !remaining.has(branch))) removeConflictedAttempts(paths, key)
-      }
-    } catch (error) {
-      failures.push(errorSummary(error))
-    }
+    const failures = retireKeptConflictedAttempts(paths, taskId, linkedIssues)
     if (failures.length > 0) {
       event('WARN', `could not remove commits kept for ${shortTaskId(taskId)}: ${failures.join('; ')}`)
     }
@@ -1549,25 +1545,31 @@ export function createLoop(deps: LoopDeps) {
     }
   }
 
+  /** What the merge log says about the environment, or '' when it blames nothing there. */
+  function infrastructureDiagnosis(mergeLog: string): string {
+    if (!existsSync(mergeLog)) return ''
+    const text = readFileSync(mergeLog, 'utf8')
+    const infrastructureFailure = project.classifyInfrastructureFailure?.(text)
+    if (infrastructureFailure !== undefined) return infrastructureFailure.diagnosis
+    if (/Could not resolve host|Connection refused/.test(text)) {
+      return 'the network or a package registry is unreachable'
+    }
+    return ''
+  }
+
   /**
-   * Count a merge failure and stop once they stop looking like the work: the task
-   * completed and the gate that verifies it could not run. Any successful merge resets
-   * the count, so one genuine test failure does not accumulate alongside unrelated ones.
+   * Count a merge failure and stop once failures stop looking like one task's work. A
+   * failure that reaches this count is either the environment — the gate could not run —
+   * or a task whose own content failed verification and has used its handbacks
+   * (handBackFailedGate): retrying the same commits cannot change either. Any successful
+   * merge resets the count, so one genuine test failure does not accumulate alongside
+   * unrelated ones.
    */
   function noteMergeFailure(mergeLog: string): boolean {
     const failures = readCount(mergeFailureFile) + 1
     writeFileSync(mergeFailureFile, `${failures}\n`)
 
-    let diagnosis = ''
-    if (existsSync(mergeLog)) {
-      const text = readFileSync(mergeLog, 'utf8')
-      const infrastructureFailure = project.classifyInfrastructureFailure?.(text)
-      if (infrastructureFailure !== undefined) {
-        diagnosis = infrastructureFailure.diagnosis
-      } else if (/Could not resolve host|Connection refused/.test(text)) {
-        diagnosis = 'the network or a package registry is unreachable'
-      }
-    }
+    const diagnosis = infrastructureDiagnosis(mergeLog)
     if (diagnosis !== '') event('WARN', diagnosis)
 
     if (failures >= config.maxConsecutiveMergeFailures) {
@@ -1576,6 +1578,151 @@ export function createLoop(deps: LoopDeps) {
       return true
     }
     return false
+  }
+
+  /**
+   * A completed task's merge failed: decide whether its runner gets the failure back.
+   * Retrying unchanged commits cannot pass a gate that fails on the task's own content —
+   * two tasks once needed an operator to repair them by hand in their worktrees, one for a
+   * new file under a coverage threshold and one for an expected value a parallel merge had
+   * changed. The first verification failure is still retried unchanged, since load can
+   * fail a suite once; a second in a row is handed back while attempts remain. Anything
+   * that is not a verification command failing on the task's content — a refusal, an
+   * infrastructure diagnosis, a pending stop — is counted as before. Returns true when the
+   * failure was handed back rather than counted.
+   */
+  async function handBackFailedGate(
+    taskId: string,
+    error: unknown,
+    mergeLog: string,
+  ): Promise<boolean> {
+    // Only an implementation task is handed back: a scan or review commits nothing a
+    // follow-up asking it to correct its change was written for.
+    if (config.maxGateFixAttempts === 0 || isInspectionTaskId(paths, taskId)) return false
+    const state = readGateFixState(paths, taskId)
+    const contentFailure = error instanceof VerificationFailedError
+      && !existsSync(stopFile) && infrastructureDiagnosis(mergeLog) === ''
+    if (!contentFailure) {
+      if (state?.verificationFailed === true) {
+        writeGateFixState(paths, taskId, { ...state, verificationFailed: false })
+      }
+      return false
+    }
+    if (state === undefined || !state.verificationFailed) {
+      writeGateFixState(paths, taskId, {
+        attempts: state?.attempts ?? 0, verificationFailed: true, pending: false,
+      })
+      return false
+    }
+    if (state.attempts >= config.maxGateFixAttempts) return false
+    // Reserved before the runner starts, so a restart in between resumes this attempt
+    // instead of losing it or granting another. Both happen under the task's merge guard:
+    // a manual merge holding it is merging this worktree, and this poll leaves it alone.
+    await withMergeGuard(paths, taskId, async () => {
+      writeGateFixState(paths, taskId, {
+        attempts: state.attempts + 1, verificationFailed: false, pending: true,
+      })
+      await startHandbackWithGuardHeld(taskId)
+    })
+    return true
+  }
+
+  /**
+   * Start a reserved handback's runner once a parallel slot is free and no merge of the
+   * task holds its merge guard. While it waits, the task stays completed and each poll
+   * comes back here instead of running the gate again.
+   */
+  async function startHandback(taskId: string): Promise<void> {
+    await withMergeGuard(paths, taskId, () => startHandbackWithGuardHeld(taskId))
+  }
+
+  async function startHandbackWithGuardHeld(taskId: string): Promise<void> {
+    const state = readGateFixState(paths, taskId)
+    if (state?.pending !== true) return
+    // A merge that finished before the guard was taken leaves nothing to hand back.
+    if (readTaskState(paths, taskId) !== 'completed') return
+    if (existsSync(stopFile) || countRunningTasks() >= config.maxParallel) return
+    const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
+    const followUpSpec = gateFixSpecFile(paths, taskId)
+    writeFileSync(followUpSpec, gateFixSpecification({
+      taskId,
+      branch: branchName(taskId),
+      runBranch: optionalGit(['branch', '--show-current']).trim(),
+      attempt: state.attempts,
+      maxAttempts: config.maxGateFixAttempts,
+      specification: readFileSync(specFile(paths, taskId), 'utf8'),
+      mergeLogTail: existsSync(mergeLog) ? mergeLogTail(readFileSync(mergeLog)) : '',
+      issueNumbers: issueNumbersForTask(paths, taskId),
+    }))
+    const effortFile = join(paths.queueDir, 'effort', taskId)
+    const effort = existsSync(effortFile)
+      ? readFileSync(effortFile, 'utf8').replace(/[\s\r\n]/g, '')
+      : config.taskEffort
+    // The completed run's final message is kept, and the handback marked active before the
+    // runner starts, so a fix run that ends without completing, even across a restart,
+    // returns the task to completed as it was.
+    const finalMessage = finalMessageFile(paths, taskId)
+    if (existsSync(finalMessage)) copyFileSync(finalMessage, gateFixFinalMessageFile(paths, taskId))
+    markGateFixRunActive(paths, taskId, true)
+    try {
+      await resumeTaskImpl(paths, runner, taskId, followUpSpec, {
+        effort: effort as 'medium',
+        model: config.taskModel === '' ? undefined : config.taskModel,
+      })
+    } catch (error) {
+      if (error instanceof StartupOwnershipUnknownError
+        || error instanceof StartupProcessRetainedError) {
+        event('ERROR', shortTaskId(taskId),
+          `handback runner could not be accounted for; task retained and loop stopped: ${errorSummary(error)}`)
+        writeFileSync(stopFile, '')
+        return
+      }
+      // The attempt is spent, and the failure it was meant to fix is counted after all.
+      writeGateFixState(paths, taskId, { ...state, pending: false })
+      markGateFixRunActive(paths, taskId, false)
+      event('WARN', `${shortTaskId(taskId)} handback could not start: ${errorSummary(error)}`)
+      noteMergeFailure(mergeLog)
+      return
+    }
+    writeGateFixState(paths, taskId, { ...state, pending: false })
+    event('Handback', shortTaskId(taskId),
+      `attempt ${state.attempts}/${config.maxGateFixAttempts}  verification failed twice; runner restarted`)
+  }
+
+  /**
+   * Settle a handed-back runner that has left running. One that completed is merged as
+   * any completed task is. One that failed, hit the task deadline, was stopped, or died
+   * with the daemon leaves the task as the handback found it: completed with its commits
+   * and earlier final message, the attempt spent, and its issue still claimed, so its next
+   * merge failure is counted as before rather than the task being reported failed.
+   * Changes the fix run left uncommitted stay in the worktree, as for any stopped run.
+   */
+  async function settleHandback(taskId: string, status: TaskState): Promise<TaskState> {
+    if (config.maxGateFixAttempts === 0 || (status !== 'completed' && status !== 'failed')) {
+      return status
+    }
+    if (!gateFixRunActive(paths, taskId)) return status
+    const state = readGateFixState(paths, taskId)
+    if (state === undefined) return status
+    if (status === 'completed') {
+      // A reservation not yet started is still waiting for its slot.
+      if (!state.pending) markGateFixRunActive(paths, taskId, false)
+      return status
+    }
+    const savedFinalMessage = gateFixFinalMessageFile(paths, taskId)
+    if (existsSync(savedFinalMessage)) {
+      copyFileSync(savedFinalMessage, finalMessageFile(paths, taskId))
+    }
+    if (!await transitionStatus(paths, taskId, 'failed', 'completed')) {
+      return readTaskState(paths, taskId) ?? status
+    }
+    writeGateFixState(paths, taskId, { ...state, verificationFailed: false, pending: false })
+    markGateFixRunActive(paths, taskId, false)
+    appendFileSync(logFile(paths, taskId),
+      '\nMerge gate handback ended without completing; task returned to completed.\n')
+    event('Handback', shortTaskId(taskId),
+      `attempt ${state.attempts}/${config.maxGateFixAttempts}  fix run ended without completing; task returned to completed`)
+    return 'completed'
   }
 
   function noteIssueReleaseFailure(error: IssueReleaseReconciliationError): void {
@@ -1967,6 +2114,20 @@ export function createLoop(deps: LoopDeps) {
 
       const cycles = new Set(entries.map((entry) => entry.cycle))
       const currentCycle = readCount(scanCountFile)
+      // The counter is rewound only after every other recovery step, so a marker one
+      // cycle ahead of it means a previous start finished recovery but could not remove
+      // the marker. A new run branch also resets the counter, so a stop during a live
+      // first-cycle scan lands here with its scans untouched; cleanup is idempotent, so
+      // the named scans are discarded before the marker goes, or the new run would count
+      // them as its own failures.
+      if (cycles.size === 1 && cycles.has(currentCycle + 1)) {
+        for (const taskId of new Set(entries.map((entry) => entry.taskId))) {
+          cleanupTask(paths, taskId, undefined, false, log)
+        }
+        rmSync(marker, { force: true })
+        event('Recovered', 'scan cycle', `${currentCycle + 1} after operator stop`)
+        return true
+      }
       if (cycles.size !== 1 || !cycles.has(currentCycle)) {
         event('ERROR', `stopped-scan recovery does not match current cycle ${currentCycle}; stopping the loop`)
         writeFileSync(stopFile, '')
@@ -2969,6 +3130,11 @@ export function createLoop(deps: LoopDeps) {
         || !existsSync(join(scannedDir, taskId))) return
       clearIssueFailureCounts(paths, taskId)
       mergeAttempts.add(taskId)
+      // A reserved handback replaces the merge: these commits already failed the gate twice.
+      if (config.maxGateFixAttempts > 0 && readGateFixState(paths, taskId)?.pending === true) {
+        await startHandback(taskId)
+        return
+      }
       const mergeLog = join(paths.logsDir, `${taskId}.merge.log`)
       const linkedIssues = issueNumbersForTask(paths, taskId)
       if (linkedIssues.length > 0) {
@@ -3052,6 +3218,7 @@ export function createLoop(deps: LoopDeps) {
           onMerged: () => {
             writeFileSync(mergeFailureFile, '0\n')
             retireConflictedAttempts(taskId, linkedIssues)
+            removeGateFixState(paths, taskId)
           },
           onMergeSkipped: (reason) => event(
             'Skipped', shortTaskId(taskId),
@@ -3078,6 +3245,7 @@ export function createLoop(deps: LoopDeps) {
           previousGateFailures.delete(`no-change-reconciliation-${taskId}`)
           event('No-change', shortTaskId(taskId), 'no change warranted')
           retireConflictedAttempts(taskId, linkedIssues)
+          removeGateFixState(paths, taskId)
           if (!isInspectionTaskId(paths, taskId)) {
             const cycle = readCount(scanCountFile)
             if (cycle > 0) {
@@ -3092,7 +3260,9 @@ export function createLoop(deps: LoopDeps) {
         // Issue reconciliation needs the forge, so it waits for the merge to finish; a
         // restart that finds the task merged reconciles from the promotion record.
         if (linkedIssues.length > 0) {
-          const runBranch = optionalGit(['branch', '--show-current']).trim()
+          // The merged status holds the branch the merge checked and landed on; asking
+          // the checkout again could answer nothing and record a malformed promotion.
+          const runBranch = readStatus(paths, taskId)?.run_branch ?? ''
           await reconcileMergedIssues(taskId, linkedIssues, mergeCommit, runBranch)
         }
       } catch (error) {
@@ -3235,6 +3405,7 @@ export function createLoop(deps: LoopDeps) {
           }
           return
         }
+        if (await handBackFailedGate(taskId, error, mergeLog)) return
         const abandoned = noteMergeFailure(mergeLog)
         if (abandoned && linkedIssues.length > 1 && remoteOperationsAvailable) {
           try {
@@ -3266,14 +3437,15 @@ export function createLoop(deps: LoopDeps) {
       // Only a running task needs its process; refreshTask makes that one full read.
       const before = readTaskState(paths, taskId)
       if (before === undefined) continue
-      const status = before === 'running'
+      const refreshed = before === 'running'
         ? (await refreshTask(paths, taskId, {
           taskDeadlineHours: config.taskDeadlineHours,
           now: () => now().getTime(),
           onDeadline: reportTaskDeadline,
         }))?.status
         : before
-      if (status === undefined) continue
+      if (refreshed === undefined) continue
+      const status = await settleHandback(taskId, refreshed)
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
       const wasFailedAtStartup = tasksFailedAtStartup.delete(taskId)
       // A task can finish between the stop and this refresh; only once it leaves
@@ -3488,7 +3660,7 @@ export function createLoop(deps: LoopDeps) {
       await adoptRemoteTasks(openFindings)
     }
 
-    let running = countRunningTasks()
+    let running = countRunningTasks() + countReservedHandbacks()
 
     // Nothing new starts while a stop is pending: without this the burst detector above
     // would fill the parallel slots with the very outage it just stopped for.
@@ -3514,8 +3686,12 @@ export function createLoop(deps: LoopDeps) {
             // cost this poll its claims. A queue in the project's own repository is closed
             // by the merge commit, but an abandoned run still has to return its issues.
             try {
+              // An unknown held branch would make the run this checkout still holds look
+              // abandoned and return its merged issues, so a failed lookup skips the step.
+              const heldBranch = git(['branch', '--show-current']).trim()
+              if (heldBranch === '') throw new Error('the checkout is not on a branch')
               const { closed, returned } = await closePromotedIssues(
-                forge, paths, promotedCommitContained, optionalGit(['branch', '--show-current']).trim(),
+                forge, paths, promotedCommitContained, heldBranch,
                 issueQueueIsSeparate(paths),
               )
               for (const issueNumber of closed) {

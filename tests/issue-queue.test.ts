@@ -116,6 +116,44 @@ describe('fingerprintOf', () => {
     expect(a.startsWith('text:')).toBe(true)
   })
 
+  it.each([
+    ['[LAYOUT] Remove the close buttons from `src/frontend/src/pages/CalendarPage.tsx`',
+      'src/frontend/src/pages/CalendarPage.tsx'],
+    ['[LAYOUT] `src/frontend/styles.css`: Remove empty .live-event-form rules (#448).',
+      'src/frontend/styles.css'],
+    ['[BUG] `src/order.ts` requires foo before bar', 'src/order.ts'],
+    ['[BUG] the fallback is missing in src/shared.ts.', 'src/shared.ts'],
+    ['[TEST] `src/shared.ts` lacks coverage', 'src/shared.ts'],
+    ['[BUG] src/a.ts and src/b.ts disagree', 'src/a.ts'],
+    ['[BUG] ./src/a.test.ts fails', './src/a.test.ts'],
+    ['[BUG] src/a.ts.bak is stale', 'src/a.ts.bak'],
+    ['[BUG] src/a.ts..', 'src/a.ts'],
+    ['[BUG] src/a.ts/b is a directory', undefined],
+    ['[BUG] src/a.ts_old is stale', undefined],
+    ['[BUG] `src/adapters/v1.2/` resolves the wrong adapter', undefined],
+    ['[BUG] `orchestration/ts-1.2/scripts` resolves the wrong adapter', undefined],
+    ['[BUG] the 1.x/2.x-era adapters resolve the wrong path', undefined],
+    ['[DOCS] `README.md` claims a missing command', undefined],
+    ['[BUG] `.githooks/pre-commit` skips the subject check', undefined],
+    ['[BUG] finding without a path', undefined],
+  ])('reads the primary path of %s', (title, path) => {
+    const fingerprint = fingerprintOf(title)
+    if (path === undefined) expect(fingerprint.startsWith('text:')).toBe(true)
+    else expect(fingerprint.startsWith(`${/^\[([A-Z]+)\]/.exec(title)![1]!.toLowerCase()}:${path}:`)).toBe(true)
+  })
+
+  it('reads a primary path in linear time from a long run of path characters', () => {
+    expect(fingerprintOf(`[BUG] ${'/'.repeat(100_000)}`).startsWith('text:')).toBe(true)
+    expect(fingerprintOf(`[BUG] ${'a/.'.repeat(33_000)} src/a.ts`).startsWith('bug:src/a.ts:'))
+      .toBe(true)
+  })
+
+  it('removes issue references in linear time after a long whitespace run', () => {
+    const fingerprint = fingerprintOf(`[BUG] \`src/a.ts\` issue${' '.repeat(1_000_000)}x`)
+
+    expect(fingerprint).toBe(fingerprintOf('[BUG] `src/a.ts` issue x'))
+  })
+
   it('keeps untagged findings naming different paths apart', () => {
     const a = fingerprintOf('Fix null check in src/a.ts')
     const b = fingerprintOf('Fix null check in src/b.ts')
@@ -172,6 +210,31 @@ describe('ready finding groups', () => {
     expect(groupReadyFindings([first, second]).map((group) =>
       group.map((issue) => issue.number))).toEqual([[first.number], [second.number]])
     expect(fingerprintOf(first.title).startsWith('text:')).toBe(true)
+  })
+
+  it('leaves findings whose dotted segment continues past its extension single', async () => {
+    const titles = [
+      '[BUG] `src/adapters/v1.2/` resolves the wrong adapter',
+      '[BUG] `src/adapters/v1.2/` skips the fallback',
+      '[BUG] `orchestration/ts-1.2/scripts` resolves the wrong adapter',
+      '[BUG] `orchestration/ts-1.2/scripts` skips the fallback',
+      '[BUG] the 1.x/2.x-era adapters resolve the wrong path',
+      '[BUG] the 1.x/2.x-era adapters skip the fallback',
+    ]
+    const findings = await Promise.all(titles.map((title) => finding(title)))
+
+    expect(groupReadyFindings(findings).map((group) =>
+      group.map((issue) => issue.number))).toEqual(findings.map((issue) => [issue.number]))
+    for (const title of titles) expect(fingerprintOf(title).startsWith('text:')).toBe(true)
+  })
+
+  it('groups findings whose path ends a sentence with the same path elsewhere', async () => {
+    const first = await finding('[BUG] the fallback is missing in src/shared.ts.')
+    const second = await finding('[TEST] `src/shared.ts` lacks coverage')
+
+    expect(groupReadyFindings([first, second]).map((group) =>
+      group.map((issue) => issue.number))).toEqual([[first.number, second.number]])
+    expect(fingerprintOf(first.title).startsWith('bug:src/shared.ts:')).toBe(true)
   })
 
   it('does not regroup same-file findings released from a failed group', async () => {
@@ -2614,6 +2677,20 @@ describe('reapStaleLeases', () => {
     expect(forge.issueComments.get(issueNumber)).toEqual([
       'MERGED: task-merged\nMerged as abc123 into run branch feature/run-9. This issue closes on promotion.',
     ])
+  })
+
+  it('refuses to record a promotion without a run branch, leaving no record behind', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'merged', body: buildIssueBody('[BUG] `a/b.ts` x', 'p'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-merged', [issueNumber])
+
+    expect(() => recordIssuePromotions(paths, 'task-merged', 'abc123', ''))
+      .toThrow('without a run branch')
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    await expect(closePromotedIssues(forge, paths, () => true)).resolves
+      .toEqual({ closed: [], returned: [] })
   })
 
   it('confirms an existing trusted merge marker instead of posting a duplicate', async () => {

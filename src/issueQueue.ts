@@ -152,11 +152,44 @@ const FINDING_ORDER_TERMS = new Set([
   'precede', 'prior', 'then',
 ])
 
+/** Longer than any real path; a longer run of path characters is never examined. */
+const MAX_FINDING_PATH_LENGTH = 4_096
+const FINDING_PATH_RUN = /[A-Za-z0-9_./-]+/g
+const FINDING_PATH_CONTINUATION = /[A-Za-z0-9_/-]/
+const ALPHANUMERIC = /[A-Za-z0-9]/
+
 function findingParts(description: string): { tag: string | undefined; path: string | undefined } {
   return {
     tag: /^\[([A-Z]+)\]/.exec(description)?.[1]?.toLowerCase(),
-    path: description.match(/[A-Za-z0-9_./-]*\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/)?.[0],
+    path: findingPath(description),
   }
+}
+
+/**
+ * The first run of path characters that contains a slash followed by a file extension,
+ * up to the last such extension. Scanning each run once keeps the cost linear in the
+ * text, which a backtracking pattern over these overlapping characters does not.
+ */
+function findingPath(description: string): string | undefined {
+  for (const [run] of description.matchAll(FINDING_PATH_RUN)) {
+    if (run.length > MAX_FINDING_PATH_LENGTH) continue
+    const slash = run.indexOf('/')
+    if (slash < 0) continue
+    let end: number | undefined
+    for (let dot = run.indexOf('.', slash + 2); dot >= 0;) {
+      let extensionEnd = dot + 1
+      while (ALPHANUMERIC.test(run[extensionEnd] ?? '')) extensionEnd++
+      // The extension must end the path, so `src/v1.2/` stays a directory, while a period
+      // that ends the sentence after `src/a.ts.` does not continue it.
+      const next = run[extensionEnd] === '.' ? extensionEnd + 1 : extensionEnd
+      if (extensionEnd > dot + 1 && !FINDING_PATH_CONTINUATION.test(run[next] ?? '')) {
+        end = extensionEnd
+      }
+      dot = run.indexOf('.', extensionEnd)
+    }
+    if (end !== undefined) return run.slice(0, end)
+  }
+  return undefined
 }
 
 /**
@@ -213,7 +246,7 @@ function normalizedFindingText(description: string, tag?: string, path?: string)
   if (tag !== undefined) text = text.replace(new RegExp(`^\\[${tag}\\]`, 'i'), ' ')
   if (path !== undefined) text = text.replace(path.toLowerCase(), ' ')
   text = text
-    .replace(/\b(?:issue|commit)\s*#?\s*(?:[0-9a-f]{7,40}|\d+)\b/gi, ' ')
+    .replace(/\b(?:issue|commit)\s*(?:#\s*)?(?:[0-9a-f]{7,40}|\d+)\b/gi, ' ')
     .replace(/#\d+\b/g, ' ')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
 
@@ -1554,6 +1587,9 @@ export function recordIssuePromotions(
   mergeCommit: string,
   runBranch: string,
 ): number[] {
+  // The reader rejects a record without a run branch, so writing one would make every
+  // later reconcile fail even though the merge itself succeeded.
+  if (runBranch === '') throw new Error(`Cannot record the promotion of ${taskId} without a run branch`)
   const issueNumbers = issueNumbersForTask(paths, taskId)
   if (issueNumbers.length === 0) return []
   mkdirSync(promotionDir(paths), { recursive: true })

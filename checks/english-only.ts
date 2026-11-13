@@ -56,6 +56,13 @@ const ESCAPED_NON_ENGLISH_FIXTURE_LINES: ReadonlyMap<string, ReadonlySet<string>
   ['tests/runner-codex.test.ts', new Set([
     `const specification = 'non-ASCII specification ${BACKSLASH}u65e5${BACKSLASH}u672c${BACKSLASH}u8a9e${BACKSLASH}n'.repeat(1_000)`,
   ])],
+  // A byte cap must not split a two-byte character or leave a replacement character behind.
+  ['tests/loop-gate-fix.test.ts', new Set([
+    `const accented = String.fromCharCode(${'0xe9'}).repeat(50)`,
+    `expect(tail).not.toContain(String.fromCharCode(${'0xfffd'}))`,
+    // A frame marker split by an invisible character must still be recognised.
+    `const zeroWidthSpace = String.fromCharCode(${'0x200b'})`,
+  ])],
 ])
 
 const permitted = (character: string): boolean =>
@@ -69,13 +76,16 @@ const decodedEscapes = (line: string): string => line.replace(
     return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : escape
   },
 ).replace(
-  // Code points spelled as integer literals name the same text an escape would.
-  /String\.fromCodePoint\(\s*((?:0[xX][\da-fA-F]+|\d+)(?:\s*,\s*(?:0[xX][\da-fA-F]+|\d+))*)\s*\)/g,
-  (call, literals: string) => {
-    const codePoints = literals.split(',').map((literal) => Number(literal.trim()))
-    return codePoints.every((codePoint) => codePoint <= 0x10ffff)
-      ? String.fromCodePoint(...codePoints)
-      : call
+  // Code points or UTF-16 code units spelled as integer literals name the same text an
+  // escape would. fromCharCode keeps only the low 16 bits of each argument, as the
+  // language does.
+  /String\.(fromCodePoint|fromCharCode)\(\s*((?:0[xX][\da-fA-F]+|0[oO][0-7]+|0[bB][01]+|\d+)(?:\s*,\s*(?:0[xX][\da-fA-F]+|0[oO][0-7]+|0[bB][01]+|\d+))*)\s*\)/g,
+  (call, method: string, literals: string) => {
+    const values = literals.split(',').map((literal) => Number(literal.trim()))
+    if (method === 'fromCharCode') {
+      return String.fromCharCode(...values.map((codeUnit) => codeUnit & 0xffff))
+    }
+    return values.every((codePoint) => codePoint <= 0x10ffff) ? String.fromCodePoint(...values) : call
   },
 )
 

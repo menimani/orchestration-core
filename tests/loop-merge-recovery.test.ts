@@ -68,13 +68,18 @@ vi.mock('../src/status.ts', async (importOriginal) => {
 })
 
 const branchLookupFailure = vi.hoisted(() => ({ ref: undefined as string | undefined }))
+const currentBranchLookup = vi.hoisted(() => ({ unreadable: false }))
 
 // Git runs unchanged unless a test names a ref whose existence check must fail with an
-// error other than "absent".
+// error other than "absent", or makes the checkout's current branch read as nothing.
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   const execFileSync = ((...args: Parameters<typeof actual.execFileSync>) => {
     const [file, gitArgs] = args
+    if (file === 'git' && Array.isArray(gitArgs) && gitArgs.join(' ') === 'branch --show-current'
+      && currentBranchLookup.unreadable) {
+      return ''
+    }
     if (file === 'git' && Array.isArray(gitArgs) && gitArgs[0] === 'show-ref'
       && branchLookupFailure.ref !== undefined && gitArgs.includes(branchLookupFailure.ref)) {
       throw Object.assign(new Error('fatal: unable to read refs'), { status: 128 })
@@ -179,6 +184,44 @@ describe('completed task merge recovery', () => {
       'Stopped 034_auto    process tree PID 43121 before dependency installation',
     )
     expect(logged).toContain('Installed orchestration deps  after 033_auto')
+  })
+
+  it('records a merged issue under the run branch its merged status holds', async () => {
+    const taskId = '20260820_181836_035_auto-unreadable-branch-after-merge'
+    makeDependencyChangingTask(taskId)
+    // The checkout stops answering only once the merge is recorded and its install runs.
+    const install = vi.fn(() => {
+      currentBranchLookup.unreadable = true
+    })
+    const loop = makeLoop(
+      { autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0 },
+      stubProject,
+      { install, packageRoot: repoRoot },
+      undefined,
+      undefined,
+      undefined,
+      () => ({ terminated: [], failures: [] }),
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'merged fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+
+    try {
+      expect(await loop.poll()).toBe('continue')
+    } finally {
+      currentBranchLookup.unreadable = false
+    }
+
+    expect(install).toHaveBeenCalledOnce()
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'merged', run_branch: 'main' })
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({
+      taskId, runBranch: 'main', commentConfirmed: true,
+    })
+    expect(fakeForge.issueComments.get(issueNumber)?.join('\n'))
+      .toContain('into run branch main.')
+    expect(logText()).not.toContain(`could not reconcile issue #${issueNumber}`)
   })
 
   it('does not count task trees stopped for a dependency install as a failure burst', async () => {

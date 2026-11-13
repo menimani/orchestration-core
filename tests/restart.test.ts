@@ -301,6 +301,38 @@ describe('loop replacement startup', () => {
       .toBe(processMarkerText({ pid: 43214, startIdentity: 'start-43214' }))
   })
 
+  it('publishes the replacement once a timed-out identity query answers on a later attempt', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const pidFile = join(root, 'loop.pid')
+    let replacementQueries = 0
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockImplementation((pid) => {
+        if (pid !== 43215) return `start-${pid}`
+        replacementQueries += 1
+        // The first query hits the identity timeout, which answers "unknown".
+        return replacementQueries === 1 ? undefined : `start-${pid}`
+      })
+    writeFileSync(pidFile, processMarkerText(processMarker(process.pid)))
+
+    publishLoopReplacementPid(pidFile, process.pid, 43215)
+
+    expect(processStartIdentity.mock.calls.filter(([pid]) => pid === 43215)).toHaveLength(2)
+    expect(readFileSync(pidFile, 'utf8'))
+      .toBe(processMarkerText({ pid: 43215, startIdentity: 'start-43215' }))
+  })
+
+  it('names the identity timeout once a process marker exhausts its bounded retries', () => {
+    const processStartIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue(undefined)
+
+    expect(() => processMarker(43216)).toThrow(
+      'Could not determine process-start identity for PID 43216: the identity query'
+      + ' timed out or failed 3 times.',
+    )
+    expect(processStartIdentity).toHaveBeenCalledTimes(3)
+  })
+
   it('delegates replacement launch details to the operating-system adapter', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
     fixtureRoots.push(root)

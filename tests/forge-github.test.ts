@@ -756,6 +756,41 @@ describe('GitHub forge JSON schemas', () => {
     ])
   })
 
+  it.each([
+    'API rate limit exceeded; resets at 2026-08-11T08:00:00Z',
+    'API rate limit exceeded until: 2026-08-11T08:00:00Z',
+    'API rate limit exceeded, resetting at :  2026-08-11T08:00:00.000Z',
+  ])('reads an ISO reset time from %s', async (stderr) => {
+    const command: GithubCommand = async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      const failure = new Error('Command failed: gh api') as Error & { stderr: string }
+      failure.stderr = stderr
+      throw failure
+    }
+
+    const error = await createGithubForge('repo-root', command).getIssue(357).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(ForgeRateLimitError)
+    expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
+  })
+
+  it('reads a rate-limit error with a long whitespace run after its reset word in linear time', async () => {
+    const command: GithubCommand = async (_root, args) => {
+      if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: 'example/repo' })
+      if (args.join(' ') === 'api rate_limit') {
+        return JSON.stringify({ resources: { graphql: { reset: 1_786_435_200 } } })
+      }
+      const failure = new Error('Command failed: gh api') as Error & { stderr: string }
+      failure.stderr = `API rate limit exceeded; resets${' '.repeat(1_000_000)}soon`
+      throw failure
+    }
+
+    const error = await createGithubForge('repo-root', command).getIssue(357).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(ForgeRateLimitError)
+    expect((error as ForgeRateLimitError).resetAt.toISOString()).toBe('2026-08-11T08:00:00.000Z')
+  })
+
   it('rethrows a failure whose arguments, not gh output, mention a rate limit', async () => {
     const calls: string[][] = []
     const title = 'Handle the rate limit reset at 1786435200'

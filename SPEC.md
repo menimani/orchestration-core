@@ -18,6 +18,27 @@ comments and other items cite items by number, so a number is never reused.
   `Timed out after <ms>ms waiting for the repository test lock. Lock owner: <owner>.`
   and exits with status 75 (EX_TEMPFAIL), never 1, so a caller can tell a suite that
   never ran from one that failed.
+- Every read-modify-write of `queue/backlog.txt` takes the backlog lock beside it, and a
+  waiter gives up after 30 seconds. A lock, or the recovery mutex that serializes its
+  reclamation, is broken only when its owner is stale: retired by its holder, or older
+  than those 30 seconds and no longer its recorded process start. While one acquisition
+  waits, it remembers the exact owner text it last verified as current and skips the
+  process-identity query for that same text for one second; a changed owner text is
+  verified at once, and a stale verdict, with every decision to break or reclaim, always
+  comes from a fresh read and a fresh query. On Windows that query is bounded at five
+  seconds, and a query that times out answers "unknown", which falls back to whether the
+  recorded PID is alive.
+- Contenders for the backlog lock tolerate one another's moves. A holder marks its lock
+  retired only after renaming it away has failed, never before. A lock's owner record is
+  created exclusively, so of two processes that each created the directory standing at
+  the name, at most one becomes its owner. The main lock is broken only by moving it into
+  a directory private to the recovery mutex its breaker holds, so a holder whose mutex
+  another process displaced can no longer break it. A displaced mutex is removed, never
+  put back. A rename, owner write, or removal that finds its path gone or taken
+  (`ENOENT`, `EPERM`, `EEXIST`, `ENOTEMPTY`, or `EBUSY`) is a lost race: the attempt
+  counts as not acquired and is retried, any other error propagates, and a private
+  remnant left by the race is removed when it can be. A process running an older core
+  can still race by acquiring without the mutex.
 - Before a foreground loop enters its first cycle, or a background launcher spawns its
   daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
   runner models and reasoning efforts, and every setting whose resolved value differs
@@ -60,16 +81,17 @@ comments and other items cite items by number, so a number is never reused.
   output lines the skills and tests key on (`Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
   `LOOP_DONE:`, and `FAILED:`). Loop daemon events in `loop.log` use
   `YYYY-MM-DD HH:mm:ss [loop <cycle>/<cap>] <event> <subject> <detail>`: cycle and cap
-  are zero-padded, event names occupy a ten-character column, and subjects shorter than
+  are zero-padded, event names occupy a twelve-character column, and subjects shorter than
   twelve characters are padded so details align. Events preserve their complete first
   line; multiline traces and command output belong in the referenced task or suite log.
   A recoverable warning is deduplicated by its call site and full message: the first
-  occurrence writes `WARN <first line>` to `loop.log` and its full text, timestamped, to
-  `logs/warn-detail.log`. Further occurrences are counted, and once ten minutes have
-  passed since the last line for that warning, `loop.log` receives
-  `WARN <first line> repeated <n> times` and the count restarts. Warnings from different
-  call sites are tracked independently. When the call site next succeeds, its warnings
-  are cleared and `loop.log` receives one `Recovered <operation> after <n> minutes`
+  occurrence writes `WARN         <first line>` to `loop.log` and its full text,
+  timestamped, to `logs/warn-detail.log`. Further occurrences are counted, and once ten
+  minutes have passed since the last line for that warning, `loop.log` receives
+  `WARN         <first line> repeated <n> times` and the count restarts. Warnings from
+  different call sites are tracked independently. When the call site next succeeds, its
+  warnings are cleared and `loop.log` receives one
+  `Recovered    <operation> after <n> minutes`
   event, the whole minutes since the earliest of them first occurred; a call site with
   no active warning records nothing.
   The three machine markers
@@ -174,10 +196,17 @@ comments and other items cite items by number, so a number is never reused.
   any answer but `y` or `Y` prints `Aborted.` and exits zero. `--test-cmd` replaces
   `TEST_CMD` for this merge, and without a command it prints the usage and exits 1; any
   other option is an error. A grouped task missing a
-  requirement's completion marker is refused before the merge. A completed merge resets the
-  consecutive merge-failure count and, for an issue-born task, records the promotion and
-  comments the merge on each linked issue, a failed comment being only a `WARN:`. A
-  merge refusal prints its reason and exits non-zero.
+  requirement's completion marker is refused before the merge. A completed merge clears the
+  current cycle's gate-complete and resume flags before its status is recorded, resets the
+  consecutive merge-failure count, removes the task's gate fix state and the branches kept
+  from its conflicted attempts, a branch that cannot be removed being only a `WARN:`, and,
+  for an issue-born task, records the promotion and comments the merge on each linked
+  issue, a failed comment being only a `WARN:`. The failure count, gate fix state, and
+  kept branches are settled as soon as the merged status is recorded, so a dependency
+  install that then fails or is skipped still exits non-zero but leaves nothing for a
+  rerun, which reports the merge as already succeeded. A `no-change` outcome removes the same
+  gate fix state and kept branches and clears the cycle's gate-complete flag. A merge
+  refusal prints its reason and exits non-zero.
 
 ### Retained runtime configuration
 
@@ -241,6 +270,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `MAX_CI_FIX_ATTEMPTS` | `2` | ci-fix tasks generated for a failing CI gate before the loop stops (item 16). |
 | `MAX_BURST_FAILURES` | `3` | Task failures observed in one poll that stop the loop (item 19). |
 | `MAX_CONSECUTIVE_MERGE_FAILURES` | `3` | Merge failures in a row that stop the loop (item 10). |
+| `MAX_GATE_FIX_ATTEMPTS` | `1` | Handbacks a completed task gets when its own content fails merge verification twice in a row; `0` disables them (item 10). |
 | `SCAN_EFFORT` | `medium` | Reasoning effort for scans. Accepted values are `minimal`, `low`, `medium`, and `high` (item 14). |
 | `TASK_EFFORT` | `medium` | Reasoning effort for queued tasks without a per-task override; it does not replace the high effort of review-spawned fixes (item 14). |
 | `SCAN_MODEL` | empty | When non-empty, the runner model for scans (item 14). |
@@ -469,9 +499,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     task id, issue number, or the orchestration.
 8b. Before the rebase in item 9, a task whose agent committed off its own branch is
     adopted: when the task worktree exists and is clean, its HEAD is another local branch
-    or detached, and the task branch tip is a strict ancestor of that HEAD, the worktree
-    switches back to the task branch and fast-forwards it to that HEAD, and the merge log
-    names the branch the commits came from. The agent's branch is left in place. A HEAD
+    or detached, and the task branch tip is a strict ancestor of that HEAD, the task
+    branch is first moved to that HEAD in one compare-and-swap ref update that succeeds
+    only while the branch still points at the tip it was read at, the merge log names the
+    branch the commits came from, and only then does the worktree switch to the task
+    branch. A HEAD that already equals the task branch tip, as after a switch that failed
+    once the ref had moved, is only switched back, with no ref update and no log line.
+    The agent's branch is left in place. A HEAD
     that has diverged from the task branch, or a dirty worktree, is not adopted and meets
     the ordinary checks unchanged, so a task that committed nothing on any branch still
     fails because its merge created no commit.
@@ -506,7 +540,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
    When a step that will run (its `requires` path exists) declares `needsDocker`, the
    gate first runs the adapter's `cycleSuiteDockerProbe` command once, bounded by its
    `timeoutMs`, before any suite step. An adapter without a probe logs
-   `ERROR cycle suite infrastructure probe is not configured`, and a probe that does not
+   `ERROR        cycle suite infrastructure probe is not configured`, and a probe that does not
    exit 0 logs the probe's `remediation` as an `ERROR`; either writes the stop file
    without running a suite step. A failing suite step is diagnosed from this run's suite
    log alone: the adapter's `classifyInfrastructureFailure` remediation when it
@@ -554,6 +588,54 @@ are not parsed by `loadConfig` and are not operator-file settings.
     ended: its exit status, also in hexadecimal when outside 0-255 as Windows reports a
     crashed process, or the signal that terminated it, so a runtime crash reads differently
     from a failing test.
+    A failure whose verification commands ran and failed (`Tests failed. Aborting merge.`)
+    may be the task's own content, which no unchanged retry can pass. The first such
+    failure of a local task is counted and retried unchanged, as above. Only an ordinary
+    implementation task is handed back: a scan, a review, or a task marked as an inspection
+    is counted as above on every verification failure. When the same implementation task
+    fails verification again with no other merge failure between, while it has used fewer
+    than `MAX_GATE_FIX_ATTEMPTS` (default 1) handbacks, that failure is not counted:
+    the task is handed back. Its runner starts again in the existing worktree and branch
+    from a follow-up specification that contains the task's original specification, states
+    that its commits are in place and failed verification after being combined with the
+    current run branch, carries the merge log's last at most 200 lines and 16 KiB inside
+    the untrusted repository-content framing as data to diagnose, and instructs it to make
+    the verification commands pass by correcting the change, to commit on the same branch,
+    and never to delete, skip, or weaken a test. The log's frame markers carry an
+    identifier drawn from the crypto API for each follow-up and stated once before the
+    frame; after truncation, every log line that matches either marker regardless of
+    case, whitespace, and invisible characters is shown neutralised with a
+    `[frame-like line]` prefix, so no log text can end the frame, and no log text appears
+    outside it. The earlier final message is discarded, so the follow-up states that no
+    completion line from the earlier attempt counts and, for a task linked to several
+    issues, names each `REQUIREMENT_COMPLETE: #N` line it must print again besides its
+    completion marker. A `Handback` event names the attempt
+    number. The task returns to `running` with a fresh `started_at`: it takes a parallel
+    slot, appears in `loop-status`, keeps its issue claim and lease heartbeat, obeys the
+    task deadline and the stop command, and when it completes its merge is attempted afresh
+    without filing findings again. No issue text is re-read or re-trusted on this path.
+    A handback waits, uncounted and without rerunning the gate, while every parallel slot
+    is taken; a reserved handback counts as running when a poll sizes its claims and
+    backlog starts, so it takes the next free slot ahead of both. The reservation and the
+    start of a handback hold the task's merge guard, the one every merge of the task takes:
+    while a manual `merge` of the task holds it, the poll leaves the handback for a later
+    poll and starts no runner in the worktree being merged. A handed-back runner that ends
+    without completing — it fails, passes the task deadline, is stopped, loses its process,
+    or dies with the daemon — returns the task to `completed` as the handback found it:
+    its commits and earlier final message in place, the attempt used, and its issue still
+    claimed. It is neither reported failed nor released; uncommitted changes the fix run
+    left stay in the worktree, and its next merge failure is counted as above. The number
+    of handbacks used, whether the last attempt failed verification,
+    and a reserved handback not yet started are persisted under `queue/gate-fix/` before
+    the runner starts, so a daemon restart neither loses nor repeats an attempt; that state
+    and the follow-up specification are removed when the task merges, completes without
+    changes, or is cleaned up. A handback whose runner cannot be started spends the
+    attempt and counts the failure. Never handed back: a refusal for uncommitted changes,
+    a rebase or merge conflict, a failure the project adapter's
+    `classifyInfrastructureFailure` or the unreachable-registry diagnosis attributes to the
+    environment, a test-lock deferral, an adopted worker branch, or any failure after the
+    stop file exists. Once the handbacks are used, failures are counted exactly as above;
+    `MAX_GATE_FIX_ATTEMPTS=0` reproduces that behaviour event for event.
 10a. A failed merge or rebase is counted or retried only once its abort is confirmed to
     have left the tree where the attempt found it. A merge into the integration worktree
     or a prospective merge worktree, for a local task or an adopted worker branch, must
@@ -617,7 +699,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     A scan interrupted by the operator `stop` command is the exception: the command
     records the live scan before terminating it, and the next daemon discards that scan's
     task state, rewinds the incomplete cycle, and dispatches the cycle's full scan set
-    again. A scan that dies without that stop record remains a failure.
+    again. A stop record one cycle ahead of the counter belongs to a recovery that
+    rewound the cycle but could not remove the record, or to a first-cycle scan stopped
+    before a start on another branch reset the counter: either way the daemon discards
+    the task state of every scan the record names, tolerating scans already gone, then
+    removes the record, so none of them counts as a failure of the new run.
+    A scan that dies without that stop record remains a failure.
     For parallel scans, sections in the rendered `scan-template.md` are Markdown ATX
     headings whose text begins with a number and period (for example, `### 1. Tests`),
     and every section number must be unique; headings inside fenced code blocks do not
@@ -660,8 +747,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 14a. Immediately before a new cycle consumes its number or starts a scan, after the
     previous cycle gate has closed and while no task is running, the daemon first compares
     the selected project adapter with the exact source loaded at startup. A changed,
-    missing, or unreadable adapter logs `Restarting adapter     for cycle <n>` and replaces
-    the daemon before continuing, so every adapter consumer changes atomically at the same
+    missing, or unreadable adapter logs `Restarting   adapter     for cycle <n>` and
+    replaces the daemon before continuing, so every adapter consumer changes atomically at the same
     restart-safe boundary. In integration mode the monitored source is the adapter in the
     integration worktree. The daemon then fetches the configured core upstream. It
     recovers the imported revision by first matching the current subtree tree against
@@ -670,8 +757,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     back to the last `git-subtree-split` whose `git-subtree-dir` matches this package's
     prefix. It compares the recovered revision with the upstream tip and, if it is behind,
     runs `git subtree pull --squash`.
-    A package-file change logs an aligned `Updated    core        <old8>..<new8>` event.
-    In direct layout only, it also logs `Restarting core        for cycle <n>`, releases
+    A package-file change logs an aligned `Updated      core        <old8>..<new8>` event.
+    In direct layout only, it also logs `Restarting   core        for cycle <n>`, releases
     daemon ownership, and starts the package's absolute CLI entry point from the package
     directory, retaining the remaining arguments, environment, and run branch. The parent
     waits for the replacement to finish daemon initialization and logs `Restarted`; a
@@ -924,7 +1011,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
 
 24. A PID lock (`queue/loop.pid`) keeps the loop single-instance per repository; a stale
     stop file is cleared on startup, after the PID lock is taken (never before — it may
-    be another instance's signal). Before task or issue work begins, startup refuses any
+    be another instance's signal). The lock, a restart handover, and the issue-mode marker
+    record the owner's process-start identity; a query that answers "unknown" (on Windows,
+    one that times out) is asked up to three times in all, 250 ms apart, so a slow
+    query never fails a daemon start or handover that a later attempt can answer, and only
+    then fails with an error naming the timed-out or failed query. Before task or issue work begins, startup refuses any
     live PID an earlier daemon left in the task process registry (item 24a). A worktree with no corresponding
     task status also blocks startup and is reported with an OS-specific handle diagnostic.
     A run which publishes work also refuses to start when its branch has no unambiguous
@@ -950,8 +1041,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     every one of these, so a loop stopped mid-cycle resumes where it was; a current
     branch that cannot be read fails startup with nothing reset. Startup then records the
     current branch. Every poll, before it consumes the stop file (item 25), compares the
-    checkout's current branch with the recorded one; a mismatch logs `ERROR checkout
-    <current> does not match run branch <recorded>`, writes the stop file, and stops
+    checkout's current branch with the recorded one; a mismatch logs
+    `ERROR        checkout <current> does not match run branch <recorded>`, writes the
+    stop file, and stops
     before any task is started, merged, or marked scanned.
 25. The stop file (`queue/stop`) is checked at the top of every poll. `stop`, daemon stop
     outcomes, and daemon termination signals stop every live task process tree (`taskkill
@@ -961,7 +1053,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     On Windows the tree is one process snapshot of parent links and creation times, and
     a process created before the process now holding its recorded parent PID is an orphan
     of an exited parent: it and its descendants are outside the tree, so a recycled PID
-    never adopts them. A link whose creation times are unreadable is kept.
+    never adopts them. A link whose creation times are unreadable is kept. A root the
+    snapshot omitted is dated by its start identity; when that query times out or fails,
+    a stop leaves out every child with a creation time still naming the root, because
+    an unknown identity never widens the set beyond what a known one would confirm,
+    while a liveness check keeps those links and answers `alive`. A snapshot
+    that cannot be taken is taken again while waiting for the tree to exit; a tree still
+    unlisted at the deadline fails as `Could not stop process tree <pid>. Its processes
+    could not be listed.`, and one with survivors names them as `Still running: PID <pid>`.
     A shell whose runner exited first is outside that tree, so on Windows every removal of
     a task worktree (stop recovery, merge, and `cleanup`) first terminates the tree of each
     live process whose command line or executable path contains the worktree's absolute
@@ -996,8 +1095,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; any other selector loads an external package, file URL, absolute
     path, or consumer-repository-relative module). A consumer-repository-relative
-    selector must begin with `./` or `../`; an unprefixed value such as
-    `custom/forge.mjs` remains a package specifier. External modules export a `Forge`
+    selector must begin with `./`, `../`, `.\`, or `..\` on every platform; an
+    unprefixed value such as `custom/forge.mjs` remains a package specifier. External
+    modules export a `Forge`
     as default or `forge`, or a `createForge(repoRoot, report, target)` factory, so gitea/gitlab
     implementations can be added without touching the core. The target names the
     repository for branches, pull requests, and workflow runs and the repository for the
@@ -1024,8 +1124,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     replaces an issue's title, and project bridges use it rather than the loop core.
 30. The runner is invoked only through `adapters/runner.ts` (`RUNNER=codex` selects
     `runner-codex.ts`; `RUNNER=claude` selects `runner-claude.ts`; any other selector
-    resolves like an external forge module, including the required `./` or `../` prefix
-    for a consumer-repository-relative module). External modules export a `Runner` as
+    resolves like an external forge module, including the required `./`, `../`, `.\`, or
+    `..\` prefix for a consumer-repository-relative module). External modules export a `Runner` as
     default or `runner`, or a `createRunner(options)` factory. The runner contract is
     the output markers — `TASK_COMPLETE`,
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
@@ -1356,7 +1456,7 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     with the reason in its task log. Rate-limit errors are not counted, and operator
     `cleanup` resets the count, so a re-run of the same task starts afresh.
     Its poll status uses the shared
-    `Running    Status      Task=<n>  Queue=<n>` event while work is active and, when
+    `Running      Status      Task=<n>  Queue=<n>` event while work is active and, when
     idle, the shared `Idle` event of item 15, whose `Status` subject is followed by
     `Task=0`, `Queue=0`, the idle duration, and `Waiting=open finding`; because workers
     never scan, their loop-log prefix
@@ -1415,6 +1515,10 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     report-shaped comment on a member comes from an author whose access is undetermined
     (see the trust model), the adoption is deferred the same way, with a WARN naming the
     issue, and that issue's comments are not cached, so the next poll asks again.
+    The run branch the promotion records is read before the merge and asked a second time
+    when the first lookup fails or answers nothing; when neither answers, the adoption is
+    deferred the same way, with one deduplicated WARN that the run branch could not be read
+    and nothing posted to the issue, since an empty run branch is never recorded.
     A grouped member still claimed — `loop:in-progress` and not `loop:ready` — is still
     being published, even when it carries a report from an earlier task, so the poll
     skips the group and leaves every member as it is; only an unclaimed member reporting

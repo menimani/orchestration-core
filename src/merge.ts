@@ -107,6 +107,13 @@ export const TEST_LOCK_BUSY_EXIT_CODE = 75
  */
 export class TestLockBusyError extends MergeError {}
 
+/**
+ * A verification command ran in the prospective worktree and failed. Unlike every other
+ * gate refusal, this one can be the task's own content, so the loop may hand it back to
+ * the task's runner to correct instead of retrying the same commits.
+ */
+export class VerificationFailedError extends MergeError {}
+
 export interface MergeRuntime {
   git: (cwd: string, args: string[]) => string
 }
@@ -192,7 +199,7 @@ export interface OrchestrationDepsRuntime {
 }
 
 export type OrchestrationDepsEvent = (
-  name: 'Installed' | 'Skipped', subject: string,
+  name: 'Installed' | 'Skipped' | 'WARN', subject: string,
 ) => void
 
 const orchestrationDepsRuntime: OrchestrationDepsRuntime = {
@@ -309,6 +316,28 @@ export function syncOrchestrationDepsAfterMerge(
     `after ${shortTaskId(taskId)}`, event, runtime,
     pendingOrchestrationDepsFile(paths, root), beforeInstall,
   )
+}
+
+/**
+ * Synchronizes dependencies after a merge that is already recorded. Only a failed install
+ * stops the loop; a failure to read what the merge changed is not a merge failure, since
+ * rethrowing it would count against the loop and skip what follows the recorded merge.
+ */
+export function syncOrchestrationDepsAfterRecordedMerge(
+  paths: OrchPaths,
+  mergeCommit: string,
+  taskId: string,
+  event: OrchestrationDepsEvent,
+  runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
+  beforeInstall?: (() => boolean) | undefined,
+): void {
+  try {
+    syncOrchestrationDepsAfterMerge(paths, mergeCommit, taskId, event, runtime, beforeInstall)
+  } catch (error) {
+    if (error instanceof OrchestrationDepsInstallError) throw error
+    event('WARN', `could not check ${shortTaskId(taskId)} for orchestration dependency `
+      + `changes: ${commandFailureSummary(error)}`)
+  }
 }
 
 function orchestrationDepsMissing(root: string): boolean {
@@ -801,7 +830,7 @@ function runMergeChecks(
     } catch (error) {
       io.out(`=== Tests failed: ${describeCommandFailure(error)} ===`)
       if (testLockStayedBusy(error)) throw new TestLockBusyError(testLockBusyMessage)
-      throw new MergeError('Tests failed. Aborting merge.')
+      throw new VerificationFailedError('Tests failed. Aborting merge.')
     }
     if (options.project.verifyDependencyIsolation === true
       && !ranIsolated(worktree, 'the worktree', io)) {
@@ -843,7 +872,7 @@ function runMergeChecks(
       || (passed && ranIsolated(directory, check.label, io))
     ok = passed && isolated && ok
   }
-  if (!ok) throw new MergeError('Tests failed. Aborting merge.')
+  if (!ok) throw new VerificationFailedError('Tests failed. Aborting merge.')
   if (lockBusy) throw new TestLockBusyError(testLockBusyMessage)
   return ranCommand
 }
@@ -1014,7 +1043,7 @@ async function finalizeLocalMerge(
   options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   options.onMerged?.(mergeCommit)
-  syncOrchestrationDepsAfterMerge(
+  syncOrchestrationDepsAfterRecordedMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     options.beforeOrchestrationDepsInstall,
   )
@@ -1079,6 +1108,14 @@ export async function completeTaskWithoutChanges(
   }
   if (!noChangeMarkerPresent(paths, taskId)) {
     throw new MergeError(`${taskId} did not report NO_CHANGE_WARRANTED.`)
+  }
+  // An empty or unresolvable base would read `..HEAD` as `HEAD..HEAD`, which lists no
+  // commits, and the branch holding the worker's commits would then be deleted.
+  if (baseRef.trim() === '') throw new MergeError(`${taskId} has no base to compare against.`)
+  try {
+    git(paths.repoRoot, ['rev-parse', '--verify', '--quiet', `${baseRef}^{commit}`])
+  } catch {
+    throw new MergeError(`${taskId} base ${baseRef} does not name a commit.`)
   }
   if (status.pid !== null) stopCompletedRunner(paths, taskId, status.pid)
 
@@ -1496,6 +1533,27 @@ export async function mergeTask(
   }
 }
 
+/**
+ * Run an operation on a task's worktree under the merge guard mergeTask takes, so no merge
+ * of the task, by the daemon or the CLI, can run meanwhile. Returns false without running
+ * it when another operation holds the guard.
+ */
+export async function withMergeGuard(
+  paths: OrchPaths,
+  taskId: string,
+  operation: () => Promise<void>,
+): Promise<boolean> {
+  const acquisition = acquireMergeGuard(paths, taskId)
+  const acquired = acquisition instanceof Promise ? await acquisition : acquisition
+  if (!acquired.acquired) return false
+  try {
+    await operation()
+    return true
+  } finally {
+    finishMergeGuard(acquired)
+  }
+}
+
 /** Merge an already-fetched worker branch through the same selected checks as a local task. */
 export async function mergeRemoteTask(
   paths: OrchPaths,
@@ -1554,7 +1612,7 @@ export async function mergeRemoteTask(
       throw new MergeError(`${branch} has no new commits relative to ${currentBranch}.`)
     }
     options.onMerged?.(appliedCommit)
-    syncOrchestrationDepsAfterMerge(
+    syncOrchestrationDepsAfterRecordedMerge(
       paths, appliedCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
       options.beforeOrchestrationDepsInstall,
     )
@@ -1591,7 +1649,7 @@ export async function mergeRemoteTask(
     throw new MergeError(`Adopting ${branch} created no commit on ${currentBranch}.`)
   }
   options.onMerged?.(mergeCommit)
-  syncOrchestrationDepsAfterMerge(
+  syncOrchestrationDepsAfterRecordedMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     options.beforeOrchestrationDepsInstall,
   )

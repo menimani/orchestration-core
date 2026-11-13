@@ -32,7 +32,7 @@ const defaultRuntime: CoreUpdateRuntime = {
 }
 
 function importSplit(message: string, prefix: string): string | undefined {
-  const dir = /^git-subtree-dir:\s*(.+?)\s*$/im.exec(message)?.[1]
+  const dir = /^git-subtree-dir:\s*(\S(?:.*\S)?)\s*$/im.exec(message)?.[1]
   const split = /^git-subtree-split:\s*([0-9a-f]{7,64})\s*$/im.exec(message)?.[1]
   return dir === prefix ? split : undefined
 }

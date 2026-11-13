@@ -48,12 +48,15 @@ describe('English-only source check', () => {
   it('reports non-English code points hidden in source escapes', () => {
     const slash = characters(92)
     const fromCodePoint = 'String.fromCodePoint'
+    const fromCharCode = 'String.fromCharCode'
     const violations = scanText([
       `${slash}u65e5${slash}u672c${slash}u8a9e`,
       `${slash}u{1f4a1}${slash}ufe0f`,
       `${slash}xD7`,
       `${fromCodePoint}(0x65e5, 0x672c)`,
       `${fromCodePoint}(0x3002)`,
+      `${fromCharCode}(0xe9, 0x41)`,
+      `${fromCharCode}(65533)`,
     ].join('\n'))
 
     expect(violations.map((violation) => violation.codePoints)).toEqual([
@@ -62,6 +65,32 @@ describe('English-only source check', () => {
       ['U+00D7'],
       ['U+65E5', 'U+672C'],
       ['U+3002'],
+      ['U+00E9'],
+      ['U+FFFD'],
+    ])
+  })
+
+  it('decodes character codes the way the language truncates them, in every numeric literal form', () => {
+    const fromCodePoint = 'String.fromCodePoint'
+    const fromCharCode = 'String.fromCharCode'
+    const violations = scanText([
+      'const ascii = true',
+      `${fromCharCode}(0x165e5)`,
+      `${fromCharCode}(91621)`,
+      `${fromCharCode}(0o305236)`,
+      `${fromCharCode}(0b10011000000000010)`,
+      `${fromCharCode}(0x10041)`,
+      `${fromCodePoint}(0x1f4a1)`,
+      `${fromCodePoint}(0o30002, 0b11000000001100)`,
+    ].join('\n'))
+
+    expect(violations.map((violation) => [violation.line, violation.codePoints])).toEqual([
+      [2, ['U+65E5']],
+      [3, ['U+65E5']],
+      [4, ['U+8A9E']],
+      [5, ['U+3002']],
+      [7, ['U+1F4A1']],
+      [8, ['U+3002', 'U+300C']],
     ])
   })
 

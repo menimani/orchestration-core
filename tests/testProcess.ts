@@ -8,6 +8,8 @@ const PROCESS_EXIT_TIMEOUT_MS = PROCESS_TEST_TIMEOUT_MS
 const PROCESS_EXIT_POLL_MS = 10
 const PARENT_EXIT_POLL_MS = 100
 
+const fixtureStderr = new WeakMap<ChildProcess, string>()
+
 interface FixtureProcessDescriptor {
   args: string[]
   command: string
@@ -36,6 +38,17 @@ export function lockContentionProbeScript(lockArg: number, readyArg: number): st
     "  return 'timed-out'",
     '}',
   ].join('\n')
+}
+
+/**
+ * Describe a fixture child for a timeout message: whether it is still running, how it
+ * exited, and what it has written to stderr so far.
+ */
+export function describeFixtureChild(child: ChildProcess): string {
+  const state = child.exitCode === null && child.signalCode === null
+    ? 'still running'
+    : `exited with code ${child.exitCode} and signal ${child.signalCode}`
+  return `${state}, stderr ${JSON.stringify(fixtureStderr.get(child) ?? '')}`
 }
 
 async function waitForExit(pid: number): Promise<void> {
@@ -122,6 +135,11 @@ export class TestProcessRegistry {
       // A dedicated process group lets cleanup stop descendants, not only the immediate
       // fixture. It also keeps a failed Vitest worker from taking the watchdog with it.
       detached: true,
+    })
+    // A timeout report needs what the child printed even when nothing awaits its exit.
+    fixtureStderr.set(child, '')
+    child.stderr?.on('data', (chunk: Buffer) => {
+      fixtureStderr.set(child, `${fixtureStderr.get(child) ?? ''}${chunk.toString()}`)
     })
     this.processes.push({ child, pid: () => child.pid, tree: true })
     return child

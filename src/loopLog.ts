@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { OrchPaths } from './paths.ts'
 
 const WARN_SUMMARY_INTERVAL_MS = 10 * 60 * 1000
-const LOOP_EVENT_NAME_WIDTH = 10
+const LOOP_EVENT_NAME_WIDTH = 12
 
 const EVENT_NAMES = [
   'Completed',

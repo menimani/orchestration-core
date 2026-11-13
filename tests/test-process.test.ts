@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { operatingSystem } from '../src/adapters/os.ts'
-import { PROCESS_TEST_TIMEOUT_MS } from './testProcess.ts'
+import { describeFixtureChild, PROCESS_TEST_TIMEOUT_MS, TestProcessRegistry } from './testProcess.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const TEST_PROCESS_MODULE = join(HERE, 'testProcess.ts')
@@ -69,4 +69,28 @@ it('stops an eval fixture when its Vitest-like parent exits without cleanup', ()
   // The contract is now proven and these numeric PIDs may be reused immediately on a
   // busy host. Do not let afterEach mistake their next owners for leaked fixtures.
   fixturePids.length = 0
+})
+
+it('describes a fixture child as still running or by its exit and stderr', async () => {
+  const registry = new TestProcessRegistry()
+  try {
+    const running = registry.spawn(process.execPath, [
+      '--eval', "process.stderr.write('waiting'); setInterval(() => {}, 1000)",
+    ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+    const exited = registry.spawn(process.execPath, [
+      '--eval', "process.stderr.write('lock failed'); process.exitCode = 3",
+    ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+    await new Promise((resolve) => exited.once('close', resolve))
+    // The stderr listener runs on this event loop, so poll without blocking it.
+    const deadline = Date.now() + PROCESS_TEST_TIMEOUT_MS
+    while (describeFixtureChild(running) === 'still running, stderr ""') {
+      if (Date.now() >= deadline) throw new Error('running fixture never wrote to stderr')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+
+    expect(describeFixtureChild(running)).toBe('still running, stderr "waiting"')
+    expect(describeFixtureChild(exited)).toBe('exited with code 3 and signal null, stderr "lock failed"')
+  } finally {
+    await registry.cleanup()
+  }
 })

@@ -238,6 +238,34 @@ describe('worker mode', () => {
     expect(() => git(origin, ['rev-parse', `refs/heads/${branchName(taskId)}`])).toThrow()
   })
 
+  it('retries publication when the comparison base cannot be read', async () => {
+    const taskId = '20260809_000000_013_auto-unreadable-base'
+    await completedTask(taskId, true)
+    const issueNumber = await claimedIssue(taskId)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The reported defect no longer reproduces.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    const loop = makeWorkerLoop()
+    // Once the poll has checked its run branch and reported the completion, a corrupt
+    // branch ref makes `git rev-parse HEAD` fail in the merger checkout only.
+    const push = logged.push.bind(logged)
+    logged.push = (...lines: string[]) => {
+      if (lines.some((line) => line.includes('Completed'))) {
+        writeFileSync(join(repoRoot, '.git', 'refs', 'heads', 'main'), 'corrupt\n')
+      }
+      return push(...lines)
+    }
+
+    await loop.poll()
+
+    expect(() => git(repoRoot, ['rev-parse', 'HEAD'])).toThrow()
+    expect(logged.join('\n')).toContain('(attempt 1/5)')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect((await forge.getIssue(issueNumber)).state).toBe('open')
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
+    expect(git(repoRoot, ['show-ref', '--verify', `refs/heads/${branchName(taskId)}`]))
+      .toContain(branchName(taskId))
+  })
+
   it('counts an unpublishable completion that never clears until its issue is parked', async () => {
     const firstTaskId = '20260809_000000_005_auto-dirty-attempt'
     await completedTask(firstTaskId, true)

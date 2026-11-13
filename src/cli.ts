@@ -6,7 +6,7 @@ import {
 } from 'node:fs'
 import { join, relative, resolve, toNamespacedPath } from 'node:path'
 import { createInterface } from 'node:readline/promises'
-import { loadForge, type Forge } from './adapters/forge.ts'
+import { ForgeIssueNotFoundError, loadForge, type Forge } from './adapters/forge.ts'
 import { projectScopeLabel, scopeForgeToProject } from './issueScope.ts'
 import {
   loadRunner, type ReasoningEffort, type Runner, type RunnerSharedSkills,
@@ -39,8 +39,10 @@ import {
   syncOrchestrationDepsAtStartup,
 } from './merge.ts'
 import { deploy } from './deploy.ts'
+import { retireConflictedAttempts } from './conflictRetry.ts'
+import { removeGateFixState } from './gateFix.ts'
 import {
-  absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isScanTaskId,
+  absolutePackageScriptCommand, createOrchDirectories, fleetPaths, isInspectionTaskId, isScanTaskId,
   issueQueueIsSeparate, locationArgs, logFile, orchPaths, PACKAGE_ROOT, packageCommandPrefix,
   packageFile, type OrchPaths,
 } from './paths.ts'
@@ -772,6 +774,24 @@ const cmdMerge: Command = async (paths, args) => {
     const forge = linkedIssues.length === 0
       ? undefined
       : await loadPathsForge(config.forge, paths)
+    // The loop's post-merge bookkeeping, so a hand merge during a run leaves no state the
+    // loop would act on as if the task had never landed.
+    const clearCycleFlags = (names: readonly string[]): void => {
+      if (isInspectionTaskId(paths, taskId)) return
+      const scanCountFile = join(paths.queueDir, 'scan-count.txt')
+      const cycle = existsSync(scanCountFile)
+        ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
+        : 0
+      if (cycle <= 0) return
+      for (const name of names) rmSync(join(paths.queueDir, `${name}-${cycle}`), { force: true })
+    }
+    const retireTaskState = (): void => {
+      const failures = retireConflictedAttempts(paths, taskId, linkedIssues)
+      if (failures.length > 0) {
+        console.error(`WARN: could not remove commits kept for ${taskId}: ${failures.join('; ')}`)
+      }
+      removeGateFixState(paths, taskId)
+    }
     const mergeResult = await mergeTask(paths, taskId, {
       taskGate: config.taskGate,
       testCmd: testCmd ?? (config.testCmd === '' ? undefined : config.testCmd),
@@ -782,25 +802,47 @@ const cmdMerge: Command = async (paths, args) => {
         ? undefined
         : sourceIssueNumbers(issueSourcesForTask(paths, taskId), paths.fleet.repository),
       forge,
+      // npm ci empties the node_modules every live runner loads from, whether `start` or
+      // a running loop launched it, so they stop first; a survivor leaves the install
+      // pending rather than run underneath it.
+      beforeOrchestrationDepsInstall: () => reportTaskProcessTermination(
+        terminateLiveTaskProcesses(paths), console.log, false,
+      ),
       onMergeStart: () => console.log(`Merging ${taskId}`),
+      // Commits merged after the gate passed must be pushed and verified again before
+      // promotion, so the cycle's gate flags go before the merged status is written.
+      beforeMergeRecorded: () => clearCycleFlags(['cycle-complete', 'cycle-resume']),
+      // Runs before the dependency sync, as in the loop: an install that fails or is
+      // skipped afterwards exits 1, and a rerun that finds the task merged never comes
+      // back to this point.
+      onMerged: () => {
+        // A completed manual merge proves the previous failures are no longer consecutive.
+        writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+        retireTaskState()
+      },
       onMergeSkipped: (reason) => console.log(
         `Skipped ${taskId}: ${reason === 'active' ? 'merge already in progress' : 'merge already succeeded'}`,
       ),
       onNoChange: async () => {
         if (linkedIssues.length > 0) {
-          await Promise.all(linkedIssues.map((linkedIssue) =>
-            closeIssueAndRemoveLifecycleLabels(forge!, linkedIssue,
-              `Task ${taskId} completed without commits after reporting that no change was warranted.`)))
+          await Promise.all(linkedIssues.map(async (linkedIssue) => {
+            try {
+              await closeIssueAndRemoveLifecycleLabels(forge!, linkedIssue,
+                `Task ${taskId} completed without commits after reporting that no change was warranted.`)
+            } catch (error) {
+              // A deleted issue cannot be closed, and nothing remains open to close.
+              if (!(error instanceof ForgeIssueNotFoundError)) throw error
+            }
+          }))
         }
         // Keep completion persistence inside the retryable reconciliation phase. Once
         // mergeTask writes no-change and removes the worktree there is no merge retry.
         recordIssueCompletions(paths, taskId, 'no-change')
       },
     })
-    if (mergeResult.outcome === 'merged') {
-      // A completed manual merge proves the previous failures are no longer consecutive.
-      // Clear the durable streak immediately, before optional forge bookkeeping can fail.
-      writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '0\n')
+    if (mergeResult.outcome === 'no-change') {
+      retireTaskState()
+      clearCycleFlags(['cycle-complete'])
     }
     if (mergeResult.outcome === 'merged' && linkedIssues.length > 0) {
       const mergeCommit = mergeResult.mergeCommit

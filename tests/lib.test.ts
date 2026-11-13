@@ -12,12 +12,13 @@ import { descSlug, newTaskId, shortTaskId, taskIdForDesc } from '../src/ids.ts'
 import {
   branchName, finalMessageFile, isInspectionTaskId, isReviewTaskId,
   isScanTaskId,
-  absolutePackageScriptCommand, orchPaths, packageSubtreePrefix, statusFile, type OrchPaths,
+  absolutePackageScriptCommand, orchPaths, packageSubtreePrefix, shellPathSpelling, statusFile,
+  type OrchPaths,
 } from '../src/paths.ts'
 import { nonCanonicalSpelling } from './pathComparison.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, transitionStatus, writeMergedStatus, writeStatus } from '../src/status.ts'
-import { lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
+import { describeFixtureChild, lockContentionProbeScript, TestProcessRegistry } from './testProcess.ts'
 
 let repoRoot: string
 let paths: OrchPaths
@@ -42,10 +43,15 @@ function childOutput(child: ChildProcess): Promise<string> {
 // hang, not against slowness.
 const CHILD_START_TIMEOUT_MS = 30_000
 
-async function waitForFiles(files: string[]): Promise<void> {
+async function waitForFiles(files: string[], children: ChildProcess[]): Promise<void> {
   const deadline = Date.now() + CHILD_START_TIMEOUT_MS
   while (!files.every((file) => existsSync(file))) {
-    if (Date.now() >= deadline) throw new Error('children did not reach ID allocation')
+    if (Date.now() >= deadline) {
+      const missing = files.flatMap((file, index) => existsSync(file)
+        ? []
+        : [`child ${index} (${describeFixtureChild(children[index]!)})`])
+      throw new Error(`children did not reach ID allocation within ${CHILD_START_TIMEOUT_MS} ms: ${missing.join('; ')}`)
+    }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
@@ -287,6 +293,9 @@ describe('package script commands', () => {
 
     expect(absolutePackageScriptCommand(repoRoot, 'loop-status', packageRoot))
       .toBe(`npm run -C '${expectedPackageRoot}' loop-status -- --repo '${expectedRepoRoot}'`)
+    expect(absolutePackageScriptCommand(repoRoot, 'loop-status', packageRoot)).toBe(
+      `npm run -C '${shellPathSpelling(packageRoot)}' loop-status -- --repo '${shellPathSpelling(repoRoot)}'`,
+    )
   })
 
   it('names the subtree in the spelling Git stores, whatever spelling the package root has', () => {
@@ -397,7 +406,7 @@ describe('task ids', () => {
     ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }))
     const outputs = Promise.allSettled(children.map(childOutput))
 
-    await waitForFiles(readyFiles)
+    await waitForFiles(readyFiles, children)
     expect(children.every((child) => child.exitCode === null)).toBe(true)
     rmSync(lockDir, { recursive: true })
 
@@ -448,7 +457,7 @@ describe('task ids', () => {
 
     await waitForChildrenLoaded(loadedFiles)
     writeFileSync(goFile, '')
-    await waitForFiles(readyFiles)
+    await waitForFiles(readyFiles, children)
     expect(children.every((child) => child.exitCode === null)).toBe(true)
     rmSync(lockDir, { recursive: true })
 

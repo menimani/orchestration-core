@@ -1156,6 +1156,28 @@ describe('completeTaskWithoutChanges refusals', () => {
     expect(git(repoRoot, ['rev-parse', branchName(taskId)]).trim()).toBe(taskHead)
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
+
+  it('refuses an empty base instead of reading it as HEAD..HEAD', async () => {
+    const taskId = '20261111_181522_106_user-no-change-empty-base'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+
+    await expectRefusal(taskId, '', `${taskId} has no base to compare against.`)
+    expect(git(repoRoot, ['rev-parse', branchName(taskId)]).trim()).toBe(taskHead)
+  })
+
+  it('refuses a base that does not name a commit', async () => {
+    const taskId = '20261111_181522_107_user-no-change-unknown-base'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const taskHead = git(worktree, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(finalMessageFile(paths, taskId), noChangeMessage)
+
+    await expectRefusal(
+      taskId, 'refs/heads/missing', `${taskId} base refs/heads/missing does not name a commit.`,
+    )
+    expect(git(repoRoot, ['rev-parse', branchName(taskId)]).trim()).toBe(taskHead)
+  })
 })
 
 describe('mergeTask with commits left off the task branch', () => {
@@ -1421,6 +1443,97 @@ describe('mergeRemoteTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(appliedCommit)
     expect(onMerged).toHaveBeenCalledTimes(2)
     expect(onMerged).toHaveBeenLastCalledWith(appliedCommit)
+  })
+
+  it('keeps a recorded adoption when the dependency check cannot read it', async () => {
+    const branch = 'task/remote-unreadable-merge'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    const install = vi.fn()
+    const events: Array<[string, string]> = []
+    const previousGitDir = process.env.GIT_DIR
+    const restoreGitDir = (): void => {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR
+      else process.env.GIT_DIR = previousGitDir
+    }
+
+    let mergeCommit: string
+    try {
+      mergeCommit = await mergeRemoteTask(paths, 232, 'origin', branch, expectedHead, {
+        taskGate: 'light',
+        project: noCheckProject,
+        forge: { issueClosingCommitMessage: (message) => message },
+        orchestrationDepsRuntime: { install, packageRoot: join(repoRoot, 'orchestration', 'ts') },
+        // Every git call the dependency check makes now fails; the warning restores git.
+        onMerged: () => { process.env.GIT_DIR = join(repoRoot, 'missing-git-dir') },
+        onOrchestrationDepsEvent: (name, subject) => {
+          restoreGitDir()
+          events.push([name, subject])
+        },
+      })
+    } finally {
+      restoreGitDir()
+    }
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(mergeCommit)
+    expect(git(repoRoot, ['rev-parse', `${mergeCommit}^2`]).trim()).toBe(expectedHead)
+    expect(install).not.toHaveBeenCalled()
+    expect(events).toHaveLength(1)
+    expect(events[0]?.[0]).toBe('WARN')
+    expect(events[0]?.[1]).toMatch(/^could not check .+ for orchestration dependency changes: /)
+  })
+
+  it('keeps a replayed adoption when the dependency check cannot read it', async () => {
+    const branch = 'task/remote-unreadable-replay'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    const events: Array<[string, string]> = []
+    const previousGitDir = process.env.GIT_DIR
+    const restoreGitDir = (): void => {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR
+      else process.env.GIT_DIR = previousGitDir
+    }
+    const onMerged = vi.fn()
+      .mockImplementationOnce(() => { throw new Error('persistence unavailable') })
+      .mockImplementationOnce(() => { process.env.GIT_DIR = join(repoRoot, 'missing-git-dir') })
+    const options = {
+      taskGate: 'light' as const,
+      project: noCheckProject,
+      forge: { issueClosingCommitMessage: (message: string) => message },
+      onMerged,
+      onOrchestrationDepsEvent: (name: 'Installed' | 'Skipped' | 'WARN', subject: string) => {
+        restoreGitDir()
+        events.push([name, subject])
+      },
+    }
+
+    await expect(mergeRemoteTask(
+      paths, 233, 'origin', branch, expectedHead, options,
+    )).rejects.toThrow('persistence unavailable')
+    const appliedCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    try {
+      await expect(mergeRemoteTask(
+        paths, 233, 'origin', branch, expectedHead, options,
+      )).resolves.toBe(appliedCommit)
+    } finally {
+      restoreGitDir()
+    }
+
+    expect(onMerged).toHaveBeenLastCalledWith(appliedCommit)
+    expect(events).toHaveLength(1)
+    expect(events[0]?.[0]).toBe('WARN')
+    expect(events[0]?.[1]).toMatch(/^could not check .+ for orchestration dependency changes: /)
   })
 
   it('refuses to record an adoption that left the run branch where it was', async () => {

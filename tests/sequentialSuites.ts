@@ -16,6 +16,7 @@ export const SEQUENTIAL_SUITES: string[] = [
   'tests/windows-process.test.ts',
   'tests/runner-survival.test.ts',
   'tests/backlog.test.ts',
+  'tests/backlog-stress.test.ts',
   'tests/lib.test.ts',
   'tests/shell.test.ts',
   'tests/wake.test.ts',
@@ -27,4 +28,5 @@ export const SEQUENTIAL_SUITES: string[] = [
   'tests/test-process.test.ts',
   'tests/test-linux.test.ts',
   'tests/typecheck-config.test.ts',
+  'tests/loop-gate-fix.test.ts',
 ]

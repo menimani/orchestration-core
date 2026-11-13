@@ -87,6 +87,8 @@ export function pruneTasks(
       join(paths.queueDir, 'inspect', taskId),
       join(paths.queueDir, 'heartbeat', taskId),
       join(paths.queueDir, 'merge-guards', taskId),
+      join(paths.queueDir, 'gate-fix', `${taskId}.json`),
+      join(paths.queueDir, 'gate-fix', `${taskId}.md`),
       ...(specTracked ? [] : [spec]),
       file,
     )

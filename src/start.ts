@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, closeSync, existsSync, openSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import type { WorktreeSetupStep } from './adapters/project.ts'
@@ -7,7 +9,7 @@ import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
 import { recordTaskProcess } from './processRegistry.ts'
-import { readStatus, writeStatus } from './status.ts'
+import { readStatus, resumeCompletedStatus, writeStatus } from './status.ts'
 import { specFile } from './tasks.ts'
 
 export type StartResult
@@ -166,3 +168,84 @@ export async function startTask(
     throw error
   }
 }
+
+/**
+ * Hand a completed task back to its runner: start the runner again in the task's existing
+ * worktree and branch, from a follow-up specification, and return the task to running.
+ * The earlier final message is set aside so its completion marker cannot complete the new
+ * run, and is restored when the runner cannot be started, which leaves the task completed.
+ */
+export async function resumeTask(
+  paths: OrchPaths,
+  runner: Runner,
+  taskId: string,
+  followUpSpec: string,
+  options: StartOptions,
+): Promise<StartResult> {
+  if (!['minimal', 'low', 'medium', 'high'].includes(options.effort)) {
+    throw new Error(`effort must be minimal, low, medium or high, got '${options.effort}'`)
+  }
+  const worktree = worktreeDir(paths, taskId)
+  if (!existsSync(worktree)) throw new Error(`Task worktree not found: ${worktree}`)
+  if (readStatus(paths, taskId)?.status !== 'completed') {
+    throw new Error(`Task ${taskId} is not completed and cannot be handed back.`)
+  }
+
+  const log = logFile(paths, taskId)
+  const finalMessage = finalMessageFile(paths, taskId)
+  const earlierFinal = existsSync(finalMessage) ? readFileSync(finalMessage) : undefined
+  rmSync(finalMessage, { force: true })
+  appendFileSync(log, `\n=== Merge gate handback: ${followUpSpec} ===\n`)
+  let launchedPid: number | undefined
+
+  try {
+    options.report?.(`Restarting task execution: ${taskId}`
+      + (options.model !== undefined && options.model !== '' ? ` model=${options.model}` : '')
+      + ` effort=${options.effort}`)
+    const pid = await runner.start({
+      worktree,
+      specFile: followUpSpec,
+      finalMessageFile: finalMessage,
+      logFile: log,
+      effort: options.effort,
+      model: options.model,
+    })
+    if (!Number.isSafeInteger(pid) || pid <= 0) {
+      throw new StartupOwnershipUnknownError(pid)
+    }
+    launchedPid = pid
+    recordTaskProcess(paths, taskId, pid)
+    if (!await resumeCompletedStatus(paths, taskId, pid)) {
+      throw new Error(`Task ${taskId} left completed before its handback started.`)
+    }
+    options.report?.(`Restarted. task_id=${taskId} pid=${pid} log=${log}`)
+    return { outcome: 'started', pid }
+  } catch (error) {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error)
+    if (error instanceof StartupOwnershipUnknownError) {
+      appendFileSync(log, `Task handback ownership is unknown:\n${detail}\n`)
+      throw error
+    }
+    if (launchedPid !== undefined) {
+      try {
+        operatingSystem.terminateProcessTree(launchedPid)
+        if (operatingSystem.processTreeIsAlive(launchedPid)) {
+          throw new Error(`Process tree ${launchedPid} is still alive.`)
+        }
+      } catch (terminationError) {
+        const terminationDetail = terminationError instanceof Error
+          ? terminationError.stack ?? terminationError.message
+          : String(terminationError)
+        appendFileSync(
+          log,
+          `Task handback failed:\n${detail}\nProcess tree cleanup failed:\n${terminationDetail}\n`,
+        )
+        throw new StartupProcessRetainedError(launchedPid, error, terminationError)
+      }
+    }
+    appendFileSync(log, `Task handback failed:\n${detail}\n`)
+    if (earlierFinal !== undefined) writeFileSync(finalMessage, earlierFinal)
+    throw error
+  }
+}
+
