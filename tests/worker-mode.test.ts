@@ -222,7 +222,6 @@ describe('worker mode', () => {
 
   it('closes an explicit no-change task without publishing an empty branch', async () => {
     const taskId = '20260809_000000_004_auto-already-resolved'
-    git(repoRoot, ['checkout', '--detach'])
     await completedTask(taskId, false)
     const issueNumber = await claimedIssue(taskId)
     writeFileSync(finalMessageFile(paths, taskId),
@@ -236,6 +235,23 @@ describe('worker mode', () => {
     expect(readStatus(paths, taskId)?.status).toBe('no-change')
     expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
     expect(() => git(origin, ['rev-parse', `refs/heads/${branchName(taskId)}`])).toThrow()
+  })
+
+  it('refuses to start on a detached HEAD, leaving a no-change task and its claim untouched', async () => {
+    const taskId = '20260809_000000_004_auto-already-resolved'
+    await completedTask(taskId, false)
+    const issueNumber = await claimedIssue(taskId)
+    writeFileSync(finalMessageFile(paths, taskId),
+      'The reported defect no longer reproduces.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    git(repoRoot, ['checkout', '--detach'])
+
+    expect(() => makeWorkerLoop()).toThrow('HEAD is detached')
+
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.state).toBe('open')
+    expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(true)
   })
 
   it('retries publication when the comparison base cannot be read', async () => {

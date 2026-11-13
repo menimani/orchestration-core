@@ -146,6 +146,27 @@ describe('initializeSessionStateForBranch', () => {
     assertPersistentState()
   })
 
+  it('fails startup on a detached HEAD without resetting the recorded run', () => {
+    seedState()
+    writeFileSync(join(paths.queueDir, 'run-branch.txt'), 'current-branch\n')
+    writeFileSync(join(paths.queueDir, 'held-documentation.txt'), 'held finding\n')
+    execFileSync('git', ['switch', '-q', '--detach'], { cwd: repoRoot })
+
+    expect(() => makeLoop().initializeSessionStateForBranch()).toThrow('HEAD is detached')
+
+    expect(logged.some((line) => line.startsWith('ERROR') && line.includes('detached HEAD'))).toBe(true)
+    expect(readFileSync(join(paths.queueDir, 'run-branch.txt'), 'utf8').trim())
+      .toBe('current-branch')
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8').trim()).toBe('4')
+    for (const name of cycleFileNames) {
+      expect(readFileSync(join(paths.queueDir, name), 'utf8').trim()).toBe('cycle state')
+    }
+    expect(readFileSync(join(paths.queueDir, 'held-documentation.txt'), 'utf8').trim())
+      .toBe('held finding')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('3')
+    assertPersistentState()
+  })
+
   it('resets the merge streak when no previous run was recorded', () => {
     seedState()
 

@@ -2250,6 +2250,12 @@ export function createLoop(deps: LoopDeps) {
    */
   function initializeSessionStateForBranch(): void {
     const currentBranch = git(['branch', '--show-current']).trim()
+    if (currentBranch === '') {
+      // A detached HEAD names no branch: comparing '' with the record would wipe the
+      // recorded run's state, and recording '' would let every poll's guard pass.
+      event('ERROR', 'current branch cannot be read (detached HEAD); run state kept')
+      throw new Error('current branch cannot be read: HEAD is detached')
+    }
     const previousBranch = existsSync(runBranchFile)
       ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
       : undefined
