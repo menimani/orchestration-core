@@ -1364,6 +1364,38 @@ describe('claimIssueGroup', () => {
     },
   )
 
+  it('claims a fresh task for an advisory returned to ready after its run pull request closed unmerged', async () => {
+    const description = '[SECURITY] GHSA-qwww-vcr4-c8h2 affects a dependency'
+    const issueNumber = await readyIssue(description)
+    const first = await claimIssueGroup(
+      forge, paths, [await forge.getIssue(issueNumber)], 'worker-a', appendRequirements,
+    )
+    if (first.outcome !== 'claimed') throw new Error(`expected a claim, got ${first.outcome}`)
+    writeFileSync(join(paths.statusDir, `${first.taskId}.json`),
+      durableStatus(first.taskId, 'merged'))
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    recordIssuePromotions(paths, first.taskId, 'a'.repeat(40), 'run/closed')
+    expect(issueCompletionForIssue(paths, issueNumber)?.taskId).toBe(first.taskId)
+    forge.prStatusValue = { state: 'closed', isDraft: false, url: 'pr-url', headSha: 'b'.repeat(40), checks: [] }
+
+    expect(await closePromotedIssues(forge, paths, () => true))
+      .toEqual({ closed: [], returned: [issueNumber] })
+    expect(issueCompletionForIssue(paths, issueNumber)).toBeUndefined()
+    expect(existingTaskIdForDesc(paths, 'auto', description)).toBeUndefined()
+
+    const second = await claimIssueGroup(
+      forge, paths, [await forge.getIssue(issueNumber)], 'worker-a', appendRequirements,
+    )
+    if (second.outcome !== 'claimed') throw new Error(`expected a claim, got ${second.outcome}`)
+    expect(second.taskId).not.toBe(first.taskId)
+    expect(second.enqueue).toEqual({ outcome: 'enqueued', taskId: second.taskId, depth: 1 })
+    expect(existingTaskIdForDesc(paths, 'auto', description)).toBe(second.taskId)
+    expect(issueNumberForTask(paths, second.taskId)).toBe(issueNumber)
+    const after = await forge.getIssue(issueNumber)
+    expect(after.state).toBe('open')
+    expect(after.labels).toContain(LABEL_IN_PROGRESS)
+  })
+
   it('settles a simultaneous claim deterministically — first login wins, loser backs off', async () => {
     const issueNumber = await readyIssue('[BUG] `src/a/b.ts` breaks')
     const issue = await forge.getIssue(issueNumber)

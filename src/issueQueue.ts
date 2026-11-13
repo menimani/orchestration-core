@@ -1644,6 +1644,14 @@ function removePromotionRecord(paths: OrchPaths, issueNumber: number): void {
   if (!taskStillPromoting) rmSync(issueMapFile(paths, promotion.taskId), { force: true })
 }
 
+/** Drop the completion and description index a promotion's task left once its run is abandoned. */
+function forgetAbandonedCompletion(paths: OrchPaths, promotion: IssuePromotion): void {
+  if (issueCompletionForIssue(paths, promotion.issueNumber)?.taskId === promotion.taskId) {
+    rmSync(completionFile(paths, promotion.issueNumber), { force: true })
+  }
+  forgetTaskId(paths, promotion.taskId)
+}
+
 async function removeClosedPromotionRecords(
   forge: Forge,
   paths: OrchPaths,
@@ -1726,6 +1734,9 @@ export async function closePromotedIssues(
             await forge.listIssueComments(promotion.issueNumber), withdrawal)
           if (present === undefined) continue
           if (!present) await forge.commentIssue(promotion.issueNumber, withdrawal)
+          // The abandoned task never reached the base branch, so its completion and
+          // description index must not mark the returned issue as already processed.
+          forgetAbandonedCompletion(paths, promotion)
           await returnIssueToReady(forge, promotion.issueNumber)
         } catch (error) {
           if (!(error instanceof ForgeIssueNotFoundError)) throw error
