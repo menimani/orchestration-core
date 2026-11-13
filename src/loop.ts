@@ -130,6 +130,11 @@ const MAX_CONSECUTIVE_ISSUE_RELEASE_FAILURES = 3
 // A worker publication that keeps failing for another reason, such as a rejected push or
 // a forge error, is retried on this many polls before the task is failed.
 const MAX_WORKER_PUBLICATION_FAILURES = 5
+// A remote adoption deferred for a transient reason on this many consecutive polls stops the
+// loop. Twenty polls is about ten minutes at the default interval: longer than an ordinary
+// outage blip, and short enough that a failure that never clears, such as an expired git
+// credential, does not keep the loop spinning on the same issue for hours.
+const MAX_CONSECUTIVE_ADOPTION_DEFERRALS = 20
 
 class InvalidPersistedCounterError extends Error {}
 // A finished worker task whose output can never be published as it stands. Retrying the
@@ -153,6 +158,20 @@ class LostWorkerClaimError extends UnpublishableWorkerTaskError {
 class UndeterminedWorkerReportError extends Error {
   constructor(issueNumber: number) {
     super(`the worker branch report on issue #${issueNumber} has an author whose write access could not be determined`)
+  }
+}
+
+// A forge read or a fetch that failed for a reason that says nothing about the worker's
+// pushed work, such as a forge outage or a network error. Marking the issue failed would
+// quarantine finished work until a person relabels it, so the adoption waits for a later
+// poll instead.
+class TransientAdoptionError extends Error {
+  /** What kind of step failed, for a log line that must not quote git's or the forge's text. */
+  readonly kind: string
+
+  constructor(kind: string, message: string) {
+    super(message)
+    this.kind = kind
   }
 }
 
@@ -268,8 +287,12 @@ export function createLoop(deps: LoopDeps) {
   // The merge marker each adopted issue was given this run, so a marker the listing does
   // not yet show as trusted is waited for rather than posted again on every poll.
   const postedMergeMarkers = new Map<number, string>()
+  // Consecutive transient adoption deferrals per merge-ready issue, kept in memory only.
+  const adoptionDeferrals = new Map<number, number>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
+  // The check names the previous CI gate poll saw, for the PR and head it saw them on.
+  let previousCiPoll: { url: string; headSha: string; names: string[] } | undefined
   let gateWaitTarget: string | undefined
   let idleLogState: {
     startedAt: number
@@ -689,6 +712,16 @@ export function createLoop(deps: LoopDeps) {
     const issues = findings.filter((issue) =>
       issueHasExactlyLifecycleLabel(issue, LABEL_MERGE_READY))
     const processedIssues = new Set<number>()
+    // An issue that left merge-ready no longer has a deferral to count.
+    for (const number of [...adoptionDeferrals.keys()]) {
+      if (!issues.some((issue) => issue.number === number)) adoptionDeferrals.delete(number)
+    }
+    // The adoption got past the step a transient failure defers, succeeded, or failed for
+    // another reason: whatever deferred it before has cleared.
+    const clearAdoptionDeferrals = (issueNumber: number): void => {
+      adoptionDeferrals.delete(issueNumber)
+      warningLog.recovered(`adoption-deferred-${issueNumber}`)
+    }
 
     for (const issue of issues) {
       if (processedIssues.has(issue.number)) continue
@@ -713,7 +746,17 @@ export function createLoop(deps: LoopDeps) {
       let adoptionIssues = [issue]
       try {
         const remote = currentBranchPushRemote(paths.repoRoot)
-        const report = workerBranchReport(await commentsForIssue(issue))
+        const adoptionComments = async (candidate: ForgeIssue): Promise<ForgeIssueComment[]> => {
+          try {
+            return await commentsForIssue(candidate)
+          } catch (error) {
+            if (error instanceof ForgeRateLimitError) throw error
+            appendFileSync(mergeLog, `${errorSummary(error)}\n`)
+            throw new TransientAdoptionError('comment listing',
+              `could not read the comments on issue #${candidate.number}`)
+          }
+        }
+        const report = workerBranchReport(await adoptionComments(issue))
         if (report === 'undetermined') throw new UndeterminedWorkerReportError(issue.number)
         if (report === undefined) {
           throw new MergeError(`Issue #${issue.number} has no valid worker branch report.`)
@@ -737,7 +780,7 @@ export function createLoop(deps: LoopDeps) {
             stillPublishing = true
             break
           }
-          const candidateReport = workerBranchReport(await commentsForIssue(candidate))
+          const candidateReport = workerBranchReport(await adoptionComments(candidate))
           if (candidateReport === 'undetermined') {
             throw new UndeterminedWorkerReportError(candidate.number)
           }
@@ -746,7 +789,10 @@ export function createLoop(deps: LoopDeps) {
           }
         }
         adoptionIssues.forEach((candidate) => processedIssues.add(candidate.number))
-        if (stillPublishing) continue
+        if (stillPublishing) {
+          clearAdoptionDeferrals(issue.number)
+          continue
+        }
         const taskId = report.branch.slice('task/'.length)
         adoptionTaskId = taskId
         event('Merging', shortTaskId(taskId))
@@ -756,6 +802,8 @@ export function createLoop(deps: LoopDeps) {
             `+refs/heads/${report.branch}:refs/remotes/${remote}/${report.branch}`,
           ], {
             cwd: paths.repoRoot,
+            // git's reason is matched below, so it must not be translated.
+            env: { ...process.env, LC_ALL: 'C' },
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
@@ -763,8 +811,16 @@ export function createLoop(deps: LoopDeps) {
           // git's reason stays in the local log: it can quote the remote URL, and the
           // MergeError text is also posted to the issue.
           appendFileSync(mergeLog, `${errorSummary(error)}\n`)
+          // Only a branch the remote definitely lacks fails the worker's work; any other
+          // fetch failure may clear by the next poll.
+          // git has printed this message capitalized in other versions.
+          if (!/couldn't find remote ref/i.test(errorSummary(error))) {
+            throw new TransientAdoptionError('fetch',
+              `could not fetch ${report.branch} from ${remote}`)
+          }
           throw new MergeError(`Could not fetch ${report.branch} from ${remote}.`)
         }
+        clearAdoptionDeferrals(issue.number)
 
         // Read before the merge, and checked: a promotion recorded without its run branch
         // is malformed, and every later reconcile would fail on it. A lookup that fails or
@@ -875,11 +931,29 @@ export function createLoop(deps: LoopDeps) {
           continue
         }
         // Not a failure either: a transient permission lookup says nothing about the
-        // report, so every member stays merge-ready for the next poll.
+        // report, and a forge or network error says nothing about the pushed work, so
+        // every member stays merge-ready for the next poll.
         if (error instanceof UndeterminedWorkerReportError) {
           event('WARN', `issue #${issue.number} adoption deferred: ${message}`)
           continue
         }
+        // A transient failure that never clears would defer the issue on every poll for
+        // ever while the cycle gate waits on it, so a bounded run of them stops the loop.
+        // The issue keeps its labels and comments, so a person finds the branch untouched.
+        if (error instanceof TransientAdoptionError) {
+          const deferrals = (adoptionDeferrals.get(issue.number) ?? 0) + 1
+          adoptionDeferrals.set(issue.number, deferrals)
+          warning(`adoption-deferred-${issue.number}`, `adopting issue #${issue.number}`,
+            `issue #${issue.number} adoption deferred: ${message}`)
+          if (deferrals >= MAX_CONSECUTIVE_ADOPTION_DEFERRALS) {
+            event('ERROR', `issue #${issue.number} adoption deferred ${deferrals} consecutive times `
+              + `(${error.kind} failed); stopping the loop`)
+            writeFileSync(stopFile, '')
+            return
+          }
+          continue
+        }
+        clearAdoptionDeferrals(issue.number)
         if (error instanceof OrchestrationDepsInstallError || error instanceof MergeRecoveryError) {
           throw error
         }
@@ -2371,6 +2445,8 @@ export function createLoop(deps: LoopDeps) {
 
   /** The CI verdict for the cycle gate: success / failure / pending / unknown. */
   async function checkPrCiStatus(): Promise<'success' | 'failure' | 'pending' | 'unknown'> {
+    const previous = previousCiPoll
+    previousCiPoll = undefined
     const prUrl = existsSync(prUrlFile) ? readFileSync(prUrlFile, 'utf8').trim() : ''
     if (prUrl === '') return 'unknown'
     let status
@@ -2398,7 +2474,19 @@ export function createLoop(deps: LoopDeps) {
       // project that explicitly declares it expects no CI checks may clear this gate.
       return project.ciChecksExpected === false ? 'success' : 'unknown'
     }
+    // A job that waits on another, or an external status, can appear only after the
+    // checks already listed have finished, so a verdict needs the same check names on
+    // two polls in a row for the same head. The forge lists them in no fixed order, so
+    // the polls are compared as sorted copies, keeping each duplicated name's count.
+    const names = checks.map((check) => check.name).sort()
+    previousCiPoll = { url: prUrl, headSha: status.headSha, names }
+    const stable = previous !== undefined
+      && previous.url === prUrl
+      && previous.headSha === status.headSha
+      && previous.names.length === names.length
+      && previous.names.every((name, index) => name === names[index])
     if (checks.some((check) => check.conclusion === 'pending')) return 'pending'
+    if (!stable) return 'pending'
     if (checks.some((check) => check.conclusion === 'failure')) return 'failure'
     return 'success'
   }

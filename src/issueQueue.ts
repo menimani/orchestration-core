@@ -1438,16 +1438,22 @@ export async function reconcileIssueReleaseIntent(
     if (remaining.size > 0) {
       writeIssueNumbers(releaseIntentFile(paths, taskId),
         issueNumbers.filter((number) => remaining.has(number)))
+    } else {
+      removeIssueReleaseIntent(paths, taskId)
     }
   }))
   const failures = results.flatMap((result, index) => result.status === 'rejected'
     ? [{ issueNumber: issueNumbers[index]!, error: result.reason }]
     : [])
-  if (failures.length === 0) {
+  if (failures.length > 0) return failures
+  // Every issue is already back, and the intent no longer lists them, so a local cleanup
+  // failure is reported for the caller to count rather than escaping as an unknown error.
+  try {
     dropClaimedTaskMaterialization(paths, taskId)
-    removeIssueReleaseIntent(paths, taskId)
+  } catch (error) {
+    return issueNumbers.map((issueNumber) => ({ issueNumber, error }))
   }
-  return failures
+  return []
 }
 
 /** Reconcile cleanup releases left by earlier commands or interrupted daemon polls. */
@@ -1644,6 +1650,14 @@ function removePromotionRecord(paths: OrchPaths, issueNumber: number): void {
   if (!taskStillPromoting) rmSync(issueMapFile(paths, promotion.taskId), { force: true })
 }
 
+/** Drop the completion and description index a promotion's task left once its run is abandoned. */
+function forgetAbandonedCompletion(paths: OrchPaths, promotion: IssuePromotion): void {
+  if (issueCompletionForIssue(paths, promotion.issueNumber)?.taskId === promotion.taskId) {
+    rmSync(completionFile(paths, promotion.issueNumber), { force: true })
+  }
+  forgetTaskId(paths, promotion.taskId)
+}
+
 async function removeClosedPromotionRecords(
   forge: Forge,
   paths: OrchPaths,
@@ -1726,6 +1740,9 @@ export async function closePromotedIssues(
             await forge.listIssueComments(promotion.issueNumber), withdrawal)
           if (present === undefined) continue
           if (!present) await forge.commentIssue(promotion.issueNumber, withdrawal)
+          // The abandoned task never reached the base branch, so its completion and
+          // description index must not mark the returned issue as already processed.
+          forgetAbandonedCompletion(paths, promotion)
           await returnIssueToReady(forge, promotion.issueNumber)
         } catch (error) {
           if (!(error instanceof ForgeIssueNotFoundError)) throw error

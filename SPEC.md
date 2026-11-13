@@ -39,6 +39,13 @@ comments and other items cite items by number, so a number is never reused.
   counts as not acquired and is retried, any other error propagates, and a private
   remnant left by the race is removed when it can be. A process running an older core
   can still race by acquiring without the mutex.
+- Between polls the daemon sleeps for at most `POLL_INTERVAL` seconds while watching the
+  queue directory, and it starts the next poll early, after a half-second debounce, when
+  `queue/backlog.txt` or `queue/wake` changes. It begins watching before each poll, so
+  a change made while that poll runs still shortens the sleep that follows. A local
+  enqueue changes the backlog; `delegate` in issue-queue mode publishes only to the
+  forge, so it writes the current time to `queue/wake` instead. A failed write of the
+  wake file is ignored and costs at most one poll interval.
 - Before a foreground loop enters its first cycle, or a background launcher spawns its
   daemon, the CLI prints the resolved queue mode (`local` or `issue`), run branch,
   runner models and reasoning efforts, and every setting whose resolved value differs
@@ -99,6 +106,14 @@ comments and other items cite items by number, so a number is never reused.
   marker as an exact standalone line, while a background loop writes that exact line to
   `logs/loop-markers.log`. The corresponding result is represented separately by an
   aligned display event in `loop.log`.
+  `logs/loop.log.branch` records the run branch `loop.log` belongs to. Before a
+  background loop opens `loop.log`, it compares that record with the run branch; when
+  they differ, or the record is missing, an existing `loop.log` is renamed to
+  `logs/loop-<branch>-<YYYYMMDD_HHMMSS>.log`, named after the recorded branch (or, without
+  a record, the one in `queue/run-branch.txt`) with each run of characters outside
+  `[A-Za-z0-9._-]` collapsed into one `-`, dashes trimmed from both ends, and `unknown`
+  when nothing is left, and an empty `loop.log` is started. The record is then rewritten
+  with the run branch. A foreground loop does not rotate the log.
 - Every command except `install-skills`, whose own item below states its single option,
   accepts a global `--repo <path>` option. When present, Git resolves the
   named path to its repository root and the CLI verifies both that it is a Git repository
@@ -334,7 +349,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
    whose indexed task failed and still holds its worktree or branch creates a fresh task
    and updates the index. If an identical
    non-advisory finding returns after that task has merged or completed with no change, it
-   creates a fresh task and updates the index; completed advisories remain deduplicated.
+   creates a fresh task and updates the index; completed advisories remain deduplicated,
+   except that a task whose run pull request closed without merging is forgotten (item
+   35), so its returning issue gets a fresh task.
    A worker never merges, so in worker mode a completed task counts as finished here: a
    finding that returns to ready after it was published claims a fresh task, and a
    returning advisory is closed as a duplicate.
@@ -717,7 +734,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     cycle gate. The current cycle number lives in `queue/scan-count.txt` and is
     re-read every poll (this is also the documented lever for forcing an early final
     cycle on a running loop). The counter carries over a restart only on the same
-    branch: a daemon started on another branch resets it to zero (item 24b). A missing persisted counter reads as zero; an existing
+    branch: a daemon started on another branch resets it to zero (item 24b). A missing persisted counter reads as zero, except
+    to the `stop` command while a scan is live, which refuses instead (item 25); an existing
     counter must contain base-10 digits representing a non-negative safe integer.
     Invalid contents, including an empty file, log the state path relative to the
     orchestration state root (for example, `queue/scan-count.txt`), write the stop file,
@@ -865,7 +883,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     second in a row logs `ERROR` and writes the stop file, a successful read resets the
     count, and a forge rate limit is not counted. An open
     PR whose reported head commit is not the local `HEAD` is pending, whatever its
-    checks say, because the forge can still report the previous head after a push. A PR with
+    checks say, because the forge can still report the previous head after a push. A
+    success or failure verdict also needs the same check names on two consecutive polls
+    of the same head, because a dependent job or an external status can appear only
+    after the listed checks finish; until then the gate is pending. The comparison ignores
+    the order the forge lists the checks in, but a name listed twice must be listed twice
+    again. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
     explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
@@ -900,6 +923,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     appended to the generated task, so a consumer's template that predates the
     placeholder still carries the accepted limits, and the numbered sections that
     `SCAN_PARALLEL` splits are unchanged.
+    A review that finds nothing prints `NO_FINDINGS` on its own line instead of any
+    `NEXT_TASK` line (item 30). A round is clean only because its final message has no
+    actionable `NEXT_TASK` finding; `NO_FINDINGS` never makes it clean, and a final
+    message carrying both logs
+    `WARN         final message has NO_FINDINGS and NEXT_TASK; keeping findings` and
+    keeps the findings.
     A clean review round resumes the cycle; `MAX_REVIEW_ROUNDS` bounds rounds per cycle. An ordinary
     cycle that still has findings at that bound logs a warning and resumes. A review
     that ends failed, or in an unknown state, without a verdict says nothing about the
@@ -1011,7 +1040,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
 
 24. A PID lock (`queue/loop.pid`) keeps the loop single-instance per repository; a stale
     stop file is cleared on startup, after the PID lock is taken (never before — it may
-    be another instance's signal). The lock, a restart handover, and the issue-mode marker
+    be another instance's signal). A replacement that takes over its predecessor's lock
+    keeps the stop file, and a stop file present when any poll other than one that
+    finished the run returns stops the daemon, so a stop sent while a poll restarts it
+    exits instead of handing over. The lock, a restart handover, and the issue-mode marker
     record the owner's process-start identity; a query that answers "unknown" (on Windows,
     one that times out) is asked up to three times in all, 250 ms apart, so a slow
     query never fails a daemon start or handover that a later attempt can answer, and only
@@ -1038,7 +1070,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     reset to zero. Task statuses, the backlog, the description index, and the `scanned/`
     announcement markers are kept, since status files span branches. A changed or
     missing record also resets the merge-failure count to zero. A matching record keeps
-    every one of these, so a loop stopped mid-cycle resumes where it was; a current
+    every one of these, so a loop stopped mid-cycle resumes where it was. Separately, a
+    background launch archives `loop.log` to `logs/loop-<branch>-<YYYYMMDD_HHMMSS>.log`
+    and starts it empty when `logs/loop.log.branch` names another branch (see the
+    `loop.log` format above); a foreground run never rotates it. A current
     branch that cannot be read fails startup with nothing reset. Startup then records the
     current branch. Every poll, before it consumes the stop file (item 25), compares the
     checkout's current branch with the recorded one; a mismatch logs
@@ -1074,7 +1109,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Other platforms stop the runner's detached process group and do nothing further.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
-    the intentional termination as a missing scan yield.
+    the intentional termination as a missing scan yield. That record names the scan's
+    cycle, so while any scan is live `stop` requires `queue/scan-count.txt` to hold a
+    positive safe integer. When the file is missing, or holds anything else (including
+    zero), `stop` exits 1 with an error beginning `Cannot stop live scans:` that names
+    the file's defect and ends `no stop file was created.`: it writes neither the stop
+    file nor the interrupted-scan record, terminates no task, and leaves the scan and the
+    loop running. The operator repairs the counter to the running cycle number and runs
+    `stop` again. With no live scan the counter is not read.
 26. The daemon holds the code it started with; `loop`, once it has launched the daemon in
     the background, prints where the log lives and how to stop.
 27. `prune [--days N]` deletes logs/status/generated specs/queue markers of tasks finished
@@ -1128,9 +1170,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `..\` prefix for a consumer-repository-relative module). External modules export a `Runner` as
     default or `runner`, or a `createRunner(options)` factory. The runner contract is
     the output markers — `TASK_COMPLETE`,
-    `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `DECISION_REQUIRED:` in the final-message file — plus effort/model
+    `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `NO_FINDINGS`, `DECISION_REQUIRED:` in the
+    final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
-    rendering behavior inside the adapter. Any runner honoring the contract is
+    rendering behavior inside the adapter. `NO_FINDINGS`, a standalone line, is an
+    explicit empty result from a review; it never overrides a `NEXT_TASK:` line in
+    the same final message (item 17). Any runner honoring the contract is
     substitutable. Additional interactive-agent skill destinations and rendering are
     selected by the consumer's project adapter rather than assumed by the core. The Claude
     runner and an interactive Claude adapter may share a destination, which is deduplicated.
@@ -1379,8 +1424,11 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     issue-queue mode, separate or not, a run pull
     request closed without merging will never land its work once a later run has left its
     branch, so the merger then comments `UNPROMOTED: <task-id>` on each issue recorded
-    for that run branch, naming the merge commit, run branch, and pull request, returns the issue to ready and unassigned, drops
-    its promotion record the same way, and logs a `Released` event. The comment withdraws
+    for that run branch, naming the merge commit, run branch, and pull request, deletes the
+    abandoned task's issue-completion record for that issue and every `queue/desc-index`
+    entry that names the task, so the returned issue is claimed as a fresh task rather
+    than deduplicated against work that never landed, returns the issue to ready and
+    unassigned, drops its promotion record the same way, and logs a `Released` event. The comment withdraws
     the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. Workers never
     close promoted issues. Immediately after merging, the merger comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
@@ -1515,6 +1563,19 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     report-shaped comment on a member comes from an author whose access is undetermined
     (see the trust model), the adoption is deferred the same way, with a WARN naming the
     issue, and that issue's comments are not cached, so the next poll asks again.
+    A failure that says nothing about the pushed work — a comment listing the forge
+    fails to answer for any reason but a rate limit, or a fetch of the reported branch
+    that fails without git reporting the remote ref missing, matched without regard to
+    case — defers the adoption the same way, with a deduplicated WARN keyed by the issue,
+    logged as recovered when the adoption proceeds, and git's or the forge's reason kept
+    in the merge log. Only a reported branch the remote does not have counts as a failure.
+    These deferrals are counted per issue in memory; the count clears when the issue's
+    adoption gets past the fetch, succeeds, fails for another reason, or the issue leaves
+    `loop:merge-ready`. The twentieth consecutive deferral of one issue — about ten
+    minutes at the default poll interval — logs an `ERROR` naming the issue and the kind
+    of failure, never git's or the forge's text, and stops the loop through the same stop
+    file a burst of merge failures uses, without relabelling or commenting on the issue.
+    A rate-limited comment listing is not counted.
     The run branch the promotion records is read before the merge and asked a second time
     when the first lookup fails or answers nothing; when neither answers, the adoption is
     deferred the same way, with one deduplicated WARN that the run branch could not be read
@@ -1562,4 +1623,8 @@ flags, CI outcomes, review rounds, final promotion, and stop conditions.
 `README.md` to the defaults the source resolves. The suite's global setup removes this
 suite's own fixture directories older than six hours from the OS temporary directory,
 writing a `stop` file into any that holds an `orchestration/queue` first, and never
-touches newer or foreign entries.
+touches newer or foreign entries. It then prints the platform-only suites this platform
+leaves uncollected and why, from `tests/platformCoverage.ts`, so a run that skipped a
+suite says so. The files listed in `tests/sequentialSuites.ts` launch long-lived
+processes or wait on deadlines; they run one at a time after the rest of the suite has
+run in parallel.
