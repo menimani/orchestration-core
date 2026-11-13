@@ -296,7 +296,7 @@ function installOrchestrationDeps(
   }
 }
 
-export function syncOrchestrationDepsAfterMerge(
+function syncOrchestrationDepsAfterMerge(
   paths: OrchPaths,
   mergeCommit: string,
   taskId: string,
@@ -309,9 +309,9 @@ export function syncOrchestrationDepsAfterMerge(
   ]).trim().split(/\s+/)
   if (firstParent === undefined || secondParent === undefined) return
   const changed = gitPaths(paths.repoRoot, ['diff', '--name-only', firstParent, mergeCommit])
-  const manifests = orchestrationManifests(runtime.packageRoot ?? PACKAGE_ROOT)
-  if (!changed.some((path) => manifests.has(manifestKey(paths.repoRoot, path)))) return
   const root = runtime.packageRoot ?? PACKAGE_ROOT
+  const manifests = orchestrationManifests(root)
+  if (!changed.some((path) => manifests.has(manifestKey(paths.repoRoot, path)))) return
   installOrchestrationDeps(
     `after ${shortTaskId(taskId)}`, event, runtime,
     pendingOrchestrationDepsFile(paths, root), beforeInstall,
