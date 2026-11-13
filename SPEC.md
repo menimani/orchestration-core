@@ -886,7 +886,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     checks say, because the forge can still report the previous head after a push. A
     success or failure verdict also needs the same check names on two consecutive polls
     of the same head, because a dependent job or an external status can appear only
-    after the listed checks finish; until then the gate is pending. A PR with
+    after the listed checks finish; until then the gate is pending. The comparison ignores
+    the order the forge lists the checks in, but a name listed twice must be listed twice
+    again. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
     explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,

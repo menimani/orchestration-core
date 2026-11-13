@@ -1076,6 +1076,65 @@ describe('checkPrCiStatus', () => {
     expect(await loop.checkPrCiStatus()).toBe('success')
   })
 
+  it('gives a verdict when the second poll lists the same checks in another order', async () => {
+    const loop = makeLoop()
+    forgeStatus.checks = [
+      { name: 'build', conclusion: 'success', startedAt: '' },
+      { name: 'lint', conclusion: 'success', startedAt: '' },
+      { name: 'test', conclusion: 'failure', startedAt: '' },
+    ]
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+
+    forgeStatus.checks = [
+      { name: 'test', conclusion: 'failure', startedAt: '' },
+      { name: 'build', conclusion: 'success', startedAt: '' },
+      { name: 'lint', conclusion: 'success', startedAt: '' },
+    ]
+    expect(await loop.checkPrCiStatus()).toBe('failure')
+  })
+
+  it.each([
+    ['a name is added', ['b', 'a'], ['c', 'a', 'b']],
+    ['a name is removed', ['c', 'a', 'b'], ['b', 'a']],
+    ['a name listed twice is listed once', ['b', 'a', 'b'], ['b', 'a']],
+    ['a name listed once is listed twice', ['b', 'a'], ['b', 'a', 'b']],
+  ])('stays pending for the poll on which %s', async (_description, first, second) => {
+    const loop = makeLoop()
+    forgeStatus.checks = first.map((name) => ({ name, conclusion: 'success', startedAt: '' }))
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+
+    forgeStatus.checks = second.map((name) => ({ name, conclusion: 'success', startedAt: '' }))
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+    forgeStatus.checks = [...second].reverse()
+      .map((name) => ({ name, conclusion: 'success', startedAt: '' }))
+    expect(await loop.checkPrCiStatus()).toBe('success')
+  })
+
+  it('compares reordered check names afresh after the head changes', async () => {
+    const loop = makeLoop()
+    setForgeStatus({
+      ...forgeStatus,
+      state: 'closed',
+      headSha: 'f'.repeat(40),
+      checks: [
+        { name: 'a', conclusion: 'success', startedAt: '' },
+        { name: 'b', conclusion: 'success', startedAt: '' },
+      ],
+    })
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+
+    setForgeStatus({
+      ...forgeStatus,
+      headSha: 'e'.repeat(40),
+      checks: [
+        { name: 'b', conclusion: 'success', startedAt: '' },
+        { name: 'a', conclusion: 'success', startedAt: '' },
+      ],
+    })
+    expect(await loop.checkPrCiStatus()).toBe('pending')
+    expect(await loop.checkPrCiStatus()).toBe('success')
+  })
+
   it('judges a closed PR by its checks even when its head is not the local HEAD', async () => {
     const loop = makeLoop()
     setForgeStatus({

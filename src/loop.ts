@@ -2427,8 +2427,9 @@ export function createLoop(deps: LoopDeps) {
     }
     // A job that waits on another, or an external status, can appear only after the
     // checks already listed have finished, so a verdict needs the same check names on
-    // two polls in a row for the same head.
-    const names = checks.map((check) => check.name)
+    // two polls in a row for the same head. The forge lists them in no fixed order, so
+    // the polls are compared as sorted copies, keeping each duplicated name's count.
+    const names = checks.map((check) => check.name).sort()
     previousCiPoll = { url: prUrl, headSha: status.headSha, names }
     const stable = previous !== undefined
       && previous.url === prUrl
