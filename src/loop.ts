@@ -3624,10 +3624,14 @@ export function createLoop(deps: LoopDeps) {
                 `rebase conflict; issue release pending; commits kept on ${kept.branch}`)
             }
           } catch (abandonmentError) {
+            // A status that survived a failed cleanup still reaches the poll sweep, which
+            // records the loss itself. One that cleanup already removed reaches nobody.
+            const statusRemoved = terminalized && readTaskState(paths, taskId) === undefined
             // A preparation left behind by a failed cleanup would be published by a later
-            // operator cleanup and release whichever task claims the issue next. After a
-            // completed cleanup it has already become the intent, so this removes nothing.
-            if (linkedIssues.length > 0) {
+            // operator cleanup and release whichever task claims the issue next. Once
+            // cleanup has removed the status, the preparation is the only record of the
+            // release, and issue release reconciliation publishes it on a later poll.
+            if (linkedIssues.length > 0 && !statusRemoved) {
               try {
                 removeIssueReleasePreparation(paths, taskId)
               } catch (rollbackError) {
@@ -3637,9 +3641,6 @@ export function createLoop(deps: LoopDeps) {
             if (!(abandonmentError instanceof ForgeRateLimitError)) {
               event('WARN', `${shortTaskId(taskId)} rebase conflict was abandoned but cleanup or issue release failed: ${errorSummary(abandonmentError)}`)
             }
-            // A status that survived a failed cleanup still reaches the poll sweep, which
-            // records the loss itself. One that cleanup already removed reaches nobody.
-            const statusRemoved = terminalized && readTaskState(paths, taskId) === undefined
             if (statusRemoved && !failureReported) reportConflictFailure()
             if (statusRemoved && retryId === undefined && !lossRecorded) {
               try {
