@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { ForgeIssueNotFoundError } from '../src/adapters/forge.ts'
+import { ForgeIssueNotFoundError, ForgeRateLimitError } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
 import {
@@ -1601,6 +1601,52 @@ describe('completed task merge recovery', () => {
     expect(reclaimed.labels).not.toContain(LABEL_READY)
     expect(logText()).toMatch(
       new RegExp(`Released #${reclaimedIssue} +claimed by another account since; left as it is`))
+  })
+
+  it.each([
+    ['a lookup failure', () => new Error('user lookup failed'), true],
+    ['a rate limit', () => new ForgeRateLimitError(new Date('2026-08-11T13:00:00Z')), false],
+  ])('releases no grouped issue when the current user cannot be read after %s', async (
+    _cause, lookupError, warns,
+  ) => {
+    const taskId = '20260811_120000_069_auto-abandoned-group-no-user'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true,
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      maxParallel: 0,
+      maxConsecutiveMergeFailures: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumbers = await Promise.all([1, 2].map((number) =>
+      fakeForge.createIssue({
+        title: `grouped finding ${number}`,
+        body: '',
+        labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+        assignees: [fakeForge.user],
+      })))
+    recordIssuesForTask(paths, taskId, issueNumbers)
+    // Without the claimant, a release could strip a claim another account now holds.
+    fakeForge.currentUser = async () => { throw lookupError() }
+
+    await loop.poll()
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    for (const issueNumber of issueNumbers) {
+      const issue = await fakeForge.getIssue(issueNumber)
+      expect(issue.assignees).toEqual([fakeForge.user])
+      expect(issue.labels).toContain(LABEL_IN_PROGRESS)
+      expect(issue.labels).not.toContain(LABEL_READY)
+    }
+    expect(logged).not.toContain('Released 069_auto    grouped merge abandoned')
+    const warning = 'WARN 069_auto grouped merge failed and its issues could not all be released'
+    if (warns) {
+      expect(logText()).toContain(`${warning}: user lookup failed`)
+    } else {
+      expect(logText()).not.toContain(warning)
+    }
   })
 
   it('records a git failure in the merge log when the task worktree is missing', async () => {
