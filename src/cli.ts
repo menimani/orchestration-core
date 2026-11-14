@@ -60,7 +60,7 @@ import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import {
   liveTaskProcesses, orphanedWorktreeDirectories, orphanedWorktreeReport,
-  terminateLiveTaskProcesses, type TaskProcessTermination,
+  sweepAbandonedTemporaryWorktrees, terminateLiveTaskProcesses, type TaskProcessTermination,
 } from './taskProcesses.ts'
 import { recordInterruptedScans } from './scanRecovery.ts'
 import {
@@ -1515,6 +1515,15 @@ async function runLoopDaemon(
 
   try {
     const foreignTasks = liveTaskProcesses(paths)
+    const sweep = sweepAbandonedTemporaryWorktrees(paths, log, restartPredecessorPid)
+    for (const worktree of sweep.removed) {
+      log(formatEventLine('Removed', 'worktree', relative(paths.repoRoot, worktree)))
+    }
+    for (const failure of sweep.failures) {
+      log(formatEventLine(
+        'WARN', 'worktree', `${relative(paths.repoRoot, failure.worktree)}: ${failure.error}`,
+      ))
+    }
     const orphanedWorktrees = orphanedWorktreeDirectories(paths)
     if (foreignTasks.length > 0 || orphanedWorktrees.length > 0) {
       for (const task of foreignTasks) {

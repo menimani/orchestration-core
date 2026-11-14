@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
@@ -6,6 +7,7 @@ import {
   bootedAt, forgetTaskProcess, registeredTaskIds, taskProcessPid, terminableTaskProcessPid,
 } from './processRegistry.ts'
 import { listTaskIds } from './refresh.ts'
+import { removeWorktreeWithFallback, type WorktreeRemovalRuntime } from './worktree.ts'
 
 export interface TaskProcess {
   taskId: string
@@ -77,6 +79,61 @@ export function terminateLiveTaskProcesses(
     }
   }
   return result
+}
+
+// A merge or adoption gate checks its result out in a worktree named after the process
+// that made it, `.merge-<task>-<pid>-<ms>` or `.adopt-<issue>-<pid>-<ms>`, and records
+// it nowhere else. When the gate's removal fails the directory stays, and only that name
+// says whose it is.
+const TEMPORARY_WORKTREE_NAME = /^\.(?:merge|adopt)-.+-(\d+)-\d+$/
+
+export interface TemporaryWorktreeSweep {
+  removed: string[]
+  failures: Array<{ worktree: string, error: string }>
+}
+
+const temporaryWorktreeRemovalRuntime: WorktreeRemovalRuntime = {
+  os: operatingSystem,
+  git: (cwd, args) => execFileSync('git', args, {
+    cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+  }),
+}
+
+/**
+ * Remove the temporary gate worktrees whose creating process is gone. Nothing else ever
+ * refers to them, so without this one failed removal would count as an orphan at every
+ * later start. A gate runs inside the daemon and a restart hands over only between polls,
+ * so a worktree of the `settledPid` predecessor is abandoned even while it still lives.
+ * A worktree that cannot be removed stays, for the orphan check to report.
+ */
+export function sweepAbandonedTemporaryWorktrees(
+  paths: OrchPaths,
+  report: (line: string) => void,
+  settledPid?: number,
+  runtime: WorktreeRemovalRuntime = temporaryWorktreeRemovalRuntime,
+): TemporaryWorktreeSweep {
+  const sweep: TemporaryWorktreeSweep = { removed: [], failures: [] }
+  const entries = existsSync(paths.worktreesDir)
+    ? readdirSync(paths.worktreesDir, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name))
+    : []
+  for (const entry of entries) {
+    const owner = TEMPORARY_WORKTREE_NAME.exec(entry.name)?.[1]
+    if (owner === undefined || !entry.isDirectory()) continue
+    const pid = Number(owner)
+    if (pid !== settledPid && runtime.os.processIsAlive(pid)) continue
+    const worktree = join(paths.worktreesDir, entry.name)
+    const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, report)
+    if (result.fallbackFailure !== undefined || existsSync(worktree)) {
+      sweep.failures.push({
+        worktree,
+        error: `git: ${result.gitFailure}; fallback: ${result.fallbackFailure ?? 'no error'}`,
+      })
+      continue
+    }
+    sweep.removed.push(worktree)
+  }
+  return sweep
 }
 
 export function orphanedWorktreeDirectories(paths: OrchPaths): string[] {
