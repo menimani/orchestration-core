@@ -3069,6 +3069,7 @@ export function createLoop(deps: LoopDeps) {
     // Round-robin groups cover every discovered section exactly once while keeping
     // group sizes within one, without assuming what any section asks the scan to do.
     let launchFailed = false
+    let retainedScan: string | undefined
     const attemptedScans: string[] = []
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
@@ -3085,7 +3086,23 @@ export function createLoop(deps: LoopDeps) {
         })
         event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
       } catch (error) {
-        event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
+        // A runner the loop could not identify, or could not stop, may still be writing
+        // to this scan's worktree, so the scan is left for the owner rather than removed.
+        if (error instanceof StartupOwnershipUnknownError) {
+          event(
+            'ERROR', shortTaskId(scanId),
+            'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+          )
+          retainedScan = scanId
+        } else if (error instanceof StartupProcessRetainedError) {
+          event(
+            'ERROR', shortTaskId(scanId),
+            `startup process tree PID ${error.pid} survived; task retained and loop stopped`,
+          )
+          retainedScan = scanId
+        } else {
+          event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
+        }
         launchFailed = true
         break
       }
@@ -3097,6 +3114,7 @@ export function createLoop(deps: LoopDeps) {
       // failure list and counted against an expectation it was never part of, and the
       // gate would then stop every later start over a scan yield that cannot arrive.
       for (const scanId of attemptedScans) {
+        if (scanId === retainedScan) continue
         try {
           cleanupTask(paths, scanId, undefined, false, log)
         } catch (error) {
