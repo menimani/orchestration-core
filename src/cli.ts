@@ -25,6 +25,7 @@ import {
   type ConfigEvent, type LoopConfig,
 } from './config.ts'
 import { writeConfigFile } from './configFile.ts'
+import { createCycleCapRecorder, type CycleCapRecorder } from './cycleCap.ts'
 import { readJsonFile } from './jsonFile.ts'
 import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
@@ -1235,6 +1236,9 @@ const cmdLoop: Command = async (paths, args) => {
   }
 
   const pendingConfigEvents: ConfigEvent[] = []
+  // The daemon installs the recorder once it owns the cap file; before that a cap change
+  // has nowhere it may be persisted.
+  let cycleCap: CycleCapRecorder = { observe: () => {} }
   let handleConfigEvent = (event: ConfigEvent): void => {
     pendingConfigEvents.push(event)
   }
@@ -1243,6 +1247,9 @@ const cmdLoop: Command = async (paths, args) => {
     config = loadConfig(process.env, {
       filePath: join(paths.projectRoot, 'config.json'),
       onEvent: (event) => handleConfigEvent(event),
+      onRead: (setting, value) => {
+        if (setting === 'MAX_SCAN_CYCLES' && typeof value === 'number') cycleCap.observe(value)
+      },
     })
     if (markerOutput === undefined) {
       for (const event of pendingConfigEvents.splice(0)) console.error(configEventLine(event))
@@ -1333,15 +1340,9 @@ const cmdLoop: Command = async (paths, args) => {
       cycleCap: config.maxScanCycles,
     })) write(line)
   }
-  // The daemon installs the recorder once it owns the cap file; before that a cap change
-  // has nowhere it may be persisted.
-  const cycleCap: CycleCapRecorder = { record: () => {} }
-  handleConfigEvent = (event): void => {
-    if (event.type === 'changed' && event.setting === 'MAX_SCAN_CYCLES'
-      && typeof event.value === 'number') {
-      cycleCap.record(event.value)
-    }
-    log(configEventLine(event), event.type === 'error')
+  handleConfigEvent = (event): void => log(configEventLine(event), event.type === 'error')
+  const installCycleCap = (recorder: CycleCapRecorder): void => {
+    cycleCap = recorder
   }
   for (const event of pendingConfigEvents.splice(0)) handleConfigEvent(event)
   const marker = (message: string): void => {
@@ -1349,7 +1350,7 @@ const cmdLoop: Command = async (paths, args) => {
     else appendFileSync(markerOutput, `${message}\n`)
   }
   try {
-    const result = await runLoopDaemon(paths, log, marker, config, cycleCap, () => {
+    const result = await runLoopDaemon(paths, log, marker, config, installCycleCap, () => {
       reportStartup({
         status: 'ready',
         pid: operatingSystem.processTreeRootPid(),
@@ -1425,17 +1426,12 @@ const cmdCiWait: Command = async (paths, args) => {
   return waitForCi(forge, Number(prNumber), { timeoutSeconds, expectedHead })
 }
 
-/** Persists a live MAX_SCAN_CYCLES change once the daemon owns the cap file. */
-interface CycleCapRecorder {
-  record: (cap: number) => void
-}
-
 async function runLoopDaemon(
   paths: OrchPaths,
   log: (line: string) => void,
   marker: (line: string) => void,
   config: LoopConfig,
-  cycleCap: CycleCapRecorder,
+  installCycleCap: (recorder: CycleCapRecorder) => void,
   ready: () => void = () => {},
 ): Promise<number> {
   const daemonPid = operatingSystem.processTreeRootPid()
@@ -1565,13 +1561,17 @@ async function runLoopDaemon(
     // lock, so a stop sent during the handover is that run's signal and must survive.
     if (!usesRestartReservation) rmSync(stopFile, { force: true })
     if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
-    writeFileSync(cycleCapFile, `${config.maxScanCycles}\n`)
+    const startupCycleCap = config.maxScanCycles
+    writeFileSync(cycleCapFile, `${startupCycleCap}\n`)
     // The loop reads MAX_SCAN_CYCLES live, so the file follows a mid-run change for
     // `shipped` to record the cap the run actually worked to. After a handover the
     // replacement owns the file.
-    cycleCap.record = (cap) => {
-      if (ownsDaemonState) writeFileSync(cycleCapFile, `${cap}\n`)
-    }
+    installCycleCap(createCycleCapRecorder(cycleCapFile, {
+      persisted: startupCycleCap,
+      label: 'queue/cycle-cap.txt',
+      owns: () => ownsDaemonState,
+      warn: (detail) => log(formatEventLine('WARN', 'cycle cap', detail)),
+    }))
 
     syncOrchestrationDepsAtStartup(
       paths,

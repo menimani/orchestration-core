@@ -792,7 +792,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     lock and owns the task lifecycle — a startup refused before that point leaves no cap
     behind — rewritten again by the running daemon whenever a live `MAX_SCAN_CYCLES`
     change is applied, and left in place at shutdown, so it holds the cap in force when
-    the run ended. The daemon's own `[loop <cycle>/<cap>]` log
+    the run ended. A live rewrite replaces the file atomically (a temporary file renamed
+    over it) and never stops the daemon: a failed one logs a single WARN naming the file
+    and the error, the configuration-change line is still logged, and the next read of
+    the setting tries again, warning once per change rather than once per attempt. The
+    daemon's own `[loop <cycle>/<cap>]` log
     prefix takes the cap from its loaded configuration, so the file exists for the
     commands that run after the daemon has gone: it is what lets `shipped` (item 18a)
     record an ending against the cap the run was actually working to, rather than

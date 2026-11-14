@@ -76,6 +76,12 @@ export interface LoadConfigOptions {
   /** Set false when resolving contract defaults without any repository file. */
   filePath?: string | false
   onEvent?: (event: ConfigEvent) => void
+  /**
+   * Receives each read of a setting, with the value the reader is given, after any event
+   * that read reported. Reads made from inside an event handler or this callback are not
+   * passed on, so neither can recurse into itself.
+   */
+  onRead?: (setting: ConfigName, value: ConfigValue) => void
 }
 
 export const CONFIG_ENV_NAMES = {
@@ -401,38 +407,50 @@ export function loadConfig(
   const lastUsed = new Map<keyof LoopConfig, ConfigValue>()
   const lastIgnored = new Map<keyof LoopConfig, ConfigValue>()
   const target = { ...activeConfig }
+  let readDepth = 0
+
+  const readSetting = (key: keyof LoopConfig): ConfigValue => {
+    refresh()
+    const name = CONFIG_ENV_NAMES[key]
+    const proposed = activeConfig[key]
+    const reason = PINNED_CONFIG_REASONS[key]
+    if (reason !== undefined) {
+      const value = pinned[key] as ConfigValue
+      if (Object.is(proposed, value)) lastIgnored.delete(key)
+      if (!Object.is(proposed, value) && !Object.is(lastIgnored.get(key), proposed)) {
+        report({
+          type: 'ignored', setting: name, previous: value, value: proposed,
+          message: `Ignored ${name} change from '${String(value)}' to '${String(proposed)}': ${reason}`,
+        })
+        lastIgnored.set(key, proposed)
+      }
+      return value
+    }
+    const previous = lastUsed.get(key)
+    lastUsed.set(key, proposed)
+    if (previous !== undefined && !Object.is(previous, proposed)) {
+      report({
+        type: 'changed', setting: name, previous, value: proposed,
+        message: `${name} changed from '${String(previous)}' to '${String(proposed)}'`,
+      })
+    }
+    return proposed
+  }
 
   return new Proxy(target, {
     get(_target, property, receiver) {
       if (typeof property !== 'string' || !(property in CONFIG_ENV_NAMES)) {
         return Reflect.get(target, property, receiver)
       }
-      refresh()
       const key = property as keyof LoopConfig
-      const name = CONFIG_ENV_NAMES[key]
-      const proposed = activeConfig[key]
-      const reason = PINNED_CONFIG_REASONS[key]
-      if (reason !== undefined) {
-        const value = pinned[key] as ConfigValue
-        if (Object.is(proposed, value)) lastIgnored.delete(key)
-        if (!Object.is(proposed, value) && !Object.is(lastIgnored.get(key), proposed)) {
-          report({
-            type: 'ignored', setting: name, previous: value, value: proposed,
-            message: `Ignored ${name} change from '${String(value)}' to '${String(proposed)}': ${reason}`,
-          })
-          lastIgnored.set(key, proposed)
-        }
+      readDepth += 1
+      try {
+        const value = readSetting(key)
+        if (readDepth === 1) options.onRead?.(CONFIG_ENV_NAMES[key], value)
         return value
+      } finally {
+        readDepth -= 1
       }
-      const previous = lastUsed.get(key)
-      lastUsed.set(key, proposed)
-      if (previous !== undefined && !Object.is(previous, proposed)) {
-        report({
-          type: 'changed', setting: name, previous, value: proposed,
-          message: `${name} changed from '${String(previous)}' to '${String(proposed)}'`,
-        })
-      }
-      return proposed
     },
     set() {
       return false
