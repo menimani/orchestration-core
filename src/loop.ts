@@ -77,7 +77,7 @@ import {
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
-  reconcileIssueReleaseIntent, type RunBranchProbe,
+  reconcileIssueReleaseIntent, type PromotedIssueOutcome, type RunBranchProbe,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
   removeIssueReleasePreparation,
@@ -3878,13 +3878,24 @@ export function createLoop(deps: LoopDeps) {
             // Closing promoted issues is bookkeeping a later poll can finish; it must not
             // cost this poll its claims. A queue in the project's own repository is closed
             // by the merge commit, but an abandoned run still has to return its issues.
+            // The issues settled before a failure are logged too: the next poll drops
+            // their records without a word, so this is their only event. Each is logged once.
+            const promotedOutcome: PromotedIssueOutcome = { closed: [], returned: [] }
+            const logPromotedOutcome = (): void => {
+              for (const issueNumber of promotedOutcome.closed.splice(0)) {
+                event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
+              }
+              for (const issueNumber of promotedOutcome.returned.splice(0)) {
+                event('Released', `#${issueNumber}`, 'run pull request closed without merging')
+              }
+            }
             try {
               // An unknown held branch would make the run this checkout still holds look
               // abandoned and return its merged issues, so a failed lookup skips the step.
               const heldBranch = git(['branch', '--show-current']).trim()
               if (heldBranch === '') throw new Error('the checkout is not on a branch')
               let strandedReported = false
-              const { closed, returned } = await closePromotedIssues(
+              await closePromotedIssues(
                 forge, paths, promotedCommitContained, heldBranch,
                 issueQueueIsSeparate(paths),
                 runBranchProbe((runBranch, issueNumbers) => {
@@ -3893,16 +3904,13 @@ export function createLoop(deps: LoopDeps) {
                     `run branch ${runBranch} has no pull request; issues `
                     + `${issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')} stay claimed`)
                 }),
+                promotedOutcome,
               )
               if (!strandedReported) warningLog.recovered('stranded-promotions')
-              for (const issueNumber of closed) {
-                event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
-              }
-              for (const issueNumber of returned) {
-                event('Released', `#${issueNumber}`, 'run pull request closed without merging')
-              }
+              logPromotedOutcome()
               warningLog.recovered('promoted-issues')
             } catch (error) {
+              logPromotedOutcome()
               if (error instanceof ForgeRateLimitError) throw error
               warning('promoted-issues', 'closing promoted issues',
                 `could not close promoted issues: ${errorSummary(error)}`)
