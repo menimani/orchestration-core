@@ -182,7 +182,9 @@ checkout's own: `codeRepository` for branches, pull requests, and workflow runs,
 `issueRepository` for the issue queue, each `owner/name` or absent. An absent name leaves
 the adapter to infer that repository from the checkout. A fleet names both (see *Running
 from a fleet*), so a factory that drops `target` sends the queue to the checkout's own
-repository instead of the fleet's.
+repository instead of the fleet's. Only `createForge` receives `target`: a ready-made
+default or `forge` export can only infer its repositories from the checkout, so a fleet
+that names an `issueRepository` needs the `createForge` factory shape.
 
 A project adapter answers a few questions: which interactive agents receive shared skills,
 which staged-path checks run before a commit,
@@ -231,7 +233,11 @@ node orchestration/ts/src/cli.ts init <project-name>
 The subtree command is intentionally manual: it makes the imported commit visible. After
 that one deliberate import, `init` is the supported setup and repair path. It generates a
 contract-valid adapter, project templates, points `core.hooksPath` at the core-owned
-hooks, and creates missing `loop:*` labels. It is safe to repeat: missing required adapter
+hooks, and creates missing `loop:*` labels. Those hooks include `commit-msg`, which `init`
+requires to be present: it rejects any commit whose subject does not begin with `feat: `,
+`fix: `, `chore: `, `docs: `, `refactor: `, or `test: ` (merge commits excepted), so from
+then on every commit made in the repository, by a person or a task agent, follows that
+convention. It is safe to repeat: missing required adapter
 members are added with marked scaffold defaults, while declared members, other existing
 project files, and a deliberately different hooks setting are reported and never overwritten.
 It works on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the

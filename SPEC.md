@@ -1181,7 +1181,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `custom/forge.mjs` remains a package specifier. External
     modules export a `Forge`
     as default or `forge`, or a `createForge(repoRoot, report, target)` factory, so gitea/gitlab
-    implementations can be added without touching the core. The target names the
+    implementations can be added without touching the core. Only the factory receives the
+    target, so a fleet that names an `issueRepository` needs it. The target names the
     repository for branches, pull requests, and workflow runs and the repository for the
     issue queue when they are not the checkout's own; a fleet project names both, and an
     omitted name keeps the adapter's inference from the checkout. The bundled GitHub
@@ -1248,7 +1249,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     as the single setup and repair command. Init generates its adapter from the same
     required-member description the real loader validates, scaffolds project templates,
     points the repository-local `core.hooksPath` at the core's hooks, and creates only
-    missing `loop:*` labels. Re-running it adds and reports marked scaffold defaults for
+    missing `loop:*` labels. Init refuses to proceed unless those hooks include
+    `commit-msg`, which rejects every non-merge commit whose subject does not match
+    `^(feat|fix|chore|docs|refactor|test): `, so every later commit in the repository,
+    including a task agent's, follows that convention. Re-running it adds and reports marked scaffold defaults for
     missing required adapter members, but never overwrites a declared member, another
     project-owned file, or a different hooks setting; divergence is reported. Init works
     on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the
