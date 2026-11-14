@@ -75,6 +75,15 @@ export function pruneTasks(
       continue
     }
 
+    // A guard retirement that could not be deleted at merge time is left under a
+    // uniquely suffixed name; its task being pruned is the last chance to reclaim it.
+    const guardsDir = join(paths.queueDir, 'merge-guards')
+    const retiredGuards = existsSync(guardsDir)
+      ? readdirSync(guardsDir)
+        .filter((entry) => entry.startsWith(`${taskId}.retired-`))
+        .map((entry) => join(guardsDir, entry))
+      : []
+
     const spec = join(paths.tasksDir, `${taskId}.md`)
     const specTracked = trackedSpecs.has(`orchestration/tasks/${taskId}.md`)
     remove(
@@ -87,6 +96,7 @@ export function pruneTasks(
       join(paths.queueDir, 'inspect', taskId),
       join(paths.queueDir, 'heartbeat', taskId),
       join(paths.queueDir, 'merge-guards', taskId),
+      ...retiredGuards,
       join(paths.queueDir, 'gate-fix', `${taskId}.json`),
       join(paths.queueDir, 'gate-fix', `${taskId}.md`),
       ...(specTracked ? [] : [spec]),

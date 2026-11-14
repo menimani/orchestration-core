@@ -212,6 +212,27 @@ describe('loadConfig', () => {
     )
   })
 
+  it('passes each outer read to onRead after the change it reported', () => {
+    const order: string[] = []
+    const filePath = configFile(JSON.stringify({ MAX_SCAN_CYCLES: 10 }))
+    let config!: ReturnType<typeof loadConfig>
+    config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => order.push(`event ${event.message} (cap ${config.maxScanCycles})`),
+      onRead: (setting, value) => order.push(`read ${setting}=${String(value)} (cap ${config.maxScanCycles})`),
+    })
+    expect(config.maxScanCycles).toBe(10)
+    writeFileSync(filePath, JSON.stringify({ MAX_SCAN_CYCLES: 4 }))
+
+    expect(config.maxScanCycles).toBe(4)
+
+    expect(order).toEqual([
+      'read MAX_SCAN_CYCLES=10 (cap 10)',
+      "event MAX_SCAN_CYCLES changed from '10' to '4' (cap 4)",
+      'read MAX_SCAN_CYCLES=4 (cap 4)',
+    ])
+  })
+
   it('stops instead of retaining the last good parse when the file becomes malformed', () => {
     const events: string[] = []
     const filePath = configFile(JSON.stringify({ MAX_PARALLEL: 6 }))

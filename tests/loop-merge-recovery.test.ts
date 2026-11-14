@@ -46,6 +46,24 @@ vi.mock('../src/cleanup.ts', async (importOriginal) => {
   }
 })
 
+const releaseCompletionFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
+
+// Publishing a prepared issue release runs unchanged unless a test names a task whose
+// rename must fail once, as a file another process holds open fails it on Windows.
+vi.mock('../src/issueQueue.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/issueQueue.ts')>()
+  return {
+    ...actual,
+    completeIssueReleaseIntent: (...args: Parameters<typeof actual.completeIssueReleaseIntent>) => {
+      if (args[1] === releaseCompletionFailure.taskId) {
+        releaseCompletionFailure.taskId = undefined
+        throw Object.assign(new Error('EBUSY: resource busy or locked, rename'), { code: 'EBUSY' })
+      }
+      actual.completeIssueReleaseIntent(...args)
+    },
+  }
+})
+
 const mergedStatusFailure = vi.hoisted(() => ({
   taskId: undefined as string | undefined,
   onWrite: undefined as (() => void) | undefined,
@@ -600,6 +618,49 @@ describe('completed task merge recovery', () => {
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
     // The surviving failed status leaves the announcement to the next poll's sweep.
     expect(logged.some((line) => line.startsWith(`FAILED: ${taskId}`))).toBe(false)
+  })
+
+  it('keeps the issue release preparation when publishing it fails after cleanup', async () => {
+    const taskId = '20260815_181908_197_auto-rebase-conflict'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: advance run branch'])
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'conflicting fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    releaseCompletionFailure.taskId = taskId
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(releaseCompletionFailure.taskId).toBeUndefined()
+    expect(logText()).toContain(
+      '197_auto rebase conflict was abandoned but cleanup or issue release failed: '
+      + 'EBUSY: resource busy or locked, rename',
+    )
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(existsSync(worktree)).toBe(false)
+    expect(logged.some((line) => line.startsWith(`FAILED: ${taskId}`))).toBe(true)
+    // Cleanup already removed the status, so the preparation was the only record left of
+    // the release: it survived the failure, and the same poll's release reconciliation
+    // published it and handed the issue back instead of leaving it claimed.
+    expect(releasePreparationForTask(paths, taskId)).toEqual([])
+    expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
   /** A completed local task whose only commit conflicts with a later run-branch commit. */
