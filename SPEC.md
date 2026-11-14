@@ -431,8 +431,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
    enqueue an accepted finding counts one gate failure under that completion scan's key,
    however many findings it rejected: the first warns, a repeat stops the loop rather
    than holding the completion pending forever, and a forge rate limit is not counted.
+   In issue mode a review completion first checks its findings against open finding
+   issues, and a check that fails leaves the completion pending. A local fingerprint
+   ledger that cannot be parsed, which no retry can cure, counts a gate failure under the
+   completion scan's key, so the second attempt stops the loop. Any other failed check
+   is a forge lookup a later poll may cure: it warns once, twenty consecutive polls that
+   cannot check a completion's findings report a gate failure naming the task, the
+   count, and the error, and the next such poll stops the loop; a successful check
+   clears the count and logs `Recovered`. A rate-limited check neither counts nor clears
+   the count.
    A worker-mode daemon (item 36) has no gate to count against: it files a completion's
-   findings before publishing it, so a filing failure is one of its publication errors,
+   findings before publishing it, so a check or filing failure is one of its publication errors,
    retried on later polls until the fifth consecutive failure marks the task failed, and
    never stops the loop.
 6a. A finding whose leading tag is `[DOCS]` is held rather than dispatched when the task
@@ -441,7 +450,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     would have been queued at and the task that reported it, written atomically, unless
     its fingerprint is already held or the duplicate checks of the dispatch paths find it
     already carried by a queued, running, completed, or failed task or an open finding
-    issue. The daemon logs one `Deferred <task> <n> documentation finding(s) until
+    issue. In issue mode that check against open finding issues fails as a review's
+    does in item 6: a malformed fingerprint ledger stops the loop at the second attempt,
+    any other failure only after twenty consecutive polls, and a rate limit is not
+    counted; until it succeeds nothing is held and the completion stays pending. The
+    daemon logs one `Deferred <task> <n> documentation finding(s) until
     the cycle's other tasks finish` event per source task. Every other finding, and every
     finding of a review task, is dispatched as item 6 describes, and a held finding still
     counts as a finding of its scan, so a scan reporting only documentation is not empty.

@@ -416,9 +416,7 @@ function fingerprintLedger(paths: OrchPaths): Array<{ fingerprint: string; issue
     const match = /^(\S+) ([1-9]\d*)$/.exec(line)
     const issueNumber = Number(match?.[2])
     if (match === null || !Number.isSafeInteger(issueNumber)) {
-      throw new Error(
-        `Malformed fingerprint ledger ${file}; repair this file before issue reconciliation can continue`,
-      )
+      throw new MalformedFingerprintLedgerError(file)
     }
     return { fingerprint: match[1]!, issueNumber }
   })
@@ -1385,6 +1383,15 @@ export class IssueReleaseReconciliationError extends AggregateError {
     )
     this.name = 'IssueReleaseReconciliationError'
     this.failures = failures
+  }
+}
+
+// A local fingerprint ledger that cannot be parsed. Unlike a failed forge lookup, no retry
+// can cure it: the file stays as it is until a person repairs it.
+export class MalformedFingerprintLedgerError extends Error {
+  constructor(file: string) {
+    super(`Malformed fingerprint ledger ${file}; repair this file before issue reconciliation can continue`)
+    this.name = 'MalformedFingerprintLedgerError'
   }
 }
 
