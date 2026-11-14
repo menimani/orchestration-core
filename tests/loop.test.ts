@@ -5132,21 +5132,22 @@ describe('scanForNextTasks', () => {
     }
 
     await expect(loop.poll()).resolves.toBe('continue')
+    await expect(loop.poll()).resolves.toBe('continue')
 
     expect(existsSync(scannedFlag)).toBe(false)
     expect(fakeForge.issues.size).toBe(0)
     expect(logged.filter((line) =>
       line.includes('WARN could not check review findings from 019_review')))
       .toHaveLength(1)
-    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
 
     fakeForge.listOpenIssues = listOpenIssues
     await loop.poll()
 
     expect(existsSync(scannedFlag)).toBe(true)
     expect(fakeForge.issues.size).toBe(1)
-    expect(logText()).not.toContain('ERROR could not check review findings')
-    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).toContain(
+      'Recovered checking review findings from 019_review after 0 minutes',
+    )
   })
 
   it('stops when a review or documentation completion cannot check its findings twice', async () => {
@@ -5198,6 +5199,151 @@ describe('scanForNextTasks', () => {
     expect(existsSync(stopFile)).toBe(true)
     expect(readFileSync(ledgerFile, 'utf8')).toBe('malformed line here\n')
   })
+
+  const findingCheckKinds = [
+    ['review', '20250101_000000_030_review-c1', 'NEXT_TASK: [BUG] a review finding behind a forge outage'],
+    ['documentation', '20250101_000000_031_scan', 'NEXT_TASK: [DOCS] `README.md` names a flag the outage hid'],
+  ] as const
+
+  function prepareFailingFindingCheck(taskId: string, finding: string): {
+    loop: Loop
+    scannedFlag: string
+    stopFile: string
+    restore: () => void
+  } {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoMerge: false,
+      maxParallel: 0,
+      maxConsecutiveMergeFailures: 10,
+    })
+    loop.initializeSessionStateForBranch()
+    writeFinal(taskId, [finding, 'TASK_COMPLETE'].join('\n'))
+    writeRawStatus(taskId, 'completed')
+    const listOpenIssues = fakeForge.listOpenIssues.bind(fakeForge)
+    fakeForge.listOpenIssues = async () => {
+      throw new Error('forge lookup unavailable')
+    }
+    return {
+      loop,
+      scannedFlag: join(paths.queueDir, 'scanned', taskId),
+      stopFile: join(paths.queueDir, 'stop'),
+      restore: () => {
+        fakeForge.listOpenIssues = listOpenIssues
+      },
+    }
+  }
+
+  it.each(findingCheckKinds)(
+    'keeps polling through twenty failed %s finding checks and stops on the twenty-first',
+    async (kind, taskId, finding) => {
+      const { loop, scannedFlag, stopFile } = prepareFailingFindingCheck(taskId, finding)
+      const subject = `could not check ${kind} findings from ${shortTaskId(taskId)}`
+      const warnings = (): string[] => logged.filter((line) => line.includes(`WARN ${subject}: `))
+
+      for (let poll = 1; poll <= 20; poll++) {
+        await expect(loop.poll()).resolves.toBe('continue')
+        expect(existsSync(stopFile)).toBe(false)
+        if (poll === 2 || poll === 3 || poll === 20) {
+          expect(warnings()).toEqual([expect.stringContaining(`${subject}: forge lookup unavailable`)])
+          expect(logText()).not.toContain('ERROR could not check')
+        }
+        if (poll < 20) expect(logText()).not.toContain('consecutive polls')
+      }
+      expect(logged.filter((line) => line.includes(
+        `WARN ${subject} on 20 consecutive polls: forge lookup unavailable`,
+      ))).toHaveLength(1)
+
+      await loop.poll()
+
+      expect(existsSync(stopFile)).toBe(true)
+      expect(logText()).toContain(
+        `ERROR ${subject} on 21 consecutive polls: forge lookup unavailable (repeated 2 times)`,
+      )
+      expect(existsSync(scannedFlag)).toBe(false)
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+    },
+  )
+
+  it.each(findingCheckKinds)(
+    'logs the recovery when a %s finding check succeeds after failed polls',
+    async (kind, taskId, finding) => {
+      const { loop, scannedFlag, stopFile, restore } = prepareFailingFindingCheck(taskId, finding)
+
+      for (let poll = 1; poll <= 19; poll++) await loop.poll()
+      restore()
+      await loop.poll()
+
+      expect(existsSync(scannedFlag)).toBe(true)
+      expect(logText()).toMatch(new RegExp(
+        `Recovered checking ${kind} findings from ${shortTaskId(taskId)} after [0-9]+ minutes`,
+      ))
+      expect(logText()).not.toContain('consecutive polls')
+      expect(logText()).not.toContain('ERROR could not check')
+      expect(existsSync(stopFile)).toBe(false)
+    },
+  )
+
+  it('starts the count of failed review finding checks again after a successful check', async () => {
+    const [, taskId, finding] = findingCheckKinds[0]
+    const { loop, scannedFlag, stopFile, restore } = prepareFailingFindingCheck(taskId, finding)
+    const failingLookup = fakeForge.listOpenIssues
+    const createIssue = fakeForge.createIssue.bind(fakeForge)
+
+    for (let poll = 1; poll <= 19; poll++) await loop.poll()
+    // The check succeeds, but the rate-limited filing leaves the completion for a later poll.
+    restore()
+    fakeForge.createIssue = async () => {
+      throw new ForgeRateLimitError(new Date(0))
+    }
+    await loop.poll()
+
+    expect(existsSync(scannedFlag)).toBe(false)
+    expect(logText()).toContain('Recovered checking review findings from 030_review')
+
+    fakeForge.listOpenIssues = failingLookup
+    fakeForge.createIssue = createIssue
+    for (let poll = 1; poll <= 19; poll++) {
+      await expect(loop.poll()).resolves.toBe('continue')
+    }
+
+    expect(logText()).not.toContain('consecutive polls')
+    expect(logText()).not.toContain('ERROR could not check')
+    expect(existsSync(stopFile)).toBe(false)
+  })
+
+  it.each(findingCheckKinds)(
+    'neither counts nor clears failed %s finding checks on a rate-limited poll',
+    async (kind, taskId, finding) => {
+      const { loop, stopFile } = prepareFailingFindingCheck(taskId, finding)
+      const failingLookup = fakeForge.listOpenIssues
+      const subject = `could not check ${kind} findings from ${shortTaskId(taskId)}`
+
+      for (let poll = 1; poll <= 10; poll++) await loop.poll()
+      fakeForge.listOpenIssues = async () => {
+        throw new ForgeRateLimitError(new Date(0))
+      }
+      await loop.poll()
+      fakeForge.listOpenIssues = failingLookup
+      for (let poll = 1; poll <= 9; poll++) await loop.poll()
+
+      expect(logText()).not.toContain('consecutive polls')
+
+      await loop.poll()
+
+      expect(logText()).toContain(`WARN ${subject} on 20 consecutive polls: forge lookup unavailable`)
+      expect(existsSync(stopFile)).toBe(false)
+
+      await loop.poll()
+
+      expect(logText()).toContain(
+        `ERROR ${subject} on 21 consecutive polls: forge lookup unavailable (repeated 2 times)`,
+      )
+      expect(existsSync(stopFile)).toBe(true)
+    },
+  )
 
   it('leaves a local finding unreconciled when enqueue fails so a later scan retries it', async () => {
     initializeGitRepo()

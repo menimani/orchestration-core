@@ -84,6 +84,7 @@ import {
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
+  MalformedFingerprintLedgerError,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
   LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
@@ -135,9 +136,9 @@ const MAX_WORKER_PUBLICATION_FAILURES = 5
 // outage blip, and short enough that a failure that never clears, such as an expired git
 // credential, does not keep the loop spinning on the same issue for hours.
 const MAX_CONSECUTIVE_ADOPTION_DEFERRALS = 20
-// A completed task whose issue claims cannot be read on this many consecutive polls is
-// reported as a gate failure, which stops the loop when the failure repeats on the next
-// poll. The bound matches adoption deferrals for the same reason.
+// A completed task whose issue claims, or whose findings' open issues, cannot be read on
+// this many consecutive polls is reported as a gate failure, which stops the loop when the
+// failure repeats on the next poll. The bound matches adoption deferrals for the same reason.
 const MAX_CONSECUTIVE_MERGE_CLAIM_READ_FAILURES = 20
 
 class InvalidPersistedCounterError extends Error {}
@@ -295,6 +296,8 @@ export function createLoop(deps: LoopDeps) {
   const adoptionDeferrals = new Map<number, number>()
   // Consecutive failed claim reads per completed task awaiting merge, kept in memory only.
   const mergeClaimReadFailures = new Map<string, number>()
+  // Consecutive failed finding checks per completed task awaiting its scan, kept in memory only.
+  const findingCheckFailures = new Map<string, number>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
   // The check names the previous CI gate poll saw, for the PR and head it saw them on.
@@ -478,6 +481,35 @@ export function createLoop(deps: LoopDeps) {
     } else {
       log(formatEventLine('WARN', detail))
     }
+  }
+
+  /**
+   * Report a completion's failed check of its findings against the forge. A ledger that
+   * cannot be parsed stays broken until a person repairs it, so it counts against the
+   * completion scan at once. Any other failure is a forge lookup that a later poll may
+   * cure: it warns once and stops the loop only after a bounded run of failed polls.
+   */
+  function reportFindingCheckFailure(taskId: string, operation: string, subject: string, error: unknown): void {
+    const failure = `${subject}: ${errorSummary(error)}`
+    if (error instanceof MalformedFingerprintLedgerError) {
+      reportGateFailure(failure, `completion-scan-${taskId}`)
+      return
+    }
+    const failures = (findingCheckFailures.get(taskId) ?? 0) + 1
+    findingCheckFailures.set(taskId, failures)
+    warning(`unresolved-findings-${taskId}`, operation, failure)
+    if (failures >= MAX_CONSECUTIVE_MERGE_CLAIM_READ_FAILURES) {
+      reportGateFailure(
+        `${subject} on ${failures} consecutive polls: ${errorSummary(error)}`,
+        `unresolved-findings-${taskId}`,
+      )
+    }
+  }
+
+  function findingCheckRecovered(taskId: string): void {
+    findingCheckFailures.delete(taskId)
+    previousGateFailures.delete(`unresolved-findings-${taskId}`)
+    warningLog.recovered(`unresolved-findings-${taskId}`)
   }
 
   function requeueAfterStartupFailure(taskId: string, depth: number, error: unknown): void {
@@ -1335,23 +1367,20 @@ export function createLoop(deps: LoopDeps) {
         let filtered: Awaited<ReturnType<typeof unresolvedFindings>>
         try {
           filtered = await unresolvedFindings(forge, paths, findings)
-          warningLog.recovered(`unresolved-findings-${taskId}`)
+          findingCheckRecovered(taskId)
         } catch (error) {
           if (error instanceof ForgeRateLimitError) {
             return { findings, destinations, reconciled: false }
           }
-          const failure = `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
+          const subject = `could not check review findings from ${shortTaskId(taskId)}`
+          const failure = `${subject}: ${errorSummary(error)}`
+          const operation = `checking review findings from ${shortTaskId(taskId)}`
           // A worker counts the failure against its publication limit. Elsewhere a
-          // failure that survives the retry stops the loop, as the publish path does,
-          // instead of holding the completion scan open forever.
+          // failure that would hold the completion scan open forever stops the loop.
           if (config.workerMode) {
-            warning(
-              `unresolved-findings-${taskId}`,
-              `checking review findings from ${shortTaskId(taskId)}`,
-              failure,
-            )
+            warning(`unresolved-findings-${taskId}`, operation, failure)
           } else {
-            reportGateFailure(failure, `completion-scan-${taskId}`)
+            reportFindingCheckFailure(taskId, operation, subject, error)
           }
           return { findings, destinations, reconciled: false, failure }
         }
@@ -1543,12 +1572,16 @@ export function createLoop(deps: LoopDeps) {
     if (config.issueQueueEnabled) {
       try {
         candidates = (await unresolvedFindings(forge, paths, candidates)).unresolved
+        findingCheckRecovered(taskId)
       } catch (error) {
         if (error instanceof ForgeRateLimitError) return { reconciled: false }
-        const failure = `could not check documentation findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
-        // Only the cycle gate holds documentation, so a failure that survives the retry
-        // stops the loop rather than holding the completion scan open forever.
-        reportGateFailure(failure, `completion-scan-${taskId}`)
+        const subject = `could not check documentation findings from ${shortTaskId(taskId)}`
+        const failure = `${subject}: ${errorSummary(error)}`
+        // Only the cycle gate holds documentation, so a failure that would hold the
+        // completion scan open forever stops the loop.
+        reportFindingCheckFailure(
+          taskId, `checking documentation findings from ${shortTaskId(taskId)}`, subject, error,
+        )
         return { reconciled: false, failure }
       }
     } else {
