@@ -579,8 +579,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
    completes without changes, or a remote worker branch is adopted for one of its linked
    issues, every branch kept for its chain is deleted and its records are removed.
    A merge whose changes would overwrite an uncommitted or untracked file in the main
-   checkout is refused before its gate, naming that checkout and those paths; changes
-   elsewhere in the checkout do not stop it. A merge git refuses without starting one,
+   checkout is refused before its gate, naming that checkout and those paths. The check
+   refuses exactly the states git refuses a `--no-ff` merge for: any staged or
+   intent-to-add entry, wherever it is, and an unstaged modification or an untracked file
+   at a path the merge changes, inside it, or holding it. An unstaged deletion, and
+   unstaged or untracked changes elsewhere in the checkout, do not stop it. A merge git refuses without starting one,
    leaving no merge in progress and no unmerged paths, fails with git's reason rather
    than as a conflict in the task. Pre-merge tests are chosen from the paths the
    rebased worktree touched. `TASK_GATE=full` asks the project adapter for its full merge

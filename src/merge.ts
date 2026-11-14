@@ -594,8 +594,12 @@ function mergeStoppedOnConflict(cwd: string, runtime: MergeRuntime): boolean {
 /**
  * Refuse a merge whose changes would overwrite an uncommitted or untracked file in the
  * main checkout. Git refuses that merge, so it would fail only after the whole gate had
- * run, and again on every retry, for a reason the task cannot fix. Changes elsewhere in the
- * checkout, such as orchestration state kept beside the code, do not stop the merge.
+ * run, and again on every retry, for a reason the task cannot fix. The check refuses only
+ * the states git refuses, so a merge git would make is never stopped by it: a `--no-ff`
+ * merge refuses any staged or intent-to-add entry wherever it is, and an unstaged
+ * modification or an untracked file only where the merge changes that path, a path inside
+ * it, or the directory holding it. An unstaged deletion, and anything else elsewhere in
+ * the checkout, such as orchestration state kept beside the code, do not stop the merge.
  */
 function requireMergeableIntegrationCheckout(
   repoRoot: string,
@@ -606,12 +610,17 @@ function requireMergeableIntegrationCheckout(
   const changed = gitPaths(repoRoot, [
     'diff', '--name-only', '--no-renames', `${currentBranch}...${mergedRef}`,
   ])
-  const dirty = git(repoRoot, ['status', '--porcelain', '--no-renames', '--untracked-files=all', '-z'])
+  const entries = git(repoRoot, ['status', '--porcelain', '--no-renames', '--untracked-files=all', '-z'])
     .split('\0')
     .filter((entry) => entry.length > 3)
-    .map((entry) => entry.slice(3))
-  const collisions = dirty.filter((path) => changed.some((changedPath) => changedPath === path
-    || changedPath.startsWith(`${path}/`) || path.startsWith(`${changedPath}/`)))
+    .map((entry) => ({ index: entry[0], worktree: entry[1], path: entry.slice(3) }))
+  const collisions = entries.filter(({ index, worktree, path }) => {
+    if (index !== ' ' && index !== '?') return true
+    if (worktree === 'A') return true
+    if (worktree === 'D') return false
+    return changed.some((changedPath) => changedPath === path
+      || changedPath.startsWith(`${path}/`) || path.startsWith(`${changedPath}/`))
+  }).map(({ path }) => path)
   if (collisions.length === 0) return
   throw new MergeError(
     `The main checkout has uncommitted or untracked changes the merge would overwrite: ${repoRoot}\n`
