@@ -500,7 +500,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
    proceeds on that poll without the warning. When all
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
-   requiring the worker to have predicted that outcome.
+   requiring the worker to have predicted that outcome. An ordinary task whose commits
+   were empty before any rebase falls under the marker rule of a task with no new commits
+   instead.
 8a. A task's merge commit has the subject `Merge <task-id> via orchestration`, followed by
     the forge's closing text for each linked issue the merge may name. Its body records why
     the work exists, as one `Why:` line per distinct requirement: the first paragraph,

@@ -1452,6 +1452,24 @@ async function mergeTaskWithGuardHeld(
       + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
     )
   }
+  // Commits that were empty before any rebase carry no change of their own, so they need
+  // the same marker as a task with no commits; only a rebase that empties them proves the
+  // work already landed.
+  if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
+    if (!noChangeMarkerPresent(paths, taskId)) {
+      throw new MergeError(
+        `${taskId} has only empty commits relative to ${currentBranch}.\n`
+        + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
+      )
+    }
+    if (closingIssues.length > 0 && options.onNoChange === undefined) {
+      throw new NoChangeReconciliationError(
+        'A linked no-change task requires issue reconciliation.',
+      )
+    }
+    await finalizeNoChange(paths, taskId, branch, worktree, io, options)
+    return { outcome: 'no-change' }
+  }
   rebaseTaskOntoRunTip(worktree, currentBranch, io)
   if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
     if (closingIssues.length > 0 && options.onNoChange === undefined) {
