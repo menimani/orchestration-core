@@ -1738,14 +1738,25 @@ const cmdShipped: Command = async (paths, args) => {
     return 1
   }
   const config = loadRepositoryConfig(paths)
-  const scanCountFile = join(paths.queueDir, 'scan-count.txt')
-  const cycleCapFile = join(paths.queueDir, 'cycle-cap.txt')
-  const currentCycle = existsSync(scanCountFile)
-    ? Number(readFileSync(scanCountFile, 'utf8').trim()) || 0
-    : 0
-  const cycleCap = existsSync(cycleCapFile)
-    ? Number(readFileSync(cycleCapFile, 'utf8').trim())
-    : config.maxScanCycles
+  // Both files hold what the daemon wrote; contents it could not have written are
+  // refused rather than recorded as a NaN or zero prefix.
+  const readPersisted = (name: string, fallback: number): number | undefined => {
+    const file = join(paths.queueDir, name)
+    if (!existsSync(file)) return fallback
+    const raw = readFileSync(file, 'utf8').trim()
+    const value = Number(raw)
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value)) {
+      console.error(
+        `queue/${name} must contain a non-negative integer; nothing was recorded.`,
+      )
+      return undefined
+    }
+    return value
+  }
+  const currentCycle = readPersisted('scan-count.txt', 0)
+  if (currentCycle === undefined) return 1
+  const cycleCap = readPersisted('cycle-cap.txt', config.maxScanCycles)
+  if (cycleCap === undefined) return 1
   mkdirSync(paths.logsDir, { recursive: true })
   const lines = loopLogLines(formatEventLine('Completed', 'Loop', `PR ${reference}`), {
     currentCycle,
