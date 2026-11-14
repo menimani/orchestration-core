@@ -849,6 +849,49 @@ describe('loop daemon ownership', () => {
     expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('rewrites the cycle cap when the live configuration changes it mid-run', () => {
+    const configFile = join(repoRoot, 'orchestration', 'config.json')
+    mkdirSync(dirname(configFile), { recursive: true })
+    writeFileSync(configFile, JSON.stringify({ MAX_SCAN_CYCLES: 10 }))
+    const wrapper = join(repoRoot, 'change-cap-loop.mjs')
+    const cliUrl = pathToFileURL(CLI).href
+    writeFileSync(wrapper, [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalWriteFileSync = fs.writeFileSync',
+      'let changed = false',
+      'fs.writeFileSync = function (file, ...args) {',
+      '  const result = originalWriteFileSync.call(this, file, ...args)',
+      "  if (!changed && typeof file === 'string' && /[\\\\/]cycle-cap\\.txt$/.test(file)) {",
+      '    changed = true',
+      `    originalWriteFileSync(${JSON.stringify(configFile)}, JSON.stringify({ MAX_SCAN_CYCLES: 0 }))`,
+      '  }',
+      '  return result',
+      '}',
+      'syncBuiltinESMExports()',
+      `await import(${JSON.stringify(cliUrl)})`,
+      '',
+    ].join('\n'))
+
+    const result = spawnSync(process.execPath, [wrapper, 'loop', '--approve-mode', 'local'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        SCAN_ENABLED: 'true',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    // The first poll ends the run against the lowered cap, which the file must hold.
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("MAX_SCAN_CYCLES changed from '10' to '0'")
+    expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('0\n')
+  })
+
   it('states when automatic core updates are disabled', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
