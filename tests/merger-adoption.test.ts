@@ -851,6 +851,35 @@ describe('remote task adoption', () => {
     expect(forge.issueComments.get(issueNumber)).toEqual(commentsBefore)
   })
 
+  it('stops the loop on the twentieth consecutive deferral for an undetermined reporter', async () => {
+    const task = pushWorkerBranch('20260809_000000_031_auto-permission-never-clears')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const headBefore = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const labelsBefore = (await forge.getIssue(issueNumber)).labels
+    const commentsBefore = [...forge.issueComments.get(issueNumber)!]
+    // Every poll's permission lookup fails, as with a token missing the scope.
+    forge.issueCommentAuthors.get(issueNumber)![0] =
+      { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true }
+    const loop = makeLoop(stubProject)
+    const stopFile = join(paths.queueDir, 'stop')
+
+    for (let poll = 1; poll < 20; poll += 1) await loop.adoptRemoteTasks()
+
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logged.filter((line) => line.includes('adoption deferred'))).toHaveLength(1)
+    expect(logged.join('\n')).not.toContain('ERROR')
+
+    await loop.adoptRemoteTasks()
+
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logged.filter((line) => line.includes('ERROR'))).toEqual([expect.stringContaining(
+      `issue #${issueNumber} adoption deferred 20 consecutive times (permission lookup failed); stopping the loop`)])
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+    expect((await forge.getIssue(issueNumber)).labels).toEqual(labelsBefore)
+    expect(forge.issueComments.get(issueNumber)).toEqual(commentsBefore)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+  })
+
   it('does not count a rate-limited comment listing as a deferral', async () => {
     const task = pushWorkerBranch('20260809_000000_030_auto-comments-rate-limited')
     const issueNumber = await mergeReadyIssue(task.branch, task.head)
