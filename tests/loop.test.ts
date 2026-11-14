@@ -3110,6 +3110,58 @@ describe('remote issue queue idle detection', () => {
     expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
+  async function noPullRequestLoop(mergeCommit: string, runBranch: string) {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'stranded fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'stranded-task', [issueNumber])
+    recordIssuePromotions(paths, 'stranded-task', mergeCommit, runBranch)
+    fakeForge.prStatus = async () => ({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] })
+    return { loop, issueNumber }
+  }
+
+  it('returns the issues of a deleted run branch that never got a pull request', async () => {
+    git(['switch', '--quiet', '-c', 'run/deleted'])
+    writeFileSync(join(repoRoot, 'abandoned.txt'), 'abandoned\n')
+    git(['add', 'abandoned.txt'])
+    git(['commit', '--quiet', '-m', 'abandoned merge'])
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    git(['switch', '--quiet', 'main'])
+    git(['branch', '--quiet', '-D', 'run/deleted'])
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/deleted')
+
+    await loop.poll()
+
+    expect(logText()).toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('warns about the issues of a run branch without a pull request whose work is on the default branch', async () => {
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/landed')
+
+    await loop.poll()
+
+    expect(logText()).toContain(
+      `WARN run branch run/landed has no pull request; issues #${issueNumber} stay claimed`)
+    expect(logText()).not.toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('stranded-task')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
   async function promotedIssueLoop(headSha: string) {
     setPaths({
       ...paths,

@@ -1685,6 +1685,19 @@ async function removeClosedPromotionRecords(
   }
 }
 
+/**
+ * What the merger can learn from git about a run branch that never had a pull request.
+ * Each answer is undefined when git could not tell, which keeps the issues waiting.
+ */
+export interface RunBranchProbe {
+  /** Whether the remote still has the run branch. */
+  remoteBranchExists(runBranch: string): boolean | undefined
+  /** Whether the default branch contains the merge commit. */
+  onDefaultBranch(mergeCommit: string): boolean | undefined
+  /** Report issues of a run branch without a pull request that cannot be settled. */
+  stranded(runBranch: string, issueNumbers: number[]): void
+}
+
 export interface PromotedIssueOutcome {
   /** Issues closed because their run pull request merged with their work. */
   closed: number[]
@@ -1703,6 +1716,13 @@ export interface PromotedIssueOutcome {
  * land that work once its branch is abandoned, so its issues go back to ready rather
  * than waiting for good. The branch the loop still holds is not abandoned: its merges
  * remain on it and a person may reopen the pull request, so those issues wait.
+ *
+ * A run branch other than the held one that never got a pull request, because the run
+ * restarted before its cycle gate opened one or the branch was deleted with automatic
+ * pull requests off, is settled through `probe`: once the remote branch is gone, each
+ * issue whose merge commit the default branch does not contain goes back to ready as for
+ * a closed pull request, and every other issue of that branch is reported as stranded.
+ * Without a probe such a branch is left for later.
  */
 export async function closePromotedIssues(
   forge: Forge,
@@ -1710,6 +1730,7 @@ export async function closePromotedIssues(
   contains: (ancestor: string, descendant: string) => boolean,
   heldBranch = '',
   closeMerged = true,
+  probe?: RunBranchProbe,
 ): Promise<PromotedIssueOutcome> {
   const dir = promotionDir(paths)
   if (!existsSync(dir)) return { closed: [], returned: [] }
@@ -1722,36 +1743,56 @@ export async function closePromotedIssues(
   }
   const closed: number[] = []
   const returned: number[] = []
+  async function returnPromotions(abandoned: IssuePromotion[], prUrl: string): Promise<void> {
+    for (const promotion of abandoned) {
+      // The withdrawal lands before the issue is claimable again, and the record
+      // stays until it is ready, so an interrupted return is retried next poll. A retry
+      // finds its own withdrawal already posted and does not post it again. A matching
+      // withdrawal whose author's permission could not be read leaves the record for a
+      // later poll rather than posting a duplicate.
+      try {
+        const withdrawal = issueUnpromotedComment(
+          promotion.taskId, promotion.mergeCommit, promotion.runBranch, prUrl,
+        )
+        const present = trustedCommentPresent(
+          await forge.listIssueComments(promotion.issueNumber), withdrawal)
+        if (present === undefined) continue
+        if (!present) await forge.commentIssue(promotion.issueNumber, withdrawal)
+        // The abandoned task never reached the base branch, so its completion and
+        // description index must not mark the returned issue as already processed.
+        forgetAbandonedCompletion(paths, promotion)
+        await returnIssueToReady(forge, promotion.issueNumber)
+      } catch (error) {
+        if (!(error instanceof ForgeIssueNotFoundError)) throw error
+        removePromotionRecord(paths, promotion.issueNumber)
+        continue
+      }
+      removePromotionRecord(paths, promotion.issueNumber)
+      returned.push(promotion.issueNumber)
+    }
+  }
   for (const runBranch of new Set(promotions.map((promotion) => promotion.runBranch))) {
     const pr = await forge.prStatus({ kind: 'branch', value: runBranch })
+    const branchPromotions = promotions.filter((candidate) => candidate.runBranch === runBranch)
     if (pr.state === 'closed') {
       if (runBranch === heldBranch) continue
-      for (const promotion of promotions.filter((candidate) => candidate.runBranch === runBranch)) {
-        // The withdrawal lands before the issue is claimable again, and the record
-        // stays until it is ready, so an interrupted return is retried next poll. A retry
-        // finds its own withdrawal already posted and does not post it again. A matching
-        // withdrawal whose author's permission could not be read leaves the record for a
-        // later poll rather than posting a duplicate.
-        try {
-          const withdrawal = issueUnpromotedComment(
-            promotion.taskId, promotion.mergeCommit, runBranch, pr.url,
-          )
-          const present = trustedCommentPresent(
-            await forge.listIssueComments(promotion.issueNumber), withdrawal)
-          if (present === undefined) continue
-          if (!present) await forge.commentIssue(promotion.issueNumber, withdrawal)
-          // The abandoned task never reached the base branch, so its completion and
-          // description index must not mark the returned issue as already processed.
-          forgetAbandonedCompletion(paths, promotion)
-          await returnIssueToReady(forge, promotion.issueNumber)
-        } catch (error) {
-          if (!(error instanceof ForgeIssueNotFoundError)) throw error
-          removePromotionRecord(paths, promotion.issueNumber)
-          continue
-        }
-        removePromotionRecord(paths, promotion.issueNumber)
-        returned.push(promotion.issueNumber)
+      await returnPromotions(branchPromotions, pr.url)
+      continue
+    }
+    if (pr.state === 'none') {
+      if (probe === undefined || runBranch === heldBranch) continue
+      // A branch still on the remote may yet get its pull request, and a merge commit
+      // already on the default branch has landed, so only the rest are abandoned. An
+      // unanswered question keeps the issue waiting rather than returning it.
+      const branchGone = probe.remoteBranchExists(runBranch) === false
+      const abandoned = branchGone
+        ? branchPromotions.filter((promotion) => probe.onDefaultBranch(promotion.mergeCommit) === false)
+        : []
+      const stranded = branchPromotions.filter((promotion) => !abandoned.includes(promotion))
+      if (stranded.length > 0) {
+        probe.stranded(runBranch, stranded.map((promotion) => promotion.issueNumber))
       }
+      await returnPromotions(abandoned, '')
       continue
     }
     if (!closeMerged || pr.state !== 'merged' || pr.headSha === '') continue
@@ -1896,9 +1937,12 @@ export function issueUnpromotedComment(
   runBranch: string,
   prUrl: string,
 ): string {
+  const fate = prUrl === ''
+    ? 'which was deleted without a pull request'
+    : `whose pull request ${prUrl} was closed without merging`
   return [
     `UNPROMOTED: ${taskId}`,
-    `Merged as ${mergeCommit} into run branch ${runBranch}, whose pull request ${prUrl} was closed without merging. This issue is ready again.`,
+    `Merged as ${mergeCommit} into run branch ${runBranch}, ${fate}. This issue is ready again.`,
   ].join('\n')
 }
 
