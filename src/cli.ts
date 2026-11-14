@@ -25,6 +25,7 @@ import {
   type ConfigEvent, type LoopConfig,
 } from './config.ts'
 import { writeConfigFile } from './configFile.ts'
+import { readJsonFile } from './jsonFile.ts'
 import { createLoop, formatEventLine } from './loop.ts'
 import { loopLogLines, prepareLoopLog } from './loopLog.ts'
 import { followLog } from './logFollower.ts'
@@ -1030,7 +1031,7 @@ const cmdStop: Command = async (paths) => {
 
 function readConfigFileForCommand(filePath: string): Record<string, unknown> {
   if (!existsSync(filePath)) return {}
-  const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown
+  const parsed = readJsonFile(filePath)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('The configuration file must contain a JSON object.')
   }

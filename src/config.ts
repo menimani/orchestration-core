@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ReasoningEffort } from './adapters/runner.ts'
+import { readJsonFile } from './jsonFile.ts'
 import { PACKAGE_ROOT } from './paths.ts'
 
 const MAX_POLL_INTERVAL_SECONDS = 30 * 60
@@ -286,8 +287,8 @@ function defaultConfigFilePath(cwd = process.cwd()): string {
   return join(cwd, 'orchestration', 'config.json')
 }
 
-function parseConfigFile(text: string): ConfigFileValues {
-  const parsed = JSON.parse(text) as unknown
+function parseConfigFile(file: string): ConfigFileValues {
+  const parsed = readJsonFile(file)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('configuration file must contain a JSON object')
   }
@@ -370,7 +371,7 @@ export function loadConfig(
     }
     let parsed: ConfigFileValues
     try {
-      parsed = parseConfigFile(readFileSync(filePath, 'utf8'))
+      parsed = parseConfigFile(filePath)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       refreshError = new Error(

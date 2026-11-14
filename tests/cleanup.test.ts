@@ -14,6 +14,9 @@ import {
 } from '../src/adapters/os-windows.ts'
 import { cleanupTask, type CleanupRuntime } from '../src/cleanup.ts'
 import {
+  gateFixFinalMessageFile, gateFixSpecFile, markGateFixRunActive, writeGateFixState,
+} from '../src/gateFix.ts'
+import {
   branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
@@ -475,5 +478,47 @@ describe('cleanupTask', () => {
     cleanupTask(paths, taskId, makeRuntime())
 
     expect(existsSync(marker)).toBe(false)
+  })
+
+  it('removes every gate fix handback file, so a reused id starts without them', () => {
+    seedTask(null)
+    writeGateFixState(paths, taskId, { attempts: 1, verificationFailed: true, pending: false })
+    writeFileSync(gateFixSpecFile(paths, taskId), '# Fix\n')
+    writeFileSync(gateFixFinalMessageFile(paths, taskId), 'TASK_COMPLETE\n')
+    markGateFixRunActive(paths, taskId, true)
+    const gateFixDir = join(paths.queueDir, 'gate-fix')
+    const seeded = [`${taskId}.json`, `${taskId}.md`, `${taskId}.final.md`, `${taskId}.active`]
+    for (const name of seeded) expect(existsSync(join(gateFixDir, name))).toBe(true)
+
+    cleanupTask(paths, taskId, makeRuntime())
+
+    for (const name of seeded) expect(existsSync(join(gateFixDir, name))).toBe(false)
+  })
+
+  it('keeps the status file when a marker cannot be removed, so cleanup can run again', () => {
+    seedTask(null)
+    writeGateFixState(paths, taskId, { attempts: 1, verificationFailed: false, pending: true })
+    const lockedMarker = join(paths.queueDir, 'scanned', `${taskId}.failed`)
+    const runtime = makeRuntime()
+    const removeFile = runtime.remove
+    runtime.remove = (path, options) => {
+      if (path === lockedMarker) {
+        const error = new Error('resource busy or locked') as NodeJS.ErrnoException
+        error.code = 'EBUSY'
+        throw error
+      }
+      removeFile(path, options)
+    }
+
+    expect(() => cleanupTask(paths, taskId, runtime)).toThrow('resource busy or locked')
+    expect(existsSync(statusFile(paths, taskId))).toBe(true)
+    expect(existsSync(lockedMarker)).toBe(true)
+
+    runtime.remove = removeFile
+    cleanupTask(paths, taskId, runtime)
+
+    expect(existsSync(statusFile(paths, taskId))).toBe(false)
+    expect(existsSync(lockedMarker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'gate-fix', `${taskId}.json`))).toBe(false)
   })
 })

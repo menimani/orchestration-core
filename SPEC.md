@@ -494,7 +494,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    Windows any process still naming the worktree is terminated before it is removed. A runner
    recorded without the start identity that makes stopping it safe cannot be verified at
    all, so that merge is deferred rather than failed: the task stays `completed`, one WARN
-   per task names the PID, and a later poll merges once the registry entry clears. When all
+   per task names the PID, and a later poll merges once the registry entry clears. A
+   runner PID since reassigned to another process is no such runner: once the finished
+   runner's own orphans are gone its entry clears as it is read (item 24a), and the merge
+   proceeds on that poll without the warning. When all
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
    requiring the worker to have predicted that outcome.
@@ -706,8 +709,16 @@ are not parsed by `loadConfig` and are not operator-file settings.
     scan launch failure stops the loop without advancing the cycle number, discarding
     the task state of every scan that attempt had already started so the next daemon
     dispatches the cycle's full scan set again rather than inheriting scans no cycle
-    accounts for. A cycle missing any expected yield stops rather than advancing to
-    another cycle or completion.
+    accounts for. The scan whose own startup failed is kept when the loop cannot account
+    for its runner: the runner returned a PID that is not a positive safe integer, or the
+    startup process tree it launched survived termination. Discarding that scan could
+    leave a live runner writing into a worktree nobody tracks, so the loop logs an
+    `ERROR` for that scan ending `task retained and loop stopped` and leaves its
+    worktree, branch, and specification in place. It belongs to no cycle: the cycle
+    still records no expectation and is dispatched again in full by the next daemon,
+    and the retained scan stays until the operator removes it with `cleanup`, which
+    first stops any runner the process registry recorded for it. A cycle missing any expected yield stops rather than
+    advancing to another cycle or completion.
     A scan the cycle recorded as failed counts towards the expected total as a delivered
     but silent yield: the cycle closes, its id still reaches the decisions and the pull
     request through the cycle's loss note, and a failed scan by itself neither resets nor
@@ -1019,6 +1030,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks. A finished run lists the failures it announced,
     so the next run neither reports them again nor counts them toward a failure burst.
+    Starting a failed task again clears both, so a retry that fails is announced anew.
 
 ## The generated pull request
 
@@ -1059,7 +1071,26 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the running system booted is not believed and is dropped as it is read: identifiers
     are reassigned across a restart, and a survivor would otherwise refuse a startup or
     direct a termination at a stranger. A PID left in an older status record is never
-    read back.
+    read back. An entry's start identity decides what its PID means now. A matching
+    identity is the recorded runner itself. An identity that cannot be read is not proof
+    the runner is gone, so the entry blocks while anything under the PID lives, and an
+    entry recorded without an identity blocks the same way and is never terminable. A
+    known identity that differs means the PID was reassigned and the runner is gone: the
+    entry then blocks only while the runner's own orphans live, and is dropped as it is
+    read once they are gone. The process now holding the PID, and anything it started, is
+    never counted as the runner's tree. On Windows those orphans are the processes that
+    still name the PID as their parent and were not created after its current holder, with
+    their descendants. The holder's creation time is taken from the same process snapshot
+    as theirs, and from its start identity only when the snapshot omits it; a child
+    created at the same millisecond as the holder, or with an unreadable creation time,
+    counts as an orphan, so the merge waits rather than runs under a possible writer. On
+    POSIX an orphan is reparented and can only be found through the runner's process
+    group, and a PID is never reassigned while a group of that ID has members, so a
+    reassigned PID leaves nothing to wait for. Only a procfs identity (`linux:` clock
+    ticks) is exact enough to prove that reassignment; the `ps` start-time text used
+    where procfs is missing follows the time zone and locale of the process asking, so
+    when either identity has that form a difference decides nothing and the entry blocks
+    while the runner's process group lives, as for an unreadable identity.
 24b. `queue/run-branch.txt` records the branch a run belongs to; a stopped loop's cycle
     state belongs only to that branch. At startup, once the push target and issue queue
     are initialized and before the first poll, a recorded branch that differs from the
@@ -1137,8 +1168,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; any other selector loads an external package, file URL, absolute
     path, or consumer-repository-relative module). A consumer-repository-relative
-    selector must begin with `./`, `../`, `.\`, or `..\` on every platform; an
-    unprefixed value such as `custom/forge.mjs` remains a package specifier. External
+    selector must begin with `./`, `../`, `.\`, or `..\` on every platform, and its
+    backslashes separate directories on every platform; an unprefixed value such as
+    `custom/forge.mjs` remains a package specifier. External
     modules export a `Forge`
     as default or `forge`, or a `createForge(repoRoot, report, target)` factory, so gitea/gitlab
     implementations can be added without touching the core. The target names the
@@ -1429,7 +1461,18 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     entry that names the task, so the returned issue is claimed as a fresh task rather
     than deduplicated against work that never landed, returns the issue to ready and
     unassigned, drops its promotion record the same way, and logs a `Released` event. The comment withdraws
-    the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. Workers never
+    the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. A run
+    branch other than the one the loop holds that never got a pull request, because the
+    run restarted on a new branch before its cycle gate opened one or the branch was
+    deleted with `autoPr` off, is settled from git instead. A run branch is pushed only at
+    its cycle gate, so absence from the push remote alone does not mean it was deleted: an
+    issue is returned the same way, its comment stating that the branch was deleted without
+    a pull request, only when the push remote no longer has the branch, the checkout has no
+    local branch of that name either, and the current `HEAD` does not contain the issue's
+    recorded merge commit, which the default branch must not contain either. A merge commit
+    unknown to the checkout cannot be placed, so its issue is not returned on that poll.
+    Every other issue of such a branch, including any whose answer git could not give, such
+    as a failed remote lookup, stays claimed and is named in a warning. Workers never
     close promoted issues. Immediately after merging, the merger comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary

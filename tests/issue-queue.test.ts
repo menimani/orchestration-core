@@ -862,6 +862,65 @@ describe('publishFinding', () => {
     expect(claimedAfter.labels).toContain(LABEL_IN_PROGRESS)
   })
 
+  it('treats a duplicate close lost to a concurrent reconciler as success', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks'
+    const survivor = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const duplicate = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-2'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const closeIssue = forge.closeIssue.bind(forge)
+    const closeAttempts: number[] = []
+    forge.closeIssue = async (issueNumber, comment) => {
+      closeAttempts.push(issueNumber)
+      // The other reconciler closes the issue first, so this call reports a failure.
+      await closeIssue(issueNumber, 'Duplicate closed by a concurrent reconciler.')
+      throw new Error(`close #${issueNumber} failed: ${comment}`)
+    }
+
+    await expect(reconcileFindingFingerprints(
+      forge, paths, await forge.listOpenIssues(LABEL_FINDING),
+    )).resolves.toBeUndefined()
+
+    expect(closeAttempts).toEqual([duplicate])
+    expect((await forge.getIssue(duplicate)).state).toBe('closed')
+    expect((await forge.getIssue(survivor)).state).toBe('open')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprintOf(description)} ${survivor}\n`)
+  })
+
+  it('rethrows a failed duplicate close while the duplicate is still open', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks'
+    const survivor = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const duplicate = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-2'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    forge.closeIssue = async (issueNumber) => {
+      throw new Error(`close #${issueNumber} unavailable`)
+    }
+
+    await expect(reconcileFindingFingerprints(
+      forge, paths, await forge.listOpenIssues(LABEL_FINDING),
+    )).rejects.toThrow(`close #${duplicate} unavailable`)
+
+    expect(await forge.getIssue(duplicate)).toMatchObject({
+      state: 'open',
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    expect((await forge.getIssue(survivor)).state).toBe('open')
+  })
+
   it('does not let a merged-but-unpromoted issue suppress a new same-fingerprint finding', async () => {
     // Once an issue's fix has merged locally, a fresh observation is new work, not a dup.
     const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-1')
@@ -3037,6 +3096,25 @@ describe('reapStaleLeases', () => {
       expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
       expect(issueNumbersForTask(paths, 'task-deleted')).toEqual([])
     })
+
+    it.each([
+      ['a rate limit', () => new ForgeRateLimitError(new Date('2026-08-08T13:00:00Z'))],
+      ['a transient failure', () => new Error('forge unreachable')],
+    ])('keeps the record of an unlisted issue whose lookup fails with %s', async (_failure, failure) => {
+      const issueNumber = await promoted('task-unknown')
+      // Closed, so the listing omits it; the failed lookup must not count as that answer.
+      await forge.closeIssue(issueNumber, 'promoted')
+      const getIssue = forge.getIssue.bind(forge)
+      forge.getIssue = async (number) => {
+        if (number === issueNumber) throw failure()
+        return getIssue(number)
+      }
+
+      expect(await reapCountingLookups()).toContain(issueNumber)
+      expect(existsSync(join(paths.queueDir, 'issue-promotion', `${issueNumber}.json`))).toBe(true)
+      expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-unknown')
+      expect(issueNumbersForTask(paths, 'task-unknown')).toEqual([issueNumber])
+    })
   })
 
   it('reaps a stale mapped lease when its local task is not merged', async () => {
@@ -3600,6 +3678,152 @@ describe('closePromotedIssues', () => {
 
     expect(await closePromotedIssues(forge, paths, () => true, 'run/next'))
       .toEqual({ closed: [], returned: [issueNumber] })
+  })
+
+  function probe(answers: {
+    exists?: boolean,
+    local?: boolean,
+    onHead?: (mergeCommit: string) => boolean | undefined,
+    onDefault?: (mergeCommit: string) => boolean | undefined,
+  }) {
+    const stranded: Array<{ runBranch: string, issueNumbers: number[] }> = []
+    const probed: string[] = []
+    return {
+      stranded,
+      probed,
+      probe: {
+        remoteBranchExists: (runBranch: string) => {
+          probed.push(runBranch)
+          return answers.exists
+        },
+        localBranchExists: () => ('local' in answers ? answers.local : false),
+        onHead: (mergeCommit: string) => (answers.onHead === undefined ? false : answers.onHead(mergeCommit)),
+        onDefaultBranch: (mergeCommit: string) => answers.onDefault?.(mergeCommit),
+        stranded: (runBranch: string, issueNumbers: number[]) => { stranded.push({ runBranch, issueNumbers }) },
+      },
+    }
+  }
+
+  it('returns the issues of a deleted run branch that never got a pull request to ready', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'task-no-pr', body: buildIssueBody('[BUG] task-no-pr', 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'task-no-pr', [issueNumber])
+    recordIssuePromotions(paths, 'task-no-pr', 'a'.repeat(40), 'run/gone')
+    await forge.commentIssue(issueNumber, issueMergeComment('task-no-pr', 'a'.repeat(40), 'run/gone'))
+    const landed = await promotedIssue('task-landed', 'c'.repeat(40), 'run/gone')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const { probe: gone, stranded } = probe({
+      exists: false, onDefault: (mergeCommit) => mergeCommit === 'c'.repeat(40),
+    })
+
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, gone))
+      .toEqual({ closed: [], returned: [issueNumber] })
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+    expect(forge.issueComments.get(issueNumber)?.at(-1)).toBe(
+      `UNPROMOTED: task-no-pr\nMerged as ${'a'.repeat(40)} into run branch run/gone, which was deleted without a pull request. This issue is ready again.`,
+    )
+    expect(standingMergeMarkers(await forge.listIssueComments(issueNumber))).toEqual([])
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    expect(issueNumbersForTask(paths, 'task-no-pr')).toEqual([])
+    expect(issuePromotionForIssue(paths, landed)?.taskId).toBe('task-landed')
+    expect(stranded).toEqual([{ runBranch: 'run/gone', issueNumbers: [landed] }])
+  })
+
+  it('keeps and reports the issues of a run branch without a pull request that may still get one', async () => {
+    const onRemote = await promotedIssue('task-on-remote', 'a'.repeat(40), 'run/pending')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+
+    const present = probe({ exists: true, onDefault: () => false })
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, present.probe))
+      .toEqual({ closed: [], returned: [] })
+    expect(present.stranded).toEqual([{ runBranch: 'run/pending', issueNumbers: [onRemote] }])
+
+    const unknown = probe({ exists: undefined, onDefault: () => false })
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, unknown.probe))
+      .toEqual({ closed: [], returned: [] })
+    expect(unknown.stranded).toEqual([{ runBranch: 'run/pending', issueNumbers: [onRemote] }])
+
+    const undecided = probe({ exists: false, onDefault: () => undefined })
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, undecided.probe))
+      .toEqual({ closed: [], returned: [] })
+    expect(undecided.stranded).toEqual([{ runBranch: 'run/pending', issueNumbers: [onRemote] }])
+
+    expect(issuePromotionForIssue(paths, onRemote)?.taskId).toBe('task-on-remote')
+    expect((await forge.getIssue(onRemote)).labels).not.toContain(LABEL_READY)
+    expect(forge.issueComments.get(onRemote) ?? []).toEqual([])
+  })
+
+  it('returns the issues of a run branch gone from the remote and the checkout whose work HEAD lacks', async () => {
+    const issueNumber = await promotedIssue('task-gone-everywhere', 'a'.repeat(40), 'run/gone')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const { probe: gone, stranded } = probe({
+      exists: false, local: false, onHead: () => false, onDefault: () => false,
+    })
+
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, gone))
+      .toEqual({ closed: [], returned: [issueNumber] })
+    expect(forge.issueComments.get(issueNumber)?.at(-1)).toBe(
+      `UNPROMOTED: task-gone-everywhere\nMerged as ${'a'.repeat(40)} into run branch run/gone, which was deleted without a pull request. This issue is ready again.`,
+    )
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    expect(stranded).toEqual([])
+  })
+
+  it('keeps the issues of a run branch missing on the remote but present in the checkout', async () => {
+    const local = await promotedIssue('task-local', 'a'.repeat(40), 'run/local')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+
+    const present = probe({ exists: false, local: true, onHead: () => false, onDefault: () => false })
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, present.probe))
+      .toEqual({ closed: [], returned: [] })
+    expect(present.stranded).toEqual([{ runBranch: 'run/local', issueNumbers: [local] }])
+
+    const unknown = probe({ exists: false, local: undefined, onHead: () => false, onDefault: () => false })
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, unknown.probe))
+      .toEqual({ closed: [], returned: [] })
+    expect(unknown.stranded).toEqual([{ runBranch: 'run/local', issueNumbers: [local] }])
+
+    expect(issuePromotionForIssue(paths, local)?.taskId).toBe('task-local')
+    expect(forge.issueComments.get(local) ?? []).toEqual([])
+  })
+
+  it('keeps the issues of a deleted run branch whose merge commit HEAD contains or cannot be checked', async () => {
+    const cutFrom = await promotedIssue('task-cut-from', 'a'.repeat(40), 'run/earlier')
+    const unknown = await promotedIssue('task-unknown-commit', 'c'.repeat(40), 'run/earlier')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const { probe: gone, stranded } = probe({
+      exists: false,
+      local: false,
+      onHead: (mergeCommit) => (mergeCommit === 'a'.repeat(40) ? true : undefined),
+      onDefault: () => false,
+    })
+
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, gone))
+      .toEqual({ closed: [], returned: [] })
+    expect(stranded).toEqual([{ runBranch: 'run/earlier', issueNumbers: [cutFrom, unknown] }])
+    expect(issuePromotionForIssue(paths, cutFrom)?.taskId).toBe('task-cut-from')
+    expect(issuePromotionForIssue(paths, unknown)?.taskId).toBe('task-unknown-commit')
+    expect(forge.issueComments.get(cutFrom) ?? []).toEqual([])
+    expect(forge.issueComments.get(unknown) ?? []).toEqual([])
+  })
+
+  it('leaves the held run branch without a pull request alone, and every such branch without a probe', async () => {
+    const held = await promotedIssue('task-held-no-pr', 'a'.repeat(40), 'run/held')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const { probe: gone, stranded, probed } = probe({ exists: false, onDefault: () => false })
+
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, gone))
+      .toEqual({ closed: [], returned: [] })
+    expect(probed).toEqual([])
+    expect(stranded).toEqual([])
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/next'))
+      .toEqual({ closed: [], returned: [] })
+    expect(issuePromotionForIssue(paths, held)?.taskId).toBe('task-held-no-pr')
   })
 
   it('posts the withdrawal once while returning the issue to ready keeps failing', async () => {

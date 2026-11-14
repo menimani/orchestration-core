@@ -77,7 +77,7 @@ import {
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
-  reconcileIssueReleaseIntent,
+  reconcileIssueReleaseIntent, type RunBranchProbe,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
   removeIssueReleasePreparation,
@@ -544,6 +544,61 @@ export function createLoop(deps: LoopDeps) {
     if (result.status === 1) return false
     throw new Error(`could not tell whether ${descendant} contains ${ancestor}`
       + (result.detail === '' ? '' : `: ${result.detail}`))
+  }
+
+  // Git answers each question with exit 0 or a single documented "no" status; any other
+  // failure leaves it unanswered, so the promoted issues keep waiting.
+  function gitAnswer(args: string[], noStatus: number): boolean | undefined {
+    try {
+      git(args)
+      return true
+    } catch (error) {
+      return (error as { status?: number | null }).status === noStatus ? false : undefined
+    }
+  }
+
+  function runBranchProbe(
+    stranded: (runBranch: string, issueNumbers: number[]) => void,
+  ): RunBranchProbe {
+    // One fetch of the default branch serves every merge commit of the poll.
+    let defaultRef: string | undefined | null = null
+    function fetchedDefaultRef(): string | undefined {
+      if (defaultRef !== null) return defaultRef
+      defaultRef = undefined
+      try {
+        const remote = currentBranchTrackingRemote(paths.repoRoot)
+        const ref = git(['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]).trim()
+        if (!ref.startsWith(`${remote}/`)) return undefined
+        git(['fetch', '--quiet', remote, ref.slice(remote.length + 1)])
+        defaultRef = ref
+      } catch {
+        // An unknown default branch answers nothing.
+      }
+      return defaultRef
+    }
+    return {
+      remoteBranchExists: (runBranch) => {
+        let remote: string
+        try {
+          remote = currentBranchPushRemote(paths.repoRoot)
+        } catch {
+          return undefined
+        }
+        return gitAnswer(['ls-remote', '--exit-code', '--heads', remote, `refs/heads/${runBranch}`], 2)
+      },
+      localBranchExists: (runBranch) =>
+        gitAnswer(['show-ref', '--verify', '--quiet', `refs/heads/${runBranch}`], 1),
+      // An unknown merge commit makes merge-base fail with a status other than 1, which
+      // leaves the question unanswered rather than treating the work as lost.
+      onHead: (mergeCommit) => gitAnswer(['merge-base', '--is-ancestor', mergeCommit, 'HEAD'], 1),
+      onDefaultBranch: (mergeCommit) => {
+        const ref = fetchedDefaultRef()
+        return ref === undefined
+          ? undefined
+          : gitAnswer(['merge-base', '--is-ancestor', mergeCommit, ref], 1)
+      },
+      stranded,
+    }
   }
 
   function gitIn(cwd: string, args: string[]): string {
@@ -1345,6 +1400,7 @@ export function createLoop(deps: LoopDeps) {
       ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
       : pendingFindings
     let reconciled = true
+    let enqueueFailure: string | undefined
     for (const desc of descriptions) {
       if (!hasTaskCapacity(taskId)) continue
       const queued = queueFindingTask(
@@ -1352,7 +1408,15 @@ export function createLoop(deps: LoopDeps) {
         combinesReviewFindings ? pendingFindings : undefined,
       )
       destinations.push(shortTaskId(queued.taskId))
-      if (!queued.enqueued) reconciled = false
+      if (queued.failure !== undefined) {
+        reconciled = false
+        enqueueFailure ??= queued.failure
+      }
+    }
+    // One report per scan attempt, as on the issue path: a queue that rejects several
+    // findings counts once, so the stop file waits for the failure to survive a retry.
+    if (enqueueFailure !== undefined) {
+      reportGateFailure(enqueueFailure, `completion-scan-${taskId}`)
     }
     return { findings, destinations, reconciled }
   }
@@ -1386,6 +1450,8 @@ export function createLoop(deps: LoopDeps) {
   /**
    * Queue one finding description as a local task. Combined findings arrive as the
    * numbered list in `desc`, and each is recorded against the one task carrying them.
+   * An enqueue failure is returned rather than reported, so a caller queueing several
+   * findings in one attempt reports it once.
    */
   function queueFindingTask(
     desc: string,
@@ -1394,7 +1460,7 @@ export function createLoop(deps: LoopDeps) {
     origin: 'auto' | 'fix',
     combinedFindings: readonly string[] | undefined,
     pitfallKey = desc,
-  ): { taskId: string; enqueued: boolean } {
+  ): { taskId: string; failure?: string } {
     const existing = existingFindingTask(desc, origin)
     const needsFreshTask = existing !== undefined
       && ['merged', 'no-change'].includes(readTaskState(paths, existing) ?? '')
@@ -1436,13 +1502,12 @@ export function createLoop(deps: LoopDeps) {
       const enqueue = enqueueTaskImpl(paths, newId, depth)
       if (enqueue.outcome === 'enqueued') recordPublishedTask()
     } catch (error) {
-      reportGateFailure(
-        `could not enqueue finding from ${shortTaskId(parentId)}: ${errorSummary(error)}`,
-        `completion-scan-${parentId}`,
-      )
-      return { taskId: newId, enqueued: false }
+      return {
+        taskId: newId,
+        failure: `could not enqueue finding from ${shortTaskId(parentId)}: ${errorSummary(error)}`,
+      }
     }
-    return { taskId: newId, enqueued: true }
+    return { taskId: newId }
   }
 
   /**
@@ -1567,11 +1632,15 @@ export function createLoop(deps: LoopDeps) {
         gateWaitTarget = 'documentation release'
         return true
       }
-    } else if (!queueFindingTask(
-      desc, parentId, depth, 'auto', combined ? findings : undefined, first.finding,
-    ).enqueued) {
-      gateWaitTarget = 'documentation release'
-      return true
+    } else {
+      const { failure } = queueFindingTask(
+        desc, parentId, depth, 'auto', combined ? findings : undefined, first.finding,
+      )
+      if (failure !== undefined) {
+        reportGateFailure(failure, `completion-scan-${parentId}`)
+        gateWaitTarget = 'documentation release'
+        return true
+      }
     }
     previousGateFailures.delete('release-documentation')
     writeHeldFindings(paths, [])
@@ -2250,6 +2319,12 @@ export function createLoop(deps: LoopDeps) {
    */
   function initializeSessionStateForBranch(): void {
     const currentBranch = git(['branch', '--show-current']).trim()
+    if (currentBranch === '') {
+      // A detached HEAD names no branch: comparing '' with the record would wipe the
+      // recorded run's state, and recording '' would let every poll's guard pass.
+      event('ERROR', 'current branch cannot be read (detached HEAD); run state kept')
+      throw new Error('current branch cannot be read: HEAD is detached')
+    }
     const previousBranch = existsSync(runBranchFile)
       ? readFileSync(runBranchFile, 'utf8').replace(/[\r\n]/g, '')
       : undefined
@@ -3063,6 +3138,7 @@ export function createLoop(deps: LoopDeps) {
     // Round-robin groups cover every discovered section exactly once while keeping
     // group sizes within one, without assuming what any section asks the scan to do.
     let launchFailed = false
+    let retainedScan: string | undefined
     const attemptedScans: string[] = []
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
@@ -3079,7 +3155,23 @@ export function createLoop(deps: LoopDeps) {
         })
         event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
       } catch (error) {
-        event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
+        // A runner the loop could not identify, or could not stop, may still be writing
+        // to this scan's worktree, so the scan is left for the owner rather than removed.
+        if (error instanceof StartupOwnershipUnknownError) {
+          event(
+            'ERROR', shortTaskId(scanId),
+            'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+          )
+          retainedScan = scanId
+        } else if (error instanceof StartupProcessRetainedError) {
+          event(
+            'ERROR', shortTaskId(scanId),
+            `startup process tree PID ${error.pid} survived; task retained and loop stopped`,
+          )
+          retainedScan = scanId
+        } else {
+          event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
+        }
         launchFailed = true
         break
       }
@@ -3091,6 +3183,7 @@ export function createLoop(deps: LoopDeps) {
       // failure list and counted against an expectation it was never part of, and the
       // gate would then stop every later start over a scan yield that cannot arrive.
       for (const scanId of attemptedScans) {
+        if (scanId === retainedScan) continue
         try {
           cleanupTask(paths, scanId, undefined, false, log)
         } catch (error) {
@@ -3778,10 +3871,18 @@ export function createLoop(deps: LoopDeps) {
               // abandoned and return its merged issues, so a failed lookup skips the step.
               const heldBranch = git(['branch', '--show-current']).trim()
               if (heldBranch === '') throw new Error('the checkout is not on a branch')
+              let strandedReported = false
               const { closed, returned } = await closePromotedIssues(
                 forge, paths, promotedCommitContained, heldBranch,
                 issueQueueIsSeparate(paths),
+                runBranchProbe((runBranch, issueNumbers) => {
+                  strandedReported = true
+                  warning('stranded-promotions', 'settling run branches without a pull request',
+                    `run branch ${runBranch} has no pull request; issues `
+                    + `${issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')} stay claimed`)
+                }),
               )
+              if (!strandedReported) warningLog.recovered('stranded-promotions')
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
               }
@@ -3872,6 +3973,9 @@ export function createLoop(deps: LoopDeps) {
         const effort = existsSync(effortFile)
           ? readFileSync(effortFile, 'utf8').replace(/[\s\r\n]/g, '')
           : config.taskEffort
+        // A retry of a failure the previous run announced is a new attempt; its own
+        // outcome is reported and counted like any other task's.
+        tasksFailedBeforeStartup.delete(entry.taskId)
         try {
           await startTaskImpl(paths, runner, entry.taskId, {
             effort: effort as 'medium',

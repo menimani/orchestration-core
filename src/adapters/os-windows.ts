@@ -2,7 +2,12 @@ import { spawnSync } from 'node:child_process'
 import { rmSync } from 'node:fs'
 import { win32 } from 'node:path'
 import type { AgentCommand, OperatingSystem } from './os.ts'
-import { cmdArgumentLine, processTreeRootPid, startWindowsProcess } from './windows-process.ts'
+import {
+  cmdArgumentLine, listWindowsProcesses, processTreeRootPid, startWindowsProcess,
+} from './windows-process.ts'
+import type { WindowsProcess } from './windows-process.ts'
+
+export type { WindowsProcess } from './windows-process.ts'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
@@ -25,13 +30,6 @@ export interface WindowsOperatingSystemRuntime {
   processStartIdentity?(pid: number): string | undefined
   startDaemon?: typeof startWindowsProcess
   startAgent?: typeof startWindowsProcess
-}
-
-export interface WindowsProcess {
-  pid: number
-  parentPid: number
-  /** Creation time in epoch milliseconds; absent when Windows did not report one. */
-  createdAt?: number
 }
 
 export interface WindowsProcessCommand {
@@ -79,33 +77,11 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
       windowsHide: true,
     })
   },
-  listProcesses: () => {
-    // Measured on Windows (2026-08-13), five launches of the original full-property query
-    // took 1,040 ms at the median. Selecting these two properties took 1,017 ms;
-    // PowerShell startup dominates, so terminateProcessTree snapshots once and polls the
-    // captured PIDs instead of launching this command again during its exit wait.
-    // CreationDate rides along in the same launch so the tree walk can reject stale
-    // parent links.
-    const result = spawnSync('powershell.exe', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | ForEach-Object { '{0},{1},{2}' -f $_.ProcessId,$_.ParentProcessId,$(if ($null -ne $_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }) }",
-    ], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    if (result.error !== undefined) throw result.error
-    if (result.status !== 0) throw new Error('Could not inspect the Windows process tree.')
-    return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-      const match = /^(\d+),(\d+),(.*)$/.exec(line)
-      if (match === null) throw new Error('Could not parse the Windows process tree.')
-      const entry: WindowsProcess = { pid: Number(match[1]), parentPid: Number(match[2]) }
-      if (/^-?\d+$/.test(match[3]!)) entry.createdAt = Number(match[3])
-      return entry
-    })
-  },
+  // Measured on Windows (2026-08-13), five launches of the original full-property query
+  // took 1,040 ms at the median. Selecting these two properties took 1,017 ms;
+  // PowerShell startup dominates, so terminateProcessTree snapshots once and polls the
+  // captured PIDs instead of launching this command again during its exit wait.
+  listProcesses: () => listWindowsProcesses('process tree'),
   listProcessCommands: () => {
     // UTF-8 output keeps a worktree path outside the console code page comparable, and
     // JSON keeps command lines that contain commas or line breaks intact.
@@ -232,6 +208,30 @@ function startIdentityMilliseconds(identity: string | undefined): number | undef
   return Number((BigInt(match[1]!) - 621_355_968_000_000_000n) / 10_000n)
 }
 
+/**
+ * Creation times in UTC epoch milliseconds, keyed by PID. The snapshot is the source for
+ * every process it lists, so times compared against each other come from one clock and
+ * one zone. Only a `pid` the snapshot omits takes the time behind its start identity,
+ * converted to the same scale; `dated` reports whether that pid ended up with a time.
+ */
+function processCreationTimes(
+  processes: readonly WindowsProcess[],
+  pid: number,
+  startIdentity: () => string | undefined,
+): { createdAt: Map<number, number>, dated: boolean } {
+  const createdAt = new Map<number, number>()
+  let listed = false
+  for (const entry of processes) {
+    if (entry.pid === pid) listed = true
+    if (entry.createdAt !== undefined) createdAt.set(entry.pid, entry.createdAt)
+  }
+  if (!listed) {
+    const identityCreatedAt = startIdentityMilliseconds(startIdentity())
+    if (identityCreatedAt !== undefined) createdAt.set(pid, identityCreatedAt)
+  }
+  return { createdAt, dated: createdAt.has(pid) }
+}
+
 function processTreePids(
   runtime: WindowsOperatingSystemRuntime,
   rootPid: number,
@@ -246,18 +246,12 @@ function processTreePids(
   }
 
   const runningPids = new Set(processes.map(({ pid }) => pid))
-  const createdAtByPid = new Map<number, number>()
-  for (const { pid, createdAt } of processes) {
-    if (createdAt !== undefined) createdAtByPid.set(pid, createdAt)
-  }
-  let rootUndated = false
-  if (!runningPids.has(rootPid)) {
-    // A root the snapshot omitted has no creation time, and every orphan still naming its
-    // PID would pass the check below. A live root's start time takes the snapshot's place.
-    const rootCreatedAt = startIdentityMilliseconds(runtime.processStartIdentity?.(rootPid))
-    if (rootCreatedAt !== undefined) createdAtByPid.set(rootPid, rootCreatedAt)
-    else rootUndated = true
-  }
+  // A root the snapshot omitted has no creation time, and every orphan still naming its
+  // PID would pass the check below. A live root's start time takes the snapshot's place.
+  const { createdAt: createdAtByPid, dated: rootDated } = processCreationTimes(
+    processes, rootPid, () => runtime.processStartIdentity?.(rootPid),
+  )
+  const rootUndated = !runningPids.has(rootPid) && !rootDated
   const childrenByParent = new Map<number, number[]>()
   for (const { pid, parentPid, createdAt } of processes) {
     // Windows never updates ParentProcessId when a parent exits, so an orphan keeps
@@ -298,6 +292,81 @@ function processTreePids(
   return { pids: treePids, parents, createdAt: createdAtByPid }
 }
 
+/**
+ * The surviving descendants of a process that held `recordedPid` with
+ * `recordedStartIdentity` and has since exited, or null when the PID's current holder
+ * cannot be told apart from it. Windows never updates ParentProcessId, so the recorded
+ * process's orphans still name its PID; one created before the current holder cannot
+ * have been started by that holder. The holder and anything it started are excluded.
+ * The holder's creation time comes from the same snapshot as its children's; its start
+ * identity, read from another source, stands in only when the snapshot omits it.
+ */
+function recordedOrphanTreePids(
+  runtime: WindowsOperatingSystemRuntime,
+  recordedPid: number,
+  recordedStartIdentity: string,
+): ProcessTree | undefined | null {
+  let holderIdentity: string | undefined
+  try {
+    holderIdentity = runtime.processStartIdentity?.(recordedPid)
+  } catch {
+    holderIdentity = undefined
+  }
+  if (holderIdentity === undefined || holderIdentity === recordedStartIdentity) return null
+
+  let processes: readonly WindowsProcess[]
+  try {
+    processes = runtime.listProcesses()
+  } catch {
+    // An inspection failure does not prove that the orphans have stopped.
+    return undefined
+  }
+  const holderListed = processes.some(({ pid }) => pid === recordedPid)
+  const { createdAt: createdAtByPid } = processCreationTimes(
+    processes, recordedPid, () => holderIdentity,
+  )
+  const holderCreatedAt = createdAtByPid.get(recordedPid)
+  // An omitted holder whose identity holds no creation time cannot be compared at all.
+  if (holderCreatedAt === undefined && !holderListed) return null
+  const childrenByParent = new Map<number, number[]>()
+  const pending: number[] = []
+  const parents = new Map<number, number>()
+  for (const { pid, parentPid, createdAt } of processes) {
+    if (pid === recordedPid) continue
+    if (parentPid === recordedPid) {
+      // Only a child created strictly after the holder is provably the holder's. One
+      // created at the same millisecond, an undated child, and any child of a holder the
+      // snapshot lists without a time cannot be placed after it, so each counts as a
+      // possible orphan: the entry then keeps blocking and the merge waits rather than
+      // runs under a writer that may still be the recorded runner's.
+      if (createdAt === undefined || holderCreatedAt === undefined || createdAt <= holderCreatedAt) {
+        pending.push(pid)
+        parents.set(pid, recordedPid)
+      }
+      continue
+    }
+    const parentCreatedAt = createdAtByPid.get(parentPid)
+    if (createdAt !== undefined && parentCreatedAt !== undefined && createdAt < parentCreatedAt) {
+      continue
+    }
+    const children = childrenByParent.get(parentPid) ?? []
+    children.push(pid)
+    childrenByParent.set(parentPid, children)
+  }
+
+  const treePids = new Set<number>()
+  while (pending.length > 0) {
+    const pid = pending.pop()!
+    if (treePids.has(pid)) continue
+    treePids.add(pid)
+    for (const child of childrenByParent.get(pid) ?? []) {
+      if (!parents.has(child)) parents.set(child, pid)
+      pending.push(child)
+    }
+  }
+  return { pids: treePids, parents, createdAt: createdAtByPid }
+}
+
 /** The parent links that put pid in the tree, so a stale link can be identified. */
 function treeChain(tree: ProcessTree | undefined, pid: number): string {
   const chain: number[] = [pid]
@@ -322,9 +391,13 @@ function anyProcessIsAlive(
 export function createOperatingSystem(
   runtime: WindowsOperatingSystemRuntime = systemRuntime,
 ): OperatingSystem {
-  const processTreeIsAlive = (pid: number): boolean => (
-    anyProcessIsAlive(runtime, processTreePids(runtime, pid))
-  )
+  const processTreeIsAlive = (pid: number, recordedStartIdentity?: string): boolean => {
+    if (recordedStartIdentity !== undefined) {
+      const orphans = recordedOrphanTreePids(runtime, pid, recordedStartIdentity)
+      if (orphans !== null) return anyProcessIsAlive(runtime, orphans)
+    }
+    return anyProcessIsAlive(runtime, processTreePids(runtime, pid))
+  }
   const terminateProcessTree = (pid: number): boolean => {
     let trackedPids = processTreePids(runtime, pid, true)
     if (!anyProcessIsAlive(runtime, trackedPids)) return false

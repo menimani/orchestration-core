@@ -2033,6 +2033,55 @@ describe('cycle gate', () => {
     expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
   })
 
+  it('retains a scan whose runner returned an invalid PID and discards the rest', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n',
+    )
+    const attempted: string[] = []
+    let scanPid: number | undefined
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attempted.push(basename(options.specFile, '.md'))
+        if (attempted.length === 2) return 0
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        scanPid = child.pid
+        return child.pid
+      },
+    }
+    const loop = makeLoop(
+      { scanParallel: 2, autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(attempted).toHaveLength(2)
+    const [startedScan, retainedScan] = attempted as [string, string]
+    expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+    )
+    expect(logText()).not.toContain('scan startup failed')
+    // The scan the loop owned is discarded as for any failed launch.
+    expect(existsSync(worktreeDir(paths, startedScan))).toBe(false)
+    expect(git(['branch', '--list', branchName(startedScan)])).toBe('')
+    expect(scanPid).toBeDefined()
+    expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
+    // The one whose runner the loop never identified keeps its worktree and branch.
+    expect(existsSync(worktreeDir(paths, retainedScan))).toBe(true)
+    expect(git(['branch', '--list', branchName(retainedScan)])).not.toBe('')
+  })
+
   it('stops a cycle gate that is missing an expected scan yield', async () => {
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeFileSync(join(paths.queueDir, 'scan-expected-1'), '2\n')
@@ -3061,6 +3110,125 @@ describe('remote issue queue idle detection', () => {
     expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
   })
 
+  async function noPullRequestLoop(mergeCommit: string, runBranch: string) {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'stranded fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-a'],
+    })
+    recordIssuesForTask(paths, 'stranded-task', [issueNumber])
+    recordIssuePromotions(paths, 'stranded-task', mergeCommit, runBranch)
+    fakeForge.prStatus = async () => ({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] })
+    return { loop, issueNumber }
+  }
+
+  it('returns the issues of a deleted run branch that never got a pull request', async () => {
+    git(['switch', '--quiet', '-c', 'run/deleted'])
+    writeFileSync(join(repoRoot, 'abandoned.txt'), 'abandoned\n')
+    git(['add', 'abandoned.txt'])
+    git(['commit', '--quiet', '-m', 'abandoned merge'])
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    git(['switch', '--quiet', 'main'])
+    git(['branch', '--quiet', '-D', 'run/deleted'])
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/deleted')
+
+    await loop.poll()
+
+    expect(logText()).toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    const issue = await fakeForge.getIssue(issueNumber)
+    expect(issue.assignees).toEqual([])
+    expect(issue.labels).toContain(LABEL_READY)
+    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
+  })
+
+  it('warns about the issues of a run branch without a pull request whose work is on the default branch', async () => {
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/landed')
+
+    await loop.poll()
+
+    expect(logText()).toContain(
+      `WARN run branch run/landed has no pull request; issues #${issueNumber} stay claimed`)
+    expect(logText()).not.toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('stranded-task')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
+  function stillClaimedWithWarning(issueNumber: number, runBranch: string) {
+    expect(logText()).toContain(
+      `WARN run branch ${runBranch} has no pull request; issues #${issueNumber} stay claimed`)
+    expect(logText()).not.toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('stranded-task')
+  }
+
+  it('keeps the issues of a run branch never pushed that still exists locally', async () => {
+    git(['switch', '--quiet', '-c', 'run/unpushed'])
+    writeFileSync(join(repoRoot, 'unpushed.txt'), 'unpushed\n')
+    git(['add', 'unpushed.txt'])
+    git(['commit', '--quiet', '-m', 'unpushed merge'])
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    git(['switch', '--quiet', 'main'])
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/unpushed')
+
+    await loop.poll()
+
+    stillClaimedWithWarning(issueNumber, 'run/unpushed')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
+  it('keeps the issues of a deleted run branch the current HEAD was cut from', async () => {
+    git(['switch', '--quiet', '-c', 'run/earlier'])
+    writeFileSync(join(repoRoot, 'earlier.txt'), 'earlier\n')
+    git(['add', 'earlier.txt'])
+    git(['commit', '--quiet', '-m', 'earlier merge'])
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    git(['switch', '--quiet', 'main'])
+    git(['merge', '--quiet', '--ff-only', 'run/earlier'])
+    git(['branch', '--quiet', '-D', 'run/earlier'])
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/earlier')
+
+    await loop.poll()
+
+    stillClaimedWithWarning(issueNumber, 'run/earlier')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
+  it('keeps the issues of a deleted run branch whose merge commit is unknown locally', async () => {
+    const { loop, issueNumber } = await noPullRequestLoop('f'.repeat(40), 'run/unknown')
+
+    await loop.poll()
+
+    stillClaimedWithWarning(issueNumber, 'run/unknown')
+    expect(logText()).not.toContain('ERROR')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
+  it('keeps the issues of a run branch without a pull request when the remote lookup fails', async () => {
+    git(['switch', '--quiet', '-c', 'run/unreachable'])
+    writeFileSync(join(repoRoot, 'unreachable.txt'), 'unreachable\n')
+    git(['add', 'unreachable.txt'])
+    git(['commit', '--quiet', '-m', 'unreachable merge'])
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    git(['switch', '--quiet', 'main'])
+    git(['branch', '--quiet', '-D', 'run/unreachable'])
+    git(['remote', 'add', 'missing', join(repoRoot, 'missing.git')])
+    git(['config', 'branch.main.pushRemote', 'missing'])
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/unreachable')
+
+    await loop.poll()
+
+    stillClaimedWithWarning(issueNumber, 'run/unreachable')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
   async function promotedIssueLoop(headSha: string) {
     setPaths({
       ...paths,
@@ -3887,6 +4055,61 @@ describe('failure announcement and burst stop (via poll)', () => {
       `FAILED: unlisted-f1 — log: ${join(paths.logsDir, 'unlisted-f1.log')}`)
     expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe('unlisted-f1\n')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('announces a re-enqueued task that fails a second time', async () => {
+    // A branch named `task` blocks every `task/<id>` branch, so worktree creation fails
+    // and leaves neither worktree nor branch for cleanup to remove.
+    initializeGitRepoWithRemote()
+    git(['branch', 'task'])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const taskId = '20260808_120000_001_user-retry'
+    writeFileSync(specFile(paths, taskId), '# retry\n')
+    const failedLine = `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`
+    // A task still running keeps the cycle open across the polls below.
+    writeRawStatus('20260808_110000_000_user-busy', 'running', process.pid)
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 2, maxBurstFailures: 3 })
+    loop.initializeSessionStateForBranch()
+
+    expect(enqueueTask(paths, taskId).outcome).toBe('enqueued')
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(logged.filter((line) => line === failedLine)).toHaveLength(1)
+
+    expect(enqueueTask(paths, taskId).outcome).toBe('enqueued')
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(logged.filter((line) => line === failedLine)).toHaveLength(2)
+    expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe(`${taskId}\n${taskId}\n`)
+    expect(existsSync(join(paths.queueDir, 'scanned', `${taskId}.failed`))).toBe(true)
+  })
+
+  it('announces a retry of a failure the previous run announced', async () => {
+    initializeGitRepoWithRemote()
+    git(['branch', 'task'])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const taskId = '20260808_120000_001_user-listed'
+    writeFileSync(specFile(paths, taskId), '# listed\n')
+    writeRawStatus(taskId, 'failed')
+    writeFileSync(join(paths.queueDir, 'announced-failures.txt'), `${taskId}\nother-f1\n`)
+    const failedLine = `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`
+    // A task still running keeps the cycle open across the polls below.
+    writeRawStatus('20260808_110000_000_user-busy', 'running', process.pid)
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 2, maxBurstFailures: 3 })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logged.some((line) => line.startsWith('FAILED:'))).toBe(false)
+
+    expect(enqueueTask(paths, taskId).outcome).toBe('enqueued')
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged.filter((line) => line === failedLine)).toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'announced-failures.txt'), 'utf8')).toBe('other-f1\n')
   })
 
   it('releases and counts the issue of a task already failed at startup', async () => {
@@ -4996,6 +5219,26 @@ describe('scanForNextTasks', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
+  it('counts one gate failure when several local findings fail to enqueue in one attempt', async () => {
+    const loop = makeLoop(
+      {}, stubProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
+      () => { throw new Error('persistent local queue failure') },
+    )
+    const taskId = '20250101_000000_026_scan'
+    writeFinal(
+      taskId,
+      'NEXT_TASK: [BUG] the first finding a broken queue rejects\n'
+        + 'NEXT_TASK: [BUG] the second finding a broken queue rejects\n',
+    )
+
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+    const warnings = logText().split('\n')
+      .filter((line) => line.includes('WARN could not enqueue finding from 026_scan'))
+    expect(warnings).toHaveLength(1)
+    expect(logText()).not.toContain('ERROR could not enqueue finding')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_012_scan', 'NEXT_TASK: [BUG] a finding whose fix must be detectable\n')
@@ -5459,6 +5702,117 @@ describe('documentation findings held for the cycle', () => {
     expect(combined.body).toContain('Depth: 1')
     expect(heldRecords()).toEqual([])
     expect(suiteRuns()).toBe(false)
+  })
+
+  it('keeps the held findings and waits when filing their issue fails, then files them once', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const scanId = '20250101_000000_047_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    await loop.scanForNextTasks(scanId, 0)
+    const held = heldRecords()
+    expect(held).toEqual([
+      `1\t${scanId}\t[DOCS] \`README.md\` names a removed flag`,
+      `1\t${scanId}\t[DOCS] \`SPEC.md\` misstates the retry bound`,
+    ])
+
+    const createIssue = fakeForge.createIssue.bind(fakeForge)
+    fakeForge.createIssue = async () => {
+      throw new Error('temporary publication failure')
+    }
+    expect(await loop.poll()).toBe('continue')
+
+    expect(fakeForge.issues.size).toBe(0)
+    expect(heldRecords()).toEqual(held)
+    expect(logText()).toContain(
+      'WARN could not file held documentation findings: temporary publication failure',
+    )
+    expect(logged).toContain('Idle Status      Task=0  Queue=0  0s  Waiting=documentation release')
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(suiteRuns()).toBe(false)
+
+    fakeForge.createIssue = createIssue
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(fakeForge.issues.size).toBe(1)
+    const combined = await fakeForge.getIssue(1)
+    expect(combined.title).toBe('Documentation fixes (cycle 1)')
+    expect(combined.body).toContain([
+      '1. [DOCS] `README.md` names a removed flag',
+      '2. [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    expect(heldRecords()).toEqual([])
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([
+      'Released docs        2 documentation finding(s) as one task',
+    ])
+    expect(suiteRuns()).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(fakeForge.issues.size).toBe(1)
+    expect(logged.filter((line) => line.startsWith('Released'))).toHaveLength(1)
+  })
+
+  it('keeps the held findings and waits when the local enqueue fails, then releases them once', async () => {
+    initializeGitRepo()
+    let failEnqueue = true
+    const loop = makeLoop(
+      gateConfig, gatedProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
+      (queuePaths, taskId, depth) => {
+        if (failEnqueue) throw new Error('temporary local queue failure')
+        return enqueueTask(queuePaths, taskId, depth)
+      },
+    )
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const scanId = '20250101_000000_048_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    await loop.scanForNextTasks(scanId, 0)
+    const held = heldRecords()
+    expect(held).toHaveLength(2)
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(backlogEntries()).toEqual([])
+    expect(heldRecords()).toEqual(held)
+    expect(logText()).toContain(
+      'WARN could not enqueue finding from 048_scan: temporary local queue failure',
+    )
+    expect(logged).toContain('Idle Status      Task=0  Queue=0  0s  Waiting=documentation release')
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(suiteRuns()).toBe(false)
+
+    failEnqueue = false
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    const [docsId] = taskIdsNow()
+    expect(taskIdsNow()).toHaveLength(1)
+    expect(backlogEntries()).toEqual([`${docsId}:1`])
+    expect(readFileSync(specFile(paths, docsId!), 'utf8')).toContain([
+      '## Requirement',
+      '',
+      '1. [DOCS] `README.md` names a removed flag',
+      '2. [DOCS] `SPEC.md` misstates the retry bound',
+    ].join('\n'))
+    expect(heldRecords()).toEqual([])
+    expect(logged.filter((line) => line.startsWith('Released'))).toEqual([
+      'Released docs        2 documentation finding(s) as one task',
+    ])
+    expect(suiteRuns()).toBe(false)
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(taskIdsNow()).toEqual([docsId])
+    expect(backlogEntries()).toEqual([`${docsId}:1`])
+    expect(logged.filter((line) => line.startsWith('Released'))).toHaveLength(1)
   })
 
   it('does not file held findings again when listing fails after their issue was created', async () => {

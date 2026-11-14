@@ -148,7 +148,9 @@ resolves against the project directory (`orchestration/` in a subtree consumer,
 
 An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, absolute
 path, or path relative to the consumer repository root. A repository-relative selector
-must begin with `./`, `../`, `.\`, or `..\` on every platform; for example, use
+must begin with `./`, `../`, `.\`, or `..\` on every platform, and its backslashes separate directories everywhere, so
+`.\custom\runner.mjs` written on Windows into shared fleet configuration also loads on
+Linux. For example, use
 `./custom/runner.mjs`, because `custom/runner.mjs` is treated as a package specifier. A forge module exports a `Forge`
 as its default or `forge` export, or exports `createForge(repoRoot, report, target)`.
 Every forge implements `updateIssueTitle(issueNumber, title)`, which replaces an issue's
@@ -233,10 +235,11 @@ hooks, and creates missing `loop:*` labels. It is safe to repeat: missing requir
 members are added with marked scaffold defaults, while declared members, other existing
 project files, and a deliberately different hooks setting are reported and never overwritten.
 It works on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the
-selected file rather than the single discovered one. A project name given to `init` that
-disagrees with `PROJECT` is reported as `DIVERGED` and `PROJECT` is used; several adapters
-with neither variable set are left unchanged and reported as `DIVERGED`. Either report
-makes `init` exit non-zero.
+selected file rather than the single discovered one. `init` exits non-zero when any of
+these is reported as `DIVERGED`: a `core.hooksPath` other than the core-owned hooks, left
+unchanged; an adapter it cannot repair, left unchanged; a project name given to `init`
+that disagrees with `PROJECT`, in which case `PROJECT` is used; and several adapters with
+neither variable set, left unchanged.
 For `SCAN_PARALLEL` greater than one, keep the scan checklist as uniquely numbered
 Markdown headings outside fenced code blocks; without numbered headings the loop warns
 and runs one full scan, while ambiguous numbering stops the loop before the cycle starts.
@@ -388,7 +391,9 @@ fleet/
 Select a project with `--project <name>`; `--fleet <dir>` names the fleet when the
 working directory is not inside it. `loop-status --fleet <dir>` without a project prints
 one line per declared project. `init` and `verify-setup` for a fleet project leave the
-target repository's hooks alone.
+target repository's hooks alone. They also skip the `loop:*` labels for a fleet project
+without `issueRepository`, since it files no issues; with one, `init` creates the
+project's `project:<name>` scope label alongside them.
 
 Add `"issueRepository": "owner/fleet"` at the top of `fleet.json` to keep the issue queue
 in the fleet's own repository instead of the project's. Every project shares that queue:

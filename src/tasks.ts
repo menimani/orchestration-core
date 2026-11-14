@@ -5,6 +5,7 @@ import { appendBacklogUnless } from './backlog.ts'
 import { loadConfig } from './config.ts'
 import { pitfallsFileForDesc } from './gates.ts'
 import { descSlug, newTaskId, recordTaskIdForDesc, taskIdForDesc } from './ids.ts'
+import { readJsonFile } from './jsonFile.ts'
 import { branchName, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { readStatus } from './status.ts'
 import { readTemplate } from './templates.ts'
@@ -188,7 +189,7 @@ export function removeIssueModeMarker(paths: OrchPaths, pid: number): void {
 
 function fileSetsIssueQueue(configFile: string): boolean {
   if (!existsSync(configFile)) return false
-  const values = JSON.parse(readFileSync(configFile, 'utf8')) as Record<string, unknown>
+  const values = readJsonFile(configFile) as Record<string, unknown>
   return Object.hasOwn(values, 'ISSUE_QUEUE_ENABLED')
 }
 

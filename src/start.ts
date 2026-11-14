@@ -8,7 +8,7 @@ import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
 import { execShellSync } from './shell.ts'
-import { recordTaskProcess } from './processRegistry.ts'
+import { forgetTaskProcess, recordTaskProcess } from './processRegistry.ts'
 import { readStatus, resumeCompletedStatus, writeStatus } from './status.ts'
 import { specFile } from './tasks.ts'
 
@@ -43,6 +43,20 @@ export class StartupOwnershipUnknownError extends Error {
     super(`Runner returned invalid PID ${String(pid)}; process ownership could not be established.`)
     this.name = 'StartupOwnershipUnknownError'
   }
+}
+
+/**
+ * A new attempt supersedes the failure an earlier one left, so that failure's announce
+ * markers go once the attempt has written its own status. Kept, they would make the loop
+ * take a retry that fails again for the failure it already reported, and stay silent.
+ */
+function forgetAnnouncedFailure(paths: OrchPaths, taskId: string): void {
+  rmSync(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
+  const announced = join(paths.queueDir, 'announced-failures.txt')
+  if (!existsSync(announced)) return
+  const taskIds = readFileSync(announced, 'utf8').split(/\r?\n/).filter((id) => id !== '')
+  if (!taskIds.includes(taskId)) return
+  writeFileSync(announced, taskIds.filter((id) => id !== taskId).map((id) => `${id}\n`).join(''))
 }
 
 export function worktreeAddArgs(worktree: string, branch: string): string[] {
@@ -138,6 +152,7 @@ export async function startTask(
     // to release or retry.
     recordTaskProcess(paths, taskId, pid)
     await writeStatus(paths, taskId, 'running', pid)
+    forgetAnnouncedFailure(paths, taskId)
     options.report?.(`Started. task_id=${taskId} pid=${pid} log=${log}`)
     return { outcome: 'started', pid }
   } catch (error) {
@@ -162,9 +177,11 @@ export async function startTask(
         )
         throw new StartupProcessRetainedError(launchedPid, error, terminationError)
       }
+      forgetTaskProcess(paths, taskId)
     }
     appendFileSync(log, `Task startup failed:\n${detail}\n`)
     await writeStatus(paths, taskId, 'failed')
+    forgetAnnouncedFailure(paths, taskId)
     throw error
   }
 }
@@ -242,6 +259,7 @@ export async function resumeTask(
         )
         throw new StartupProcessRetainedError(launchedPid, error, terminationError)
       }
+      forgetTaskProcess(paths, taskId)
     }
     appendFileSync(log, `Task handback failed:\n${detail}\n`)
     if (earlierFinal !== undefined) writeFileSync(finalMessage, earlierFinal)
