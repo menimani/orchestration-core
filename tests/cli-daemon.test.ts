@@ -536,6 +536,39 @@ describe('loop daemon ownership', () => {
     expect(existsSync(daemonFile('loop.pid'))).toBe(false)
   })
 
+  it('removes a gate worktree its dead owner left behind and starts', () => {
+    const paths = orchPaths(repoRoot)
+    git(['-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit', '--allow-empty', '--quiet', '-m', 'init'])
+    // A process that has already exited stands in for the daemon whose merge gate could
+    // not remove its worktree before it was restarted.
+    const exited = spawnSync(process.execPath, ['-e', ''], { windowsHide: true })
+    expect(exited.status).toBe(0)
+    const leftover = join(paths.worktreesDir, `.merge-left-behind-${exited.pid}-1`)
+    mkdirSync(paths.worktreesDir, { recursive: true })
+    git(['worktree', 'add', '--quiet', '--detach', leftover])
+
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_SCAN_CYCLES: '0',
+        SCAN_ENABLED: 'true',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stdout + result.stderr).toBe(0)
+    expect(result.stdout).toMatch(/Removed\s+worktree\s+\S*\.merge-left-behind-/)
+    expect(result.stdout).not.toContain('has no task status')
+    expect(existsSync(leftover)).toBe(false)
+    expect(git(['worktree', 'list', '--porcelain'])).not.toContain('.merge-left-behind-')
+  })
+
   it('allows only one of concurrent starts to acquire the PID lock', async () => {
     const wrapper = join(repoRoot, 'start-loop.mjs')
     const cliUrl = pathToFileURL(CLI).href
