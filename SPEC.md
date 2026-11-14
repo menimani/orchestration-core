@@ -39,6 +39,10 @@ comments and other items cite items by number, so a number is never reused.
   counts as not acquired and is retried, any other error propagates, and a private
   remnant left by the race is removed when it can be. A process running an older core
   can still race by acquiring without the mutex.
+- A status write waits up to ten seconds for the task's status lock, retrying both a
+  held lock and `EPERM` from creating it. A wait that ends while the last attempt failed
+  with `EPERM` times out naming that code, so a permission failure is not reported as
+  plain contention; one that ends on a held lock says only that it timed out.
 - Between polls the daemon sleeps for at most `POLL_INTERVAL` seconds while watching the
   queue directory, and it starts the next poll early, after a half-second debounce, when
   `queue/backlog.txt` or `queue/wake` changes. It begins watching before each poll, so
@@ -596,7 +600,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. A durable per-task guard skips an attempt while that task's merge is
     active or after it succeeded, without changing the failure count; a failed attempt
-    releases the guard so a later poll can retry. A merge deferred because a completed
+    releases the guard so a later poll can retry. Only a guard that exists answers
+    "active". Creating the guard with `EPERM`, which Windows reports for a name still
+    pending deletion, is retried every 10 ms within the same ten-second deadline that bounds
+    reclaiming a stale guard, one deadline per acquisition; an `EPERM` that outlasts it
+    fails the attempt with an error naming the guard and the cause, and counts as a failure. A merge deferred because a completed
     task's runner cannot be verified yet (item 8) is no failure of the work: it leaves
     this count and the task's own failure count alone, so a runner tree that lingers for
     a few minutes cannot stop the loop and terminate the tasks still running under it.

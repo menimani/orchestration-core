@@ -168,20 +168,27 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
   const startIdentity = JSON.stringify(currentProcessStartIdentity())
   const token = randomUUID()
   const deadline = Date.now() + STATUS_LOCK_WAIT_MS
+  // The code of the last attempt when it failed on something other than a held lock, so
+  // a wait that ends on a permission failure is not reported as plain contention.
+  let lastErrorCode: string | undefined
   for (;;) {
     if (Date.now() >= deadline) {
-      throw new Error(`Timed out waiting for the status lock: ${taskId}`)
+      const cause = lastErrorCode === undefined ? '' : ` (last error: ${lastErrorCode})`
+      throw new Error(`Timed out waiting for the status lock: ${taskId}${cause}`)
     }
     try {
       mkdirSync(dir)
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
-      // Windows reports a name still pending deletion as EPERM rather than EEXIST.
+      // Windows reports a name still pending deletion as EPERM rather than EEXIST, but a
+      // real permission error is EPERM too; the deadline bounds the wait for either.
       if (code === 'EPERM') {
+        lastErrorCode = code
         await sleep(STATUS_LOCK_RETRY_MS)
         continue
       }
       if (code !== 'EEXIST') throw error
+      lastErrorCode = undefined
       try {
         if (!statSync(dir).isDirectory()) throw error
       } catch (inspectionError) {
