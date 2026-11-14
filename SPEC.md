@@ -494,7 +494,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    Windows any process still naming the worktree is terminated before it is removed. A runner
    recorded without the start identity that makes stopping it safe cannot be verified at
    all, so that merge is deferred rather than failed: the task stays `completed`, one WARN
-   per task names the PID, and a later poll merges once the registry entry clears. When all
+   per task names the PID, and a later poll merges once the registry entry clears. A
+   runner PID since reassigned to another process is no such runner: once the finished
+   runner's own orphans are gone its entry clears as it is read (item 24a), and the merge
+   proceeds on that poll without the warning. When all
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
    requiring the worker to have predicted that outcome.
@@ -1060,7 +1063,18 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the running system booted is not believed and is dropped as it is read: identifiers
     are reassigned across a restart, and a survivor would otherwise refuse a startup or
     direct a termination at a stranger. A PID left in an older status record is never
-    read back.
+    read back. An entry's start identity decides what its PID means now. A matching
+    identity is the recorded runner itself. An identity that cannot be read is not proof
+    the runner is gone, so the entry blocks while anything under the PID lives, and an
+    entry recorded without an identity blocks the same way and is never terminable. A
+    known identity that differs means the PID was reassigned and the runner is gone: the
+    entry then blocks only while the runner's own orphans live, and is dropped as it is
+    read once they are gone. The process now holding the PID, and anything it started, is
+    never counted as the runner's tree. On Windows those orphans are the processes that
+    still name the PID as their parent and were created before its current holder, with
+    their descendants. On POSIX an orphan is reparented and can only be found through the
+    runner's process group, and a PID is never reassigned while a group of that ID has
+    members, so a reassigned PID leaves nothing to wait for.
 24b. `queue/run-branch.txt` records the branch a run belongs to; a stopped loop's cycle
     state belongs only to that branch. At startup, once the push target and issue queue
     are initialized and before the first poll, a recorded branch that differs from the

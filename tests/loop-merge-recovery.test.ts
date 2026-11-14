@@ -1116,6 +1116,48 @@ describe('completed task merge recovery', () => {
     })
   })
 
+  // A finished runner's PID once went to another task's runner, and every poll deferred
+  // the merge as unverifiable until a person removed the registry entry.
+  it('merges a completed task on the next poll once its runner PID was reused', async () => {
+    const runnerPid = 29316
+    const startIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue('started:runner')
+    const processAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    // The holder's own tree is alive; the finished runner left no orphan behind.
+    const treeAlive = vi.spyOn(operatingSystem, 'processTreeIsAlive')
+      .mockImplementation((_pid, recordedStartIdentity) => recordedStartIdentity === undefined)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
+    try {
+      const taskId = '20260815_125300_040_auto-runner-pid-reused'
+      const initialHead = initializeGitRepo()
+      makeCompletedTask(taskId, false)
+      writeRawStatus(taskId, 'completed', runnerPid)
+      startIdentity.mockReturnValue('started:another-runner')
+      const loop = makeLoop({
+        autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+      })
+      loop.initializeSessionStateForBranch()
+      const issueNumber = await fakeForge.createIssue({
+        title: 'reused runner pid', body: '',
+        labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      })
+      recordIssuesForTask(paths, taskId, [issueNumber])
+
+      expect(await loop.poll()).toBe('continue')
+
+      expect(readStatus(paths, taskId)?.status).toBe('merged')
+      expect(git(['rev-parse', 'HEAD'])).not.toBe(initialHead)
+      expect(terminate).not.toHaveBeenCalled()
+      expect(logText()).not.toContain('cannot be verified yet')
+      expect(logged.some((line) => line.startsWith('Merged 040_auto'))).toBe(true)
+    } finally {
+      terminate.mockRestore()
+      treeAlive.mockRestore()
+      processAlive.mockRestore()
+      startIdentity.mockRestore()
+    }
+  })
+
   it('terminalizes a no-change task while preserving failures and invalidating the cycle', async () => {
     const taskId = '20260814_144959_066_auto-already-resolved'
     const initialHead = initializeGitRepo()

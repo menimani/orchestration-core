@@ -701,6 +701,83 @@ describe('operating-system adapters', () => {
       .toThrow('Could not stop process tree 471. Still running: PID 474.')
   })
 
+  /** A Windows start identity for a process created `milliseconds` after the epoch. */
+  const windowsIdentity = (milliseconds: number): string => (
+    `windows:${621_355_968_000_000_000n + BigInt(milliseconds) * 10_000n}`
+  )
+
+  it('answers for no tree when a newer process holds a recorded PID and no orphan remains', () => {
+    // 481 was recorded for a process created at 1 s; the holder was created at 5 s.
+    const { os } = processTreeOs([
+      { pid: 481, parentPid: 1, createdAt: 5_000 },
+    ], () => {}, (pid) => (pid === 481 ? windowsIdentity(5_000) : undefined))
+
+    expect(os.processTreeIsAlive(481)).toBe(true)
+    expect(os.processTreeIsAlive(481, windowsIdentity(1_000))).toBe(false)
+  })
+
+  it('leaves the children of the process now holding a recorded PID out of its tree', () => {
+    const { os } = processTreeOs([
+      { pid: 491, parentPid: 1, createdAt: 5_000 },
+      { pid: 492, parentPid: 491, createdAt: 6_000 },
+      { pid: 493, parentPid: 492, createdAt: 7_000 },
+    ], () => {}, (pid) => (pid === 491 ? windowsIdentity(5_000) : undefined))
+
+    expect(os.processTreeIsAlive(491, windowsIdentity(1_000))).toBe(false)
+  })
+
+  it('answers alive while an orphan of the recorded process or its descendant lives', () => {
+    // 502 names the reused PID and predates its holder; 503 descends from 502.
+    const { alive, os } = processTreeOs([
+      { pid: 501, parentPid: 1, createdAt: 5_000 },
+      { pid: 502, parentPid: 501, createdAt: 2_000 },
+      { pid: 503, parentPid: 502, createdAt: 3_000 },
+    ], () => {}, (pid) => (pid === 501 ? windowsIdentity(5_000) : undefined))
+
+    expect(os.processTreeIsAlive(501, windowsIdentity(1_000))).toBe(true)
+    alive.delete(502)
+    expect(os.processTreeIsAlive(501, windowsIdentity(1_000))).toBe(true)
+    alive.delete(503)
+    expect(os.processTreeIsAlive(501, windowsIdentity(1_000))).toBe(false)
+    expect(os.processTreeIsAlive(501)).toBe(true)
+  })
+
+  it('counts an undated child of a reused recorded PID as a possible orphan', () => {
+    const { os } = processTreeOs([
+      { pid: 511, parentPid: 1, createdAt: 5_000 },
+      { pid: 512, parentPid: 511 },
+    ], () => {}, (pid) => (pid === 511 ? windowsIdentity(5_000) : undefined))
+
+    expect(os.processTreeIsAlive(511, windowsIdentity(1_000))).toBe(true)
+  })
+
+  it('keeps the whole-tree answer when the holder identity is unreadable or matches', () => {
+    const unreadable = processTreeOs([
+      { pid: 521, parentPid: 1, createdAt: 5_000 },
+    ], () => {}, () => undefined)
+    const matching = processTreeOs([
+      { pid: 531, parentPid: 1, createdAt: 1_000 },
+    ], () => {}, (pid) => (pid === 531 ? windowsIdentity(1_000) : undefined))
+
+    expect(unreadable.os.processTreeIsAlive(521, windowsIdentity(1_000))).toBe(true)
+    expect(matching.os.processTreeIsAlive(531, windowsIdentity(1_000))).toBe(true)
+  })
+
+  it('answers no recorded group on POSIX once a process with another identity holds its ID', () => {
+    const signalProcessGroup = vi.fn()
+    const posixOs = (identity: string | undefined) => createPosixOperatingSystem({
+      signalProcessGroup, probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, groupHasRunningMember: () => true,
+      processStartIdentity: () => identity,
+    })
+
+    expect(posixOs('linux:500').processTreeIsAlive(541, 'linux:100')).toBe(false)
+    expect(signalProcessGroup).not.toHaveBeenCalled()
+    expect(posixOs(undefined).processTreeIsAlive(541, 'linux:100')).toBe(true)
+    expect(posixOs('linux:100').processTreeIsAlive(541, 'linux:100')).toBe(true)
+    expect(posixOs('linux:500').processTreeIsAlive(541)).toBe(true)
+  })
+
   it('leaves worktree processes alone on POSIX', () => {
     const signalProcessGroup = vi.fn()
     const os = createPosixOperatingSystem({

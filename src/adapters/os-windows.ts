@@ -274,6 +274,75 @@ function processTreePids(
   return { pids: treePids, parents, createdAt: createdAtByPid }
 }
 
+/**
+ * The surviving descendants of a process that held `recordedPid` with
+ * `recordedStartIdentity` and has since exited, or null when the PID's current holder
+ * cannot be told apart from it. Windows never updates ParentProcessId, so the recorded
+ * process's orphans still name its PID; one created before the current holder cannot
+ * have been started by that holder. The holder and anything it started are excluded.
+ */
+function recordedOrphanTreePids(
+  runtime: WindowsOperatingSystemRuntime,
+  recordedPid: number,
+  recordedStartIdentity: string,
+): ProcessTree | undefined | null {
+  let holderIdentity: string | undefined
+  try {
+    holderIdentity = runtime.processStartIdentity?.(recordedPid)
+  } catch {
+    holderIdentity = undefined
+  }
+  if (holderIdentity === undefined || holderIdentity === recordedStartIdentity) return null
+  const holderCreatedAt = startIdentityMilliseconds(holderIdentity)
+  if (holderCreatedAt === undefined) return null
+
+  let processes: readonly WindowsProcess[]
+  try {
+    processes = runtime.listProcesses()
+  } catch {
+    // An inspection failure does not prove that the orphans have stopped.
+    return undefined
+  }
+  const createdAtByPid = new Map<number, number>()
+  for (const { pid, createdAt } of processes) {
+    if (createdAt !== undefined) createdAtByPid.set(pid, createdAt)
+  }
+  const childrenByParent = new Map<number, number[]>()
+  const pending: number[] = []
+  const parents = new Map<number, number>()
+  for (const { pid, parentPid, createdAt } of processes) {
+    if (pid === recordedPid) continue
+    if (parentPid === recordedPid) {
+      // An undated child cannot be placed before or after the holder; counting it keeps
+      // the safe "alive" verdict, as processTreePids does for a missing creation time.
+      if (createdAt === undefined || createdAt < holderCreatedAt) {
+        pending.push(pid)
+        parents.set(pid, recordedPid)
+      }
+      continue
+    }
+    const parentCreatedAt = createdAtByPid.get(parentPid)
+    if (createdAt !== undefined && parentCreatedAt !== undefined && createdAt < parentCreatedAt) {
+      continue
+    }
+    const children = childrenByParent.get(parentPid) ?? []
+    children.push(pid)
+    childrenByParent.set(parentPid, children)
+  }
+
+  const treePids = new Set<number>()
+  while (pending.length > 0) {
+    const pid = pending.pop()!
+    if (treePids.has(pid)) continue
+    treePids.add(pid)
+    for (const child of childrenByParent.get(pid) ?? []) {
+      if (!parents.has(child)) parents.set(child, pid)
+      pending.push(child)
+    }
+  }
+  return { pids: treePids, parents, createdAt: createdAtByPid }
+}
+
 /** The parent links that put pid in the tree, so a stale link can be identified. */
 function treeChain(tree: ProcessTree | undefined, pid: number): string {
   const chain: number[] = [pid]
@@ -298,9 +367,13 @@ function anyProcessIsAlive(
 export function createOperatingSystem(
   runtime: WindowsOperatingSystemRuntime = systemRuntime,
 ): OperatingSystem {
-  const processTreeIsAlive = (pid: number): boolean => (
-    anyProcessIsAlive(runtime, processTreePids(runtime, pid))
-  )
+  const processTreeIsAlive = (pid: number, recordedStartIdentity?: string): boolean => {
+    if (recordedStartIdentity !== undefined) {
+      const orphans = recordedOrphanTreePids(runtime, pid, recordedStartIdentity)
+      if (orphans !== null) return anyProcessIsAlive(runtime, orphans)
+    }
+    return anyProcessIsAlive(runtime, processTreePids(runtime, pid))
+  }
   const terminateProcessTree = (pid: number): boolean => {
     let trackedPids = processTreePids(runtime, pid, true)
     if (!anyProcessIsAlive(runtime, trackedPids)) return false
