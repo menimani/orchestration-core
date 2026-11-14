@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { operatingSystem } from './adapters/os.ts'
+import { readJsonFile } from './jsonFile.ts'
 import type { FleetLocation } from './paths.ts'
 
 // A fleet is a separate checkout that holds what each target repository would otherwise
@@ -30,7 +31,7 @@ export type FleetFile = z.infer<typeof fleetSchema>
 function readJson<T>(file: string, schema: z.ZodType<T>): T {
   let parsed: unknown
   try {
-    parsed = JSON.parse(readFileSync(file, 'utf8'))
+    parsed = readJsonFile(file)
   } catch (error) {
     throw new Error(`Cannot read ${file}: ${(error as Error).message}`, { cause: error })
   }
