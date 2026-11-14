@@ -386,6 +386,23 @@ describe('delegateTask', () => {
     expect(loadedForge).toBe(false)
   })
 
+  it('files nothing when only the configuration file explicitly disables issue mode', async () => {
+    writeIssueModeMarker(paths, true)
+    writeFileSync(join(paths.projectRoot, 'config.json'), '{ "ISSUE_QUEUE_ENABLED": false }\n')
+    expect(isIssueModeActive(paths, {})).toBe(false)
+
+    let loadedForge = false
+    const result = await delegateTaskVisible(paths, DESC, {}, {
+      env: {},
+      loadForge: async () => { loadedForge = true; return makeFakeForge() },
+      warn: () => {},
+    })
+
+    expect(queueLines()).toEqual([`${result.taskId}:0`])
+    expect(result.issue).toBeUndefined()
+    expect(loadedForge).toBe(false)
+  })
+
   it('publishes delegated work when only the configuration file enables issue mode', async () => {
     writeFileSync(join(paths.projectRoot, 'config.json'), '{ "ISSUE_QUEUE_ENABLED": true }\n')
     const forge = makeFakeForge('delegator')
