@@ -892,6 +892,79 @@ describe('loop daemon ownership', () => {
     expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('persists a mid-run cycle cap change for a later shipped record', async () => {
+    const paths = orchPaths(repoRoot)
+    const configFile = join(paths.projectRoot, 'config.json')
+    mkdirSync(paths.projectRoot, { recursive: true })
+    writeFileSync(configFile, JSON.stringify({ MAX_SCAN_CYCLES: 5 }))
+    // Hold the daemon after its startup cap write so the configuration changes while it
+    // runs, before its first poll.
+    const wrapper = join(repoRoot, 'start-held-loop.mjs')
+    const cliUrl = pathToFileURL(CLI).href
+    writeFileSync(wrapper, [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalWriteFileSync = fs.writeFileSync',
+      'fs.writeFileSync = function (file, ...args) {',
+      '  const result = originalWriteFileSync.call(this, file, ...args)',
+      "  if (typeof file === 'string' && /[\\\\/]cycle-cap\\.txt$/.test(file)) {",
+      "    const release = file.replace(/cycle-cap\\.txt$/, 'release')",
+      '    while (!fs.existsSync(release)) {',
+      '      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)',
+      '    }',
+      '  }',
+      '  return result',
+      '}',
+      'syncBuiltinESMExports()',
+      `await import(${JSON.stringify(cliUrl)})`,
+      '',
+    ].join('\n'))
+
+    const child = testProcesses.spawn(process.execPath, [wrapper, 'loop', '--approve-mode', 'local'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        POLL_INTERVAL: '1',
+        SCAN_ENABLED: 'false',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+    const completion = childCompletion(child)
+
+    await waitUntil(
+      () => existsSync(daemonFile('cycle-cap.txt')),
+      'loop did not record its startup cycle cap',
+    )
+    expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('5\n')
+    writeFileSync(configFile, JSON.stringify({ MAX_SCAN_CYCLES: 12 }))
+    writeFileSync(daemonFile('stop'), '')
+    writeFileSync(daemonFile('release'), '')
+    const result = await completion
+
+    expect(result.code, result.output).toBe(0)
+    expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('12\n')
+
+    // shipped must read the cap the run ended on, not the configuration as it is now.
+    writeFileSync(configFile, JSON.stringify({ MAX_SCAN_CYCLES: 20 }))
+    writeFileSync(daemonFile('scan-count.txt'), '4\n')
+    const shipped = spawnSync(process.execPath, [CLI, 'shipped', '#41'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(shipped.status, shipped.stderr).toBe(0)
+    expect(readFileSync(join(paths.logsDir, 'loop.log'), 'utf8')).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 04\/12\] Completed {4}Loop {8}PR #41\r?\n$/,
+    )
+  })
+
   it('states when automatic core updates are disabled', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
