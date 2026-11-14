@@ -3680,7 +3680,12 @@ describe('closePromotedIssues', () => {
       .toEqual({ closed: [], returned: [issueNumber] })
   })
 
-  function probe(answers: { exists?: boolean, onDefault?: (mergeCommit: string) => boolean | undefined }) {
+  function probe(answers: {
+    exists?: boolean,
+    local?: boolean,
+    onHead?: (mergeCommit: string) => boolean | undefined,
+    onDefault?: (mergeCommit: string) => boolean | undefined,
+  }) {
     const stranded: Array<{ runBranch: string, issueNumbers: number[] }> = []
     const probed: string[] = []
     return {
@@ -3691,6 +3696,8 @@ describe('closePromotedIssues', () => {
           probed.push(runBranch)
           return answers.exists
         },
+        localBranchExists: () => ('local' in answers ? answers.local : false),
+        onHead: (mergeCommit: string) => (answers.onHead === undefined ? false : answers.onHead(mergeCommit)),
         onDefaultBranch: (mergeCommit: string) => answers.onDefault?.(mergeCommit),
         stranded: (runBranch: string, issueNumbers: number[]) => { stranded.push({ runBranch, issueNumbers }) },
       },
@@ -3749,6 +3756,60 @@ describe('closePromotedIssues', () => {
     expect(issuePromotionForIssue(paths, onRemote)?.taskId).toBe('task-on-remote')
     expect((await forge.getIssue(onRemote)).labels).not.toContain(LABEL_READY)
     expect(forge.issueComments.get(onRemote) ?? []).toEqual([])
+  })
+
+  it('returns the issues of a run branch gone from the remote and the checkout whose work HEAD lacks', async () => {
+    const issueNumber = await promotedIssue('task-gone-everywhere', 'a'.repeat(40), 'run/gone')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const { probe: gone, stranded } = probe({
+      exists: false, local: false, onHead: () => false, onDefault: () => false,
+    })
+
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, gone))
+      .toEqual({ closed: [], returned: [issueNumber] })
+    expect(forge.issueComments.get(issueNumber)?.at(-1)).toBe(
+      `UNPROMOTED: task-gone-everywhere\nMerged as ${'a'.repeat(40)} into run branch run/gone, which was deleted without a pull request. This issue is ready again.`,
+    )
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    expect(stranded).toEqual([])
+  })
+
+  it('keeps the issues of a run branch missing on the remote but present in the checkout', async () => {
+    const local = await promotedIssue('task-local', 'a'.repeat(40), 'run/local')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+
+    const present = probe({ exists: false, local: true, onHead: () => false, onDefault: () => false })
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, present.probe))
+      .toEqual({ closed: [], returned: [] })
+    expect(present.stranded).toEqual([{ runBranch: 'run/local', issueNumbers: [local] }])
+
+    const unknown = probe({ exists: false, local: undefined, onHead: () => false, onDefault: () => false })
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, unknown.probe))
+      .toEqual({ closed: [], returned: [] })
+    expect(unknown.stranded).toEqual([{ runBranch: 'run/local', issueNumbers: [local] }])
+
+    expect(issuePromotionForIssue(paths, local)?.taskId).toBe('task-local')
+    expect(forge.issueComments.get(local) ?? []).toEqual([])
+  })
+
+  it('keeps the issues of a deleted run branch whose merge commit HEAD contains or cannot be checked', async () => {
+    const cutFrom = await promotedIssue('task-cut-from', 'a'.repeat(40), 'run/earlier')
+    const unknown = await promotedIssue('task-unknown-commit', 'c'.repeat(40), 'run/earlier')
+    forge.prStatusValue = { state: 'none', isDraft: false, url: '', headSha: '', checks: [] }
+    const { probe: gone, stranded } = probe({
+      exists: false,
+      local: false,
+      onHead: (mergeCommit) => (mergeCommit === 'a'.repeat(40) ? true : undefined),
+      onDefault: () => false,
+    })
+
+    expect(await closePromotedIssues(forge, paths, () => true, 'run/held', true, gone))
+      .toEqual({ closed: [], returned: [] })
+    expect(stranded).toEqual([{ runBranch: 'run/earlier', issueNumbers: [cutFrom, unknown] }])
+    expect(issuePromotionForIssue(paths, cutFrom)?.taskId).toBe('task-cut-from')
+    expect(issuePromotionForIssue(paths, unknown)?.taskId).toBe('task-unknown-commit')
+    expect(forge.issueComments.get(cutFrom) ?? []).toEqual([])
+    expect(forge.issueComments.get(unknown) ?? []).toEqual([])
   })
 
   it('leaves the held run branch without a pull request alone, and every such branch without a probe', async () => {
