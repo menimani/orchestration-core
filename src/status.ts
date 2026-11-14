@@ -175,7 +175,13 @@ async function acquireStatusLock(paths: OrchPaths, taskId: string): Promise<stri
     try {
       mkdirSync(dir)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      const code = (error as NodeJS.ErrnoException).code
+      // Windows reports a name still pending deletion as EPERM rather than EEXIST.
+      if (code === 'EPERM') {
+        await sleep(STATUS_LOCK_RETRY_MS)
+        continue
+      }
+      if (code !== 'EEXIST') throw error
       try {
         if (!statSync(dir).isDirectory()) throw error
       } catch (inspectionError) {
