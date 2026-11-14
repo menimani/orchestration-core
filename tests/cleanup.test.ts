@@ -494,4 +494,31 @@ describe('cleanupTask', () => {
 
     for (const name of seeded) expect(existsSync(join(gateFixDir, name))).toBe(false)
   })
+
+  it('keeps the status file when a marker cannot be removed, so cleanup can run again', () => {
+    seedTask(null)
+    writeGateFixState(paths, taskId, { attempts: 1, verificationFailed: false, pending: true })
+    const lockedMarker = join(paths.queueDir, 'scanned', `${taskId}.failed`)
+    const runtime = makeRuntime()
+    const removeFile = runtime.remove
+    runtime.remove = (path, options) => {
+      if (path === lockedMarker) {
+        const error = new Error('resource busy or locked') as NodeJS.ErrnoException
+        error.code = 'EBUSY'
+        throw error
+      }
+      removeFile(path, options)
+    }
+
+    expect(() => cleanupTask(paths, taskId, runtime)).toThrow('resource busy or locked')
+    expect(existsSync(statusFile(paths, taskId))).toBe(true)
+    expect(existsSync(lockedMarker)).toBe(true)
+
+    runtime.remove = removeFile
+    cleanupTask(paths, taskId, runtime)
+
+    expect(existsSync(statusFile(paths, taskId))).toBe(false)
+    expect(existsSync(lockedMarker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'gate-fix', `${taskId}.json`))).toBe(false)
+  })
 })
