@@ -70,8 +70,8 @@ import {
 import { observeNextPoll } from './wake.ts'
 import { runWorkerCommand } from './worker.ts'
 import {
-  loopRestartPredecessorPid, publishLoopReplacementPid, signalLoopRestartReady,
-  startLoopReplacement,
+  loopRestartPredecessorPid, loopRestartPredecessorProcessPid, publishLoopReplacementPid,
+  signalLoopRestartReady, startLoopReplacement,
 } from './restart.ts'
 import {
   prepareBranchTopology, prepareIntegrationWorktree,
@@ -1523,7 +1523,9 @@ async function runLoopDaemon(
 
   try {
     const foreignTasks = liveTaskProcesses(paths)
-    const sweep = sweepAbandonedTemporaryWorktrees(paths, log, restartPredecessorPid)
+    const sweep = sweepAbandonedTemporaryWorktrees(paths, log, [
+      restartPredecessorPid, loopRestartPredecessorProcessPid(),
+    ].filter((pid) => pid !== undefined))
     for (const worktree of sweep.removed) {
       log(formatEventLine('Removed', 'worktree', relative(paths.repoRoot, worktree)))
     }
