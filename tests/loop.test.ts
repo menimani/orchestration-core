@@ -5152,6 +5152,26 @@ describe('scanForNextTasks', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
   })
 
+  it('counts one gate failure when several local findings fail to enqueue in one attempt', async () => {
+    const loop = makeLoop(
+      {}, stubProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
+      () => { throw new Error('persistent local queue failure') },
+    )
+    const taskId = '20250101_000000_026_scan'
+    writeFinal(
+      taskId,
+      'NEXT_TASK: [BUG] the first finding a broken queue rejects\n'
+        + 'NEXT_TASK: [BUG] the second finding a broken queue rejects\n',
+    )
+
+    expect((await loop.scanForNextTasks(taskId, 0)).reconciled).toBe(false)
+    const warnings = logText().split('\n')
+      .filter((line) => line.includes('WARN could not enqueue finding from 026_scan'))
+    expect(warnings).toHaveLength(1)
+    expect(logText()).not.toContain('ERROR could not enqueue finding')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
   it('writes specs that instruct the completion marker — its absence records finished work as failed', async () => {
     const loop = makeLoop()
     writeFinal('20250101_000000_012_scan', 'NEXT_TASK: [BUG] a finding whose fix must be detectable\n')
