@@ -765,4 +765,67 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
     expectNoTemporaryWorktree('.merge-')
   })
+
+  it('refuses before the gate when an untracked file in the main checkout collides with the task', async () => {
+    const taskId = '20260824_084607_022_auto-dirty-main-checkout'
+    await makeCompletedTask(taskId, { commit: true })
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repoRoot, `${taskId}.txt`), 'left in the main checkout\n')
+    const mergeCommands: string[] = []
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string => {
+        if (args[0] === 'merge') mergeCommands.push(cwd)
+        return git(cwd, args)
+      },
+    }
+
+    const failure = mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+    })
+    await expect(failure).rejects.toThrow(MergeError)
+    await expect(failure).rejects.not.toThrow(MergeRecoveryError)
+    await expect(failure).rejects.toThrow(
+      `The main checkout has uncommitted or untracked changes the merge would overwrite: ${repoRoot}\n`
+      + `${taskId}.txt\n`,
+    )
+
+    // The gate never ran: no merge was attempted, in a temporary worktree or the checkout.
+    expect(mergeCommands).toEqual([])
+    expect(readFileSync(join(repoRoot, `${taskId}.txt`), 'utf8')).toBe('left in the main checkout\n')
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expectNoTemporaryWorktree('.merge-')
+  })
+
+  it('reports git refusing the checkout merge instead of a conflict in the task', async () => {
+    const taskId = '20260824_084607_023_auto-refused-main-merge'
+    await makeCompletedTask(taskId, { commit: true })
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const mergeRuntime = {
+      git: (cwd: string, args: string[]): string => {
+        // The file appears while the gate runs, after the check before it passed.
+        if (args[0] === 'merge' && args[1] === '--quiet' && cwd !== repoRoot) {
+          writeFileSync(join(repoRoot, `${taskId}.txt`), 'written during the gate\n')
+        }
+        return git(cwd, args)
+      },
+    }
+
+    const failure = mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, mergeRuntime,
+    })
+    await expect(failure).rejects.toThrow(MergeError)
+    await expect(failure).rejects.not.toThrow(MergeRecoveryError)
+    await expect(failure).rejects.not.toThrow('A merge conflict occurred')
+    await expect(failure).rejects.toThrow(
+      `Git refused the merge into ${repoRoot} without a conflict; the checkout was left as it was. `
+      + 'Merge failure: ',
+    )
+    await expect(failure).rejects.toThrow('would be overwritten by merge')
+
+    expect(readFileSync(join(repoRoot, `${taskId}.txt`), 'utf8')).toBe('written during the gate\n')
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expectNoTemporaryWorktree('.merge-')
+  })
 })

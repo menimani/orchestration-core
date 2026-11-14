@@ -1903,7 +1903,12 @@ describe('mergeRemoteTask', () => {
     })
     await expect(failure).rejects.toThrow(MergeError)
     await expect(failure).rejects.not.toThrow(MergeRecoveryError)
-    await expect(failure).rejects.toThrow(`A merge conflict occurred while adopting ${branch}.`)
+    // The merge left neither a merge in progress nor unmerged paths, so git refused it
+    // rather than stopping on a conflict, and the task is not blamed for one.
+    await expect(failure).rejects.toThrow(
+      'without a conflict; the checkout was left as it was. Merge failure: merge did not start',
+    )
+    await expect(failure).rejects.not.toThrow('A merge conflict occurred')
     expectNoTemporaryWorktree('.adopt-')
   })
 })

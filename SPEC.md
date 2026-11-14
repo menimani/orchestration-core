@@ -575,7 +575,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
    used both retries is instead parked under `loop:retry-exhausted` by the same release,
    with a `Parked` event that does not stop the loop; its record and branches are kept. When a retry merges or
    completes without changes, or a remote worker branch is adopted for one of its linked
-   issues, every branch kept for its chain is deleted and its records are removed. Pre-merge tests are chosen from the paths the
+   issues, every branch kept for its chain is deleted and its records are removed.
+   A merge whose changes would overwrite an uncommitted or untracked file in the main
+   checkout is refused before its gate, naming that checkout and those paths; changes
+   elsewhere in the checkout do not stop it. A merge git refuses without starting one,
+   leaving no merge in progress and no unmerged paths, fails with git's reason rather
+   than as a conflict in the task. Pre-merge tests are chosen from the paths the
    rebased worktree touched. `TASK_GATE=full` asks the project adapter for its full merge
    checks; `TASK_GATE=light` asks it for reduced merge checks. At each cycle-gate entry,
    light mode runs every step in the adapter's cycle suite, while full mode runs only
