@@ -571,6 +571,41 @@ describe('loop daemon ownership', () => {
     expect(git(['worktree', 'list', '--porcelain'])).not.toContain('.merge-left-behind-')
   })
 
+  it('removes a gate worktree its live wrapped predecessor left behind at the handover', () => {
+    const paths = orchPaths(repoRoot)
+    git(['-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit', '--allow-empty', '--quiet', '-m', 'init'])
+    // This live test process stands in for the predecessor's Node process, which named the
+    // worktree; an exited process stands in for the wrapper that is its tree root.
+    const wrapper = spawnSync(process.execPath, ['-e', ''], { windowsHide: true })
+    expect(wrapper.status).toBe(0)
+    expect(wrapper.pid).not.toBe(process.pid)
+    const leftover = join(paths.worktreesDir, `.merge-wrapped-${process.pid}-1`)
+    mkdirSync(paths.worktreesDir, { recursive: true })
+    git(['worktree', 'add', '--quiet', '--detach', leftover])
+
+    const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_SCAN_CYCLES: '0',
+        SCAN_ENABLED: 'true',
+        ORCHESTRATION_LOOP_RESTART_PREDECESSOR_PID: `${wrapper.pid}`,
+        ORCHESTRATION_LOOP_RESTART_PREDECESSOR_PROCESS_PID: `${process.pid}`,
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status, result.stdout + result.stderr).toBe(0)
+    expect(result.stdout).toMatch(/Removed\s+worktree\s+\S*\.merge-wrapped-/)
+    expect(existsSync(leftover)).toBe(false)
+    expect(git(['worktree', 'list', '--porcelain'])).not.toContain('.merge-wrapped-')
+  })
+
   it('allows only one of concurrent starts to acquire the PID lock', async () => {
     const wrapper = join(repoRoot, 'start-loop.mjs')
     const cliUrl = pathToFileURL(CLI).href

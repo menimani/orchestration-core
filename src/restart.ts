@@ -7,7 +7,8 @@ import {
 import { errorHeadline } from './errorText.ts'
 import { PACKAGE_ROOT } from './paths.ts'
 import {
-  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV,
+  LOOP_RESTART_READY_FILE_ENV,
 } from './internalEnvironment.ts'
 import {
   currentProcessMarkerPid, parseProcessMarker, processMarker, processMarkerText,
@@ -40,7 +41,22 @@ interface LoopRestartRuntime {
 export function loopRestartPredecessorPid(
   env: NodeJS.ProcessEnv = process.env,
 ): number | undefined {
-  const value = env[LOOP_RESTART_PREDECESSOR_PID_ENV]
+  return positivePid(env[LOOP_RESTART_PREDECESSOR_PID_ENV])
+}
+
+/**
+ * The predecessor's own process, which names its gate worktrees with its own PID. Behind
+ * the Windows wrapper that differs from the tree root holding the reservation, so it is
+ * believed only when handed over together with that root.
+ */
+export function loopRestartPredecessorProcessPid(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  if (loopRestartPredecessorPid(env) === undefined) return undefined
+  return positivePid(env[LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV])
+}
+
+function positivePid(value: string | undefined): number | undefined {
   if (value === undefined || !/^\d+$/.test(value)) return undefined
   const pid = Number(value)
   return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
@@ -101,6 +117,7 @@ export function signalLoopRestartReady(
   } finally {
     delete env[LOOP_RESTART_READY_FILE_ENV]
     delete env[LOOP_RESTART_PREDECESSOR_PID_ENV]
+    delete env[LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]
   }
 }
 
@@ -120,6 +137,7 @@ export async function startLoopReplacement(
       ...(runtime.env ?? process.env),
       [LOOP_RESTART_READY_FILE_ENV]: readyFile,
       [LOOP_RESTART_PREDECESSOR_PID_ENV]: `${predecessorPid}`,
+      [LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]: `${process.pid}`,
     }
     if (runtime.outputFile === undefined) throw new Error('A loop log file is required to restart the daemon')
     replacement = await os.launchDaemon({

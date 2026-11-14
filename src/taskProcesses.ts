@@ -103,15 +103,18 @@ const temporaryWorktreeRemovalRuntime: WorktreeRemovalRuntime = {
  * Remove the temporary gate worktrees whose creating process is gone. Nothing else ever
  * refers to them, so without this one failed removal would count as an orphan at every
  * later start. A gate runs inside the daemon and a restart hands over only between polls,
- * so a worktree of the `settledPid` predecessor is abandoned even while it still lives.
+ * so a worktree of the settled predecessor is abandoned even while it still lives. The
+ * name holds the creating Node process's own PID, which behind the Windows wrapper is not
+ * the predecessor's tree root, so `settledPids` names every PID that process answers to.
  * A worktree that cannot be removed stays, for the orphan check to report.
  */
 export function sweepAbandonedTemporaryWorktrees(
   paths: OrchPaths,
   report: (line: string) => void,
-  settledPid?: number,
+  settledPids: number | readonly number[] = [],
   runtime: WorktreeRemovalRuntime = temporaryWorktreeRemovalRuntime,
 ): TemporaryWorktreeSweep {
+  const settled = new Set(typeof settledPids === 'number' ? [settledPids] : settledPids)
   const sweep: TemporaryWorktreeSweep = { removed: [], failures: [] }
   const entries = existsSync(paths.worktreesDir)
     ? readdirSync(paths.worktreesDir, { withFileTypes: true })
@@ -121,7 +124,7 @@ export function sweepAbandonedTemporaryWorktrees(
     const owner = TEMPORARY_WORKTREE_NAME.exec(entry.name)?.[1]
     if (owner === undefined || !entry.isDirectory()) continue
     const pid = Number(owner)
-    if (pid !== settledPid && runtime.os.processIsAlive(pid)) continue
+    if (!settled.has(pid) && runtime.os.processIsAlive(pid)) continue
     const worktree = join(paths.worktreesDir, entry.name)
     const result = removeWorktreeWithFallback(paths.repoRoot, worktree, runtime, report)
     if (result.fallbackFailure !== undefined || existsSync(worktree)) {

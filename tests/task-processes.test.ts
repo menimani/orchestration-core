@@ -270,6 +270,48 @@ describe('sweepAbandonedTemporaryWorktrees', () => {
     expect(existsSync(predecessorMerge)).toBe(false)
   })
 
+  // Behind the Windows wrapper the predecessor's tree root is the wrapper, while the gate
+  // worktree carries the PID of the Node process inside it.
+  it('treats a predecessor whose tree root differs from its own PID as settled', () => {
+    const predecessorMerge = join(paths.worktreesDir, '.merge-0101_task-601-1700000000000')
+    mkdirSync(predecessorMerge, { recursive: true })
+
+    const sweep = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, [600, 601], runtime(new Set([600, 601])).runtime,
+    )
+
+    expect(sweep).toEqual({ removed: [predecessorMerge], failures: [] })
+    expect(existsSync(predecessorMerge)).toBe(false)
+  })
+
+  it('keeps a wrapped daemon worktree while that daemon lives and is not the predecessor', () => {
+    const liveMerge = join(paths.worktreesDir, '.merge-0101_task-601-1700000000000')
+    mkdirSync(liveMerge, { recursive: true })
+
+    const unsettled = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, undefined, runtime(new Set([600, 601])).runtime,
+    )
+    const rootOnly = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, 600, runtime(new Set([600, 601])).runtime,
+    )
+
+    expect(unsettled).toEqual({ removed: [], failures: [] })
+    expect(rootOnly).toEqual({ removed: [], failures: [] })
+    expect(existsSync(liveMerge)).toBe(true)
+  })
+
+  it('keeps a worktree naming an unrelated live PID at a wrapped handover', () => {
+    const unrelated = join(paths.worktreesDir, '.adopt-42-777-1700000000000')
+    mkdirSync(unrelated, { recursive: true })
+
+    const sweep = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, [600, 601], runtime(new Set([600, 601, 777])).runtime,
+    )
+
+    expect(sweep).toEqual({ removed: [], failures: [] })
+    expect(orphanedWorktreeDirectories(paths)).toEqual([unrelated])
+  })
+
   it('reports a worktree it cannot remove and leaves it for the orphan check', () => {
     const held = join(paths.worktreesDir, '.adopt-42-555-1700000000000')
     mkdirSync(held, { recursive: true })

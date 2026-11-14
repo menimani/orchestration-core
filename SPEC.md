@@ -1129,7 +1129,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the temporary gate worktrees, `.merge-<task>-<pid>-<ms>` and `.adopt-<issue>-<pid>-<ms>`,
     which nothing records but the process ID in their name: one whose creating process is
     gone, or which belongs to the restart predecessor handing over its lock, is removed and
-    logged as `Removed worktree`; one whose creator still lives is left alone, and one that
+    logged as `Removed worktree`. The name holds the creating Node process's own PID, which
+    for a daemon behind the Windows wrapper is not its process-tree root, so the
+    predecessor hands its replacement both and either one counts as the predecessor. One
+    whose creator still lives is left alone, and one that
     cannot be removed is logged as `WARN worktree` and stays. A worktree left after the
     sweep with no corresponding task status blocks startup and is reported with an
     OS-specific handle diagnostic.

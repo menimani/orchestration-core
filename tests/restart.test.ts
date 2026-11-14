@@ -9,10 +9,12 @@ import type {
   DaemonLaunchOptions, DaemonProcess, OperatingSystem,
 } from '../src/adapters/os.ts'
 import {
-  publishLoopReplacementPid, signalLoopRestartReady, startLoopReplacement,
+  loopRestartPredecessorProcessPid, publishLoopReplacementPid, signalLoopRestartReady,
+  startLoopReplacement,
 } from '../src/restart.ts'
 import {
-  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV, WINDOWS_PROCESS_ROOT_PID_ENV,
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV,
+  LOOP_RESTART_READY_FILE_ENV, WINDOWS_PROCESS_ROOT_PID_ENV,
 } from '../src/internalEnvironment.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
 import { markStartupInstalling, startupInstallingFile } from '../src/startupInstall.ts'
@@ -613,5 +615,63 @@ describe('loop replacement startup', () => {
 
     expect(readFileSync(readyFile, 'utf8')).toBe('43213\n')
     expect(readdirSync(root)).toEqual(['ready'])
+  })
+
+  // The gate worktrees a wrapped predecessor leaves carry its Node PID, not the wrapper's,
+  // so the replacement's startup sweep needs both to recognise them as settled.
+  it('hands the replacement the predecessor process PID beside its wrapper tree root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    const child = fakeChild(43214)
+    const launchDaemon = vi.fn((options: DaemonLaunchOptions) => {
+      expect(options.env?.[LOOP_RESTART_PREDECESSOR_PID_ENV]).toBe('43215')
+      expect(options.env?.[LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]).toBe(`${process.pid}`)
+      expect(loopRestartPredecessorProcessPid(options.env)).toBe(process.pid)
+      setTimeout(() => writeFileSync(readyFile, '43214\n'), 0)
+    })
+    const os = {
+      ...fakeOperatingSystem(child, launchDaemon),
+      processTreeRootPid: () => 43215,
+    }
+
+    await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      startupTimeoutMs: 1_000,
+    })).resolves.toEqual({ ok: true, pid: 43214 })
+    expect(launchDaemon).toHaveBeenCalledOnce()
+  })
+
+  it('believes a predecessor process PID only beside its tree root', () => {
+    expect(loopRestartPredecessorProcessPid({
+      [LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]: '43216',
+    })).toBeUndefined()
+    expect(loopRestartPredecessorProcessPid({
+      [LOOP_RESTART_PREDECESSOR_PID_ENV]: '43215',
+      [LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]: 'not-a-pid',
+    })).toBeUndefined()
+    expect(loopRestartPredecessorProcessPid({
+      [LOOP_RESTART_PREDECESSOR_PID_ENV]: '43215',
+      [LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]: '43216',
+    })).toBe(43216)
+  })
+
+  it('withholds the predecessor process PID from what the ready replacement starts', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const env: NodeJS.ProcessEnv = {
+      [LOOP_RESTART_READY_FILE_ENV]: join(root, 'ready'),
+      [LOOP_RESTART_PREDECESSOR_PID_ENV]: '43215',
+      [LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]: '43216',
+    }
+
+    signalLoopRestartReady(env, {
+      processTreeRootPid: () => 43217,
+    } as unknown as OperatingSystem)
+
+    expect(env).toEqual({})
   })
 })
