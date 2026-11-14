@@ -1152,8 +1152,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
 29. All forge access goes through `adapters/forge.ts` (`FORGE=github` selects
     `forge-github.ts`; any other selector loads an external package, file URL, absolute
     path, or consumer-repository-relative module). A consumer-repository-relative
-    selector must begin with `./`, `../`, `.\`, or `..\` on every platform; an
-    unprefixed value such as `custom/forge.mjs` remains a package specifier. External
+    selector must begin with `./`, `../`, `.\`, or `..\` on every platform, and its
+    backslashes separate directories on every platform; an unprefixed value such as
+    `custom/forge.mjs` remains a package specifier. External
     modules export a `Forge`
     as default or `forge`, or a `createForge(repoRoot, report, target)` factory, so gitea/gitlab
     implementations can be added without touching the core. The target names the

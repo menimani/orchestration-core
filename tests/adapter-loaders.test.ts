@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -26,9 +26,31 @@ describe('external adapter selectors', () => {
 
     const specifier = externalAdapterSpecifier(selector, root)
 
-    expect(specifier).toBe(pathToFileURL(resolve(root, selector)).href)
+    expect(specifier).toBe(pathToFileURL(resolve(root, 'custom', 'forge.mjs')).href)
+    expect(specifier).not.toContain('%5C')
     expect(specifier.startsWith('file:')).toBe(true)
     expect(externalAdapterSpecifier('custom\\forge.mjs', root)).toBe('custom\\forge.mjs')
+  })
+
+  it('treats backslashes in a relative selector as directory separators on every platform', () => {
+    const root = fixtureRoot()
+
+    expect(externalAdapterSpecifier('..\\shared\\runner.mjs', root))
+      .toBe(pathToFileURL(resolve(root, '..', 'shared', 'runner.mjs')).href)
+    expect(externalAdapterSpecifier('./custom\\nested/forge.mjs', root))
+      .toBe(pathToFileURL(resolve(root, 'custom', 'nested', 'forge.mjs')).href)
+  })
+
+  it('loads a forge from a backslash-separated relative selector on every platform', async () => {
+    const root = fixtureRoot()
+    mkdirSync(join(root, 'custom'))
+    writeFileSync(join(root, 'custom', 'forge.mjs'), `
+export default { selectedBy: 'backslash selector' }
+`)
+
+    const forge = await loadForge('.\\custom\\forge.mjs', root, () => {})
+
+    expect(forge).toMatchObject({ selectedBy: 'backslash selector' })
   })
 
   it('loads a forge factory from a path relative to the repository', async () => {
