@@ -1189,7 +1189,9 @@ function publishMergeGuard(dir: string, owner: MergeGuardOwner): boolean {
   try {
     mkdirSync(dir)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    // Windows reports a name still pending deletion as EPERM rather than EEXIST.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'EEXIST' || code === 'EPERM') return false
     throw error
   }
   try {

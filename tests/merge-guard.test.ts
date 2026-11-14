@@ -5,13 +5,15 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  readFileSync: vi.fn(), renameSync: vi.fn(), rmSync: vi.fn(), writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(), readFileSync: vi.fn(), renameSync: vi.fn(), rmSync: vi.fn(),
+  writeFileSync: vi.fn(),
 }))
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
   return {
     ...actual,
+    mkdirSync: mocks.mkdirSync,
     readFileSync: mocks.readFileSync,
     renameSync: mocks.renameSync,
     rmSync: mocks.rmSync,
@@ -67,6 +69,8 @@ function restoreOwnerReads(): void {
 
 beforeEach(() => {
   restoreOwnerReads()
+  mocks.mkdirSync.mockReset().mockImplementation((...args: unknown[]) =>
+    Reflect.apply(actualFs.mkdirSync, actualFs, args))
   mocks.rmSync.mockReset().mockImplementation((...args: unknown[]) =>
     Reflect.apply(actualFs.rmSync, actualFs, args))
   mocks.renameSync.mockReset().mockImplementation((...args: unknown[]) =>
@@ -86,6 +90,30 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   actualFs.rmSync(repoRoot, { recursive: true, force: true })
+})
+
+describe('merge guard publication', () => {
+  it('reports a lost race when Windows still reports the guard as pending deletion', async () => {
+    const taskId = '20261114_140130_001_auto-pending-deletion-guard'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mocks.mkdirSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === guard) {
+        throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' })
+      }
+      return Reflect.apply(actualFs.mkdirSync, actualFs, args)
+    })
+    const onMergeSkipped = vi.fn()
+    const onMergeStart = vi.fn()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onMergeSkipped, onMergeStart,
+    })).resolves.toEqual({ outcome: 'skipped', reason: 'active' })
+    expect(onMergeSkipped.mock.calls).toEqual([['active']])
+    expect(onMergeStart).not.toHaveBeenCalled()
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(actualFs.existsSync(guard)).toBe(false)
+  })
 })
 
 describe('merge guard retirement', () => {
