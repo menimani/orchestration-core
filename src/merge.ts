@@ -174,7 +174,8 @@ export interface MergeOptions {
   /**
    * Persist what follows from the merge before post-merge work begins or this function
    * returns. A dependency install that fails afterwards stops the loop, and a restart
-   * that finds the merge already recorded never repeats this step.
+   * that finds the merge already recorded never repeats this step. A local merge logs a
+   * failure here as a warning and still synchronizes dependencies and removes the worktree.
    */
   onMerged?: ((mergeCommit: string) => void) | undefined
 }
@@ -1106,7 +1107,13 @@ async function finalizeLocalMerge(
   options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   removeRebaseEmptiedMarker(paths, taskId)
-  options.onMerged?.(mergeCommit)
+  // The merge is recorded by now, and no later poll returns to a merged task, so a
+  // callback that throws must not skip the dependency sync and the cleanup below.
+  try {
+    options.onMerged?.(mergeCommit)
+  } catch (error) {
+    io.out(`WARN: post-merge bookkeeping failed for ${taskId}: ${commandFailureSummary(error)}`)
+  }
   syncOrchestrationDepsAfterRecordedMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     options.beforeOrchestrationDepsInstall,
