@@ -115,7 +115,25 @@ function groupIsAlive(runtime: PosixOperatingSystemRuntime, pid: number): boolea
 export function createOperatingSystem(
   runtime: PosixOperatingSystemRuntime = systemRuntime,
 ): OperatingSystem {
-  const processTreeIsAlive = (pid: number): boolean => groupIsAlive(runtime, pid)
+  const processTreeIsAlive = (pid: number, recordedStartIdentity?: string): boolean => {
+    // A runner's tree is its process group, and the group keeps the runner's PID as its
+    // ID after the runner exits. Parent links cannot find its orphans here: the system
+    // reparents them, so they no longer name the dead PID. What the query can see is the
+    // group, and fork never hands a new process the ID of a group that still has members,
+    // so a holder with a known, different identity proves the recorded group is empty;
+    // probing the group then would only ask about the holder's own. Where the holder's
+    // identity cannot be read or matches, the group answer stands as before.
+    if (recordedStartIdentity !== undefined) {
+      let holderIdentity: string | undefined
+      try {
+        holderIdentity = runtime.processStartIdentity?.(pid)
+      } catch {
+        holderIdentity = undefined
+      }
+      if (holderIdentity !== undefined && holderIdentity !== recordedStartIdentity) return false
+    }
+    return groupIsAlive(runtime, pid)
+  }
   const signalAndAwaitExit = (pid: number, signal?: NodeJS.Signals): boolean => {
     try {
       if (signal === undefined) runtime.signalProcessGroup(pid)

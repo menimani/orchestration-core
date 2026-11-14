@@ -85,7 +85,14 @@ export interface OperatingSystem {
    * second daemon start alongside a live foreign task.
    */
   processIsAlive(pid: number): boolean
-  processTreeIsAlive(pid: number): boolean
+  /**
+   * Without `recordedStartIdentity`, whether the tree rooted at whatever holds the PID now
+   * is alive. With the identity a caller recorded for the PID, a holder whose identity is
+   * known and differs is not that process: the answer then covers only the recorded
+   * process's surviving descendants, never the holder or anything the holder started.
+   * Where the holder's identity cannot be read or matches, the answer is unchanged.
+   */
+  processTreeIsAlive(pid: number, recordedStartIdentity?: string): boolean
   /**
    * Terminate the tree of every live process that names this worktree in its command line
    * or executable path, before the worktree is removed. A shell whose parent exited first

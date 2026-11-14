@@ -37,7 +37,8 @@ type ProcessRegistryEntry = VerifiedProcessRegistryEntry | UnverifiedProcessRegi
 
 export type ProcessStartIdentity = (pid: number) => string | undefined
 export type ProcessIsAlive = (pid: number) => boolean
-export type ProcessTreeIsAlive = (pid: number) => boolean
+/** The recorded start identity, when given, scopes the answer to that process's tree. */
+export type ProcessTreeIsAlive = (pid: number, recordedStartIdentity?: string) => boolean
 
 function registryDir(paths: OrchPaths): string {
   return join(paths.queueDir, 'pids')
@@ -192,9 +193,12 @@ function registeredTaskProcessPid(
     return undefined
   }
   if (entry.startIdentity !== null && currentStartIdentity !== entry.startIdentity) {
+    // Another process holds the PID now, so the recorded runner is gone. Processes it
+    // started may outlive it and still write to the worktree; only those keep the entry.
+    // The holder and anything the holder started are never the recorded runner's tree.
     let alive = true
     try {
-      alive = processTreeIsAlive(entry.pid)
+      alive = processTreeIsAlive(entry.pid, entry.startIdentity)
     } catch {
       // A failed tree probe cannot prove that the recorded tree was cleaned up.
     }
