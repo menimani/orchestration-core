@@ -1563,7 +1563,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     except that an issue whose comments include an author whose access is undetermined
     (see the trust model) is not cached, so the next poll asks again.
     Closed lifecycle labels are reconciled at startup and once on cycle-gate entry, not on
-    every idle poll. A forge rate-limit response pauses further forge calls until its
+    every idle poll; a cycle-gate reconciliation that fails for any reason other than a
+    rate limit holds the gate and logs a WARN, and a second consecutive failure stops the
+    loop. A forge rate-limit response pauses further forge calls until its
     reported reset (querying `rate_limit` when needed), logs one aligned `Waiting forge`
     event, and resumes without attributing even a long wait to the branch.
     The daemon records issue mode in

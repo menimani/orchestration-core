@@ -1780,6 +1780,36 @@ describe('cycle gate', () => {
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(attempts).toBe(2)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('stops the loop when closed-issue label removal keeps failing', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: false,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const issueNumber = await fakeForge.createIssue({
+      title: 'closed finding', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    await fakeForge.closeIssue(issueNumber, 'done')
+    const removeLabel = vi.fn(async () => { throw new Error('label removal failed') })
+    fakeForge.removeLabel = removeLabel
+    const stopFile = join(paths.queueDir, 'stop')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logText()).toContain('WARN could not reconcile closed issue labels: label removal failed')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(removeLabel).toHaveBeenCalledTimes(2)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText()).toContain(
+      'ERROR could not reconcile closed issue labels: label removal failed (repeated 2 times)',
+    )
   })
 
   it.each([
