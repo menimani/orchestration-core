@@ -433,7 +433,10 @@ prefixed with `#`, or one absolute HTTP(S) URL. It refuses to run while the loop
 performs no forge operation, records the completion in `logs/loop.log`, and emits a
 standalone `LOOP_DONE:` marker to `logs/loop-markers.log` carrying the normalized
 reference: `#<n>` for a number, and for a URL its parsed form, with the scheme and host
-lowercased and a default port dropped.
+lowercased and a default port dropped. The event's cycle prefix comes from
+`queue/scan-count.txt` and `queue/cycle-cap.txt`; when either file exists but does not
+hold a non-negative safe integer, the command exits 1 with an error naming the file and
+writes neither log.
 An active loop that observes the PR already ready or merged records its normal ending
 itself, so `shipped` is only needed when that ending is absent. A PR merged before later
 commits reached the run branch does not end the run; the loop opens a new PR for them. If

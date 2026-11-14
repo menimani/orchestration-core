@@ -1646,10 +1646,12 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     failure label first and reading the issue back to confirm it holds that single
     lifecycle label, logging a WARN when it does not — and counts
     through the consecutive-merge-failure limit instead of returning singleton work to
-    ready. A grouped adoption returns all members to ready as singleton work only when an
-    unclaimed member reports a different branch or head. A report naming an unavailable
-    issue is not treated as a group: each reporting issue is quarantined as
-    `loop:merge-failed` and counts as a merge failure.
+    ready. Once a group has formed — every issue the report names is available — any
+    counted adoption failure, whether a missing worker branch, a merge failure, a failed
+    gate, or an unclaimed member reporting a different branch or head, returns every
+    member to ready as singleton work instead, and still counts as a merge failure. A
+    report naming an unavailable issue fails before the group forms: the reporting issue
+    takes the singleton path and is quarantined as `loop:merge-failed`.
     As in item 10, a gate command that exits 75 never ran its tests: the adoption is
     deferred with a WARN that the repository test lock stayed busy, without the comment,
     the relabel, or a failure count, and every member stays `loop:merge-ready` for the
@@ -1678,8 +1680,8 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     A grouped member still claimed — `loop:in-progress` and not `loop:ready` — is still
     being published, even when it carries a report from an earlier task, so the poll
     skips the group and leaves every member as it is; only an unclaimed member reporting
-    a different branch or head, which returns the group to ready, or an unavailable
-    member, which quarantines the reporter as above, fails the adoption.
+    a different branch or head, which returns every member to ready as above, or an
+    unavailable member, which quarantines the reporter as above, fails the adoption.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
     `loop:in-progress` → `loop:retry-exhausted` parking branch, inspections and
