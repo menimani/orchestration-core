@@ -77,7 +77,7 @@ import {
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
-  reconcileIssueReleaseIntent,
+  reconcileIssueReleaseIntent, type RunBranchProbe,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
   removeIssueReleasePreparation,
@@ -544,6 +544,56 @@ export function createLoop(deps: LoopDeps) {
     if (result.status === 1) return false
     throw new Error(`could not tell whether ${descendant} contains ${ancestor}`
       + (result.detail === '' ? '' : `: ${result.detail}`))
+  }
+
+  // Git answers each question with exit 0 or a single documented "no" status; any other
+  // failure leaves it unanswered, so the promoted issues keep waiting.
+  function gitAnswer(args: string[], noStatus: number): boolean | undefined {
+    try {
+      git(args)
+      return true
+    } catch (error) {
+      return (error as { status?: number | null }).status === noStatus ? false : undefined
+    }
+  }
+
+  function runBranchProbe(
+    stranded: (runBranch: string, issueNumbers: number[]) => void,
+  ): RunBranchProbe {
+    // One fetch of the default branch serves every merge commit of the poll.
+    let defaultRef: string | undefined | null = null
+    function fetchedDefaultRef(): string | undefined {
+      if (defaultRef !== null) return defaultRef
+      defaultRef = undefined
+      try {
+        const remote = currentBranchTrackingRemote(paths.repoRoot)
+        const ref = git(['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]).trim()
+        if (!ref.startsWith(`${remote}/`)) return undefined
+        git(['fetch', '--quiet', remote, ref.slice(remote.length + 1)])
+        defaultRef = ref
+      } catch {
+        // An unknown default branch answers nothing.
+      }
+      return defaultRef
+    }
+    return {
+      remoteBranchExists: (runBranch) => {
+        let remote: string
+        try {
+          remote = currentBranchPushRemote(paths.repoRoot)
+        } catch {
+          return undefined
+        }
+        return gitAnswer(['ls-remote', '--exit-code', '--heads', remote, `refs/heads/${runBranch}`], 2)
+      },
+      onDefaultBranch: (mergeCommit) => {
+        const ref = fetchedDefaultRef()
+        return ref === undefined
+          ? undefined
+          : gitAnswer(['merge-base', '--is-ancestor', mergeCommit, ref], 1)
+      },
+      stranded,
+    }
   }
 
   function gitIn(cwd: string, args: string[]): string {
@@ -3802,10 +3852,18 @@ export function createLoop(deps: LoopDeps) {
               // abandoned and return its merged issues, so a failed lookup skips the step.
               const heldBranch = git(['branch', '--show-current']).trim()
               if (heldBranch === '') throw new Error('the checkout is not on a branch')
+              let strandedReported = false
               const { closed, returned } = await closePromotedIssues(
                 forge, paths, promotedCommitContained, heldBranch,
                 issueQueueIsSeparate(paths),
+                runBranchProbe((runBranch, issueNumbers) => {
+                  strandedReported = true
+                  warning('stranded-promotions', 'settling run branches without a pull request',
+                    `run branch ${runBranch} has no pull request; issues `
+                    + `${issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')} stay claimed`)
+                }),
               )
+              if (!strandedReported) warningLog.recovered('stranded-promotions')
               for (const issueNumber of closed) {
                 event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
               }

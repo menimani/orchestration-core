@@ -1429,7 +1429,14 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     entry that names the task, so the returned issue is claimed as a fresh task rather
     than deduplicated against work that never landed, returns the issue to ready and
     unassigned, drops its promotion record the same way, and logs a `Released` event. The comment withdraws
-    the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. Workers never
+    the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. A run
+    branch other than the one the loop holds that never got a pull request, because the
+    run restarted on a new branch before its cycle gate opened one or the branch was
+    deleted with `autoPr` off, is settled from git instead: once the push remote no longer
+    has the branch, each issue whose merge commit the default branch does not contain is
+    returned the same way, its comment stating that the branch was deleted without a pull
+    request. Every other issue of such a branch, including any whose answer git could not
+    give, stays claimed and is named in a warning. Workers never
     close promoted issues. Immediately after merging, the merger comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary
