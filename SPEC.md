@@ -1031,7 +1031,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
      parsed form, with the scheme and host lowercased and a default port dropped. The event's cycle prefix is read back from the state the stopped daemon
      left: the cycle number from `queue/scan-count.txt` and the cap from
      `queue/cycle-cap.txt` (item 13). A missing cycle number reads as zero, and a cap no
-     daemon recorded falls back to the configured `MAX_SCAN_CYCLES`.
+     daemon recorded falls back to the configured `MAX_SCAN_CYCLES`. An existing file of
+     either kind must hold base-10 digits representing a non-negative safe integer, as
+     the daemon writes them; other contents, including an empty file, make `shipped`
+     exit non-zero with an error naming the file (for example, `queue/cycle-cap.txt`)
+     and record nothing, so neither log receives an event with an unreadable prefix.
 
 ## Failure containment
 

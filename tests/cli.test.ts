@@ -1681,6 +1681,34 @@ describe('manually promoted run ending', () => {
       .toBe('LOOP_DONE: https://example.test/pull/323\n')
   })
 
+  it.each([
+    ['cycle-cap.txt', 'scan-count.txt', 'abc\n'],
+    ['cycle-cap.txt', 'scan-count.txt', ''],
+    ['scan-count.txt', 'cycle-cap.txt', 'abc\n'],
+    ['scan-count.txt', 'cycle-cap.txt', '9007199254740993\n'],
+  ])('refuses an invalid queue/%s without recording anything', (invalid, valid, contents) => {
+    const paths = orchPaths(repoRoot)
+    mkdirSync(paths.queueDir, { recursive: true })
+    writeFileSync(join(paths.queueDir, valid), '4\n')
+    writeFileSync(join(paths.queueDir, invalid), contents)
+
+    const result = spawnSync(process.execPath, [CLI, 'shipped', '#324'], {
+      cwd: repoRoot,
+      env: { ...INHERITED_ENV, MAX_SCAN_CYCLES: '6' },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toContain(
+      `queue/${invalid} must contain a non-negative integer; nothing was recorded.`,
+    )
+    expect(existsSync(join(paths.logsDir, 'loop.log'))).toBe(false)
+    expect(existsSync(join(paths.logsDir, 'loop-markers.log'))).toBe(false)
+  })
+
   it('rejects a call without a pull request reference', () => {
     const result = spawnSync(process.execPath, [CLI, 'shipped'], {
       cwd: repoRoot,
