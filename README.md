@@ -173,9 +173,11 @@ requests, workflow dispatch, and the issue queue — so start from that file, or
 What makes a runner substitutable is the marker protocol, not its CLI. The agent must
 write `options.finalMessageFile`, and the task counts as completed once that file
 carries `TASK_COMPLETE` on a line of its own, written last. Before it, the file may carry
-`NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, and `DECISION_REQUIRED: <text>`
-lines. Markers that appear only in the transcript log are ignored; the task lifecycle in
-`SPEC.md` states the rule.
+`NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, `NO_FINDINGS`, and
+`DECISION_REQUIRED: <text>` lines. `NO_FINDINGS` is a review's explicit empty result and
+never overrides a `NEXT_TASK:` line in the same message (`SPEC.md` item 30). Markers that
+appear only in the transcript log are ignored; the task lifecycle in `SPEC.md` states the
+rule.
 
 A forge factory's `target` names the repositories to act on when they are not the
 checkout's own: `codeRepository` for branches, pull requests, and workflow runs, and
