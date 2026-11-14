@@ -3096,6 +3096,25 @@ describe('reapStaleLeases', () => {
       expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
       expect(issueNumbersForTask(paths, 'task-deleted')).toEqual([])
     })
+
+    it.each([
+      ['a rate limit', () => new ForgeRateLimitError(new Date('2026-08-08T13:00:00Z'))],
+      ['a transient failure', () => new Error('forge unreachable')],
+    ])('keeps the record of an unlisted issue whose lookup fails with %s', async (_failure, failure) => {
+      const issueNumber = await promoted('task-unknown')
+      // Closed, so the listing omits it; the failed lookup must not count as that answer.
+      await forge.closeIssue(issueNumber, 'promoted')
+      const getIssue = forge.getIssue.bind(forge)
+      forge.getIssue = async (number) => {
+        if (number === issueNumber) throw failure()
+        return getIssue(number)
+      }
+
+      expect(await reapCountingLookups()).toContain(issueNumber)
+      expect(existsSync(join(paths.queueDir, 'issue-promotion', `${issueNumber}.json`))).toBe(true)
+      expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('task-unknown')
+      expect(issueNumbersForTask(paths, 'task-unknown')).toEqual([issueNumber])
+    })
   })
 
   it('reaps a stale mapped lease when its local task is not merged', async () => {
