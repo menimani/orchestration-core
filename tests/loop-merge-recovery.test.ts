@@ -598,6 +598,8 @@ describe('completed task merge recovery', () => {
     expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
     expect(releasePreparationForTask(paths, taskId)).toEqual([])
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+    // The surviving failed status leaves the announcement to the next poll's sweep.
+    expect(logged.some((line) => line.startsWith(`FAILED: ${taskId}`))).toBe(false)
   })
 
   /** A completed local task whose only commit conflicts with a later run-branch commit. */
@@ -665,6 +667,7 @@ describe('completed task merge recovery', () => {
     expect(logged).toContain(
       `Requeued 195_user    rebase conflict; ${shortTaskId(retryId)} starts from ${kept}`,
     )
+    expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.merge.log`)}`)
   })
 
   it('keeps the commits but stops retrying once a conflict chain uses its retries', async () => {
@@ -706,10 +709,13 @@ describe('completed task merge recovery', () => {
     expect(readFileSync(join(paths.queueDir, 'failed-2'), 'utf8')).toBe(`${taskId}\n`)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
     expect(readConflictedAttempts(paths, taskId)).toEqual([])
+    const failedLine = `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.merge.log`)}`
+    expect(logged).toContain(failedLine)
 
     expect(await loop.poll()).toBe('continue')
 
     expect(readFileSync(join(paths.queueDir, 'failed-2'), 'utf8')).toBe(`${taskId}\n`)
+    expect(logged.filter((line) => line.startsWith(`FAILED: ${taskId}`))).toEqual([failedLine])
   })
 
   it('records a conflicted local task as lost when its retry cannot be queued', async () => {
@@ -738,6 +744,7 @@ describe('completed task merge recovery', () => {
     expect(readFileSync(join(paths.queueDir, 'failed-3'), 'utf8')).toBe(`${taskId}\n`)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-3'))).toBe(false)
     expect(readConflictedAttempts(paths, taskId)).toEqual([])
+    expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.merge.log`)}`)
   })
 
   it('removes every branch kept for a retry once the retry merges', async () => {
@@ -967,6 +974,44 @@ describe('completed task merge recovery', () => {
     expect(issue.state).toBe('open')
     expect(issue.labels).toContain(LABEL_IN_PROGRESS)
     expect(fakeForge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('MERGED:')
+  })
+
+  it('stops the loop when the issue claim of a completed task can never be read', async () => {
+    const taskId = '20260815_125258_043_auto-unreadable-claim-stops'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'never readable claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [fakeForge.user],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    fakeForge.getIssue = async (number) => {
+      if (number === issueNumber) throw new Error('forge unavailable')
+      return getIssue(number)
+    }
+    const stopFile = join(paths.queueDir, 'stop')
+
+    for (let poll = 1; poll <= 20; poll++) {
+      await loop.poll()
+      expect(existsSync(stopFile)).toBe(false)
+    }
+    expect(logText()).toContain(
+      '043_auto merge deferred: its issue claims could not be read on 20 consecutive polls: '
+      + 'forge unavailable')
+    await loop.poll()
+
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText()).toContain(
+      'ERROR 043_auto merge deferred: its issue claims could not be read on 21 consecutive polls: '
+      + 'forge unavailable (repeated 2 times)')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
   })
 
   it('merges a completed task whose linked issue no longer exists', async () => {
@@ -1254,6 +1299,62 @@ describe('completed task merge recovery', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logged).toContain('No-change 064_auto    no change warranted')
     expect(logged.some((line) => line.startsWith('Failed 064_auto'))).toBe(false)
+  })
+
+  it('retries a task a rebase emptied after its issue close failed without counting a merge failure', async () => {
+    const taskId = '20260814_144306_065_auto-duplicate-fix-retry'
+    initializeGitRepo()
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(join(worktree, 'tracked.txt'), 'fixed\n')
+    execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+    execFileSync('git', ['commit', '-qm', 'fix: duplicate the run fix'], { cwd: worktree })
+    writeFinal(taskId, 'TASK_COMPLETE\n')
+    writeRawStatus(taskId, 'completed')
+
+    writeFileSync(join(repoRoot, 'tracked.txt'), 'fixed\n')
+    git(['add', 'tracked.txt'])
+    git(['commit', '-m', 'fix: land the fix from another task'])
+    const runHead = git(['rev-parse', 'HEAD'])
+
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'duplicate fix retry', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+    const closeIssue = fakeForge.closeIssue.bind(fakeForge)
+    let refused = false
+    fakeForge.closeIssue = async (...args) => {
+      if (!refused) {
+        refused = true
+        throw new Error('close rejected')
+      }
+      return closeIssue(...args)
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    // The rebase has already emptied the task branch's commit.
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['diff', `${runHead}..${branchName(taskId)}`])).toBe('')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(logText()).toContain('could not reconcile no-change task 065_auto')
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(runHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).not.toContain('has only empty commits')
+    expect(logged.some((line) => line.startsWith('Failed 065_auto'))).toBe(false)
   })
 
   it('retries no-change issue reconciliation without counting a merge failure', async () => {

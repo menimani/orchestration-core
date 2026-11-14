@@ -5,13 +5,15 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  readFileSync: vi.fn(), renameSync: vi.fn(), rmSync: vi.fn(), writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(), readFileSync: vi.fn(), renameSync: vi.fn(), rmSync: vi.fn(),
+  writeFileSync: vi.fn(),
 }))
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
   return {
     ...actual,
+    mkdirSync: mocks.mkdirSync,
     readFileSync: mocks.readFileSync,
     renameSync: mocks.renameSync,
     rmSync: mocks.rmSync,
@@ -19,6 +21,7 @@ vi.mock('node:fs', async () => {
   }
 })
 
+import { operatingSystem } from '../src/adapters/os.ts'
 import { mergeTask, MergeError } from '../src/merge.ts'
 import { branchName, orchPaths, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
@@ -67,6 +70,8 @@ function restoreOwnerReads(): void {
 
 beforeEach(() => {
   restoreOwnerReads()
+  mocks.mkdirSync.mockReset().mockImplementation((...args: unknown[]) =>
+    Reflect.apply(actualFs.mkdirSync, actualFs, args))
   mocks.rmSync.mockReset().mockImplementation((...args: unknown[]) =>
     Reflect.apply(actualFs.rmSync, actualFs, args))
   mocks.renameSync.mockReset().mockImplementation((...args: unknown[]) =>
@@ -86,6 +91,139 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   actualFs.rmSync(repoRoot, { recursive: true, force: true })
+})
+
+describe('merge guard publication', () => {
+  it('reports a lost race when Windows still reports the guard as pending deletion', async () => {
+    const taskId = '20261114_140130_001_auto-pending-deletion-guard'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    mocks.mkdirSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === guard) {
+        throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' })
+      }
+      return Reflect.apply(actualFs.mkdirSync, actualFs, args)
+    })
+    const onMergeSkipped = vi.fn()
+    const onMergeStart = vi.fn()
+    const now = Date.now()
+    let elapsed = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now + elapsed++ * 1_000)
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onMergeSkipped, onMergeStart,
+    })).rejects.toBeInstanceOf(MergeError)
+    expect(onMergeSkipped.mock.calls).toEqual([])
+    expect(onMergeStart).not.toHaveBeenCalled()
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(actualFs.existsSync(guard)).toBe(false)
+  })
+
+  it('acquires the guard once a name pending deletion clears', async () => {
+    const taskId = '20261114_183744_001_auto-pending-deletion-clears'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    let pendingDeletionReports = 0
+    mocks.mkdirSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === guard && pendingDeletionReports < 1) {
+        pendingDeletionReports += 1
+        throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' })
+      }
+      return Reflect.apply(actualFs.mkdirSync, actualFs, args)
+    })
+    const onMergeSkipped = vi.fn()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onMergeSkipped,
+    })).resolves.toMatchObject({ outcome: 'merged' })
+    expect(pendingDeletionReports).toBe(1)
+    expect(mocks.mkdirSync.mock.calls.filter(([path]) => path === guard)).toHaveLength(2)
+    expect(onMergeSkipped).not.toHaveBeenCalled()
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
+  it('fails the merge naming the guard and the cause when EPERM outlasts the deadline', async () => {
+    const taskId = '20261114_183744_002_auto-persistent-guard-eperm'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    const denial = Object.assign(new Error('operation not permitted'), { code: 'EPERM' })
+    let clock = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    mocks.mkdirSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === guard) {
+        clock += 3_000
+        throw denial
+      }
+      return Reflect.apply(actualFs.mkdirSync, actualFs, args)
+    })
+    const onMergeSkipped = vi.fn()
+    const onMergeStart = vi.fn()
+
+    const failure = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onMergeSkipped, onMergeStart,
+    }).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(MergeError)
+    expect((failure as MergeError).message).toBe(
+      `Could not create merge guard ${guard}: EPERM did not clear`,
+    )
+    expect((failure as MergeError).cause).toBe(denial)
+    expect(mocks.mkdirSync.mock.calls.filter(([path]) => path === guard)).toHaveLength(5)
+    expect(onMergeSkipped).not.toHaveBeenCalled()
+    expect(onMergeStart).not.toHaveBeenCalled()
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(actualFs.existsSync(guard)).toBe(false)
+  })
+
+  it('still answers active at once when the guard exists with a live owner', async () => {
+    const taskId = '20261114_183744_003_auto-live-guard-owner'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    actualFs.mkdirSync(guard, { recursive: true })
+    actualFs.writeFileSync(join(guard, 'owner.json'), `${JSON.stringify({
+      state: 'active', pid: process.pid, startIdentity: null, token: 'live-owner',
+    })}\n`)
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const onMergeSkipped = vi.fn()
+    const onMergeStart = vi.fn()
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onMergeSkipped, onMergeStart,
+    })).resolves.toEqual({ outcome: 'skipped', reason: 'active' })
+    expect(mocks.mkdirSync.mock.calls.filter(([path]) => path === guard)).toHaveLength(1)
+    expect(onMergeSkipped.mock.calls).toEqual([['active']])
+    expect(onMergeStart).not.toHaveBeenCalled()
+    expect(actualFs.existsSync(join(guard, 'owner.json'))).toBe(true)
+  })
+
+  it('bounds EPERM after a stale guard reclaim by the deadline the reclaim started', async () => {
+    const taskId = '20261114_183744_004_auto-reclaim-then-eperm'
+    await makeCompletedTask(taskId, { commit: true })
+    const guard = join(paths.queueDir, 'merge-guards', taskId)
+    actualFs.mkdirSync(guard, { recursive: true })
+    actualFs.writeFileSync(join(guard, 'owner.json'), `${JSON.stringify({
+      state: 'active', pid: 2147483647, startIdentity: null, token: 'dead-owner',
+    })}\n`)
+    vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(false)
+    let clock = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    let guardCreations = 0
+    mocks.mkdirSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === guard && guardCreations++ > 0) {
+        // The stale guard is gone, but Windows keeps its name pending deletion.
+        clock += 3_000
+        throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' })
+      }
+      return Reflect.apply(actualFs.mkdirSync, actualFs, args)
+    })
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject,
+    })).rejects.toThrow(`Could not create merge guard ${guard}: EPERM did not clear`)
+    // The reclaim's deadline ends the wait at the fourth denial; a fresh one would allow a fifth.
+    expect(guardCreations).toBe(5)
+    expect(actualFs.existsSync(guard)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
 })
 
 describe('merge guard retirement', () => {

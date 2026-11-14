@@ -14,6 +14,7 @@ import {
 import {
   resumeTask, startTask, StartupOwnershipUnknownError, StartupProcessRetainedError, worktreeAddArgs,
 } from '../src/start.ts'
+import { rebaseEmptiedMarkerPresent, recordRebaseEmptiedMarker } from '../src/refresh.ts'
 import { readStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -207,6 +208,19 @@ describe('startTask', () => {
     expect(statusMocks.writeStatus.mock.calls).toEqual([[paths, taskId, 'failed']])
     expect(readStatus(paths, taskId)?.status).toBe('failed')
     expect(readFileSync(logFile(paths, taskId), 'utf8')).toContain('Task startup failed:')
+  })
+
+  it('drops a rebase-emptied record a reused id left behind', async () => {
+    const taskId = '20260814_000000_005_reused-rebase-record'
+    writeFileSync(specFile(paths, taskId), '# reused id\n')
+    recordRebaseEmptiedMarker(paths, taskId)
+
+    await expect(startTask(paths, {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: vi.fn(async () => { throw new Error('runner spawn failed') }),
+    }, taskId, { effort: 'medium' })).rejects.toThrow('runner spawn failed')
+
+    expect(rebaseEmptiedMarkerPresent(paths, taskId)).toBe(false)
   })
 
   it('stops and verifies a launched process tree before recording status persistence failure', async () => {

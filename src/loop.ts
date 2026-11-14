@@ -77,13 +77,14 @@ import {
   mergeMarkerStanding, reapStaleLeases, sourceIssueNumbers, standingMergeMarkers,
   trustedCommentPresent,
   completeIssueReleaseIntent, issueReleaseIntentForTask, prepareIssueReleaseIntent,
-  reconcileIssueReleaseIntent, type RunBranchProbe,
+  reconcileIssueReleaseIntent, type PromotedIssueOutcome, type RunBranchProbe,
   clearIssueFailureCounts, recordIssueCompletions, recordIssueFailure,
   recordIssueReleaseIntent, recordIssuesForTask, recordIssuePromotions,
   removeIssueReleasePreparation,
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
+  MalformedFingerprintLedgerError,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
   LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
@@ -135,6 +136,10 @@ const MAX_WORKER_PUBLICATION_FAILURES = 5
 // outage blip, and short enough that a failure that never clears, such as an expired git
 // credential, does not keep the loop spinning on the same issue for hours.
 const MAX_CONSECUTIVE_ADOPTION_DEFERRALS = 20
+// A completed task whose issue claims, or whose findings' open issues, cannot be read on
+// this many consecutive polls is reported as a gate failure, which stops the loop when the
+// failure repeats on the next poll. The bound matches adoption deferrals for the same reason.
+const MAX_CONSECUTIVE_MERGE_CLAIM_READ_FAILURES = 20
 
 class InvalidPersistedCounterError extends Error {}
 // A finished worker task whose output can never be published as it stands. Retrying the
@@ -289,6 +294,10 @@ export function createLoop(deps: LoopDeps) {
   const postedMergeMarkers = new Map<number, string>()
   // Consecutive transient adoption deferrals per merge-ready issue, kept in memory only.
   const adoptionDeferrals = new Map<number, number>()
+  // Consecutive failed claim reads per completed task awaiting merge, kept in memory only.
+  const mergeClaimReadFailures = new Map<string, number>()
+  // Consecutive failed finding checks per completed task awaiting its scan, kept in memory only.
+  const findingCheckFailures = new Map<string, number>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
   // The check names the previous CI gate poll saw, for the PR and head it saw them on.
@@ -472,6 +481,35 @@ export function createLoop(deps: LoopDeps) {
     } else {
       log(formatEventLine('WARN', detail))
     }
+  }
+
+  /**
+   * Report a completion's failed check of its findings against the forge. A ledger that
+   * cannot be parsed stays broken until a person repairs it, so it counts against the
+   * completion scan at once. Any other failure is a forge lookup that a later poll may
+   * cure: it warns once and stops the loop only after a bounded run of failed polls.
+   */
+  function reportFindingCheckFailure(taskId: string, operation: string, subject: string, error: unknown): void {
+    const failure = `${subject}: ${errorSummary(error)}`
+    if (error instanceof MalformedFingerprintLedgerError) {
+      reportGateFailure(failure, `completion-scan-${taskId}`)
+      return
+    }
+    const failures = (findingCheckFailures.get(taskId) ?? 0) + 1
+    findingCheckFailures.set(taskId, failures)
+    warning(`unresolved-findings-${taskId}`, operation, failure)
+    if (failures >= MAX_CONSECUTIVE_MERGE_CLAIM_READ_FAILURES) {
+      reportGateFailure(
+        `${subject} on ${failures} consecutive polls: ${errorSummary(error)}`,
+        `unresolved-findings-${taskId}`,
+      )
+    }
+  }
+
+  function findingCheckRecovered(taskId: string): void {
+    findingCheckFailures.delete(taskId)
+    previousGateFailures.delete(`unresolved-findings-${taskId}`)
+    warningLog.recovered(`unresolved-findings-${taskId}`)
   }
 
   function requeueAfterStartupFailure(taskId: string, depth: number, error: unknown): void {
@@ -1329,18 +1367,21 @@ export function createLoop(deps: LoopDeps) {
         let filtered: Awaited<ReturnType<typeof unresolvedFindings>>
         try {
           filtered = await unresolvedFindings(forge, paths, findings)
-          warningLog.recovered(`unresolved-findings-${taskId}`)
+          findingCheckRecovered(taskId)
         } catch (error) {
-          if (!(error instanceof ForgeRateLimitError)) {
-            warning(
-              `unresolved-findings-${taskId}`,
-              `checking review findings from ${shortTaskId(taskId)}`,
-              `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
-            )
+          if (error instanceof ForgeRateLimitError) {
+            return { findings, destinations, reconciled: false }
           }
-          const failure = error instanceof ForgeRateLimitError
-            ? undefined
-            : `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
+          const subject = `could not check review findings from ${shortTaskId(taskId)}`
+          const failure = `${subject}: ${errorSummary(error)}`
+          const operation = `checking review findings from ${shortTaskId(taskId)}`
+          // A worker counts the failure against its publication limit. Elsewhere a
+          // failure that would hold the completion scan open forever stops the loop.
+          if (config.workerMode) {
+            warning(`unresolved-findings-${taskId}`, operation, failure)
+          } else {
+            reportFindingCheckFailure(taskId, operation, subject, error)
+          }
           return { findings, destinations, reconciled: false, failure }
         }
         pendingFindings = filtered.unresolved
@@ -1531,14 +1572,15 @@ export function createLoop(deps: LoopDeps) {
     if (config.issueQueueEnabled) {
       try {
         candidates = (await unresolvedFindings(forge, paths, candidates)).unresolved
-        warningLog.recovered(`unresolved-findings-${taskId}`)
+        findingCheckRecovered(taskId)
       } catch (error) {
         if (error instanceof ForgeRateLimitError) return { reconciled: false }
-        const failure = `could not check documentation findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
-        warning(
-          `unresolved-findings-${taskId}`,
-          `checking documentation findings from ${shortTaskId(taskId)}`,
-          failure,
+        const subject = `could not check documentation findings from ${shortTaskId(taskId)}`
+        const failure = `${subject}: ${errorSummary(error)}`
+        // Only the cycle gate holds documentation, so a failure that would hold the
+        // completion scan open forever stops the loop.
+        reportFindingCheckFailure(
+          taskId, `checking documentation findings from ${shortTaskId(taskId)}`, subject, error,
         )
         return { reconciled: false, failure }
       }
@@ -3337,12 +3379,25 @@ export function createLoop(deps: LoopDeps) {
             if (issue.state === 'open' && (!issue.labels.includes(LABEL_IN_PROGRESS)
               || issue.labels.includes(LABEL_READY))) lost.push(issueNumber)
           }
+          mergeClaimReadFailures.delete(taskId)
+          previousGateFailures.delete(`merge-claim-${taskId}`)
           warningLog.recovered(`merge-claim-${taskId}`)
         } catch (error) {
           if (!(error instanceof ForgeRateLimitError)) {
+            const failures = (mergeClaimReadFailures.get(taskId) ?? 0) + 1
+            mergeClaimReadFailures.set(taskId, failures)
             warning(`merge-claim-${taskId}`, `merging ${shortTaskId(taskId)}`,
               `${shortTaskId(taskId)} merge deferred: its issue claims could not be read: `
               + errorSummary(error))
+            // A read that never succeeds would hold the cycle gate on this merge for ever,
+            // so a bounded run of them stops the loop with the reason.
+            if (failures >= MAX_CONSECUTIVE_MERGE_CLAIM_READ_FAILURES) {
+              reportGateFailure(
+                `${shortTaskId(taskId)} merge deferred: its issue claims could not be read on `
+                + `${failures} consecutive polls: ${errorSummary(error)}`,
+                `merge-claim-${taskId}`,
+              )
+            }
           }
           return
         }
@@ -3492,9 +3547,16 @@ export function createLoop(deps: LoopDeps) {
             appendFileSync(join(paths.queueDir, `failed-${cycle}`), `${taskId}\n`)
             if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
           }
+          // The poll sweep's FAILED: marker reads the status cleanup removes, so this
+          // branch announces the conflicted task itself once that status is gone.
+          const reportConflictFailure = (): void => {
+            marker(`FAILED: ${taskId} — log: ${mergeLog}`)
+            failureReported = true
+          }
           let terminalized = false
           let retryId: string | undefined
           let lossRecorded = false
+          let failureReported = false
           try {
             terminalized = await transitionStatus(paths, taskId, 'completed', 'failed')
             if (!terminalized) {
@@ -3519,6 +3581,7 @@ export function createLoop(deps: LoopDeps) {
               prepareIssueReleaseIntent(paths, taskId, linkedIssues)
             }
             cleanupTask(paths, taskId, undefined, false, log)
+            reportConflictFailure()
             if (linkedIssues.length === 0) {
               dropClaimedTaskMaterialization(paths, taskId)
             } else {
@@ -3574,8 +3637,9 @@ export function createLoop(deps: LoopDeps) {
             }
             // A status that survived a failed cleanup still reaches the poll sweep, which
             // records the loss itself. One that cleanup already removed reaches nobody.
-            if (terminalized && retryId === undefined && !lossRecorded
-              && readTaskState(paths, taskId) === undefined) {
+            const statusRemoved = terminalized && readTaskState(paths, taskId) === undefined
+            if (statusRemoved && !failureReported) reportConflictFailure()
+            if (statusRemoved && retryId === undefined && !lossRecorded) {
               try {
                 removeConflictedAttempts(paths, taskId)
                 recordAbandonedConflict()
@@ -3866,13 +3930,24 @@ export function createLoop(deps: LoopDeps) {
             // Closing promoted issues is bookkeeping a later poll can finish; it must not
             // cost this poll its claims. A queue in the project's own repository is closed
             // by the merge commit, but an abandoned run still has to return its issues.
+            // The issues settled before a failure are logged too: the next poll drops
+            // their records without a word, so this is their only event. Each is logged once.
+            const promotedOutcome: PromotedIssueOutcome = { closed: [], returned: [] }
+            const logPromotedOutcome = (): void => {
+              for (const issueNumber of promotedOutcome.closed.splice(0)) {
+                event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
+              }
+              for (const issueNumber of promotedOutcome.returned.splice(0)) {
+                event('Released', `#${issueNumber}`, 'run pull request closed without merging')
+              }
+            }
             try {
               // An unknown held branch would make the run this checkout still holds look
               // abandoned and return its merged issues, so a failed lookup skips the step.
               const heldBranch = git(['branch', '--show-current']).trim()
               if (heldBranch === '') throw new Error('the checkout is not on a branch')
               let strandedReported = false
-              const { closed, returned } = await closePromotedIssues(
+              await closePromotedIssues(
                 forge, paths, promotedCommitContained, heldBranch,
                 issueQueueIsSeparate(paths),
                 runBranchProbe((runBranch, issueNumbers) => {
@@ -3881,16 +3956,13 @@ export function createLoop(deps: LoopDeps) {
                     `run branch ${runBranch} has no pull request; issues `
                     + `${issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')} stay claimed`)
                 }),
+                promotedOutcome,
               )
               if (!strandedReported) warningLog.recovered('stranded-promotions')
-              for (const issueNumber of closed) {
-                event('Promoted', `#${issueNumber}`, 'closed after its run pull request merged')
-              }
-              for (const issueNumber of returned) {
-                event('Released', `#${issueNumber}`, 'run pull request closed without merging')
-              }
+              logPromotedOutcome()
               warningLog.recovered('promoted-issues')
             } catch (error) {
+              logPromotedOutcome()
               if (error instanceof ForgeRateLimitError) throw error
               warning('promoted-issues', 'closing promoted issues',
                 `could not close promoted issues: ${errorSummary(error)}`)

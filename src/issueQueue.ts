@@ -416,9 +416,7 @@ function fingerprintLedger(paths: OrchPaths): Array<{ fingerprint: string; issue
     const match = /^(\S+) ([1-9]\d*)$/.exec(line)
     const issueNumber = Number(match?.[2])
     if (match === null || !Number.isSafeInteger(issueNumber)) {
-      throw new Error(
-        `Malformed fingerprint ledger ${file}; repair this file before issue reconciliation can continue`,
-      )
+      throw new MalformedFingerprintLedgerError(file)
     }
     return { fingerprint: match[1]!, issueNumber }
   })
@@ -1388,6 +1386,15 @@ export class IssueReleaseReconciliationError extends AggregateError {
   }
 }
 
+// A local fingerprint ledger that cannot be parsed. Unlike a failed forge lookup, no retry
+// can cure it: the file stays as it is until a person repairs it.
+export class MalformedFingerprintLedgerError extends Error {
+  constructor(file: string) {
+    super(`Malformed fingerprint ledger ${file}; repair this file before issue reconciliation can continue`)
+    this.name = 'MalformedFingerprintLedgerError'
+  }
+}
+
 /**
  * Retry one durable cleanup release. Each issue leaves the intent as soon as its release
  * verifies, so a retry after a partial failure never touches an issue it already handed
@@ -1727,6 +1734,9 @@ export interface PromotedIssueOutcome {
  * has the branch, each issue whose merge commit neither the current HEAD nor the default
  * branch contains goes back to ready as for a closed pull request, and every other issue of that branch is reported as stranded.
  * Without a probe such a branch is left for later.
+ *
+ * Each issue is added to `outcome` as soon as it is settled, so a caller that passes its
+ * own still learns which issues closed or returned when a later step throws.
  */
 export async function closePromotedIssues(
   forge: Forge,
@@ -1735,9 +1745,10 @@ export async function closePromotedIssues(
   heldBranch = '',
   closeMerged = true,
   probe?: RunBranchProbe,
+  outcome: PromotedIssueOutcome = { closed: [], returned: [] },
 ): Promise<PromotedIssueOutcome> {
   const dir = promotionDir(paths)
-  if (!existsSync(dir)) return { closed: [], returned: [] }
+  if (!existsSync(dir)) return outcome
   const promotions: IssuePromotion[] = []
   for (const name of readdirSync(dir)) {
     const match = /^(\d+)\.json$/.exec(name)
@@ -1745,8 +1756,7 @@ export async function closePromotedIssues(
     const promotion = issuePromotionForIssue(paths, Number(match[1]))
     if (promotion !== undefined) promotions.push(promotion)
   }
-  const closed: number[] = []
-  const returned: number[] = []
+  const { closed, returned } = outcome
   async function returnPromotions(abandoned: IssuePromotion[], prUrl: string): Promise<void> {
     for (const promotion of abandoned) {
       // The withdrawal lands before the issue is claimable again, and the record
@@ -1819,24 +1829,24 @@ export async function closePromotedIssues(
     )
     let failure: { error: unknown } | undefined
     contained.forEach((promotion, index) => {
-      const outcome = outcomes[index]
-      if (outcome === undefined) return
-      if (outcome.status === 'fulfilled') {
+      const settled = outcomes[index]
+      if (settled === undefined) return
+      if (settled.status === 'fulfilled') {
         closed.push(promotion.issueNumber)
-      } else if (outcome.reason instanceof ForgeIssueNotFoundError) {
+      } else if (settled.reason instanceof ForgeIssueNotFoundError) {
         // A deleted issue would fail every poll and hold back each promotion after it.
         removePromotionRecord(paths, promotion.issueNumber)
       } else if (failure === undefined
-        || (outcome.reason instanceof ForgeRateLimitError
+        || (settled.reason instanceof ForgeRateLimitError
           && !(failure.error instanceof ForgeRateLimitError))) {
         // The caller waits out a rate limit only when it sees one, so a rate limit
         // outranks any other failure.
-        failure = { error: outcome.reason }
+        failure = { error: settled.reason }
       }
     })
     if (failure !== undefined) throw failure.error
   }
-  return { closed, returned }
+  return outcome
 }
 
 /**

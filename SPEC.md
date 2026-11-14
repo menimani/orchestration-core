@@ -39,6 +39,10 @@ comments and other items cite items by number, so a number is never reused.
   counts as not acquired and is retried, any other error propagates, and a private
   remnant left by the race is removed when it can be. A process running an older core
   can still race by acquiring without the mutex.
+- A status write waits up to ten seconds for the task's status lock, retrying both a
+  held lock and `EPERM` from creating it. A wait that ends while the last attempt failed
+  with `EPERM` times out naming that code, so a permission failure is not reported as
+  plain contention; one that ends on a held lock says only that it timed out.
 - Between polls the daemon sleeps for at most `POLL_INTERVAL` seconds while watching the
   queue directory, and it starts the next poll early, after a half-second debounce, when
   `queue/backlog.txt` or `queue/wake` changes. It begins watching before each poll, so
@@ -212,15 +216,16 @@ comments and other items cite items by number, so a number is never reused.
   `TEST_CMD` for this merge, and without a command it prints the usage and exits 1; any
   other option is an error. A grouped task missing a
   requirement's completion marker is refused before the merge. A completed merge clears the
-  current cycle's gate-complete and resume flags before its status is recorded, resets the
-  consecutive merge-failure count, removes the task's gate fix state and the branches kept
+  current cycle's gate-complete and resume flags before its status is recorded, except for
+  an inspection task (item 11), resets the consecutive merge-failure count, removes the task's gate fix state and the branches kept
   from its conflicted attempts, a branch that cannot be removed being only a `WARN:`, and,
   for an issue-born task, records the promotion and comments the merge on each linked
   issue, a failed comment being only a `WARN:`. The failure count, gate fix state, and
   kept branches are settled as soon as the merged status is recorded, so a dependency
   install that then fails or is skipped still exits non-zero but leaves nothing for a
   rerun, which reports the merge as already succeeded. A `no-change` outcome removes the same
-  gate fix state and kept branches and clears the cycle's gate-complete flag. A merge
+  gate fix state and kept branches and clears the cycle's gate-complete flag, again except for
+  an inspection task. A merge
   refusal prints its reason and exits non-zero.
 
 ### Retained runtime configuration
@@ -426,8 +431,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
    enqueue an accepted finding counts one gate failure under that completion scan's key,
    however many findings it rejected: the first warns, a repeat stops the loop rather
    than holding the completion pending forever, and a forge rate limit is not counted.
+   In issue mode a review completion first checks its findings against open finding
+   issues, and a check that fails leaves the completion pending. A local fingerprint
+   ledger that cannot be parsed, which no retry can cure, counts a gate failure under the
+   completion scan's key, so the second attempt stops the loop. Any other failed check
+   is a forge lookup a later poll may cure: it warns once, twenty consecutive polls that
+   cannot check a completion's findings report a gate failure naming the task, the
+   count, and the error, and the next such poll stops the loop; a successful check
+   clears the count and logs `Recovered`. A rate-limited check neither counts nor clears
+   the count.
    A worker-mode daemon (item 36) has no gate to count against: it files a completion's
-   findings before publishing it, so a filing failure is one of its publication errors,
+   findings before publishing it, so a check or filing failure is one of its publication errors,
    retried on later polls until the fifth consecutive failure marks the task failed, and
    never stops the loop.
 6a. A finding whose leading tag is `[DOCS]` is held rather than dispatched when the task
@@ -436,7 +450,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     would have been queued at and the task that reported it, written atomically, unless
     its fingerprint is already held or the duplicate checks of the dispatch paths find it
     already carried by a queued, running, completed, or failed task or an open finding
-    issue. The daemon logs one `Deferred <task> <n> documentation finding(s) until
+    issue. In issue mode that check against open finding issues fails as a review's
+    does in item 6: a malformed fingerprint ledger stops the loop at the second attempt,
+    any other failure only after twenty consecutive polls, and a rate limit is not
+    counted; until it succeeds nothing is held and the completion stays pending. The
+    daemon logs one `Deferred <task> <n> documentation finding(s) until
     the cycle's other tasks finish` event per source task. Every other finding, and every
     finding of a review task, is dispatched as item 6 describes, and a held finding still
     counts as a finding of its scan, so a scan reporting only documentation is not empty.
@@ -500,7 +518,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
    proceeds on that poll without the warning. When all
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
-   requiring the worker to have predicted that outcome.
+   requiring the worker to have predicted that outcome. That verdict is recorded under
+   `queue/rebase-emptied/<task-id>` before linked issues are reconciled, so when
+   reconciliation fails or is rate limited the task stays `completed` and a later poll
+   still completes it as `no-change` without counting a merge failure, although the
+   rebase has already left its commits empty. The record goes when the task is finalized,
+   cleaned up, or started again. An ordinary task whose commits were empty before any
+   rebase and that has neither the marker nor that record falls under the marker rule of
+   a task with no new commits instead.
 8a. A task's merge commit has the subject `Merge <task-id> via orchestration`, followed by
     the forge's closing text for each linked issue the merge may name. Its body records why
     the work exists, as one `Why:` line per distinct requirement: the first paragraph,
@@ -541,7 +566,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    depth and effort, as a retry whose specification names that branch, those paths, and
    those commit hashes ahead of the earlier specification; commit subjects are left out
    because they are repository-controlled text. A chain of conflicts is retried at most
-   twice, after which the commits stay kept for a person. Linked issues return to ready
+   twice, after which the commits stay kept for a person. Once cleanup removes its status,
+   the conflicted task emits `FAILED: <id>` with its merge log path itself, whether or not a
+   retry is queued; its loss is recorded in `queue/failed-<cycle>` only when no retry is
+   queued. Linked issues return to ready
    before another poll can select the task again, and when this checkout claims such an
    issue again its new specification carries the same section. An issue whose chain has
    used both retries is instead parked under `loop:retry-exhausted` by the same release,
@@ -575,7 +603,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     dependency tree nobody assembled, and that verdict describes neither tree. Declared
     dependencies with no `node_modules`, an npm-owned directory with no completed-install
     record, or any declared dependency absent from `node_modules` turns the pass into a
-    failure that names what was borrowed. The verification follows the check rather than
+    refusal that names what was borrowed. The explicit test command and the adapter's
+    merge checks refuse it alike, as `Tests passed against borrowed dependencies.
+    Aborting merge.`; a check of the same gate that genuinely failed is reported as the
+    test failure instead. The verification follows the check rather than
     preceding it, because a check may install as its own first step. When the option is
     omitted or false, merge-check results are not subjected to this Node/npm-specific
     verification, allowing adapters with other dependency models to opt out.
@@ -587,7 +618,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     a completed task remains eligible for merge on later polls, and any successful merge
     resets the count. A durable per-task guard skips an attempt while that task's merge is
     active or after it succeeded, without changing the failure count; a failed attempt
-    releases the guard so a later poll can retry. A merge deferred because a completed
+    releases the guard so a later poll can retry. Only a guard that exists answers
+    "active". Creating the guard with `EPERM`, which Windows reports for a name still
+    pending deletion, is retried every 10 ms within the same ten-second deadline that bounds
+    reclaiming a stale guard, one deadline per acquisition; an `EPERM` that outlasts it
+    fails the attempt with an error naming the guard and the cause, and counts as a failure. A merge deferred because a completed
     task's runner cannot be verified yet (item 8) is no failure of the work: it leaves
     this count and the task's own failure count alone, so a runner tree that lingers for
     a few minutes cannot stop the loop and terminate the tasks still running under it.
@@ -653,7 +688,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     attempt and counts the failure. Never handed back: a refusal for uncommitted changes,
     a rebase or merge conflict, a failure the project adapter's
     `classifyInfrastructureFailure` or the unreachable-registry diagnosis attributes to the
-    environment, a test-lock deferral, an adopted worker branch, or any failure after the
+    environment, a pass against borrowed dependencies (item 9a), a test-lock deferral, an adopted worker branch, or any failure after the
     stop file exists. Once the handbacks are used, failures are counted exactly as above;
     `MAX_GATE_FIX_ATTEMPTS=0` reproduces that behaviour event for event.
 10a. A failed merge or rebase is counted or retried only once its abort is confirmed to
@@ -1173,7 +1208,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `custom/forge.mjs` remains a package specifier. External
     modules export a `Forge`
     as default or `forge`, or a `createForge(repoRoot, report, target)` factory, so gitea/gitlab
-    implementations can be added without touching the core. The target names the
+    implementations can be added without touching the core. Only the factory receives the
+    target, so a fleet that names an `issueRepository` needs it. The target names the
     repository for branches, pull requests, and workflow runs and the repository for the
     issue queue when they are not the checkout's own; a fleet project names both, and an
     omitted name keeps the adapter's inference from the checkout. The bundled GitHub
@@ -1240,7 +1276,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     as the single setup and repair command. Init generates its adapter from the same
     required-member description the real loader validates, scaffolds project templates,
     points the repository-local `core.hooksPath` at the core's hooks, and creates only
-    missing `loop:*` labels. Re-running it adds and reports marked scaffold defaults for
+    missing `loop:*` labels. Init refuses to proceed unless those hooks include
+    `commit-msg`, which passes any commit whose first line begins with `Merge ` and rejects
+    every other commit whose first line does not match
+    `^(feat|fix|chore|docs|refactor|test): [^ ].*` (exactly one space after the colon, then
+    a non-empty subject), so every later commit in the repository,
+    including a task agent's, follows that convention. Re-running it adds and reports marked scaffold defaults for
     missing required adapter members, but never overwrites a declared member, another
     project-owned file, or a different hooks setting; divergence is reported. Init works
     on the adapter the loop would load: with `PROJECT` or `PROJECT_ADAPTER` set, the
@@ -1438,7 +1479,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     the issues it still holds then take the ordinary failed-task release. A claim that
     cannot be read defers the merge, with a WARN unless the forge was rate limited, and
     leaves the task `completed` for a later poll rather than risk closing someone else's
-    issue.
+    issue. Twenty consecutive polls that cannot read a task's claims, rate limits aside,
+    report a gate failure naming the task and the error, and the next such poll stops the
+    loop; a successful read clears the count.
 35. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
     the forge closes all of them when the promotion PR lands the commit on the default
     branch. A queue kept in a fleet's `issueRepository` is the exception: its issue

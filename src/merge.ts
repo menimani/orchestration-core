@@ -22,7 +22,10 @@ import {
 import { execShellSync } from './shell.ts'
 import { specFile } from './tasks.ts'
 import { requirementLead, specRequirements } from './templates.ts'
-import { noChangeMarkerPresent } from './refresh.ts'
+import {
+  noChangeMarkerPresent, rebaseEmptiedMarkerPresent, recordRebaseEmptiedMarker,
+  removeRebaseEmptiedMarker,
+} from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
@@ -834,7 +837,7 @@ function runMergeChecks(
     }
     if (options.project.verifyDependencyIsolation === true
       && !ranIsolated(worktree, 'the worktree', io)) {
-      throw new MergeError('Tests passed against borrowed dependencies. Aborting merge.')
+      throw new MergeError(borrowedDependenciesMessage)
     }
     return true
   }
@@ -842,6 +845,9 @@ function runMergeChecks(
 
   const changed = gitPaths(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
   let ok = true
+  // A pass on borrowed dependencies is refused like the explicit test command's, but a
+  // check that genuinely failed outranks it: that failure is the task's to correct.
+  let borrowed = false
   // A check that only waited out the test lock defers the merge, unless another check
   // genuinely failed: that failure is known, and deferring would hide it.
   let lockBusy = false
@@ -868,14 +874,21 @@ function runMergeChecks(
       continue
     }
     const passed = outcome === 'passed'
-    const isolated = options.project.verifyDependencyIsolation !== true
-      || (passed && ranIsolated(directory, check.label, io))
-    ok = passed && isolated && ok
+    ok = passed && ok
+    if (passed && options.project.verifyDependencyIsolation === true
+      && !ranIsolated(directory, check.label, io)) {
+      borrowed = true
+    }
   }
   if (!ok) throw new VerificationFailedError('Tests failed. Aborting merge.')
+  if (borrowed) throw new MergeError(borrowedDependenciesMessage)
   if (lockBusy) throw new TestLockBusyError(testLockBusyMessage)
   return ranCommand
 }
+
+// A pass on borrowed dependencies describes the dependency tree the gate assembled, not
+// the task's content, so it is a plain refusal the loop counts rather than hands back.
+const borrowedDependenciesMessage = 'Tests passed against borrowed dependencies. Aborting merge.'
 
 /**
  * Whether a check that just passed did so on dependencies of its own. A worktree sits
@@ -1042,6 +1055,7 @@ async function finalizeLocalMerge(
 ): Promise<string> {
   options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
+  removeRebaseEmptiedMarker(paths, taskId)
   options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterRecordedMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
@@ -1080,6 +1094,7 @@ async function finalizeNoChange(
     )
   }
   await writeStatus(paths, taskId, 'no-change')
+  removeRebaseEmptiedMarker(paths, taskId)
   const worktreeRemoved = removeFinishedWorktree(
     paths, worktree, io.out, options.worktreeRemovalRuntime ?? worktreeRemovalRuntime,
     'task completed without changes',
@@ -1184,18 +1199,28 @@ function mergeGuardRemovalWasVerified(dir: string): boolean {
   }
 }
 
-function publishMergeGuard(dir: string, owner: MergeGuardOwner): boolean {
+type MergeGuardPublication = { outcome: 'published' } | { outcome: 'held' } | {
+  outcome: 'denied'
+  error: NodeJS.ErrnoException
+}
+
+function publishMergeGuard(dir: string, owner: MergeGuardOwner): MergeGuardPublication {
   const pendingOwner = `${dir}.owner-${process.pid}-${randomUUID()}.json`
   try {
     mkdirSync(dir)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'EEXIST') return { outcome: 'held' }
+    // Windows reports a name still pending deletion as EPERM rather than EEXIST, but a
+    // real permission error, or a handle that keeps the name pending, is EPERM too and
+    // never clears. The caller retries it within a deadline instead of calling it held.
+    if (code === 'EPERM') return { outcome: 'denied', error: error as NodeJS.ErrnoException }
     throw error
   }
   try {
     writeFileSync(pendingOwner, `${JSON.stringify(owner)}\n`, { flag: 'wx' })
     renameSync(pendingOwner, join(dir, 'owner.json'))
-    return true
+    return { outcome: 'published' }
   } catch (error) {
     // We created this directory and no observer can acquire it while it exists. Remove
     // both pieces so an ordinary I/O failure does not become a permanent active guard.
@@ -1244,10 +1269,14 @@ type MergeGuardAcquisition = { acquired: true; file: string; owner: MergeGuardOw
   reason: 'active'
 }
 
+// One acquisition waits against one deadline: `deadline` starts with the first reclaim or
+// denied publication and bounds every later wait, while `reclaimDeadline` is set only
+// while a reclaim of the guard currently at the name is under way.
 function acquireMergeGuard(
   paths: OrchPaths,
   taskId: string,
   reclaimDeadline?: number,
+  deadline = reclaimDeadline,
 ): MergeGuardAcquisition | Promise<MergeGuardAcquisition> {
   const dir = mergeGuardDir(paths, taskId)
   mkdirSync(dirname(dir), { recursive: true })
@@ -1256,11 +1285,24 @@ function acquireMergeGuard(
     token: randomUUID(),
   }
   for (;;) {
-    if (publishMergeGuard(dir, owner)) {
+    const publication = publishMergeGuard(dir, owner)
+    if (publication.outcome === 'published') {
       return { acquired: true, file: dir, owner }
     }
+    if (publication.outcome === 'denied') {
+      deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      if (Date.now() >= deadline) {
+        throw new MergeError(
+          `Could not create merge guard ${dir}: ${publication.error.code} did not clear`,
+          true,
+          { cause: publication.error },
+        )
+      }
+      return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
+    }
     if (existsSync(join(dir, 'retired'))) {
-      reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      reclaimDeadline ??= deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       if (reclaimRetiredMergeGuard(dir)) {
         reclaimDeadline = undefined
         continue
@@ -1269,7 +1311,7 @@ function acquireMergeGuard(
         throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
       }
       return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
-        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
     }
     const recorded = activeMergeGuardOwner(dir)
     if (recorded === undefined) {
@@ -1277,7 +1319,7 @@ function acquireMergeGuard(
       // an older binary still acquiring its guard. Recover it only after that window ends.
       if (reclaimDeadline === undefined) {
         if (!malformedMergeGuardIsStale(dir)) return { acquired: false, reason: 'active' }
-        reclaimDeadline = Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+        reclaimDeadline = deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       }
       if (reclaimMalformedMergeGuard(dir)) {
         reclaimDeadline = undefined
@@ -1287,10 +1329,10 @@ function acquireMergeGuard(
         throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
       }
       return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
-        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
     }
     if (recorded.token !== null && retiredMergeGuardTokens.has(recorded.token)) {
-      reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      reclaimDeadline ??= deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       if (reclaimRetiredMergeGuard(dir)) {
         retiredMergeGuardTokens.delete(recorded.token)
         reclaimDeadline = undefined
@@ -1300,12 +1342,12 @@ function acquireMergeGuard(
         throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
       }
       return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
-        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
     }
     if (lockOwnerIsCurrent(recorded.pid, recorded.startIdentity)) {
       return { acquired: false, reason: 'active' }
     }
-    reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+    reclaimDeadline ??= deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
     // Removing the owner before the directory makes stale reclamation safe between
     // multiple waiters: rmdir can never remove a replacement's non-empty guard.
     try {
@@ -1322,7 +1364,7 @@ function acquireMergeGuard(
       throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
     }
     return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
-      .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+      .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
   }
 }
 
@@ -1440,8 +1482,30 @@ async function mergeTaskWithGuardHeld(
       + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
     )
   }
+  // Commits that were empty before any rebase carry no change of their own, so they need
+  // the same marker as a task with no commits; only a rebase that empties them proves the
+  // work already landed. A retry after that rebase finds its commits already emptied, so
+  // the rebase's recorded verdict counts as well.
+  if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
+    if (!noChangeMarkerPresent(paths, taskId) && !rebaseEmptiedMarkerPresent(paths, taskId)) {
+      throw new MergeError(
+        `${taskId} has only empty commits relative to ${currentBranch}.\n`
+        + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
+      )
+    }
+    if (closingIssues.length > 0 && options.onNoChange === undefined) {
+      throw new NoChangeReconciliationError(
+        'A linked no-change task requires issue reconciliation.',
+      )
+    }
+    await finalizeNoChange(paths, taskId, branch, worktree, io, options)
+    return { outcome: 'no-change' }
+  }
   rebaseTaskOntoRunTip(worktree, currentBranch, io)
   if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
+    // Recorded before reconciliation can fail: the rebase has already rewritten the
+    // branch, and without this the retry would read the emptied commits as the worker's.
+    recordRebaseEmptiedMarker(paths, taskId)
     if (closingIssues.length > 0 && options.onNoChange === undefined) {
       throw new NoChangeReconciliationError(
         'A linked no-change task requires issue reconciliation.',
