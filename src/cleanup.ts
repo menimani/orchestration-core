@@ -156,7 +156,8 @@ export function cleanupTask(
     throw new Error(`Could not remove branch ${branch}; task state was retained.`)
   }
 
-  runtime.remove(statusFile(paths, taskId), { force: true })
+  // The status file goes last: listTaskIds reads status/*.json, so a removal that throws
+  // part-way leaves the task visible with its markers, and cleanup can simply run again.
   runtime.remove(finalMessageFile(paths, taskId), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', taskId), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
@@ -165,5 +166,6 @@ export function cleanupTask(
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.findings-filed`), { force: true })
   runtime.remove(join(paths.queueDir, 'heartbeat', taskId), { force: true })
   for (const file of gateFixStateFiles(paths, taskId)) runtime.remove(file, { force: true })
+  runtime.remove(statusFile(paths, taskId), { force: true })
   if (announce) console.log(`Cleaned up ${taskId}.`)
 }
