@@ -125,33 +125,39 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+/**
+ * Every running process with its parent and creation time, from one PowerShell launch.
+ * `subject` names the snapshot in each failure, such as "process tree".
+ */
+export function listWindowsProcesses(subject: string): WindowsProcess[] {
+  // CreationDate rides along so the tree walk can reject stale parent links.
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | ForEach-Object { '{0},{1},{2}' -f $_.ProcessId,$_.ParentProcessId,$(if ($null -ne $_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }) }",
+  ], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) throw new Error(`Could not inspect the Windows ${subject}.`)
+  return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const match = /^(\d+),(\d+),(.*)$/.exec(line)
+    if (match === null) throw new Error(`Could not parse the Windows ${subject}.`)
+    const entry: WindowsProcess = { pid: Number(match[1]), parentPid: Number(match[2]) }
+    if (/^-?\d+$/.test(match[3]!)) entry.createdAt = Number(match[3])
+    return entry
+  })
+}
+
 const systemRuntime: WindowsProcessRuntime = {
   platform: process.platform,
   now: Date.now,
   sleep,
   spawnLauncher: (command, args, options) => spawn(command, [...args], options),
-  listProcesses: () => {
-    // CreationDate rides along so the tree walk can reject stale parent links.
-    const result = spawnSync('powershell.exe', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | ForEach-Object { '{0},{1},{2}' -f $_.ProcessId,$_.ParentProcessId,$(if ($null -ne $_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }) }",
-    ], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    if (result.error !== undefined) throw result.error
-    if (result.status !== 0) throw new Error('Could not inspect the Windows startup process tree.')
-    return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-      const match = /^(\d+),(\d+),(.*)$/.exec(line)
-      if (match === null) throw new Error('Could not parse the Windows startup process tree.')
-      const entry: WindowsProcess = { pid: Number(match[1]), parentPid: Number(match[2]) }
-      if (/^-?\d+$/.test(match[3]!)) entry.createdAt = Number(match[3])
-      return entry
-    })
-  },
+  listProcesses: () => listWindowsProcesses('startup process tree'),
   probeProcess: (pid) => {
     process.kill(pid, 0)
   },

@@ -2,7 +2,12 @@ import { spawnSync } from 'node:child_process'
 import { rmSync } from 'node:fs'
 import { win32 } from 'node:path'
 import type { AgentCommand, OperatingSystem } from './os.ts'
-import { cmdArgumentLine, processTreeRootPid, startWindowsProcess } from './windows-process.ts'
+import {
+  cmdArgumentLine, listWindowsProcesses, processTreeRootPid, startWindowsProcess,
+} from './windows-process.ts'
+import type { WindowsProcess } from './windows-process.ts'
+
+export type { WindowsProcess } from './windows-process.ts'
 
 const PROCESS_EXIT_TIMEOUT_MS = 5_000
 const PROCESS_EXIT_POLL_MS = 50
@@ -25,13 +30,6 @@ export interface WindowsOperatingSystemRuntime {
   processStartIdentity?(pid: number): string | undefined
   startDaemon?: typeof startWindowsProcess
   startAgent?: typeof startWindowsProcess
-}
-
-export interface WindowsProcess {
-  pid: number
-  parentPid: number
-  /** Creation time in epoch milliseconds; absent when Windows did not report one. */
-  createdAt?: number
 }
 
 export interface WindowsProcessCommand {
@@ -79,33 +77,11 @@ const systemRuntime: WindowsOperatingSystemRuntime = {
       windowsHide: true,
     })
   },
-  listProcesses: () => {
-    // Measured on Windows (2026-08-13), five launches of the original full-property query
-    // took 1,040 ms at the median. Selecting these two properties took 1,017 ms;
-    // PowerShell startup dominates, so terminateProcessTree snapshots once and polls the
-    // captured PIDs instead of launching this command again during its exit wait.
-    // CreationDate rides along in the same launch so the tree walk can reject stale
-    // parent links.
-    const result = spawnSync('powershell.exe', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | ForEach-Object { '{0},{1},{2}' -f $_.ProcessId,$_.ParentProcessId,$(if ($null -ne $_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }) }",
-    ], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    if (result.error !== undefined) throw result.error
-    if (result.status !== 0) throw new Error('Could not inspect the Windows process tree.')
-    return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-      const match = /^(\d+),(\d+),(.*)$/.exec(line)
-      if (match === null) throw new Error('Could not parse the Windows process tree.')
-      const entry: WindowsProcess = { pid: Number(match[1]), parentPid: Number(match[2]) }
-      if (/^-?\d+$/.test(match[3]!)) entry.createdAt = Number(match[3])
-      return entry
-    })
-  },
+  // Measured on Windows (2026-08-13), five launches of the original full-property query
+  // took 1,040 ms at the median. Selecting these two properties took 1,017 ms;
+  // PowerShell startup dominates, so terminateProcessTree snapshots once and polls the
+  // captured PIDs instead of launching this command again during its exit wait.
+  listProcesses: () => listWindowsProcesses('process tree'),
   listProcessCommands: () => {
     // UTF-8 output keeps a worktree path outside the console code page comparable, and
     // JSON keeps command lines that contain commas or line breaks intact.
