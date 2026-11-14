@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll } from 'vitest'
+import { recordSpawnProfile } from './spawnProfile.ts'
 
 // The fixtures drive real git repositories, and git reads the host's system and global
 // configuration before a fixture's own. Git for Windows ships core.autocrlf=true in its
@@ -19,3 +20,7 @@ process.env.GIT_CONFIG_GLOBAL = globalConfig
 afterAll(() => {
   rmSync(configRoot, { recursive: true, force: true })
 })
+
+// Off unless ORCH_TEST_SPAWN_PROFILE names a directory. Installed here, before any test
+// module loads, so it sees every child process the file and the code under test create.
+recordSpawnProfile(process.env)

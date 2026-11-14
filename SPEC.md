@@ -1753,3 +1753,20 @@ leaves uncollected and why, from `tests/platformCoverage.ts`, so a run that skip
 suite says so. The files listed in `tests/sequentialSuites.ts` launch long-lived
 processes or wait on deadlines; they run one at a time after the rest of the suite has
 run in parallel.
+
+Every run prints one line per test file with its project, test count and duration, also
+when standard output is not a terminal and Vitest detects a coding agent, and ends with
+the ten slowest files and the wall time of each group, measured from its first file being
+queued to its last file finishing. When `ORCH_TEST_SPAWN_PROFILE` names a directory, the
+test setup wraps `spawn`, `spawnSync`, `execFile`, `execFileSync`, `exec`, `execSync` and
+`fork` of `node:child_process` in each test worker and writes one JSON file per test file
+when it finishes: its project, test count and duration, and for every child process the
+executable's base name, the subcommand when the executable is `git`, `node`, `powershell`
+or `cmd` (the first argument after Git's own options, a script path's base name for
+`node`, and the first word of the argument for `powershell` and `cmd`), and the wall time until it exits, or until the file finished for a child still
+running then. A wrapper returns, throws and inherits what the wrapped call does, and a
+call one wrapper makes into another is counted once. Without the variable nothing is
+wrapped, recorded or written. `scripts/test-spawn-profile.mjs <directory>` aggregates
+those files into total spawns and child wall time, a table by executable and subcommand,
+a table by test file, and the twenty files with the most spawns per test; processes a
+child CLI starts are outside the worker and are not counted.

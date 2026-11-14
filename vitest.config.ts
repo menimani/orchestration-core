@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config'
+import { testReporters } from './tests/durationReporter.ts'
 import { uncollectedSuites } from './tests/platformCoverage.ts'
 import { SEQUENTIAL_SUITES } from './tests/sequentialSuites.ts'
 
@@ -19,7 +20,11 @@ export default defineConfig({
       ...uncollectedSuites(),
     ],
     globalSetup: ['tests/globalSetup.ts'],
-    // Isolates every git process from the host's system and global configuration.
+    // One line per test file, then the slowest files and each group's wall time, whether
+    // or not Vitest believes a coding agent is reading. tests/durationReporter.ts says why.
+    reporters: testReporters(process.env),
+    // Isolates every git process from the host's system and global configuration, and
+    // records the spawn profile when ORCH_TEST_SPAWN_PROFILE names a directory.
     setupFiles: ['tests/gitIsolation.ts'],
     // Fork IPC times out while the git-heavy suites run on Windows under Node 24;
     // worker threads use the same isolation without that process-channel failure.
