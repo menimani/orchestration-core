@@ -126,6 +126,12 @@ function gone(): NodeJS.ErrnoException {
   return error
 }
 
+function busy(): NodeJS.ErrnoException {
+  const error = new Error('EBUSY: resource busy or locked') as NodeJS.ErrnoException
+  error.code = 'EBUSY'
+  return error
+}
+
 function expectTaskStateToExist(): void {
   expect(existsSync(statusFile(paths, taskId))).toBe(true)
   expect(existsSync(finalMessageFile(paths, taskId))).toBe(true)
@@ -182,6 +188,23 @@ describe('cleanupTask', () => {
     expectTaskStateToExist()
     expect(existsSync(worktree)).toBe(true)
     expect(log).not.toHaveBeenCalledWith(`Cleaned up ${taskId}.`)
+  })
+
+  it('names why the process could not be stopped', () => {
+    seedTask(12345)
+    let now = 0
+    const runtime = makeRuntime({ os: windowsOperatingSystem({
+      probeProcess: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+    }) })
+
+    expect(() => cleanupTask(paths, taskId, runtime, false)).toThrow(
+      'Could not stop process 12345; task state was retained. '
+      + '(Could not stop process tree 12345. Still running: PID 12345.)',
+    )
+
+    expectTaskStateToExist()
   })
 
   it('retains task state without terminating an unverified process', () => {
@@ -286,6 +309,85 @@ describe('cleanupTask', () => {
       .toThrow(`Could not remove worktree ${worktree}; task state was retained.`)
 
     expect(spawn).toHaveBeenCalledWith('taskkill', ['/PID', '4242', '/T', '/F'])
+    expectTaskStateToExist()
+    expect(existsSync(worktree)).toBe(true)
+  })
+
+  it('removes the worktree on a second pass when the first fails with EBUSY', () => {
+    seedTask(null)
+    const runtime = makeRuntime()
+    const execFile = runtime.execFile
+    const remove = runtime.remove
+    let gitRemovals = 0
+    let directRemovals = 0
+    runtime.execFile = (command, args, options) => {
+      if (args[0] === 'worktree' && args[1] === 'remove' && ++gitRemovals === 1) throw busy()
+      return execFile(command, args, options)
+    }
+    runtime.remove = (path, options) => {
+      if (gitRemovals === 1) {
+        directRemovals++
+        throw busy()
+      }
+      remove(path, options)
+    }
+
+    cleanupTask(paths, taskId, runtime, false)
+
+    expect(gitRemovals).toBe(2)
+    expect(directRemovals).toBe(1)
+    expect(existsSync(worktree)).toBe(false)
+    expect(existsSync(statusFile(paths, taskId))).toBe(false)
+  })
+
+  it('removes the worktree when the stopped tree still answers alive on its first probe', () => {
+    seedTask(12345)
+    let now = 0
+    let killed = false
+    let probesAfterKill = 0
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const runtime = makeRuntime({ os: windowsOperatingSystem({
+      spawn: (command) => { if (command === 'taskkill') killed = true },
+      probeProcess: () => {
+        if (killed && ++probesAfterKill > 1) throw gone()
+      },
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+      remove: (path, options) => { rmSync(plainPath(path), options) },
+    }) })
+
+    cleanupTask(paths, taskId, runtime, false)
+
+    expect(probesAfterKill).toBeGreaterThan(1)
+    expect(now).toBeGreaterThan(0)
+    expect(log).toHaveBeenCalledWith('Stopping running process: pid=12345')
+    expect(existsSync(worktree)).toBe(false)
+    expect(existsSync(statusFile(paths, taskId))).toBe(false)
+  })
+
+  it('names each failed removal step and the holder hint when the worktree never goes', () => {
+    seedTask(null)
+    const runtime = makeRuntime({
+      execFile: () => { throw new Error('git worktree remove: Permission denied') },
+      remove: () => { throw busy() },
+    })
+
+    let failure: unknown
+    try {
+      cleanupTask(paths, taskId, runtime, false)
+    } catch (error) {
+      failure = error
+    }
+
+    const message = (failure as Error).message
+    expect(message).toContain(`Could not remove worktree ${worktree}; task state was retained.`)
+    expect(message).toContain(
+      'pass 1: git: git worktree remove: Permission denied; Windows long-path fallback: EBUSY',
+    )
+    expect(message).toContain(
+      'pass 2: git: git worktree remove: Permission denied; Windows long-path fallback: EBUSY',
+    )
+    expect(message).toContain(`Find holder: handle.exe "${worktree}" (Sysinternals)`)
     expectTaskStateToExist()
     expect(existsSync(worktree)).toBe(true)
   })

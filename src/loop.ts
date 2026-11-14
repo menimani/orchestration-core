@@ -3231,7 +3231,12 @@ export function createLoop(deps: LoopDeps) {
         try {
           cleanupTask(paths, scanId, undefined, false, log)
         } catch (error) {
-          event('WARN', `${shortTaskId(scanId)} scan startup cleanup failed: ${errorSummary(error)}`)
+          // A scan that could not be discarded is kept like one whose runner could not be
+          // accounted for, so the operator learns why rather than meeting it later.
+          event(
+            'ERROR', shortTaskId(scanId),
+            `scan startup cleanup failed: ${errorSummary(error)}; task retained and loop stopped`,
+          )
         }
       }
       writeFileSync(stopFile, '')
