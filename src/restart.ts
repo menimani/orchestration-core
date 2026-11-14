@@ -190,6 +190,10 @@ export async function startLoopReplacement(
       })
     }
     const poll = setInterval(() => {
+      // Sampling the install marker only when the timeout fires would count the renewed
+      // allowance from that sample rather than from the install's end, so an install
+      // finishing just before it fired left the rest of initialization almost nothing.
+      deadline = startupDeadline(readyFile, deadline, startupTimeoutMs)
       if (!existsSync(readyFile)) {
         // The exit and error listeners are the richer signal, but an adapter cannot
         // always offer them: a Windows daemon is launched through a detached wrapper, so

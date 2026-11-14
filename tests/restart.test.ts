@@ -473,54 +473,108 @@ describe('loop replacement startup', () => {
   })
 
   it('waits past the startup timeout while the replacement installs dependencies', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
-    fixtureRoots.push(root)
-    const readyFile = join(root, 'ready')
-    const child = fakeChild(43218)
-    // The install outlasts the whole startup timeout several times over; cutting it
-    // short would leave the replacement's node_modules half emptied.
-    const os = fakeOperatingSystem(child, () => {
-      const clearInstalling = markStartupInstalling([readyFile])
-      setTimeout(() => {
-        clearInstalling()
-        writeFileSync(readyFile, '43218\n')
-      }, 300)
-    })
+    vi.useFakeTimers()
+    try {
+      const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+      fixtureRoots.push(root)
+      const readyFile = join(root, 'ready')
+      const child = fakeChild(43218)
+      // The install outlasts the whole startup timeout a hundred times over; cutting it
+      // short would leave the replacement's node_modules half emptied.
+      const os = fakeOperatingSystem(child, () => {
+        const clearInstalling = markStartupInstalling([readyFile])
+        setTimeout(() => {
+          clearInstalling()
+          writeFileSync(readyFile, '43218\n')
+        }, 5_025)
+      })
 
-    await expect(startLoopReplacement(readyFile, {
-      env: environmentWithoutWrapper(),
-      operatingSystem: os,
-      outputFile: join(root, 'loop.log'),
-      packageRoot: root,
-      startupTimeoutMs: 50,
-    })).resolves.toEqual({ ok: true, pid: 43218 })
-    expect(os.terminateProcessTree).not.toHaveBeenCalled()
-    expect(readdirSync(root)).toEqual([])
+      const result = startLoopReplacement(readyFile, {
+        env: environmentWithoutWrapper(),
+        operatingSystem: os,
+        outputFile: join(root, 'loop.log'),
+        packageRoot: root,
+        startupTimeoutMs: 50,
+      })
+      await vi.advanceTimersByTimeAsync(5_100)
+
+      await expect(result).resolves.toEqual({ ok: true, pid: 43218 })
+      expect(os.terminateProcessTree).not.toHaveBeenCalled()
+      expect(readdirSync(root)).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('enforces the startup timeout again once the replacement install finishes', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
-    fixtureRoots.push(root)
-    const readyFile = join(root, 'ready')
-    const child = fakeChild(43219)
-    const os = fakeOperatingSystem(child, () => {
-      const clearInstalling = markStartupInstalling([readyFile])
-      setTimeout(clearInstalling, 150)
-    })
+    vi.useFakeTimers()
+    try {
+      const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+      fixtureRoots.push(root)
+      const readyFile = join(root, 'ready')
+      const child = fakeChild(43219)
+      const os = fakeOperatingSystem(child, () => {
+        const clearInstalling = markStartupInstalling([readyFile])
+        setTimeout(clearInstalling, 155)
+      })
 
-    await expect(startLoopReplacement(readyFile, {
-      env: environmentWithoutWrapper(),
-      operatingSystem: os,
-      outputFile: join(root, 'loop.log'),
-      packageRoot: root,
-      startupTimeoutMs: 50,
-    })).resolves.toEqual({
-      ok: false,
-      pid: 43219,
-      error: 'replacement did not become ready before the startup timeout',
-    })
-    expect(os.terminateProcessTree).toHaveBeenCalledWith(43219)
-    expect(readdirSync(root)).toEqual([])
+      let settled = false
+      const result = startLoopReplacement(readyFile, {
+        env: environmentWithoutWrapper(),
+        operatingSystem: os,
+        outputFile: join(root, 'loop.log'),
+        packageRoot: root,
+        startupTimeoutMs: 50,
+      })
+      void result.then(() => { settled = true })
+      await vi.advanceTimersByTimeAsync(180)
+      expect(settled).toBe(false)
+      expect(os.terminateProcessTree).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(40)
+
+      await expect(result).resolves.toEqual({
+        ok: false,
+        pid: 43219,
+        error: 'replacement did not become ready before the startup timeout',
+      })
+      expect(os.terminateProcessTree).toHaveBeenCalledWith(43219)
+      expect(readdirSync(root)).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('allows the full startup timeout after an install that ends just before the deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+      fixtureRoots.push(root)
+      const readyFile = join(root, 'ready')
+      const child = fakeChild(43222)
+      // The install ends 5 ms before the original deadline and the rest of initialization
+      // takes 30 ms of its 50 ms allowance: the deadline counts from the install's end,
+      // not from the last time the launcher happened to look at the marker.
+      const os = fakeOperatingSystem(child, () => {
+        const clearInstalling = markStartupInstalling([readyFile])
+        setTimeout(clearInstalling, 45)
+        setTimeout(() => { writeFileSync(readyFile, '43222\n') }, 75)
+      })
+
+      const result = startLoopReplacement(readyFile, {
+        env: environmentWithoutWrapper(),
+        operatingSystem: os,
+        outputFile: join(root, 'loop.log'),
+        packageRoot: root,
+        startupTimeoutMs: 50,
+      })
+      await vi.advanceTimersByTimeAsync(100)
+
+      await expect(result).resolves.toEqual({ ok: true, pid: 43222 })
+      expect(os.terminateProcessTree).not.toHaveBeenCalled()
+      expect(readdirSync(root)).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('clears a stale install marker before launching the replacement', async () => {
