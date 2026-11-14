@@ -3954,6 +3954,9 @@ export function createLoop(deps: LoopDeps) {
         const effort = existsSync(effortFile)
           ? readFileSync(effortFile, 'utf8').replace(/[\s\r\n]/g, '')
           : config.taskEffort
+        // A retry of a failure the previous run announced is a new attempt; its own
+        // outcome is reported and counted like any other task's.
+        tasksFailedBeforeStartup.delete(entry.taskId)
         try {
           await startTaskImpl(paths, runner, entry.taskId, {
             effort: effort as 'medium',

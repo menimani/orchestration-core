@@ -3990,6 +3990,61 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
+  it('announces a re-enqueued task that fails a second time', async () => {
+    // A branch named `task` blocks every `task/<id>` branch, so worktree creation fails
+    // and leaves neither worktree nor branch for cleanup to remove.
+    initializeGitRepoWithRemote()
+    git(['branch', 'task'])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const taskId = '20260808_120000_001_user-retry'
+    writeFileSync(specFile(paths, taskId), '# retry\n')
+    const failedLine = `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`
+    // A task still running keeps the cycle open across the polls below.
+    writeRawStatus('20260808_110000_000_user-busy', 'running', process.pid)
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 2, maxBurstFailures: 3 })
+    loop.initializeSessionStateForBranch()
+
+    expect(enqueueTask(paths, taskId).outcome).toBe('enqueued')
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(logged.filter((line) => line === failedLine)).toHaveLength(1)
+
+    expect(enqueueTask(paths, taskId).outcome).toBe('enqueued')
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('failed')
+    expect(logged.filter((line) => line === failedLine)).toHaveLength(2)
+    expect(readFileSync(join(paths.queueDir, 'failed-1'), 'utf8')).toBe(`${taskId}\n${taskId}\n`)
+    expect(existsSync(join(paths.queueDir, 'scanned', `${taskId}.failed`))).toBe(true)
+  })
+
+  it('announces a retry of a failure the previous run announced', async () => {
+    initializeGitRepoWithRemote()
+    git(['branch', 'task'])
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const taskId = '20260808_120000_001_user-listed'
+    writeFileSync(specFile(paths, taskId), '# listed\n')
+    writeRawStatus(taskId, 'failed')
+    writeFileSync(join(paths.queueDir, 'announced-failures.txt'), `${taskId}\nother-f1\n`)
+    const failedLine = `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.log`)}`
+    // A task still running keeps the cycle open across the polls below.
+    writeRawStatus('20260808_110000_000_user-busy', 'running', process.pid)
+    const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 2, maxBurstFailures: 3 })
+    loop.initializeSessionStateForBranch()
+
+    expect(await loop.poll()).toBe('continue')
+    expect(logged.some((line) => line.startsWith('FAILED:'))).toBe(false)
+
+    expect(enqueueTask(paths, taskId).outcome).toBe('enqueued')
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged.filter((line) => line === failedLine)).toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'announced-failures.txt'), 'utf8')).toBe('other-f1\n')
+  })
+
   it('releases and counts the issue of a task already failed at startup', async () => {
     initializeGitRepo()
     // The released issue is ready again, so the restarted loop may claim it anew.
