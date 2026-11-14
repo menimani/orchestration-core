@@ -41,7 +41,6 @@ export class MergeError extends Error {
   }
 }
 
-/** A stale local task cannot be refreshed and must not be selected for merge again. */
 /**
  * What a conflicting pre-merge rebase was trying to do, recorded before the rebase is
  * aborted so the loop can keep the task's commits and tell a retry where they collided.
@@ -567,7 +566,6 @@ function mergeWithVerifiedRecovery(
   }
 }
 
-/** Bring a completed local task up to the run tip before any merge-gate work begins. */
 /**
  * Return a task's commits to its own branch when the agent committed on a branch it
  * created or on a detached HEAD. The merge takes the task branch, so commits left
@@ -605,6 +603,7 @@ function adoptStrandedTaskCommits(worktree: string, branch: string, io: MergeIo)
   git(worktree, ['switch', '--quiet', branch])
 }
 
+/** Bring a completed local task up to the run tip before any merge-gate work begins. */
 function rebaseTaskOntoRunTip(
   worktree: string,
   currentBranch: string,
