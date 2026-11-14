@@ -3955,6 +3955,28 @@ describe('closePromotedIssues', () => {
     expect((await forge.getIssue(failing)).state).toBe('closed')
   })
 
+  it('reports the issues it closed before a failed close, whose records the reaper then drops', async () => {
+    const issueNumbers = await mergedRun(4)
+    const failing = issueNumbers[1]!
+    const closeIssue = forge.closeIssue
+    forge.closeIssue = async (issueNumber, comment) => {
+      if (issueNumber === failing) throw new Error('forge unavailable')
+      await closeIssue(issueNumber, comment)
+    }
+    const outcome = { closed: [] as number[], returned: [] as number[] }
+    const others = recordOrder(issueNumbers).filter((issueNumber) => issueNumber !== failing)
+
+    await expect(closePromotedIssues(forge, paths, () => true, '', true, undefined, outcome))
+      .rejects.toThrow('forge unavailable')
+    expect(outcome).toEqual({ closed: others, returned: [] })
+
+    await reapStaleLeases(forge, paths, 3, new Date('2026-08-08T12:00:00Z'))
+    for (const issueNumber of others) {
+      expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+    }
+    expect(issuePromotionForIssue(paths, failing)?.taskId).toBe('task-1')
+  })
+
   it('starts no further close after a rate limit', async () => {
     const issueNumbers = await mergedRun(12)
     const closeIssue = forge.closeIssue
