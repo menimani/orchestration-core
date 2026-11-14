@@ -1395,6 +1395,7 @@ export function createLoop(deps: LoopDeps) {
       ? [pendingFindings.map((finding, index) => `${index + 1}. ${finding}`).join('\n')]
       : pendingFindings
     let reconciled = true
+    let enqueueFailure: string | undefined
     for (const desc of descriptions) {
       if (!hasTaskCapacity(taskId)) continue
       const queued = queueFindingTask(
@@ -1402,7 +1403,15 @@ export function createLoop(deps: LoopDeps) {
         combinesReviewFindings ? pendingFindings : undefined,
       )
       destinations.push(shortTaskId(queued.taskId))
-      if (!queued.enqueued) reconciled = false
+      if (queued.failure !== undefined) {
+        reconciled = false
+        enqueueFailure ??= queued.failure
+      }
+    }
+    // One report per scan attempt, as on the issue path: a queue that rejects several
+    // findings counts once, so the stop file waits for the failure to survive a retry.
+    if (enqueueFailure !== undefined) {
+      reportGateFailure(enqueueFailure, `completion-scan-${taskId}`)
     }
     return { findings, destinations, reconciled }
   }
@@ -1436,6 +1445,8 @@ export function createLoop(deps: LoopDeps) {
   /**
    * Queue one finding description as a local task. Combined findings arrive as the
    * numbered list in `desc`, and each is recorded against the one task carrying them.
+   * An enqueue failure is returned rather than reported, so a caller queueing several
+   * findings in one attempt reports it once.
    */
   function queueFindingTask(
     desc: string,
@@ -1444,7 +1455,7 @@ export function createLoop(deps: LoopDeps) {
     origin: 'auto' | 'fix',
     combinedFindings: readonly string[] | undefined,
     pitfallKey = desc,
-  ): { taskId: string; enqueued: boolean } {
+  ): { taskId: string; failure?: string } {
     const existing = existingFindingTask(desc, origin)
     const needsFreshTask = existing !== undefined
       && ['merged', 'no-change'].includes(readTaskState(paths, existing) ?? '')
@@ -1486,13 +1497,12 @@ export function createLoop(deps: LoopDeps) {
       const enqueue = enqueueTaskImpl(paths, newId, depth)
       if (enqueue.outcome === 'enqueued') recordPublishedTask()
     } catch (error) {
-      reportGateFailure(
-        `could not enqueue finding from ${shortTaskId(parentId)}: ${errorSummary(error)}`,
-        `completion-scan-${parentId}`,
-      )
-      return { taskId: newId, enqueued: false }
+      return {
+        taskId: newId,
+        failure: `could not enqueue finding from ${shortTaskId(parentId)}: ${errorSummary(error)}`,
+      }
     }
-    return { taskId: newId, enqueued: true }
+    return { taskId: newId }
   }
 
   /**
@@ -1617,11 +1627,15 @@ export function createLoop(deps: LoopDeps) {
         gateWaitTarget = 'documentation release'
         return true
       }
-    } else if (!queueFindingTask(
-      desc, parentId, depth, 'auto', combined ? findings : undefined, first.finding,
-    ).enqueued) {
-      gateWaitTarget = 'documentation release'
-      return true
+    } else {
+      const { failure } = queueFindingTask(
+        desc, parentId, depth, 'auto', combined ? findings : undefined, first.finding,
+      )
+      if (failure !== undefined) {
+        reportGateFailure(failure, `completion-scan-${parentId}`)
+        gateWaitTarget = 'documentation release'
+        return true
+      }
     }
     previousGateFailures.delete('release-documentation')
     writeHeldFindings(paths, [])
