@@ -778,6 +778,87 @@ describe('operating-system adapters', () => {
     expect(posixOs('linux:500').processTreeIsAlive(541)).toBe(true)
   })
 
+  /** The POSIX adapter whose group 551 answers `groupAlive` and whose holder is `identity`. */
+  const posixGroupOs = (identity: string, groupAlive: boolean) => {
+    const signalProcessGroup = vi.fn((_pid: number, signal?: NodeJS.Signals | number) => {
+      if (signal === 0 && !groupAlive) {
+        const error = new Error('gone') as NodeJS.ErrnoException
+        error.code = 'ESRCH'
+        throw error
+      }
+    })
+    const os = createPosixOperatingSystem({
+      signalProcessGroup, probeProcess: () => {}, remove: () => {},
+      now: Date.now, sleep: () => {}, groupHasRunningMember: () => groupAlive,
+      processStartIdentity: () => identity,
+    })
+    return { os, signalProcessGroup }
+  }
+
+  it('answers no recorded group on POSIX when two differing procfs identities name its ID', () => {
+    const live = posixGroupOs('linux:500', true)
+    const dead = posixGroupOs('linux:500', false)
+
+    expect(live.os.processTreeIsAlive(551, 'linux:100')).toBe(false)
+    expect(live.signalProcessGroup).not.toHaveBeenCalled()
+    expect(dead.os.processTreeIsAlive(551, 'linux:100')).toBe(false)
+  })
+
+  it('lets the group decide on POSIX when differing identities are ps start-time text', () => {
+    // The same live runner read under another time zone or locale prints another lstart.
+    const recorded = 'darwin:Sat Nov 14 12:00:00 2026'
+    const holder = 'darwin:Sat Nov 14 03:00:00 2026'
+    const live = posixGroupOs(holder, true)
+    const dead = posixGroupOs(holder, false)
+    const mixedLive = posixGroupOs('linux:500', true)
+    const mixedDead = posixGroupOs(holder, false)
+
+    expect(live.os.processTreeIsAlive(551, recorded)).toBe(true)
+    expect(live.signalProcessGroup).toHaveBeenCalledWith(551, 0)
+    expect(dead.os.processTreeIsAlive(551, recorded)).toBe(false)
+    expect(mixedLive.os.processTreeIsAlive(551, recorded)).toBe(true)
+    expect(mixedDead.os.processTreeIsAlive(551, 'linux:100')).toBe(false)
+  })
+
+  /**
+   * A reused Windows PID 561 recorded for a runner created at 1 s, whose holder was
+   * created at 5 s by its start identity; the snapshot lists the holder only when
+   * `holderListed`, dated `holderCreatedAt`, and lists child 562 dated `childCreatedAt`.
+   */
+  const reusedHolderOs = (
+    holderListed: boolean,
+    childCreatedAt: number | undefined,
+    holderCreatedAt = 5_000,
+  ) => processTreeOs([
+    ...(holderListed ? [{ pid: 561, parentPid: 1, createdAt: holderCreatedAt }] : []),
+    { pid: 562, parentPid: 561, ...(childCreatedAt === undefined ? {} : { createdAt: childCreatedAt }) },
+  ], () => {}, (pid) => (pid === 561 ? windowsIdentity(5_000) : undefined))
+
+  it('places a child of a reused PID against the holder creation time from the snapshot', () => {
+    expect(reusedHolderOs(true, 4_999).os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+    // A child created at the holder's own millisecond cannot be placed after it.
+    expect(reusedHolderOs(true, 5_000).os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+    expect(reusedHolderOs(true, 5_001).os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(false)
+    expect(reusedHolderOs(true, undefined).os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+  })
+
+  it('places a child of a reused PID against the holder identity when the snapshot omits it', () => {
+    expect(reusedHolderOs(false, 4_999).os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+    expect(reusedHolderOs(false, 5_000).os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+    expect(reusedHolderOs(false, 5_001).os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(false)
+    expect(reusedHolderOs(false, undefined).os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+  })
+
+  it('compares a reused PID child with the snapshot time when the holder identity disagrees', () => {
+    // The identity says 5 s; the snapshot, the children's own source, says one hour later.
+    const hour = 3_600_000
+    const after = reusedHolderOs(true, 5_000 + hour + 1, 5_000 + hour)
+    const between = reusedHolderOs(true, 5_001, 5_000 + hour)
+
+    expect(after.os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(false)
+    expect(between.os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+  })
+
   it('leaves worktree processes alone on POSIX', () => {
     const signalProcessGroup = vi.fn()
     const os = createPosixOperatingSystem({

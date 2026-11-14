@@ -32,6 +32,7 @@ vi.mock('node:fs', async (importOriginal) => {
   }
 })
 
+import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import type { WindowsProcess } from '../src/adapters/os-windows.ts'
 import { orchPaths, type OrchPaths } from '../src/paths.ts'
@@ -315,6 +316,57 @@ describe('task process registry', () => {
       paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
     )).toBe(4321)
     expect(existsSync(registryFile())).toBe(true)
+  })
+
+  /**
+   * The POSIX adapter in which 4321 now reads as `holder` and its process group answers
+   * `groupAlive`.
+   */
+  const posixRunnerOs = (holder: string, groupAlive: boolean) => createPosixOperatingSystem({
+    signalProcessGroup: (_pid, signal) => {
+      if (signal === 0 && !groupAlive) {
+        const error = new Error('gone') as NodeJS.ErrnoException
+        error.code = 'ESRCH'
+        throw error
+      }
+    },
+    probeProcess: () => {},
+    remove: () => {},
+    now: Date.now,
+    sleep: () => {},
+    groupHasRunningMember: () => groupAlive,
+    processStartIdentity: (pid) => (pid === 4321 ? holder : undefined),
+  })
+
+  it('forgets a POSIX runner whose procfs identity differs while another group holds its ID', () => {
+    recordTaskProcess(paths, taskId, 4321, () => 'linux:100')
+    const os = posixRunnerOs('linux:500', true)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(false)
+  })
+
+  it('keeps a live POSIX runner whose ps start time reads differently from the record', () => {
+    // A daemon restarted under another time zone prints the same start time another way.
+    recordTaskProcess(paths, taskId, 4321, () => 'darwin:Sat Nov 14 12:00:00 2026')
+    const live = posixRunnerOs('darwin:Sat Nov 14 03:00:00 2026', true)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, live.processStartIdentity, live.processTreeIsAlive,
+    )).toBe(4321)
+    expect(terminableTaskProcessPid(
+      paths, taskId, undefined, live.processStartIdentity, live.processTreeIsAlive,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(true)
+
+    const dead = posixRunnerOs('darwin:Sat Nov 14 03:00:00 2026', false)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, dead.processStartIdentity, dead.processTreeIsAlive,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(false)
   })
 
   it('drops a legacy bare-PID entry because it has no process-start identity', () => {
