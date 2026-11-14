@@ -2359,6 +2359,40 @@ describe('issue claim release', () => {
     expect(issueReleaseIntentForTask(paths, 'task-park')).toEqual([])
   })
 
+  it('touches no issue of an own-claims release while the current account is unknown', async () => {
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `unverified claim ${index}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: ['worker-b'],
+    })))
+    recordIssuesForTask(paths, 'task-release', issueNumbers)
+    recordIssueReleaseIntent(paths, 'task-release', issueNumbers, true)
+    const lookupError = new Error('current user unavailable')
+    forge.currentUser = async () => { throw lookupError }
+    const mutations: string[] = []
+    forge.addLabel = async (number, label) => { mutations.push(`addLabel #${number} ${label}`) }
+    forge.removeLabel = async (number, label) => {
+      mutations.push(`removeLabel #${number} ${label}`)
+    }
+    forge.assignIssue = async (number, user) => { mutations.push(`assignIssue #${number} ${user}`) }
+    forge.unassignIssue = async (number, user) => {
+      mutations.push(`unassignIssue #${number} ${user}`)
+    }
+
+    const failures = await reconcileIssueReleaseIntent(forge, paths, 'task-release')
+
+    expect(failures).toEqual(issueNumbers.map((issueNumber) => ({ issueNumber, error: lookupError })))
+    expect(mutations).toEqual([])
+    for (const issueNumber of issueNumbers) {
+      const issue = await forge.getIssue(issueNumber)
+      expect(issue.assignees).toEqual(['worker-b'])
+      expect(issue.labels).toEqual([LABEL_FINDING, LABEL_IN_PROGRESS])
+    }
+    expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual(issueNumbers)
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'issue-release-own-claims', 'task-release'))).toBe(true)
+    expect(issueNumbersForTask(paths, 'task-release')).toEqual(issueNumbers)
+  })
+
   it('releases every assignee for an operator cleanup intent', async () => {
     const issueNumber = await forge.createIssue({
       title: 'operator cleanup', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
