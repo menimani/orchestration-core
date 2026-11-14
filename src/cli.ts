@@ -1333,14 +1333,23 @@ const cmdLoop: Command = async (paths, args) => {
       cycleCap: config.maxScanCycles,
     })) write(line)
   }
-  handleConfigEvent = (event): void => log(configEventLine(event), event.type === 'error')
+  // The daemon installs the recorder once it owns the cap file; before that a cap change
+  // has nowhere it may be persisted.
+  const cycleCap: CycleCapRecorder = { record: () => {} }
+  handleConfigEvent = (event): void => {
+    if (event.type === 'changed' && event.setting === 'MAX_SCAN_CYCLES'
+      && typeof event.value === 'number') {
+      cycleCap.record(event.value)
+    }
+    log(configEventLine(event), event.type === 'error')
+  }
   for (const event of pendingConfigEvents.splice(0)) handleConfigEvent(event)
   const marker = (message: string): void => {
     if (markerOutput === undefined) console.log(message)
     else appendFileSync(markerOutput, `${message}\n`)
   }
   try {
-    const result = await runLoopDaemon(paths, log, marker, config, () => {
+    const result = await runLoopDaemon(paths, log, marker, config, cycleCap, () => {
       reportStartup({
         status: 'ready',
         pid: operatingSystem.processTreeRootPid(),
@@ -1416,11 +1425,17 @@ const cmdCiWait: Command = async (paths, args) => {
   return waitForCi(forge, Number(prNumber), { timeoutSeconds, expectedHead })
 }
 
+/** Persists a live MAX_SCAN_CYCLES change once the daemon owns the cap file. */
+interface CycleCapRecorder {
+  record: (cap: number) => void
+}
+
 async function runLoopDaemon(
   paths: OrchPaths,
   log: (line: string) => void,
   marker: (line: string) => void,
   config: LoopConfig,
+  cycleCap: CycleCapRecorder,
   ready: () => void = () => {},
 ): Promise<number> {
   const daemonPid = operatingSystem.processTreeRootPid()
@@ -1551,6 +1566,12 @@ async function runLoopDaemon(
     if (!usesRestartReservation) rmSync(stopFile, { force: true })
     if (!existsSync(scanCountFile)) writeFileSync(scanCountFile, '0\n')
     writeFileSync(cycleCapFile, `${config.maxScanCycles}\n`)
+    // The loop reads MAX_SCAN_CYCLES live, so the file follows a mid-run change for
+    // `shipped` to record the cap the run actually worked to. After a handover the
+    // replacement owns the file.
+    cycleCap.record = (cap) => {
+      if (ownsDaemonState) writeFileSync(cycleCapFile, `${cap}\n`)
+    }
 
     syncOrchestrationDepsAtStartup(
       paths,
