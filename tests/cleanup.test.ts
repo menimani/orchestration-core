@@ -14,6 +14,9 @@ import {
 } from '../src/adapters/os-windows.ts'
 import { cleanupTask, type CleanupRuntime } from '../src/cleanup.ts'
 import {
+  gateFixFinalMessageFile, gateFixSpecFile, markGateFixRunActive, writeGateFixState,
+} from '../src/gateFix.ts'
+import {
   branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
@@ -475,5 +478,20 @@ describe('cleanupTask', () => {
     cleanupTask(paths, taskId, makeRuntime())
 
     expect(existsSync(marker)).toBe(false)
+  })
+
+  it('removes every gate fix handback file, so a reused id starts without them', () => {
+    seedTask(null)
+    writeGateFixState(paths, taskId, { attempts: 1, verificationFailed: true, pending: false })
+    writeFileSync(gateFixSpecFile(paths, taskId), '# Fix\n')
+    writeFileSync(gateFixFinalMessageFile(paths, taskId), 'TASK_COMPLETE\n')
+    markGateFixRunActive(paths, taskId, true)
+    const gateFixDir = join(paths.queueDir, 'gate-fix')
+    const seeded = [`${taskId}.json`, `${taskId}.md`, `${taskId}.final.md`, `${taskId}.active`]
+    for (const name of seeded) expect(existsSync(join(gateFixDir, name))).toBe(true)
+
+    cleanupTask(paths, taskId, makeRuntime())
+
+    for (const name of seeded) expect(existsSync(join(gateFixDir, name))).toBe(false)
   })
 })

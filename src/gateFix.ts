@@ -103,11 +103,18 @@ export function writeGateFixState(paths: OrchPaths, taskId: string, state: GateF
   }
 }
 
+/** Every file that holds a task's handback state, so cleanup can remove them all. */
+export function gateFixStateFiles(paths: OrchPaths, taskId: string): string[] {
+  return [
+    stateFile(paths, taskId),
+    gateFixSpecFile(paths, taskId),
+    gateFixFinalMessageFile(paths, taskId),
+    activeFile(paths, taskId),
+  ]
+}
+
 export function removeGateFixState(paths: OrchPaths, taskId: string): void {
-  rmSync(stateFile(paths, taskId), { force: true })
-  rmSync(gateFixSpecFile(paths, taskId), { force: true })
-  rmSync(gateFixFinalMessageFile(paths, taskId), { force: true })
-  rmSync(activeFile(paths, taskId), { force: true })
+  for (const file of gateFixStateFiles(paths, taskId)) rmSync(file, { force: true })
 }
 
 /**
