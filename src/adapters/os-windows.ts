@@ -208,6 +208,30 @@ function startIdentityMilliseconds(identity: string | undefined): number | undef
   return Number((BigInt(match[1]!) - 621_355_968_000_000_000n) / 10_000n)
 }
 
+/**
+ * Creation times in UTC epoch milliseconds, keyed by PID. The snapshot is the source for
+ * every process it lists, so times compared against each other come from one clock and
+ * one zone. Only a `pid` the snapshot omits takes the time behind its start identity,
+ * converted to the same scale; `dated` reports whether that pid ended up with a time.
+ */
+function processCreationTimes(
+  processes: readonly WindowsProcess[],
+  pid: number,
+  startIdentity: () => string | undefined,
+): { createdAt: Map<number, number>, dated: boolean } {
+  const createdAt = new Map<number, number>()
+  let listed = false
+  for (const entry of processes) {
+    if (entry.pid === pid) listed = true
+    if (entry.createdAt !== undefined) createdAt.set(entry.pid, entry.createdAt)
+  }
+  if (!listed) {
+    const identityCreatedAt = startIdentityMilliseconds(startIdentity())
+    if (identityCreatedAt !== undefined) createdAt.set(pid, identityCreatedAt)
+  }
+  return { createdAt, dated: createdAt.has(pid) }
+}
+
 function processTreePids(
   runtime: WindowsOperatingSystemRuntime,
   rootPid: number,
@@ -222,18 +246,12 @@ function processTreePids(
   }
 
   const runningPids = new Set(processes.map(({ pid }) => pid))
-  const createdAtByPid = new Map<number, number>()
-  for (const { pid, createdAt } of processes) {
-    if (createdAt !== undefined) createdAtByPid.set(pid, createdAt)
-  }
-  let rootUndated = false
-  if (!runningPids.has(rootPid)) {
-    // A root the snapshot omitted has no creation time, and every orphan still naming its
-    // PID would pass the check below. A live root's start time takes the snapshot's place.
-    const rootCreatedAt = startIdentityMilliseconds(runtime.processStartIdentity?.(rootPid))
-    if (rootCreatedAt !== undefined) createdAtByPid.set(rootPid, rootCreatedAt)
-    else rootUndated = true
-  }
+  // A root the snapshot omitted has no creation time, and every orphan still naming its
+  // PID would pass the check below. A live root's start time takes the snapshot's place.
+  const { createdAt: createdAtByPid, dated: rootDated } = processCreationTimes(
+    processes, rootPid, () => runtime.processStartIdentity?.(rootPid),
+  )
+  const rootUndated = !runningPids.has(rootPid) && !rootDated
   const childrenByParent = new Map<number, number[]>()
   for (const { pid, parentPid, createdAt } of processes) {
     // Windows never updates ParentProcessId when a parent exits, so an orphan keeps
@@ -280,6 +298,8 @@ function processTreePids(
  * cannot be told apart from it. Windows never updates ParentProcessId, so the recorded
  * process's orphans still name its PID; one created before the current holder cannot
  * have been started by that holder. The holder and anything it started are excluded.
+ * The holder's creation time comes from the same snapshot as its children's; its start
+ * identity, read from another source, stands in only when the snapshot omits it.
  */
 function recordedOrphanTreePids(
   runtime: WindowsOperatingSystemRuntime,
@@ -293,8 +313,6 @@ function recordedOrphanTreePids(
     holderIdentity = undefined
   }
   if (holderIdentity === undefined || holderIdentity === recordedStartIdentity) return null
-  const holderCreatedAt = startIdentityMilliseconds(holderIdentity)
-  if (holderCreatedAt === undefined) return null
 
   let processes: readonly WindowsProcess[]
   try {
@@ -303,19 +321,25 @@ function recordedOrphanTreePids(
     // An inspection failure does not prove that the orphans have stopped.
     return undefined
   }
-  const createdAtByPid = new Map<number, number>()
-  for (const { pid, createdAt } of processes) {
-    if (createdAt !== undefined) createdAtByPid.set(pid, createdAt)
-  }
+  const holderListed = processes.some(({ pid }) => pid === recordedPid)
+  const { createdAt: createdAtByPid } = processCreationTimes(
+    processes, recordedPid, () => holderIdentity,
+  )
+  const holderCreatedAt = createdAtByPid.get(recordedPid)
+  // An omitted holder whose identity holds no creation time cannot be compared at all.
+  if (holderCreatedAt === undefined && !holderListed) return null
   const childrenByParent = new Map<number, number[]>()
   const pending: number[] = []
   const parents = new Map<number, number>()
   for (const { pid, parentPid, createdAt } of processes) {
     if (pid === recordedPid) continue
     if (parentPid === recordedPid) {
-      // An undated child cannot be placed before or after the holder; counting it keeps
-      // the safe "alive" verdict, as processTreePids does for a missing creation time.
-      if (createdAt === undefined || createdAt < holderCreatedAt) {
+      // Only a child created strictly after the holder is provably the holder's. One
+      // created at the same millisecond, an undated child, and any child of a holder the
+      // snapshot lists without a time cannot be placed after it, so each counts as a
+      // possible orphan: the entry then keeps blocking and the merge waits rather than
+      // runs under a writer that may still be the recorded runner's.
+      if (createdAt === undefined || holderCreatedAt === undefined || createdAt <= holderCreatedAt) {
         pending.push(pid)
         parents.set(pid, recordedPid)
       }

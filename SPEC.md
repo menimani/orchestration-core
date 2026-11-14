@@ -1079,10 +1079,18 @@ are not parsed by `loadConfig` and are not operator-file settings.
     entry then blocks only while the runner's own orphans live, and is dropped as it is
     read once they are gone. The process now holding the PID, and anything it started, is
     never counted as the runner's tree. On Windows those orphans are the processes that
-    still name the PID as their parent and were created before its current holder, with
-    their descendants. On POSIX an orphan is reparented and can only be found through the
-    runner's process group, and a PID is never reassigned while a group of that ID has
-    members, so a reassigned PID leaves nothing to wait for.
+    still name the PID as their parent and were not created after its current holder, with
+    their descendants. The holder's creation time is taken from the same process snapshot
+    as theirs, and from its start identity only when the snapshot omits it; a child
+    created at the same millisecond as the holder, or with an unreadable creation time,
+    counts as an orphan, so the merge waits rather than runs under a possible writer. On
+    POSIX an orphan is reparented and can only be found through the runner's process
+    group, and a PID is never reassigned while a group of that ID has members, so a
+    reassigned PID leaves nothing to wait for. Only a procfs identity (`linux:` clock
+    ticks) is exact enough to prove that reassignment; the `ps` start-time text used
+    where procfs is missing follows the time zone and locale of the process asking, so
+    when either identity has that form a difference decides nothing and the entry blocks
+    while the runner's process group lives, as for an unreadable identity.
 24b. `queue/run-branch.txt` records the branch a run belongs to; a stopped loop's cycle
     state belongs only to that branch. At startup, once the push target and issue queue
     are initialized and before the first poll, a recorded branch that differs from the

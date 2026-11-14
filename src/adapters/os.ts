@@ -90,7 +90,8 @@ export interface OperatingSystem {
    * is alive. With the identity a caller recorded for the PID, a holder whose identity is
    * known and differs is not that process: the answer then covers only the recorded
    * process's surviving descendants, never the holder or anything the holder started.
-   * Where the holder's identity cannot be read or matches, the answer is unchanged.
+   * Where the holder's identity cannot be read or matches, or the two identities are of a
+   * form whose difference does not prove a different process, the answer is unchanged.
    */
   processTreeIsAlive(pid: number, recordedStartIdentity?: string): boolean
   /**
