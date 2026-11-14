@@ -834,7 +834,7 @@ function runMergeChecks(
     }
     if (options.project.verifyDependencyIsolation === true
       && !ranIsolated(worktree, 'the worktree', io)) {
-      throw new MergeError('Tests passed against borrowed dependencies. Aborting merge.')
+      throw new MergeError(borrowedDependenciesMessage)
     }
     return true
   }
@@ -842,6 +842,9 @@ function runMergeChecks(
 
   const changed = gitPaths(worktree, ['diff', '--name-only', `${baseRef}...HEAD`])
   let ok = true
+  // A pass on borrowed dependencies is refused like the explicit test command's, but a
+  // check that genuinely failed outranks it: that failure is the task's to correct.
+  let borrowed = false
   // A check that only waited out the test lock defers the merge, unless another check
   // genuinely failed: that failure is known, and deferring would hide it.
   let lockBusy = false
@@ -868,14 +871,21 @@ function runMergeChecks(
       continue
     }
     const passed = outcome === 'passed'
-    const isolated = options.project.verifyDependencyIsolation !== true
-      || (passed && ranIsolated(directory, check.label, io))
-    ok = passed && isolated && ok
+    ok = passed && ok
+    if (passed && options.project.verifyDependencyIsolation === true
+      && !ranIsolated(directory, check.label, io)) {
+      borrowed = true
+    }
   }
   if (!ok) throw new VerificationFailedError('Tests failed. Aborting merge.')
+  if (borrowed) throw new MergeError(borrowedDependenciesMessage)
   if (lockBusy) throw new TestLockBusyError(testLockBusyMessage)
   return ranCommand
 }
+
+// A pass on borrowed dependencies describes the dependency tree the gate assembled, not
+// the task's content, so it is a plain refusal the loop counts rather than hands back.
+const borrowedDependenciesMessage = 'Tests passed against borrowed dependencies. Aborting merge.'
 
 /**
  * Whether a check that just passed did so on dependencies of its own. A worktree sits
