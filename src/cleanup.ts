@@ -3,7 +3,9 @@ import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { gateFixStateFiles } from './gateFix.ts'
-import { branchName, finalMessageFile, statusFile, worktreeDir, type OrchPaths } from './paths.ts'
+import {
+  branchName, finalMessageFile, rebaseEmptiedMarkerFile, statusFile, worktreeDir, type OrchPaths,
+} from './paths.ts'
 import {
   forgetTaskProcess, taskProcessPid, terminableTaskProcessPid,
 } from './processRegistry.ts'
@@ -165,6 +167,7 @@ export function cleanupTask(
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.publish-failures`), { force: true })
   runtime.remove(join(paths.queueDir, 'scanned', `${taskId}.findings-filed`), { force: true })
   runtime.remove(join(paths.queueDir, 'heartbeat', taskId), { force: true })
+  runtime.remove(rebaseEmptiedMarkerFile(paths, taskId), { force: true })
   for (const file of gateFixStateFiles(paths, taskId)) runtime.remove(file, { force: true })
   runtime.remove(statusFile(paths, taskId), { force: true })
   if (announce) console.log(`Cleaned up ${taskId}.`)

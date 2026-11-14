@@ -20,6 +20,7 @@ import {
   branchName, finalMessageFile, orchPaths, statusFile, worktreeDir, type OrchPaths,
 } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
+import { rebaseEmptiedMarkerPresent, recordRebaseEmptiedMarker } from '../src/refresh.ts'
 import { nonCanonicalSpelling } from './pathComparison.ts'
 
 let repoRoot: string
@@ -493,6 +494,16 @@ describe('cleanupTask', () => {
     cleanupTask(paths, taskId, makeRuntime())
 
     for (const name of seeded) expect(existsSync(join(gateFixDir, name))).toBe(false)
+  })
+
+  it('removes the rebase-emptied record, so a reused id cannot inherit it', () => {
+    seedTask(null)
+    recordRebaseEmptiedMarker(paths, taskId)
+    expect(rebaseEmptiedMarkerPresent(paths, taskId)).toBe(true)
+
+    cleanupTask(paths, taskId, makeRuntime())
+
+    expect(rebaseEmptiedMarkerPresent(paths, taskId)).toBe(false)
   })
 
   it('keeps the status file when a marker cannot be removed, so cleanup can run again', () => {

@@ -211,6 +211,14 @@ export function finalMessageFile(paths: OrchPaths, taskId: string): string {
   return join(paths.logsDir, `${taskId}.final`)
 }
 
+/**
+ * Records that a rebase emptied the task's commits, so a retry after a failed
+ * reconciliation still completes as no-change.
+ */
+export function rebaseEmptiedMarkerFile(paths: OrchPaths, taskId: string): string {
+  return join(paths.queueDir, 'rebase-emptied', taskId)
+}
+
 export function worktreeDir(paths: OrchPaths, taskId: string): string {
   return join(paths.worktreesDir, taskId)
 }

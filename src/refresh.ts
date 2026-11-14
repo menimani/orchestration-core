@@ -1,6 +1,9 @@
-import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs'
+import {
+  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs'
+import { dirname } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
-import { finalMessageFile, logFile, type OrchPaths } from './paths.ts'
+import { finalMessageFile, logFile, rebaseEmptiedMarkerFile, type OrchPaths } from './paths.ts'
 import {
   forgetTaskProcess, taskProcessRecorded, terminableTaskProcessPid,
 } from './processRegistry.ts'
@@ -28,6 +31,31 @@ export function noChangeMarkerPresent(paths: OrchPaths, taskId: string): boolean
   if (!existsSync(file)) return false
   return readFileSync(file, 'utf8').split(/\r?\n/)
     .some((line) => line === 'NO_CHANGE_WARRANTED')
+}
+
+/**
+ * The merge's verdict that a rebase emptied the task's commits. The rebase rewrites the
+ * task branch, so once anything after it fails the commits look empty from the start;
+ * this record lets the retry tell them from commits the worker made empty.
+ */
+export function rebaseEmptiedMarkerPresent(paths: OrchPaths, taskId: string): boolean {
+  return existsSync(rebaseEmptiedMarkerFile(paths, taskId))
+}
+
+export function recordRebaseEmptiedMarker(paths: OrchPaths, taskId: string): void {
+  const file = rebaseEmptiedMarkerFile(paths, taskId)
+  mkdirSync(dirname(file), { recursive: true })
+  const temporary = `${file}.${process.pid}.tmp`
+  writeFileSync(temporary, '')
+  try {
+    renameSync(temporary, file)
+  } finally {
+    rmSync(temporary, { force: true })
+  }
+}
+
+export function removeRebaseEmptiedMarker(paths: OrchPaths, taskId: string): void {
+  rmSync(rebaseEmptiedMarkerFile(paths, taskId), { force: true })
 }
 
 export interface RefreshOptions {
