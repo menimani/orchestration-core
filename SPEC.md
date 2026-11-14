@@ -1679,15 +1679,16 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     next poll to adopt again.
     A worker report counts only from an author with write access. When the newest
     report-shaped comment on a member comes from an author whose access is undetermined
-    (see the trust model), the adoption is deferred the same way, with a WARN naming the
-    issue, and that issue's comments are not cached, so the next poll asks again.
+    (see the trust model), the adoption is deferred the same way, and that issue's
+    comments are not cached, so the next poll asks again.
     A failure that says nothing about the pushed work — a comment listing the forge
     fails to answer for any reason but a rate limit, or a fetch of the reported branch
     that fails without git reporting the remote ref missing, matched without regard to
-    case — defers the adoption the same way, with a deduplicated WARN keyed by the issue,
-    logged as recovered when the adoption proceeds, and git's or the forge's reason kept
-    in the merge log. Only a reported branch the remote does not have counts as a failure.
-    These deferrals are counted per issue in memory; the count clears when the issue's
+    case — defers the adoption the same way. Both kinds of deferral log a deduplicated
+    WARN keyed by the issue, logged as recovered when the adoption proceeds, and keep
+    git's or the forge's reason in the merge log. Only a reported branch the remote does not have counts as a failure.
+    Both kinds are counted together per issue in memory, so a permission lookup that
+    keeps failing is bounded like an outage; the count clears when the issue's
     adoption gets past the fetch, succeeds, fails for another reason, or the issue leaves
     `loop:merge-ready`. The twentieth consecutive deferral of one issue — about ten
     minutes at the default poll interval — logs an `ERROR` naming the issue and the kind
