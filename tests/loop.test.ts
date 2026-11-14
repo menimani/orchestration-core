@@ -5132,22 +5132,71 @@ describe('scanForNextTasks', () => {
     }
 
     await expect(loop.poll()).resolves.toBe('continue')
-    await expect(loop.poll()).resolves.toBe('continue')
 
     expect(existsSync(scannedFlag)).toBe(false)
     expect(fakeForge.issues.size).toBe(0)
     expect(logged.filter((line) =>
       line.includes('WARN could not check review findings from 019_review')))
       .toHaveLength(1)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
 
     fakeForge.listOpenIssues = listOpenIssues
     await loop.poll()
 
     expect(existsSync(scannedFlag)).toBe(true)
     expect(fakeForge.issues.size).toBe(1)
-    expect(logText()).toContain(
-      'Recovered checking review findings from 019_review after 0 minutes',
+    expect(logText()).not.toContain('ERROR could not check review findings')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('stops when a review or documentation completion cannot check its findings twice', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoMerge: false,
+      maxParallel: 0,
+      maxConsecutiveMergeFailures: 10,
+    })
+    loop.initializeSessionStateForBranch()
+    const reviewId = '20250101_000000_028_review-c1'
+    const docsId = '20250101_000000_029_scan'
+    writeFinal(reviewId, [
+      'NEXT_TASK: [BUG] a review finding behind a malformed ledger',
+      'TASK_COMPLETE',
+    ].join('\n'))
+    writeFinal(docsId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'TASK_COMPLETE',
+    ].join('\n'))
+    writeRawStatus(reviewId, 'completed')
+    writeRawStatus(docsId, 'completed')
+    const ledgerFile = join(paths.queueDir, 'issue-fingerprints')
+    writeFileSync(ledgerFile, 'malformed line here\n')
+    const stopFile = join(paths.queueDir, 'stop')
+
+    await loop.poll()
+
+    expect(logText()).toContain('WARN could not check review findings from 028_review')
+    expect(logText()).toContain('WARN could not check documentation findings from 029_scan')
+    expect(logText()).not.toContain('ERROR could not check')
+    expect(existsSync(stopFile)).toBe(false)
+
+    await loop.poll()
+
+    for (const taskId of [reviewId, docsId]) {
+      expect(existsSync(join(paths.queueDir, 'scanned', taskId))).toBe(false)
+      expect(readStatus(paths, taskId)?.status).toBe('completed')
+    }
+    expect(fakeForge.issues.size).toBe(0)
+    expect(logText()).toMatch(
+      /ERROR could not check review findings from 028_review: Malformed fingerprint ledger .* \(repeated 2 times\)/,
     )
+    expect(logText()).toMatch(
+      /ERROR could not check documentation findings from 029_scan: Malformed fingerprint ledger .* \(repeated 2 times\)/,
+    )
+    expect(existsSync(stopFile)).toBe(true)
+    expect(readFileSync(ledgerFile, 'utf8')).toBe('malformed line here\n')
   })
 
   it('leaves a local finding unreconciled when enqueue fails so a later scan retries it', async () => {
