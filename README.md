@@ -235,7 +235,8 @@ that one deliberate import, `init` is the supported setup and repair path. It ge
 contract-valid adapter, project templates, points `core.hooksPath` at the core-owned
 hooks, and creates missing `loop:*` labels. Those hooks include `commit-msg`, which `init`
 requires to be present: it rejects any commit whose subject does not begin with `feat: `,
-`fix: `, `chore: `, `docs: `, `refactor: `, or `test: ` (merge commits excepted), so from
+`fix: `, `chore: `, `docs: `, `refactor: `, or `test: ` followed by a non-empty subject that
+does not start with another space (a first line beginning with `Merge ` is exempt), so from
 then on every commit made in the repository, by a person or a task agent, follows that
 convention. It is safe to repeat: missing required adapter
 members are added with marked scaffold defaults, while declared members, other existing
