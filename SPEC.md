@@ -541,7 +541,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    depth and effort, as a retry whose specification names that branch, those paths, and
    those commit hashes ahead of the earlier specification; commit subjects are left out
    because they are repository-controlled text. A chain of conflicts is retried at most
-   twice, after which the commits stay kept for a person. Linked issues return to ready
+   twice, after which the commits stay kept for a person. Once cleanup removes its status,
+   the conflicted task emits `FAILED: <id>` with its merge log path itself, whether or not a
+   retry is queued; its loss is recorded in `queue/failed-<cycle>` only when no retry is
+   queued. Linked issues return to ready
    before another poll can select the task again, and when this checkout claims such an
    issue again its new specification carries the same section. An issue whose chain has
    used both retries is instead parked under `loop:retry-exhausted` by the same release,
