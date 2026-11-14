@@ -2990,11 +2990,16 @@ export function createLoop(deps: LoopDeps) {
             try {
               await reconcileClosedIssueLifecycleLabels(forge)
               warningLog.recovered('reconcile-closed-issue-labels')
+              previousGateFailures.delete('reconcile-closed-issue-labels')
               reconciledCycleGates.add(currentScans)
             } catch (error) {
               if (error instanceof ForgeRateLimitError) return 'continue'
-              warning('reconcile-closed-issue-labels', 'reconciling closed issue labels',
-                `could not reconcile closed issue labels: ${errorSummary(error)}`)
+              // The gate holds every later step of the cycle, so a failure that keeps
+              // recurring stops the loop like any other gate instead of holding it forever.
+              reportGateFailure(
+                `could not reconcile closed issue labels: ${errorSummary(error)}`,
+                'reconcile-closed-issue-labels',
+              )
               return 'continue'
             }
           }
