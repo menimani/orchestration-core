@@ -30,6 +30,16 @@ function createSpec(taskId: string): void {
   writeFileSync(specFile(paths, taskId), '# Test task\n')
 }
 
+function initRepo(): (...args: string[]) => void {
+  const git = (...args: string[]) => {
+    execFileSync('git', args, { cwd: repoRoot, stdio: 'ignore', windowsHide: true })
+  }
+  git('init', '--quiet')
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+    'commit', '--quiet', '--allow-empty', '-m', 'initial')
+  return git
+}
+
 function writeTestStatus(taskId: string, status: string): void {
   writeFileSync(join(paths.statusDir, `${taskId}.json`), JSON.stringify({
     task_id: taskId,
@@ -71,6 +81,7 @@ describe('enqueueTask', () => {
   })
 
   it('enqueues a failed task for retry at the default depth', () => {
+    initRepo()
     createSpec('failed-task')
     writeTestStatus('failed-task', 'failed')
     const result = enqueueTask(paths, 'failed-task')
@@ -90,11 +101,7 @@ describe('enqueueTask', () => {
   })
 
   it('refuses a failed task whose branch is still there until cleanup', () => {
-    const git = (...args: string[]) =>
-      execFileSync('git', args, { cwd: repoRoot, stdio: 'ignore', windowsHide: true })
-    git('init', '--quiet')
-    git('-c', 'user.name=Test', '-c', 'user.email=test@example.com',
-      'commit', '--quiet', '--allow-empty', '-m', 'initial')
+    const git = initRepo()
     git('branch', branchName('failed-task'))
     createSpec('failed-task')
     writeTestStatus('failed-task', 'failed')
@@ -102,6 +109,14 @@ describe('enqueueTask', () => {
     expect(result).toEqual({
       outcome: 'needs-cleanup', taskId: 'failed-task', leftover: `branch ${branchName('failed-task')}`,
     })
+    expect(queueLines()).toEqual([])
+  })
+
+  it('refuses a failed task when git cannot say whether its branch is still there', () => {
+    // repoRoot is not a repository, so show-ref fails with a status other than 1.
+    createSpec('failed-task')
+    writeTestStatus('failed-task', 'failed')
+    expect(() => enqueueTask(paths, 'failed-task')).toThrow(/show-ref/)
     expect(queueLines()).toEqual([])
   })
 
