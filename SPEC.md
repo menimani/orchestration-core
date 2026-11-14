@@ -728,7 +728,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     same install runs when a pending record exists — even if the recorded hash matches —
     or when that recorded hash does not match or a declared dependency is missing
     (`tests/loop-merge-recovery.test.ts` and `tests/loop.test.ts` pin the skip and the
-    forced startup install). Startup synchronization is limited to the package copy inside the repository
+    forced startup install). While that startup install runs, the daemon announces it
+    beside the readiness file its launcher polls, and both the start command and a
+    restarting predecessor hold their startup timeout open until the install finishes,
+    then allow the rest of initialization the full timeout again: killing the daemon
+    partway through `npm ci` would leave `node_modules` half emptied
+    (`tests/restart.test.ts` and `tests/startup-install.test.ts`). Startup synchronization is limited to the package copy inside the repository
     being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
     it is running from. Install output is captured; a failure stops the loop or startup
     with an error that names the package root and the `npm ci --no-audit --no-fund`

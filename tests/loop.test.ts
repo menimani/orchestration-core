@@ -237,6 +237,25 @@ describe('daemon startup', () => {
     expect(install).toHaveBeenCalledOnce()
   })
 
+  it('announces a startup install before it starts and only when one runs', () => {
+    writeOrchestrationManifests('{"lockfileVersion":3}\n')
+    const order: string[] = []
+    const install = vi.fn(() => {
+      order.push('install')
+      successfulInstall()
+    })
+    const beforeInstall = vi.fn(() => {
+      order.push('announce')
+      return true
+    })
+    const packageRoot = fixturePackageRoot()
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot }, beforeInstall)
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot }, beforeInstall)
+
+    expect(order).toEqual(['announce', 'install'])
+  })
+
   it('retries a durable pending sync even when the recorded lockfile is current', () => {
     writeOrchestrationManifests('{"lockfileVersion":3}\n')
     const install = vi.fn(successfulInstall)
