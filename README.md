@@ -148,7 +148,9 @@ resolves against the project directory (`orchestration/` in a subtree consumer,
 
 An external `FORGE` or `RUNNER` selector may be a package specifier, file URL, absolute
 path, or path relative to the consumer repository root. A repository-relative selector
-must begin with `./`, `../`, `.\`, or `..\` on every platform; for example, use
+must begin with `./`, `../`, `.\`, or `..\` on every platform, and its backslashes separate directories everywhere, so
+`.\custom\runner.mjs` written on Windows into shared fleet configuration also loads on
+Linux. For example, use
 `./custom/runner.mjs`, because `custom/runner.mjs` is treated as a package specifier. A forge module exports a `Forge`
 as its default or `forge` export, or exports `createForge(repoRoot, report, target)`.
 Every forge implements `updateIssueTitle(issueNumber, title)`, which replaces an issue's
