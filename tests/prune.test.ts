@@ -121,6 +121,24 @@ describe('pruneTasks', () => {
     expect(existsSync(mergeGuard)).toBe(false)
   })
 
+  it('removes retired merge guard directories left for a pruned task', () => {
+    const newMerged = '20990101_000000_001_user-new-merged'
+    makeTask(OLD_MERGED, 'merged', 'old')
+    makeTask(newMerged, 'merged', 'new')
+    const guardsDir = join(paths.queueDir, 'merge-guards')
+    const retired = join(guardsDir, `${OLD_MERGED}.retired-11111111-2222-3333-4444-555555555555`)
+    const otherRetired = join(guardsDir, `${newMerged}.retired-66666666-7777-8888-9999-000000000000`)
+    mkdirSync(retired, { recursive: true })
+    writeFileSync(join(retired, 'retired'), '')
+    mkdirSync(otherRetired, { recursive: true })
+
+    const report = pruneTasks(paths, { days: 14, dryRun: false })
+
+    expect(report.removed).toContain(retired)
+    expect(existsSync(retired)).toBe(false)
+    expect(existsSync(otherRetired)).toBe(true)
+  })
+
   it('retains the status file when removing an earlier artifact fails', () => {
     makeTask(OLD_MERGED, 'merged', 'old')
     const failedPath = join(paths.logsDir, `${OLD_MERGED}.log`)

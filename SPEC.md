@@ -790,7 +790,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
     The cap those cycles count towards is persisted separately, in
     `queue/cycle-cap.txt`, rewritten from `MAX_SCAN_CYCLES` once a startup holds the PID
     lock and owns the task lifecycle — a startup refused before that point leaves no cap
-    behind — and left in place at shutdown. The daemon's own `[loop <cycle>/<cap>]` log
+    behind — rewritten again by the running daemon whenever a live `MAX_SCAN_CYCLES`
+    change is applied, and left in place at shutdown, so it holds the cap in force when
+    the run ended. The daemon's own `[loop <cycle>/<cap>]` log
     prefix takes the cap from its loaded configuration, so the file exists for the
     commands that run after the daemon has gone: it is what lets `shipped` (item 18a)
     record an ending against the cap the run was actually working to, rather than
@@ -1031,7 +1033,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
      parsed form, with the scheme and host lowercased and a default port dropped. The event's cycle prefix is read back from the state the stopped daemon
      left: the cycle number from `queue/scan-count.txt` and the cap from
      `queue/cycle-cap.txt` (item 13). A missing cycle number reads as zero, and a cap no
-     daemon recorded falls back to the configured `MAX_SCAN_CYCLES`.
+     daemon recorded falls back to the configured `MAX_SCAN_CYCLES`. An existing file of
+     either kind must hold base-10 digits representing a non-negative safe integer, as
+     the daemon writes them; other contents, including an empty file, make `shipped`
+     exit non-zero with an error naming the file (for example, `queue/cycle-cap.txt`)
+     and record nothing, so neither log receives an event with an unreadable prefix.
 
 ## Failure containment
 
@@ -1640,7 +1646,10 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     failure label first and reading the issue back to confirm it holds that single
     lifecycle label, logging a WARN when it does not — and counts
     through the consecutive-merge-failure limit instead of returning singleton work to
-    ready. A failed grouped adoption instead returns all members as singleton-ready work.
+    ready. A grouped adoption returns all members to ready as singleton work only when an
+    unclaimed member reports a different branch or head. A report naming an unavailable
+    issue is not treated as a group: each reporting issue is quarantined as
+    `loop:merge-failed` and counts as a merge failure.
     As in item 10, a gate command that exits 75 never ran its tests: the adoption is
     deferred with a WARN that the repository test lock stayed busy, without the comment,
     the relabel, or a failure count, and every member stays `loop:merge-ready` for the
@@ -1669,7 +1678,8 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     A grouped member still claimed — `loop:in-progress` and not `loop:ready` — is still
     being published, even when it carries a report from an earlier task, so the poll
     skips the group and leaves every member as it is; only an unclaimed member reporting
-    a different branch or head, or an unavailable member, fails the adoption.
+    a different branch or head, which returns the group to ready, or an unavailable
+    member, which quarantines the reporter as above, fails the adoption.
     The shared-work label state machine is `loop:ready` → `loop:in-progress` →
     `loop:merge-ready` → closed or `loop:merge-failed`; repeated task failures take the
     `loop:in-progress` → `loop:retry-exhausted` parking branch, inspections and

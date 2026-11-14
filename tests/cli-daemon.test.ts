@@ -849,6 +849,122 @@ describe('loop daemon ownership', () => {
     expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('0\n')
   })
 
+  it('rewrites the cycle cap when the live configuration changes it mid-run', () => {
+    const configFile = join(repoRoot, 'orchestration', 'config.json')
+    mkdirSync(dirname(configFile), { recursive: true })
+    writeFileSync(configFile, JSON.stringify({ MAX_SCAN_CYCLES: 10 }))
+    const wrapper = join(repoRoot, 'change-cap-loop.mjs')
+    const cliUrl = pathToFileURL(CLI).href
+    writeFileSync(wrapper, [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalWriteFileSync = fs.writeFileSync',
+      'let changed = false',
+      'fs.writeFileSync = function (file, ...args) {',
+      '  const result = originalWriteFileSync.call(this, file, ...args)',
+      "  if (!changed && typeof file === 'string' && /[\\\\/]cycle-cap\\.txt$/.test(file)) {",
+      '    changed = true',
+      `    originalWriteFileSync(${JSON.stringify(configFile)}, JSON.stringify({ MAX_SCAN_CYCLES: 0 }))`,
+      '  }',
+      '  return result',
+      '}',
+      'syncBuiltinESMExports()',
+      `await import(${JSON.stringify(cliUrl)})`,
+      '',
+    ].join('\n'))
+
+    const result = spawnSync(process.execPath, [wrapper, 'loop', '--approve-mode', 'local'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        SCAN_ENABLED: 'true',
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    // The first poll ends the run against the lowered cap, which the file must hold.
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("MAX_SCAN_CYCLES changed from '10' to '0'")
+    expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('0\n')
+  })
+
+  it('persists a mid-run cycle cap change for a later shipped record', async () => {
+    const paths = orchPaths(repoRoot)
+    const configFile = join(paths.projectRoot, 'config.json')
+    mkdirSync(paths.projectRoot, { recursive: true })
+    writeFileSync(configFile, JSON.stringify({ MAX_SCAN_CYCLES: 5 }))
+    // Hold the daemon after its startup cap write so the configuration changes while it
+    // runs, before its first poll.
+    const wrapper = join(repoRoot, 'start-held-loop.mjs')
+    const cliUrl = pathToFileURL(CLI).href
+    writeFileSync(wrapper, [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const originalWriteFileSync = fs.writeFileSync',
+      'fs.writeFileSync = function (file, ...args) {',
+      '  const result = originalWriteFileSync.call(this, file, ...args)',
+      "  if (typeof file === 'string' && /[\\\\/]cycle-cap\\.txt$/.test(file)) {",
+      "    const release = file.replace(/cycle-cap\\.txt$/, 'release')",
+      '    while (!fs.existsSync(release)) {',
+      '      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)',
+      '    }',
+      '  }',
+      '  return result',
+      '}',
+      'syncBuiltinESMExports()',
+      `await import(${JSON.stringify(cliUrl)})`,
+      '',
+    ].join('\n'))
+
+    const child = testProcesses.spawn(process.execPath, [wrapper, 'loop', '--approve-mode', 'local'], {
+      cwd: repoRoot,
+      env: {
+        ...CORE_ENV,
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        POLL_INTERVAL: '1',
+        SCAN_ENABLED: 'false',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+    const completion = childCompletion(child)
+
+    await waitUntil(
+      () => existsSync(daemonFile('cycle-cap.txt')),
+      'loop did not record its startup cycle cap',
+    )
+    expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('5\n')
+    writeFileSync(configFile, JSON.stringify({ MAX_SCAN_CYCLES: 12 }))
+    writeFileSync(daemonFile('stop'), '')
+    writeFileSync(daemonFile('release'), '')
+    const result = await completion
+
+    expect(result.code, result.output).toBe(0)
+    expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('12\n')
+
+    // shipped must read the cap the run ended on, not the configuration as it is now.
+    writeFileSync(configFile, JSON.stringify({ MAX_SCAN_CYCLES: 20 }))
+    writeFileSync(daemonFile('scan-count.txt'), '4\n')
+    const shipped = spawnSync(process.execPath, [CLI, 'shipped', '#41'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(shipped.status, shipped.stderr).toBe(0)
+    expect(readFileSync(join(paths.logsDir, 'loop.log'), 'utf8')).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[loop 04\/12\] Completed {4}Loop {8}PR #41\r?\n$/,
+    )
+  })
+
   it('states when automatic core updates are disabled', () => {
     const result = spawnSync(process.execPath, [CLI, 'loop', '--approve-mode', 'local'], {
       cwd: repoRoot,
@@ -990,6 +1106,38 @@ describe('stop', () => {
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('queue/scan-count.txt must contain a positive integer')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop-interrupted-scans'))).toBe(false)
+    expect(pidIsAlive(scanPid as number)).toBe(true)
+  })
+
+  it('does not publish stop or terminate a live scan when its cycle counter is not a safe integer', async () => {
+    const paths = orchPaths(repoRoot)
+    const taskId = '20260812_010203_042_scan'
+    const scan = testProcesses.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    const scanPid = scan.pid
+    expect(scanPid).toBeTypeOf('number')
+    scan.unref()
+
+    await writeStatus(paths, taskId, 'running', scanPid)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '9007199254740993\n')
+
+    const result = spawnSync(process.execPath, [CLI, 'stop'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      'Cannot stop live scans: queue/scan-count.txt must contain a safe integer; '
+      + 'no stop file was created.',
+    )
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'stop-interrupted-scans'))).toBe(false)
     expect(pidIsAlive(scanPid as number)).toBe(true)
