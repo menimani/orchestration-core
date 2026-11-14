@@ -9,7 +9,7 @@ import { operatingSystem } from '../src/adapters/os.ts'
 import {
   completeTaskWithoutChanges, inTemporaryWorktree, MergeError, MergeRecoveryError,
   mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
-  TestLockBusyError, UnverifiedRunnerError,
+  TestLockBusyError, UnverifiedRunnerError, VerificationFailedError,
 } from '../src/merge.ts'
 import { branchName, finalMessageFile, orchPaths, worktreeDir } from '../src/paths.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
@@ -1038,10 +1038,15 @@ describe('mergeTask', () => {
     git(worktree, ['commit', '-qm', 'test: declare an uninstalled test dependency'])
     const outputFile = join(repoRoot, 'merge-check.log')
 
-    await expect(mergeTask(paths, taskId, {
+    const failure = await mergeTask(paths, taskId, {
       taskGate: 'light', project: installProject, outputFile,
       testCmd: 'node -e "process.exit(0)"',
-    })).rejects.toThrow('Tests passed against borrowed dependencies. Aborting merge.')
+    }).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(MergeError)
+    expect(failure).not.toBeInstanceOf(VerificationFailedError)
+    expect((failure as Error).message)
+      .toBe('Tests passed against borrowed dependencies. Aborting merge.')
 
     const output = readFileSync(outputFile, 'utf8')
     expect(output).toContain('the worktree: passed on dependencies it does not have')

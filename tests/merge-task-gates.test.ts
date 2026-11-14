@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { MergeCheck, ProjectAdapter } from '../src/adapters/project.ts'
 import {
   describeCommandFailure, MergeError, MergeRecoveryError, mergeTask, RebaseConflictError,
-  TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
+  TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError, VerificationFailedError,
 } from '../src/merge.ts'
 import { readStatus } from '../src/status.ts'
 import {
@@ -417,13 +417,43 @@ describe('mergeTask', () => {
     git(worktree, ['commit', '-qm', 'test: declare a dependency nobody installed'])
     const outputFile = join(repoRoot, 'merge-check.log')
 
-    await expect(mergeTask(paths, taskId, {
+    const failure = await mergeTask(paths, taskId, {
       taskGate: 'light', project: installProject, outputFile,
-    })).rejects.toThrow(/Tests failed/)
+    }).catch((error: unknown) => error)
 
+    // The same refusal as the explicit test command's, and never a hand-back candidate.
+    expect(failure).toBeInstanceOf(MergeError)
+    expect(failure).not.toBeInstanceOf(VerificationFailedError)
+    expect((failure as Error).message)
+      .toBe('Tests passed against borrowed dependencies. Aborting merge.')
     const output = readFileSync(outputFile, 'utf8')
     expect(output).toContain('passed on dependencies it does not have')
     expect(output).toContain('fixture-dependency')
+  })
+
+  it('reports a genuine check failure ahead of another check that borrowed dependencies', async () => {
+    const taskId = '20260808_000000_098_user-fails-and-borrows'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    writeFileSync(join(worktree, 'package.json'), `${JSON.stringify({
+      name: 'fixture', devDependencies: { 'fixture-dependency': '^1.0.0' },
+    }, null, 2)}
+`)
+    git(worktree, ['add', 'package.json'])
+    git(worktree, ['commit', '-qm', 'test: declare a dependency nobody installed'])
+    const project: ProjectAdapter = {
+      ...installProject,
+      name: 'fails-and-borrows',
+      mergeChecks: () => [
+        { label: 'Borrowing check', cwd: '', command: 'node -e ""' },
+        { label: 'Failing check', cwd: '', command: 'node -e "process.exit(1)"' },
+      ],
+    }
+
+    const failure = await mergeTask(paths, taskId, { taskGate: 'light', project })
+      .catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(VerificationFailedError)
+    expect((failure as Error).message).toBe('Tests failed. Aborting merge.')
   })
 
   it('does not apply Node dependency isolation to adapters that did not opt in', async () => {

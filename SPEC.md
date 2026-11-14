@@ -578,7 +578,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     dependency tree nobody assembled, and that verdict describes neither tree. Declared
     dependencies with no `node_modules`, an npm-owned directory with no completed-install
     record, or any declared dependency absent from `node_modules` turns the pass into a
-    failure that names what was borrowed. The verification follows the check rather than
+    refusal that names what was borrowed. The explicit test command and the adapter's
+    merge checks refuse it alike, as `Tests passed against borrowed dependencies.
+    Aborting merge.`; a check of the same gate that genuinely failed is reported as the
+    test failure instead. The verification follows the check rather than
     preceding it, because a check may install as its own first step. When the option is
     omitted or false, merge-check results are not subjected to this Node/npm-specific
     verification, allowing adapters with other dependency models to opt out.
@@ -656,7 +659,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     attempt and counts the failure. Never handed back: a refusal for uncommitted changes,
     a rebase or merge conflict, a failure the project adapter's
     `classifyInfrastructureFailure` or the unreachable-registry diagnosis attributes to the
-    environment, a test-lock deferral, an adopted worker branch, or any failure after the
+    environment, a pass against borrowed dependencies (item 9a), a test-lock deferral, an adopted worker branch, or any failure after the
     stop file exists. Once the handbacks are used, failures are counted exactly as above;
     `MAX_GATE_FIX_ATTEMPTS=0` reproduces that behaviour event for event.
 10a. A failed merge or rebase is counted or retried only once its abort is confirmed to
