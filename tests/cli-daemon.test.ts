@@ -6,7 +6,9 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, type Mock } from 'vitest'
+import type { DaemonLaunchOptions, DaemonProcess } from '../src/adapters/os.ts'
+import { LOOP_STARTUP_RESULT_FILE_ENV } from '../src/internalEnvironment.ts'
 import {
   absolutePackageScriptCommand, branchName, orchPaths, statusFile, worktreeDir,
 } from '../src/paths.ts'
@@ -1112,6 +1114,205 @@ describe('loop daemon ownership', () => {
 
     expect(result.exitCode).toBe(0)
     expect(outcomes).toEqual(['stopped'])
+  })
+})
+
+describe('loop daemon startup failures', () => {
+  const STARTUP_TIMEOUT_MS = 50
+
+  interface StubDaemon extends DaemonProcess {
+    terminate: Mock<() => void>
+    release: Mock<() => void>
+  }
+
+  function stubDaemon(pid: number): StubDaemon & { emitError(error: Error): void } {
+    const errorListeners = new Set<(error: Error) => void>()
+    return {
+      pid,
+      isAlive: () => true,
+      terminate: vi.fn<() => void>(),
+      release: vi.fn<() => void>(),
+      onError: (listener) => { errorListeners.add(listener) },
+      offError: (listener) => { errorListeners.delete(listener) },
+      onExit: () => {},
+      offExit: () => {},
+      emitError: (error) => { for (const listener of errorListeners) listener(error) },
+    }
+  }
+
+  // The launcher runs in this process against a stub daemon, so each outcome is decided
+  // by what the stub does, and the thirty-second startup allowance is cut to a few
+  // milliseconds by capping the deadline the launcher recomputes on every poll.
+  async function startDaemonInProcess(
+    daemon: DaemonProcess,
+    onLaunch: (options: DaemonLaunchOptions) => void = () => {},
+  ): Promise<{ exitCode: number, errors: string[], logs: string[] }> {
+    vi.doMock('../src/adapters/runner.ts', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/adapters/runner.ts')>(),
+      loadRunner: async () => ({ sharedSkills: fakeRunnerSharedSkills, start: vi.fn() }),
+    }))
+    vi.doMock('../src/adapters/os.ts', async (importOriginal) => {
+      const os = await importOriginal<typeof import('../src/adapters/os.ts')>()
+      vi.spyOn(os.operatingSystem, 'launchDaemon').mockImplementation(async (options) => {
+        onLaunch(options)
+        return daemon
+      })
+      return os
+    })
+    vi.doMock('../src/startupInstall.ts', async (importOriginal) => {
+      const startupInstall = await importOriginal<typeof import('../src/startupInstall.ts')>()
+      let cap: number | undefined
+      return {
+        ...startupInstall,
+        startupDeadline: (...args: Parameters<typeof startupInstall.startupDeadline>) => {
+          cap ??= Date.now() + STARTUP_TIMEOUT_MS
+          return Math.min(startupInstall.startupDeadline(...args), cap)
+        },
+      }
+    })
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const childProcess = await importOriginal<typeof import('node:child_process')>()
+      return {
+        ...childProcess,
+        execFileSync: (...args: Parameters<typeof execFileSync>) => {
+          const [file, fileArgs] = args
+          if (file === 'git' && fileArgs?.join(' ') === 'rev-parse --show-toplevel') {
+            return repoRoot
+          }
+          return childProcess.execFileSync(...args)
+        },
+      }
+    })
+    vi.resetModules()
+
+    const previousArgv = process.argv
+    const previousExitCode = process.exitCode
+    const previousEnv = { ...process.env }
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, CORE_ENV, {
+        AUTO_PR: 'false',
+        ISSUE_QUEUE_ENABLED: 'false',
+        MAX_SCAN_CYCLES: '0',
+      })
+      process.exitCode = undefined
+      process.argv = [process.execPath, CLI, 'loop', '--approve-mode', 'local', '--daemon']
+
+      await import('../src/cli.ts')
+
+      return {
+        exitCode: process.exitCode ?? 0,
+        errors: errors.mock.calls.map((call) => String(call[0])),
+        logs: logs.mock.calls.map((call) => String(call[0])),
+      }
+    } finally {
+      errors.mockRestore()
+      logs.mockRestore()
+      process.argv = previousArgv
+      process.exitCode = previousExitCode
+      for (const name of Object.keys(process.env)) delete process.env[name]
+      Object.assign(process.env, previousEnv)
+      vi.doUnmock('../src/adapters/runner.ts')
+      vi.doUnmock('../src/adapters/os.ts')
+      vi.doUnmock('../src/startupInstall.ts')
+      vi.doUnmock('node:child_process')
+      vi.resetModules()
+    }
+  }
+
+  const loopLog = (): string => join(orchPaths(repoRoot).logsDir, 'loop.log')
+
+  it('terminates a daemon that never reports readiness before the startup timeout', async () => {
+    const daemon = stubDaemon(43210)
+
+    const result = await startDaemonInProcess(daemon)
+
+    expect(result.exitCode).toBe(1)
+    expect(daemon.terminate).toHaveBeenCalledOnce()
+    expect(daemon.release).not.toHaveBeenCalled()
+    expect(result.errors.slice(-2)).toEqual([
+      'Could not start the loop: daemon did not initialize before the startup timeout',
+      `Log: ${loopLog()}`,
+    ])
+    expect(result.logs.some((line) => line.startsWith('Started the loop in the background')))
+      .toBe(false)
+  })
+
+  it('reports a failed cleanup when the timed-out daemon cannot be terminated', async () => {
+    const daemon = stubDaemon(43210)
+    daemon.terminate.mockImplementation(() => {
+      throw new Error('Could not stop process tree 43210.\nsecond line')
+    })
+
+    const result = await startDaemonInProcess(daemon)
+
+    expect(result.exitCode).toBe(1)
+    expect(daemon.terminate).toHaveBeenCalledOnce()
+    expect(result.errors.slice(-2)).toEqual([
+      'Could not start the loop: daemon did not initialize before the startup timeout; '
+        + 'cleanup failed: Could not stop process tree 43210.',
+      `Log: ${loopLog()}`,
+    ])
+  })
+
+  it('terminates a daemon whose startup result names another PID', async () => {
+    const daemon = stubDaemon(43210)
+    let resultFile: string | undefined
+
+    const result = await startDaemonInProcess(daemon, (options) => {
+      resultFile = options.env?.[LOOP_STARTUP_RESULT_FILE_ENV]
+      writeFileSync(resultFile!, `${JSON.stringify({ status: 'ready', pid: 43211 })}\n`)
+    })
+
+    expect(result.exitCode).toBe(1)
+    expect(daemon.terminate).toHaveBeenCalledOnce()
+    expect(daemon.release).not.toHaveBeenCalled()
+    expect(result.errors.slice(-2)).toEqual([
+      'Could not start the loop: daemon published an unexpected PID (43211)',
+      `Log: ${loopLog()}`,
+    ])
+    expect(resultFile).toBeDefined()
+    expect(existsSync(resultFile!)).toBe(false)
+  })
+
+  it('reports a failed cleanup when the daemon naming another PID cannot be terminated', async () => {
+    const daemon = stubDaemon(43210)
+    daemon.terminate.mockImplementation(() => { throw new Error('access denied') })
+
+    const result = await startDaemonInProcess(daemon, (options) => {
+      writeFileSync(
+        options.env![LOOP_STARTUP_RESULT_FILE_ENV]!,
+        `${JSON.stringify({ status: 'ready', pid: 43211 })}\n`,
+      )
+    })
+
+    expect(result.exitCode).toBe(1)
+    expect(daemon.terminate).toHaveBeenCalledOnce()
+    expect(result.errors.slice(-2)).toEqual([
+      'Could not start the loop: daemon published an unexpected PID (43211); '
+        + 'cleanup failed: access denied',
+      `Log: ${loopLog()}`,
+    ])
+  })
+
+  it('returns a spawn error reported through the daemon error listener', async () => {
+    const daemon = stubDaemon(43210)
+
+    const result = await startDaemonInProcess(daemon, () => {
+      setTimeout(() => daemon.emitError(new Error('spawn node ENOENT\ndetail')), 0)
+    })
+
+    expect(result.exitCode).toBe(1)
+    // A spawn error means the process never started, so there is nothing to terminate;
+    // the deadline has not passed, so the timeout path did not stop it either.
+    expect(daemon.terminate).not.toHaveBeenCalled()
+    expect(daemon.release).not.toHaveBeenCalled()
+    expect(result.errors.slice(-2)).toEqual([
+      'Could not start the loop: spawn node ENOENT',
+      `Log: ${loopLog()}`,
+    ])
   })
 })
 
