@@ -709,8 +709,16 @@ are not parsed by `loadConfig` and are not operator-file settings.
     scan launch failure stops the loop without advancing the cycle number, discarding
     the task state of every scan that attempt had already started so the next daemon
     dispatches the cycle's full scan set again rather than inheriting scans no cycle
-    accounts for. A cycle missing any expected yield stops rather than advancing to
-    another cycle or completion.
+    accounts for. The scan whose own startup failed is kept when the loop cannot account
+    for its runner: the runner returned a PID that is not a positive safe integer, or the
+    startup process tree it launched survived termination. Discarding that scan could
+    leave a live runner writing into a worktree nobody tracks, so the loop logs an
+    `ERROR` for that scan ending `task retained and loop stopped` and leaves its
+    worktree, branch, and specification in place. It belongs to no cycle: the cycle
+    still records no expectation and is dispatched again in full by the next daemon,
+    and the retained scan stays until the operator removes it with `cleanup`, which
+    first stops any runner the process registry recorded for it. A cycle missing any expected yield stops rather than
+    advancing to another cycle or completion.
     A scan the cycle recorded as failed counts towards the expected total as a delivered
     but silent yield: the cycle closes, its id still reaches the decisions and the pull
     request through the cycle's loss note, and a failed scan by itself neither resets nor
