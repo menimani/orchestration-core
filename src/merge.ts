@@ -376,6 +376,8 @@ export function syncOrchestrationDepsAtStartup(
   paths: OrchPaths,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
+  /** Runs once an install is certain, just before it starts; false leaves the tree untouched. */
+  beforeInstall?: (() => boolean) | undefined,
 ): void {
   const root = runtime.packageRoot ?? PACKAGE_ROOT
   // Only the repository this loop was started against gets its package synchronized. A
@@ -392,7 +394,7 @@ export function syncOrchestrationDepsAtStartup(
   if (!isInside(paths.repoRoot, root)) return
   const pendingFile = pendingOrchestrationDepsFile(paths, root)
   if (!existsSync(pendingFile) && !orchestrationDepsMissing(root)) return
-  installOrchestrationDeps('at startup', event, runtime, pendingFile)
+  installOrchestrationDeps('at startup', event, runtime, pendingFile, beforeInstall)
 }
 
 interface MergeIo {

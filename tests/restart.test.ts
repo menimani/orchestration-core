@@ -15,6 +15,7 @@ import {
   LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV, WINDOWS_PROCESS_ROOT_PID_ENV,
 } from '../src/internalEnvironment.ts'
 import { processMarker, processMarkerText } from '../src/processMarker.ts'
+import { markStartupInstalling, startupInstallingFile } from '../src/startupInstall.ts'
 
 const fixtureRoots: string[] = []
 
@@ -468,6 +469,77 @@ describe('loop replacement startup', () => {
       pid: 43216,
       error: 'replacement did not become ready before the startup timeout; '
         + 'replacement cleanup failed: Could not stop process tree 43216.',
+    })
+  })
+
+  it('waits past the startup timeout while the replacement installs dependencies', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    const child = fakeChild(43218)
+    // The install outlasts the whole startup timeout several times over; cutting it
+    // short would leave the replacement's node_modules half emptied.
+    const os = fakeOperatingSystem(child, () => {
+      const clearInstalling = markStartupInstalling([readyFile])
+      setTimeout(() => {
+        clearInstalling()
+        writeFileSync(readyFile, '43218\n')
+      }, 300)
+    })
+
+    await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      startupTimeoutMs: 50,
+    })).resolves.toEqual({ ok: true, pid: 43218 })
+    expect(os.terminateProcessTree).not.toHaveBeenCalled()
+    expect(readdirSync(root)).toEqual([])
+  })
+
+  it('enforces the startup timeout again once the replacement install finishes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    const child = fakeChild(43219)
+    const os = fakeOperatingSystem(child, () => {
+      const clearInstalling = markStartupInstalling([readyFile])
+      setTimeout(clearInstalling, 150)
+    })
+
+    await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      startupTimeoutMs: 50,
+    })).resolves.toEqual({
+      ok: false,
+      pid: 43219,
+      error: 'replacement did not become ready before the startup timeout',
+    })
+    expect(os.terminateProcessTree).toHaveBeenCalledWith(43219)
+    expect(readdirSync(root)).toEqual([])
+  })
+
+  it('clears a stale install marker before launching the replacement', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orch-restart-'))
+    fixtureRoots.push(root)
+    const readyFile = join(root, 'ready')
+    writeFileSync(startupInstallingFile(readyFile), '99999\n')
+    const child = fakeChild(43220)
+    const os = fakeOperatingSystem(child)
+
+    await expect(startLoopReplacement(readyFile, {
+      env: environmentWithoutWrapper(),
+      operatingSystem: os,
+      outputFile: join(root, 'loop.log'),
+      packageRoot: root,
+      startupTimeoutMs: 50,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: 'replacement did not become ready before the startup timeout',
     })
   })
 

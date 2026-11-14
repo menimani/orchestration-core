@@ -12,6 +12,7 @@ import {
 import {
   currentProcessMarkerPid, parseProcessMarker, processMarker, processMarkerText,
 } from './processMarker.ts'
+import { startupDeadline, startupInstallingFile } from './startupInstall.ts'
 
 export interface LoopRestartCommand {
   executable: string
@@ -109,6 +110,7 @@ export async function startLoopReplacement(
   runtime: LoopRestartRuntime = {},
 ): Promise<LoopRestartResult> {
   rmSync(readyFile, { force: true })
+  rmSync(startupInstallingFile(readyFile), { force: true })
   const command = loopRestartCommand(runtime.argv, runtime.packageRoot)
   const os = runtime.operatingSystem ?? operatingSystem
   const predecessorPid = os.processTreeRootPid(runtime.env ?? process.env)
@@ -132,6 +134,7 @@ export async function startLoopReplacement(
   }
 
   const pid = replacement.pid
+  const startupTimeoutMs = runtime.startupTimeoutMs ?? 30_000
 
   return await new Promise((resolve) => {
     let settled = false
@@ -145,6 +148,7 @@ export async function startLoopReplacement(
       replacement.offExit(onExit)
       try {
         rmSync(readyFile, { force: true })
+        rmSync(startupInstallingFile(readyFile), { force: true })
       } catch {
         // Readiness has already been decided. Marker cleanup must not keep the
         // replacement attached or leave the caller's restart promise unsettled.
@@ -226,13 +230,23 @@ export async function startLoopReplacement(
       }
       finish({ ok: true, pid })
     }, 10)
-    const timeout = setTimeout(() => {
+    // A replacement installing dependencies at startup is making progress the deadline
+    // must not cut short: killing it mid-install leaves node_modules half emptied.
+    let deadline = Date.now() + startupTimeoutMs
+    const expire = (): void => {
+      deadline = startupDeadline(readyFile, deadline, startupTimeoutMs)
+      const remaining = deadline - Date.now()
+      if (remaining > 0) {
+        timeout = setTimeout(expire, remaining)
+        return
+      }
       fail({
         ok: false,
         pid,
         error: 'replacement did not become ready before the startup timeout',
       })
-    }, runtime.startupTimeoutMs ?? 30_000)
+    }
+    let timeout = setTimeout(expire, startupTimeoutMs)
     replacement.onError(onError)
     replacement.onExit(onExit)
   })
