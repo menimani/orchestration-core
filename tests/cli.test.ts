@@ -1086,6 +1086,73 @@ describe('manual merge', () => {
     expect(readGateFixState(paths, taskId)).toBeUndefined()
   })
 
+  it('keeps the cycle gate flags when an inspect task merges commits', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20261112_190000_003_user-inspect-bookkeeping'
+    mkdirSync(join(paths.queueDir, 'inspect'), { recursive: true })
+    writeFileSync(join(paths.queueDir, 'inspect', taskId), '')
+    const worktree = worktreeDir(paths, taskId)
+    git(['worktree', 'add', worktree, '-b', branchName(taskId)])
+    writeFileSync(join(worktree, 'report.txt'), 'findings\n')
+    git(['add', '-A'], worktree)
+    git(['commit', '-qm', 'docs: record inspection findings'], worktree)
+    await writeStatus(paths, taskId, 'completed')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-4'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-4'), '')
+
+    const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(readTaskState(paths, taskId)).toBe('merged')
+    expect(readFileSync(join(repoRoot, 'report.txt'), 'utf8')).toBe('findings\n')
+    // An inspection task is not cycle work, so its merge leaves the cycle's gate as it was.
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-4'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-4'))).toBe(true)
+  })
+
+  it('keeps the cycle gate flags when a scan task completes without change', async () => {
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    writeFileSync(join(repoRoot, 'README.md'), '# repo\n')
+    git(['add', '-A'])
+    git(['commit', '-qm', 'chore: initial commit'])
+
+    const paths = orchPaths(repoRoot)
+    const taskId = '20261112_190000_004_scan'
+    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    await writeStatus(paths, taskId, 'completed')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '5\n')
+    writeFileSync(join(paths.queueDir, 'cycle-complete-5'), '')
+    writeFileSync(join(paths.queueDir, 'cycle-resume-5'), '')
+
+    const result = spawnSync(process.execPath, [CLI, 'merge', taskId, '--yes'], {
+      cwd: repoRoot,
+      env: CORE_ENV,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: CLI_TIMEOUT_MS,
+    })
+
+    expect(result.status).toBe(0)
+    expect(readTaskState(paths, taskId)).toBe('no-change')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-5'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-5'))).toBe(true)
+  })
+
   it('preserves the merge failure streak for a no-change outcome', async () => {
     git(['config', 'user.email', 'test@example.com'])
     git(['config', 'user.name', 'Test'])
