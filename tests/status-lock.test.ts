@@ -132,6 +132,42 @@ describe('status lock publication', () => {
     expect(actualFs.existsSync(lockDir)).toBe(false)
   })
 
+  it('names EPERM when the wait times out on a lock name that never clears', async () => {
+    const taskId = 'persistent-eperm'
+    const lockDir = join(paths.statusDir, `.${taskId}.lock`)
+    mocks.mkdirSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] === lockDir) {
+        throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' })
+      }
+      return Reflect.apply(actualFs.mkdirSync, actualFs, args)
+    })
+    const now = Date.now()
+    let elapsed = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now + elapsed++ * 1_000)
+
+    await expect(writeStatus(paths, taskId, 'completed')).rejects.toThrow(
+      new Error(`Timed out waiting for the status lock: ${taskId} (last error: EPERM)`),
+    )
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(actualFs.existsSync(lockDir)).toBe(false)
+  })
+
+  it('keeps the plain timeout message when a live owner holds the lock throughout', async () => {
+    const taskId = 'held-lock'
+    const lockDir = join(paths.statusDir, `.${taskId}.lock`)
+    actualFs.mkdirSync(lockDir, { recursive: true })
+    actualFs.writeFileSync(join(lockDir, 'pid'), `${process.pid}\n`)
+    const now = Date.now()
+    let elapsed = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now + elapsed++ * 1_000)
+
+    await expect(writeStatus(paths, taskId, 'completed')).rejects.toThrow(
+      new Error(`Timed out waiting for the status lock: ${taskId}`),
+    )
+    expect(readStatus(paths, taskId)).toBeUndefined()
+    expect(actualFs.readFileSync(join(lockDir, 'pid'), 'utf8')).toBe(`${process.pid}\n`)
+  })
+
   it('does not treat a file at the lock path as lock contention', async () => {
     const taskId = 'invalid-lock-file'
     const lockFile = join(paths.statusDir, `.${taskId}.lock`)

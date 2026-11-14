@@ -1194,20 +1194,28 @@ function mergeGuardRemovalWasVerified(dir: string): boolean {
   }
 }
 
-function publishMergeGuard(dir: string, owner: MergeGuardOwner): boolean {
+type MergeGuardPublication = { outcome: 'published' } | { outcome: 'held' } | {
+  outcome: 'denied'
+  error: NodeJS.ErrnoException
+}
+
+function publishMergeGuard(dir: string, owner: MergeGuardOwner): MergeGuardPublication {
   const pendingOwner = `${dir}.owner-${process.pid}-${randomUUID()}.json`
   try {
     mkdirSync(dir)
   } catch (error) {
-    // Windows reports a name still pending deletion as EPERM rather than EEXIST.
     const code = (error as NodeJS.ErrnoException).code
-    if (code === 'EEXIST' || code === 'EPERM') return false
+    if (code === 'EEXIST') return { outcome: 'held' }
+    // Windows reports a name still pending deletion as EPERM rather than EEXIST, but a
+    // real permission error, or a handle that keeps the name pending, is EPERM too and
+    // never clears. The caller retries it within a deadline instead of calling it held.
+    if (code === 'EPERM') return { outcome: 'denied', error: error as NodeJS.ErrnoException }
     throw error
   }
   try {
     writeFileSync(pendingOwner, `${JSON.stringify(owner)}\n`, { flag: 'wx' })
     renameSync(pendingOwner, join(dir, 'owner.json'))
-    return true
+    return { outcome: 'published' }
   } catch (error) {
     // We created this directory and no observer can acquire it while it exists. Remove
     // both pieces so an ordinary I/O failure does not become a permanent active guard.
@@ -1256,10 +1264,14 @@ type MergeGuardAcquisition = { acquired: true; file: string; owner: MergeGuardOw
   reason: 'active'
 }
 
+// One acquisition waits against one deadline: `deadline` starts with the first reclaim or
+// denied publication and bounds every later wait, while `reclaimDeadline` is set only
+// while a reclaim of the guard currently at the name is under way.
 function acquireMergeGuard(
   paths: OrchPaths,
   taskId: string,
   reclaimDeadline?: number,
+  deadline = reclaimDeadline,
 ): MergeGuardAcquisition | Promise<MergeGuardAcquisition> {
   const dir = mergeGuardDir(paths, taskId)
   mkdirSync(dirname(dir), { recursive: true })
@@ -1268,11 +1280,24 @@ function acquireMergeGuard(
     token: randomUUID(),
   }
   for (;;) {
-    if (publishMergeGuard(dir, owner)) {
+    const publication = publishMergeGuard(dir, owner)
+    if (publication.outcome === 'published') {
       return { acquired: true, file: dir, owner }
     }
+    if (publication.outcome === 'denied') {
+      deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      if (Date.now() >= deadline) {
+        throw new MergeError(
+          `Could not create merge guard ${dir}: ${publication.error.code} did not clear`,
+          true,
+          { cause: publication.error },
+        )
+      }
+      return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
+    }
     if (existsSync(join(dir, 'retired'))) {
-      reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      reclaimDeadline ??= deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       if (reclaimRetiredMergeGuard(dir)) {
         reclaimDeadline = undefined
         continue
@@ -1281,7 +1306,7 @@ function acquireMergeGuard(
         throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
       }
       return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
-        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
     }
     const recorded = activeMergeGuardOwner(dir)
     if (recorded === undefined) {
@@ -1289,7 +1314,7 @@ function acquireMergeGuard(
       // an older binary still acquiring its guard. Recover it only after that window ends.
       if (reclaimDeadline === undefined) {
         if (!malformedMergeGuardIsStale(dir)) return { acquired: false, reason: 'active' }
-        reclaimDeadline = Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+        reclaimDeadline = deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       }
       if (reclaimMalformedMergeGuard(dir)) {
         reclaimDeadline = undefined
@@ -1299,10 +1324,10 @@ function acquireMergeGuard(
         throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
       }
       return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
-        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
     }
     if (recorded.token !== null && retiredMergeGuardTokens.has(recorded.token)) {
-      reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+      reclaimDeadline ??= deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
       if (reclaimRetiredMergeGuard(dir)) {
         retiredMergeGuardTokens.delete(recorded.token)
         reclaimDeadline = undefined
@@ -1312,12 +1337,12 @@ function acquireMergeGuard(
         throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
       }
       return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
-        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+        .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
     }
     if (lockOwnerIsCurrent(recorded.pid, recorded.startIdentity)) {
       return { acquired: false, reason: 'active' }
     }
-    reclaimDeadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
+    reclaimDeadline ??= deadline ??= Date.now() + MERGE_GUARD_RECLAIM_TIMEOUT_MS
     // Removing the owner before the directory makes stale reclamation safe between
     // multiple waiters: rmdir can never remove a replacement's non-empty guard.
     try {
@@ -1334,7 +1359,7 @@ function acquireMergeGuard(
       throw new MergeError(`Could not remove stale merge guard: ${taskId}`)
     }
     return new Promise((resolve) => setTimeout(resolve, MERGE_GUARD_RECLAIM_RETRY_MS))
-      .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline))
+      .then(() => acquireMergeGuard(paths, taskId, reclaimDeadline, deadline))
   }
 }
 
