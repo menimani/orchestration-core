@@ -936,7 +936,8 @@ describe('loop daemon ownership', () => {
     const completion = childCompletion(child)
 
     await waitUntil(
-      () => existsSync(daemonFile('cycle-cap.txt')),
+      () => existsSync(daemonFile('cycle-cap.txt'))
+        && readFileSync(daemonFile('cycle-cap.txt'), 'utf8') === '5\n',
       'loop did not record its startup cycle cap',
     )
     expect(readFileSync(daemonFile('cycle-cap.txt'), 'utf8')).toBe('5\n')
