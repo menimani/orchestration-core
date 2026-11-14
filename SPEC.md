@@ -1450,7 +1450,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     the issues it still holds then take the ordinary failed-task release. A claim that
     cannot be read defers the merge, with a WARN unless the forge was rate limited, and
     leaves the task `completed` for a later poll rather than risk closing someone else's
-    issue.
+    issue. Twenty consecutive polls that cannot read a task's claims, rate limits aside,
+    report a gate failure naming the task and the error, and the next such poll stops the
+    loop; a successful read clears the count.
 35. The merge commit of an issue-born task carries `closes #N` for every linked issue, so
     the forge closes all of them when the promotion PR lands the commit on the default
     branch. A queue kept in a fleet's `issueRepository` is the exception: its issue

@@ -976,6 +976,44 @@ describe('completed task merge recovery', () => {
     expect(fakeForge.issueComments.get(issueNumber)?.join('\n') ?? '').not.toContain('MERGED:')
   })
 
+  it('stops the loop when the issue claim of a completed task can never be read', async () => {
+    const taskId = '20260815_125258_043_auto-unreadable-claim-stops'
+    const initialHead = initializeGitRepo()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'never readable claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [fakeForge.user],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    const getIssue = fakeForge.getIssue.bind(fakeForge)
+    fakeForge.getIssue = async (number) => {
+      if (number === issueNumber) throw new Error('forge unavailable')
+      return getIssue(number)
+    }
+    const stopFile = join(paths.queueDir, 'stop')
+
+    for (let poll = 1; poll <= 20; poll++) {
+      await loop.poll()
+      expect(existsSync(stopFile)).toBe(false)
+    }
+    expect(logText()).toContain(
+      '043_auto merge deferred: its issue claims could not be read on 20 consecutive polls: '
+      + 'forge unavailable')
+    await loop.poll()
+
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText()).toContain(
+      'ERROR 043_auto merge deferred: its issue claims could not be read on 21 consecutive polls: '
+      + 'forge unavailable (repeated 2 times)')
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+    expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
+  })
+
   it('merges a completed task whose linked issue no longer exists', async () => {
     const taskId = '20260815_125258_042_auto-deleted-claim'
     const initialHead = initializeGitRepo()
