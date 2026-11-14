@@ -862,6 +862,65 @@ describe('publishFinding', () => {
     expect(claimedAfter.labels).toContain(LABEL_IN_PROGRESS)
   })
 
+  it('treats a duplicate close lost to a concurrent reconciler as success', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks'
+    const survivor = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const duplicate = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-2'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const closeIssue = forge.closeIssue.bind(forge)
+    const closeAttempts: number[] = []
+    forge.closeIssue = async (issueNumber, comment) => {
+      closeAttempts.push(issueNumber)
+      // The other reconciler closes the issue first, so this call reports a failure.
+      await closeIssue(issueNumber, 'Duplicate closed by a concurrent reconciler.')
+      throw new Error(`close #${issueNumber} failed: ${comment}`)
+    }
+
+    await expect(reconcileFindingFingerprints(
+      forge, paths, await forge.listOpenIssues(LABEL_FINDING),
+    )).resolves.toBeUndefined()
+
+    expect(closeAttempts).toEqual([duplicate])
+    expect((await forge.getIssue(duplicate)).state).toBe('closed')
+    expect((await forge.getIssue(survivor)).state).toBe('open')
+    expect(readFileSync(join(paths.queueDir, 'issue-fingerprints'), 'utf8'))
+      .toBe(`${fingerprintOf(description)} ${survivor}\n`)
+  })
+
+  it('rethrows a failed duplicate close while the duplicate is still open', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks'
+    const survivor = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const duplicate = await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-2'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    forge.closeIssue = async (issueNumber) => {
+      throw new Error(`close #${issueNumber} unavailable`)
+    }
+
+    await expect(reconcileFindingFingerprints(
+      forge, paths, await forge.listOpenIssues(LABEL_FINDING),
+    )).rejects.toThrow(`close #${duplicate} unavailable`)
+
+    expect(await forge.getIssue(duplicate)).toMatchObject({
+      state: 'open',
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    expect((await forge.getIssue(survivor)).state).toBe('open')
+  })
+
   it('does not let a merged-but-unpromoted issue suppress a new same-fingerprint finding', async () => {
     // Once an issue's fix has merged locally, a fresh observation is new work, not a dup.
     const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'review-1')
