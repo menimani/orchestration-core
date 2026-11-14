@@ -394,6 +394,15 @@ describe('delegateTask', () => {
     expect(isIssueModeActive(paths, { ISSUE_QUEUE_ENABLED: 'true' })).toBe(false)
   })
 
+  it('reads a configuration file saved with a UTF-8 byte order mark', () => {
+    writeFileSync(
+      join(paths.projectRoot, 'config.json'),
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{ "ISSUE_QUEUE_ENABLED": true }\r\n')]),
+    )
+
+    expect(isIssueModeActive(paths, { ISSUE_QUEUE_ENABLED: 'false' })).toBe(true)
+  })
+
   it('rejects a malformed issue-mode setting instead of reading it as disabled', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     expect(() => isIssueModeActive(paths, { ISSUE_QUEUE_ENABLED: 'TRUE' }))
