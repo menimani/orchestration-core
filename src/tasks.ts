@@ -71,16 +71,19 @@ export type EnqueueResult
     | { outcome: 'already-processed'; taskId: string; status: string }
     | { outcome: 'needs-cleanup'; taskId: string; leftover: string }
 
+// show-ref exits 1 only when the ref is absent. Any other failure leaves the question
+// open, and reading it as absent would reuse a failed task id whose branch is still there.
 function localBranchExists(paths: OrchPaths, branch: string): boolean {
   try {
     execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
       cwd: paths.repoRoot,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     })
     return true
-  } catch {
-    return false
+  } catch (error) {
+    if ((error as { status?: number | null }).status === 1) return false
+    throw error
   }
 }
 
