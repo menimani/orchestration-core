@@ -3492,9 +3492,16 @@ export function createLoop(deps: LoopDeps) {
             appendFileSync(join(paths.queueDir, `failed-${cycle}`), `${taskId}\n`)
             if (cycle > 0) rmSync(join(paths.queueDir, `cycle-complete-${cycle}`), { force: true })
           }
+          // The poll sweep's FAILED: marker reads the status cleanup removes, so this
+          // branch announces the conflicted task itself once that status is gone.
+          const reportConflictFailure = (): void => {
+            marker(`FAILED: ${taskId} — log: ${mergeLog}`)
+            failureReported = true
+          }
           let terminalized = false
           let retryId: string | undefined
           let lossRecorded = false
+          let failureReported = false
           try {
             terminalized = await transitionStatus(paths, taskId, 'completed', 'failed')
             if (!terminalized) {
@@ -3519,6 +3526,7 @@ export function createLoop(deps: LoopDeps) {
               prepareIssueReleaseIntent(paths, taskId, linkedIssues)
             }
             cleanupTask(paths, taskId, undefined, false, log)
+            reportConflictFailure()
             if (linkedIssues.length === 0) {
               dropClaimedTaskMaterialization(paths, taskId)
             } else {
@@ -3574,8 +3582,9 @@ export function createLoop(deps: LoopDeps) {
             }
             // A status that survived a failed cleanup still reaches the poll sweep, which
             // records the loss itself. One that cleanup already removed reaches nobody.
-            if (terminalized && retryId === undefined && !lossRecorded
-              && readTaskState(paths, taskId) === undefined) {
+            const statusRemoved = terminalized && readTaskState(paths, taskId) === undefined
+            if (statusRemoved && !failureReported) reportConflictFailure()
+            if (statusRemoved && retryId === undefined && !lossRecorded) {
               try {
                 removeConflictedAttempts(paths, taskId)
                 recordAbandonedConflict()

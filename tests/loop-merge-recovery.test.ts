@@ -598,6 +598,8 @@ describe('completed task merge recovery', () => {
     expect(issueNumbersForTask(paths, taskId)).toEqual([issueNumber])
     expect(releasePreparationForTask(paths, taskId)).toEqual([])
     expect(issueReleaseIntentForTask(paths, taskId)).toEqual([])
+    // The surviving failed status leaves the announcement to the next poll's sweep.
+    expect(logged.some((line) => line.startsWith(`FAILED: ${taskId}`))).toBe(false)
   })
 
   /** A completed local task whose only commit conflicts with a later run-branch commit. */
@@ -665,6 +667,7 @@ describe('completed task merge recovery', () => {
     expect(logged).toContain(
       `Requeued 195_user    rebase conflict; ${shortTaskId(retryId)} starts from ${kept}`,
     )
+    expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.merge.log`)}`)
   })
 
   it('keeps the commits but stops retrying once a conflict chain uses its retries', async () => {
@@ -706,10 +709,13 @@ describe('completed task merge recovery', () => {
     expect(readFileSync(join(paths.queueDir, 'failed-2'), 'utf8')).toBe(`${taskId}\n`)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
     expect(readConflictedAttempts(paths, taskId)).toEqual([])
+    const failedLine = `FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.merge.log`)}`
+    expect(logged).toContain(failedLine)
 
     expect(await loop.poll()).toBe('continue')
 
     expect(readFileSync(join(paths.queueDir, 'failed-2'), 'utf8')).toBe(`${taskId}\n`)
+    expect(logged.filter((line) => line.startsWith(`FAILED: ${taskId}`))).toEqual([failedLine])
   })
 
   it('records a conflicted local task as lost when its retry cannot be queued', async () => {
@@ -738,6 +744,7 @@ describe('completed task merge recovery', () => {
     expect(readFileSync(join(paths.queueDir, 'failed-3'), 'utf8')).toBe(`${taskId}\n`)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-3'))).toBe(false)
     expect(readConflictedAttempts(paths, taskId)).toEqual([])
+    expect(logged).toContain(`FAILED: ${taskId} — log: ${join(paths.logsDir, `${taskId}.merge.log`)}`)
   })
 
   it('removes every branch kept for a retry once the retry merges', async () => {
