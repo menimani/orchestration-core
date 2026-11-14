@@ -752,7 +752,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     worktree, branch, and specification in place. It belongs to no cycle: the cycle
     still records no expectation and is dispatched again in full by the next daemon,
     and the retained scan stays until the operator removes it with `cleanup`, which
-    first stops any runner the process registry recorded for it. A cycle missing any expected yield stops rather than
+    first stops any runner the process registry recorded for it. A scan the attempt
+    started whose discard fails, such as a worktree still held after cleanup's last
+    removal pass, is reported the same way, with an `ERROR` for that scan reading
+    `scan startup cleanup failed: <reason>; task retained and loop stopped`, and keeps
+    whatever of its state cleanup had not yet removed, its status record included, until
+    the operator runs `cleanup` for it. A cycle missing any expected yield stops rather than
     advancing to another cycle or completion.
     A scan the cycle recorded as failed counts towards the expected total as a delivered
     but silent yield: the cycle closes, its id still reaches the decisions and the pull
@@ -1182,6 +1187,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     is terminated is logged once, with its PID, executable name, and the worktree path, in
     the log of the removal: the merge output, `cleanup`, or the loop log. A process that
     survives keeps holding the worktree: its removal fails and the task state is retained.
+    `cleanup` makes a second pass, looking for holders and removing the worktree again,
+    when the first leaves the directory behind, since a process just stopped or a scanner
+    that opened the worktree's files can hold it for a moment. When both passes fail its
+    error names, for each pass, the git failure and the fallback removal's error with its
+    code, followed by the platform's hint for finding the holder.
     Other platforms stop the runner's detached process group and do nothing further.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
