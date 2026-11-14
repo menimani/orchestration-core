@@ -2033,6 +2033,55 @@ describe('cycle gate', () => {
     expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
   })
 
+  it('retains a scan whose runner returned an invalid PID and discards the rest', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n',
+    )
+    const attempted: string[] = []
+    let scanPid: number | undefined
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attempted.push(basename(options.specFile, '.md'))
+        if (attempted.length === 2) return 0
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        scanPid = child.pid
+        return child.pid
+      },
+    }
+    const loop = makeLoop(
+      { scanParallel: 2, autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(attempted).toHaveLength(2)
+    const [startedScan, retainedScan] = attempted as [string, string]
+    expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+    )
+    expect(logText()).not.toContain('scan startup failed')
+    // The scan the loop owned is discarded as for any failed launch.
+    expect(existsSync(worktreeDir(paths, startedScan))).toBe(false)
+    expect(git(['branch', '--list', branchName(startedScan)])).toBe('')
+    expect(scanPid).toBeDefined()
+    expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
+    // The one whose runner the loop never identified keeps its worktree and branch.
+    expect(existsSync(worktreeDir(paths, retainedScan))).toBe(true)
+    expect(git(['branch', '--list', branchName(retainedScan)])).not.toBe('')
+  })
+
   it('stops a cycle gate that is missing an expected scan yield', async () => {
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeFileSync(join(paths.queueDir, 'scan-expected-1'), '2\n')
