@@ -234,7 +234,9 @@ comments and other items cite items by number, so a number is never reused.
 commands use. The operator file is `orchestration/config.json`; its keys are the existing
 uppercase setting names. Resolution order is file, then environment, then the defaults
 below. A missing file therefore preserves the previous behavior and existing launch
-commands remain valid. Use
+commands remain valid. A leading UTF-8 byte order mark, which Windows PowerShell 5.1 and
+some editors write, is accepted in this file and in `fleet.json` and `fleet.local.json`.
+Use
 `npm run config -- list`, `get <SETTING>`, `set <SETTING> <value>`, or `unset <SETTING>`
 (with the installed package's command prefix) to read and update it. The command writes a
 temporary file in the same directory and renames it into place atomically, so the loop
@@ -1120,8 +1122,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     one that times out) is asked up to three times in all, 250 ms apart, so a slow
     query never fails a daemon start or handover that a later attempt can answer, and only
     then fails with an error naming the timed-out or failed query. Before task or issue work begins, startup refuses any
-    live PID an earlier daemon left in the task process registry (item 24a). A worktree with no corresponding
-    task status also blocks startup and is reported with an OS-specific handle diagnostic.
+    live PID an earlier daemon left in the task process registry (item 24a). It then sweeps
+    the temporary gate worktrees, `.merge-<task>-<pid>-<ms>` and `.adopt-<issue>-<pid>-<ms>`,
+    which nothing records but the process ID in their name: one whose creating process is
+    gone, or which belongs to the restart predecessor handing over its lock, is removed and
+    logged as `Removed worktree`; one whose creator still lives is left alone, and one that
+    cannot be removed is logged as `WARN worktree` and stays. A worktree left after the
+    sweep with no corresponding task status blocks startup and is reported with an
+    OS-specific handle diagnostic.
     A run which publishes work also refuses to start when its branch has no unambiguous
     push target, logging `ERROR` and writing the stop file before task or issue work.
 24a. A task's runner PID is held in `queue/pids/<task-id>`, not in its status record, so
