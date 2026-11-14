@@ -1331,16 +1331,22 @@ export function createLoop(deps: LoopDeps) {
           filtered = await unresolvedFindings(forge, paths, findings)
           warningLog.recovered(`unresolved-findings-${taskId}`)
         } catch (error) {
-          if (!(error instanceof ForgeRateLimitError)) {
+          if (error instanceof ForgeRateLimitError) {
+            return { findings, destinations, reconciled: false }
+          }
+          const failure = `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
+          // A worker counts the failure against its publication limit. Elsewhere a
+          // failure that survives the retry stops the loop, as the publish path does,
+          // instead of holding the completion scan open forever.
+          if (config.workerMode) {
             warning(
               `unresolved-findings-${taskId}`,
               `checking review findings from ${shortTaskId(taskId)}`,
-              `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`,
+              failure,
             )
+          } else {
+            reportGateFailure(failure, `completion-scan-${taskId}`)
           }
-          const failure = error instanceof ForgeRateLimitError
-            ? undefined
-            : `could not check review findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
           return { findings, destinations, reconciled: false, failure }
         }
         pendingFindings = filtered.unresolved
@@ -1531,15 +1537,12 @@ export function createLoop(deps: LoopDeps) {
     if (config.issueQueueEnabled) {
       try {
         candidates = (await unresolvedFindings(forge, paths, candidates)).unresolved
-        warningLog.recovered(`unresolved-findings-${taskId}`)
       } catch (error) {
         if (error instanceof ForgeRateLimitError) return { reconciled: false }
         const failure = `could not check documentation findings from ${shortTaskId(taskId)}: ${errorSummary(error)}`
-        warning(
-          `unresolved-findings-${taskId}`,
-          `checking documentation findings from ${shortTaskId(taskId)}`,
-          failure,
-        )
+        // Only the cycle gate holds documentation, so a failure that survives the retry
+        // stops the loop rather than holding the completion scan open forever.
+        reportGateFailure(failure, `completion-scan-${taskId}`)
         return { reconciled: false, failure }
       }
     } else {
