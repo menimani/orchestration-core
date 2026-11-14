@@ -1402,7 +1402,7 @@ function finishMergeGuard(
   try {
     rmSync(retiredGuard, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   } catch {
-    // The guard is already released; leave its uniquely named remains for later cleanup.
+    // The guard is already released; prune reclaims its uniquely named remains.
   }
 }
 
