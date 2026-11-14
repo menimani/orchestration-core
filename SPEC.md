@@ -1019,6 +1019,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks. A finished run lists the failures it announced,
     so the next run neither reports them again nor counts them toward a failure burst.
+    Starting a failed task again clears both, so a retry that fails is announced anew.
 
 ## The generated pull request
 

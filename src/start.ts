@@ -45,6 +45,20 @@ export class StartupOwnershipUnknownError extends Error {
   }
 }
 
+/**
+ * A new attempt supersedes the failure an earlier one left, so that failure's announce
+ * markers go once the attempt has written its own status. Kept, they would make the loop
+ * take a retry that fails again for the failure it already reported, and stay silent.
+ */
+function forgetAnnouncedFailure(paths: OrchPaths, taskId: string): void {
+  rmSync(join(paths.queueDir, 'scanned', `${taskId}.failed`), { force: true })
+  const announced = join(paths.queueDir, 'announced-failures.txt')
+  if (!existsSync(announced)) return
+  const taskIds = readFileSync(announced, 'utf8').split(/\r?\n/).filter((id) => id !== '')
+  if (!taskIds.includes(taskId)) return
+  writeFileSync(announced, taskIds.filter((id) => id !== taskId).map((id) => `${id}\n`).join(''))
+}
+
 export function worktreeAddArgs(worktree: string, branch: string): string[] {
   return ['worktree', 'add', '--quiet', worktree, '-b', branch]
 }
@@ -138,6 +152,7 @@ export async function startTask(
     // to release or retry.
     recordTaskProcess(paths, taskId, pid)
     await writeStatus(paths, taskId, 'running', pid)
+    forgetAnnouncedFailure(paths, taskId)
     options.report?.(`Started. task_id=${taskId} pid=${pid} log=${log}`)
     return { outcome: 'started', pid }
   } catch (error) {
@@ -166,6 +181,7 @@ export async function startTask(
     }
     appendFileSync(log, `Task startup failed:\n${detail}\n`)
     await writeStatus(paths, taskId, 'failed')
+    forgetAnnouncedFailure(paths, taskId)
     throw error
   }
 }
