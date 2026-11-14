@@ -212,15 +212,16 @@ comments and other items cite items by number, so a number is never reused.
   `TEST_CMD` for this merge, and without a command it prints the usage and exits 1; any
   other option is an error. A grouped task missing a
   requirement's completion marker is refused before the merge. A completed merge clears the
-  current cycle's gate-complete and resume flags before its status is recorded, resets the
-  consecutive merge-failure count, removes the task's gate fix state and the branches kept
+  current cycle's gate-complete and resume flags before its status is recorded, except for
+  an inspection task (item 11), resets the consecutive merge-failure count, removes the task's gate fix state and the branches kept
   from its conflicted attempts, a branch that cannot be removed being only a `WARN:`, and,
   for an issue-born task, records the promotion and comments the merge on each linked
   issue, a failed comment being only a `WARN:`. The failure count, gate fix state, and
   kept branches are settled as soon as the merged status is recorded, so a dependency
   install that then fails or is skipped still exits non-zero but leaves nothing for a
   rerun, which reports the merge as already succeeded. A `no-change` outcome removes the same
-  gate fix state and kept branches and clears the cycle's gate-complete flag. A merge
+  gate fix state and kept branches and clears the cycle's gate-complete flag, again except for
+  an inspection task. A merge
   refusal prints its reason and exits non-zero.
 
 ### Retained runtime configuration
@@ -1250,8 +1251,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     required-member description the real loader validates, scaffolds project templates,
     points the repository-local `core.hooksPath` at the core's hooks, and creates only
     missing `loop:*` labels. Init refuses to proceed unless those hooks include
-    `commit-msg`, which rejects every non-merge commit whose subject does not match
-    `^(feat|fix|chore|docs|refactor|test): `, so every later commit in the repository,
+    `commit-msg`, which passes any commit whose first line begins with `Merge ` and rejects
+    every other commit whose first line does not match
+    `^(feat|fix|chore|docs|refactor|test): [^ ].*` (exactly one space after the colon, then
+    a non-empty subject), so every later commit in the repository,
     including a task agent's, follows that convention. Re-running it adds and reports marked scaffold defaults for
     missing required adapter members, but never overwrites a declared member, another
     project-owned file, or a different hooks setting; divergence is reported. Init works
