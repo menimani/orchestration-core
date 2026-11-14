@@ -944,6 +944,68 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 
+  it('stops a task whose commits were empty before any rebase and that gave no verdict', async () => {
+    const taskId = '20260808_000000_046_user-empty-commit'
+    const worktree = await makeCompletedTask(taskId)
+    git(worktree, ['commit', '-q', '--allow-empty', '-m', 'chore: record nothing'])
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const onNoChange = vi.fn(async () => {})
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318, onNoChange,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(/has only empty commits/)
+
+    expect(onNoChange).not.toHaveBeenCalled()
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+  })
+
+  it('accepts a no-change verdict from a task whose commits were empty before any rebase', async () => {
+    const taskId = '20260808_000000_047_user-empty-commit-verdict'
+    const worktree = await makeCompletedTask(taskId)
+    git(worktree, ['commit', '-q', '--allow-empty', '-m', 'chore: record nothing'])
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(finalMessageFile(paths, taskId),
+      'No implementation is needed.\nNO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
+    const forge = { issueClosingCommitMessage: (message: string) => message }
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318, forge,
+    })).rejects.toThrow('A linked no-change task requires issue reconciliation.')
+    expect(existsSync(worktree)).toBe(true)
+
+    const onNoChange = vi.fn(async () => {})
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318, forge, onNoChange,
+    })).resolves.toEqual({ outcome: 'no-change' })
+
+    expect(onNoChange).toHaveBeenCalledOnce()
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+  })
+
+  it('completes a task whose commits a rebase emptied without requiring a verdict', async () => {
+    const taskId = '20260808_000000_048_user-already-landed'
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, 'landed.txt'), 'fixed\n')
+    git(worktree, ['add', 'landed.txt'])
+    git(worktree, ['commit', '-qm', 'fix: duplicate the run fix'])
+    writeFileSync(join(repoRoot, 'landed.txt'), 'fixed\n')
+    git(repoRoot, ['add', 'landed.txt'])
+    git(repoRoot, ['commit', '-qm', 'fix: land the fix from another task'])
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
+      .resolves.toEqual({ outcome: 'no-change' })
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+  })
+
   it('completes a scan without commits and without recording a merge', async () => {
     const taskId = '20260808_000000_004_scan'
     const worktree = await makeCompletedTask(taskId)
