@@ -22,7 +22,10 @@ import {
 import { execShellSync } from './shell.ts'
 import { specFile } from './tasks.ts'
 import { requirementLead, specRequirements } from './templates.ts'
-import { noChangeMarkerPresent } from './refresh.ts'
+import {
+  noChangeMarkerPresent, rebaseEmptiedMarkerPresent, recordRebaseEmptiedMarker,
+  removeRebaseEmptiedMarker,
+} from './refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from './status.ts'
 import { currentProcessStartIdentity, lockOwnerIsCurrent } from './processOwner.ts'
 import {
@@ -1052,6 +1055,7 @@ async function finalizeLocalMerge(
 ): Promise<string> {
   options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
+  removeRebaseEmptiedMarker(paths, taskId)
   options.onMerged?.(mergeCommit)
   syncOrchestrationDepsAfterRecordedMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
@@ -1090,6 +1094,7 @@ async function finalizeNoChange(
     )
   }
   await writeStatus(paths, taskId, 'no-change')
+  removeRebaseEmptiedMarker(paths, taskId)
   const worktreeRemoved = removeFinishedWorktree(
     paths, worktree, io.out, options.worktreeRemovalRuntime ?? worktreeRemovalRuntime,
     'task completed without changes',
@@ -1479,9 +1484,10 @@ async function mergeTaskWithGuardHeld(
   }
   // Commits that were empty before any rebase carry no change of their own, so they need
   // the same marker as a task with no commits; only a rebase that empties them proves the
-  // work already landed.
+  // work already landed. A retry after that rebase finds its commits already emptied, so
+  // the rebase's recorded verdict counts as well.
   if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
-    if (!noChangeMarkerPresent(paths, taskId)) {
+    if (!noChangeMarkerPresent(paths, taskId) && !rebaseEmptiedMarkerPresent(paths, taskId)) {
       throw new MergeError(
         `${taskId} has only empty commits relative to ${currentBranch}.\n`
         + `Check the log: ${logFile(paths, taskId)}\nThe worktree will be kept: ${worktree}`,
@@ -1497,6 +1503,9 @@ async function mergeTaskWithGuardHeld(
   }
   rebaseTaskOntoRunTip(worktree, currentBranch, io)
   if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
+    // Recorded before reconciliation can fail: the rebase has already rewritten the
+    // branch, and without this the retry would read the emptied commits as the worker's.
+    recordRebaseEmptiedMarker(paths, taskId)
     if (closingIssues.length > 0 && options.onNoChange === undefined) {
       throw new NoChangeReconciliationError(
         'A linked no-change task requires issue reconciliation.',

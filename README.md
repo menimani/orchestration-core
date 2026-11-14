@@ -307,7 +307,9 @@ when they fast-forward it, naming that branch in the merge log; then it rebases 
 task branch onto the current integration tip. Long-running tasks therefore test the work
 that has landed while they were running instead of repeatedly presenting the same stale
 branch to the gate. If every task commit becomes empty because that work already landed,
-the task completes as no-change and its linked issues are closed normally. If the rebase
+the task completes as no-change and its linked issues are closed normally; that verdict is
+recorded before the issues are closed, so a close that fails is retried on a later poll
+rather than counted as a merge failure. If the rebase
 conflicts, the finished commits are kept on `conflict/<task-id>` and the work is retried
 from them: a local task is queued again with a specification naming that branch and the
 paths and run-branch commits it collided with, and a released issue carries the same

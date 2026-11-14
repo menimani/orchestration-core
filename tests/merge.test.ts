@@ -5,14 +5,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
+import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
 import {
   completeTaskWithoutChanges, inTemporaryWorktree, MergeError, MergeRecoveryError,
-  mergeRemoteTask, mergeTask, removeMergedWorktree, removeTemporaryWorktree,
-  TestLockBusyError, UnverifiedRunnerError, VerificationFailedError,
+  mergeRemoteTask, mergeTask, NoChangeReconciliationError, removeMergedWorktree,
+  removeTemporaryWorktree, TestLockBusyError, UnverifiedRunnerError, VerificationFailedError,
 } from '../src/merge.ts'
 import { branchName, finalMessageFile, orchPaths, worktreeDir } from '../src/paths.ts'
 import { taskProcessPid } from '../src/processRegistry.ts'
+import { rebaseEmptiedMarkerPresent, recordRebaseEmptiedMarker } from '../src/refresh.ts'
 import { readStatus, writeMergedStatus, writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 import { removeWorktreeWithFallback } from '../src/worktree.ts'
@@ -1004,6 +1006,100 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(existsSync(worktree)).toBe(false)
     expect(readStatus(paths, taskId)?.status).toBe('no-change')
+  })
+
+  // A task duplicating work already on the run branch: its one commit is emptied by the
+  // rebase, not by the worker.
+  async function makeAlreadyLandedTask(taskId: string): Promise<string> {
+    const worktree = await makeCompletedTask(taskId)
+    writeFileSync(join(worktree, 'landed.txt'), 'fixed\n')
+    git(worktree, ['add', 'landed.txt'])
+    git(worktree, ['commit', '-qm', 'fix: duplicate the run fix'])
+    writeFileSync(join(repoRoot, 'landed.txt'), 'fixed\n')
+    git(repoRoot, ['add', 'landed.txt'])
+    git(repoRoot, ['commit', '-qm', 'fix: land the fix from another task'])
+    return worktree
+  }
+
+  it('retries a linked task a rebase emptied as no-change after its reconciliation failed', async () => {
+    const taskId = '20260808_000000_049_user-already-landed-retry'
+    const worktree = await makeAlreadyLandedTask(taskId)
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const forge = { issueClosingCommitMessage: (message: string) => message }
+    let attempts = 0
+    const onNoChange = vi.fn(async () => {
+      if (++attempts === 1) throw new Error('forge unavailable')
+    })
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318, forge, onNoChange,
+    })).rejects.toThrow('Could not reconcile the no-change verdict: forge unavailable')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(worktree)).toBe(true)
+    expect(rebaseEmptiedMarkerPresent(paths, taskId)).toBe(true)
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318, forge, onNoChange,
+    })).resolves.toEqual({ outcome: 'no-change' })
+
+    expect(onNoChange).toHaveBeenCalledTimes(2)
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(rebaseEmptiedMarkerPresent(paths, taskId)).toBe(false)
+  })
+
+  it('retries a linked task a rebase emptied as no-change after a forge rate limit', async () => {
+    const taskId = '20260808_000000_050_user-already-landed-limited'
+    const worktree = await makeAlreadyLandedTask(taskId)
+    const runHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const forge = { issueClosingCommitMessage: (message: string) => message }
+    const rateLimit = new ForgeRateLimitError(new Date('2026-08-08T13:00:00Z'))
+    let attempts = 0
+    const onNoChange = vi.fn(async () => {
+      if (++attempts === 1) throw rateLimit
+    })
+
+    const first = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318, forge, onNoChange,
+    }).catch((error: unknown) => error)
+    expect(first).toBeInstanceOf(NoChangeReconciliationError)
+    expect((first as NoChangeReconciliationError).cause).toBe(rateLimit)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(existsSync(worktree)).toBe(true)
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318, forge, onNoChange,
+    })).resolves.toEqual({ outcome: 'no-change' })
+
+    expect(onNoChange).toHaveBeenCalledTimes(2)
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
+    expect(existsSync(worktree)).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('no-change')
+    expect(rebaseEmptiedMarkerPresent(paths, taskId)).toBe(false)
+  })
+
+  it('stops a task with empty commits and no verdict although another task has a rebase record', async () => {
+    const otherId = '20260808_000000_051_user-other-already-landed'
+    recordRebaseEmptiedMarker(paths, otherId)
+    const taskId = '20260808_000000_052_user-empty-commit-beside-record'
+    const worktree = await makeCompletedTask(taskId)
+    git(worktree, ['commit', '-q', '--allow-empty', '-m', 'chore: record nothing'])
+    const initialHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const onNoChange = vi.fn(async () => {})
+
+    await expect(mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, closesIssue: 318, onNoChange,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })).rejects.toThrow(/has only empty commits/)
+
+    expect(onNoChange).not.toHaveBeenCalled()
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(initialHead)
+    expect(existsSync(worktree)).toBe(true)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(rebaseEmptiedMarkerPresent(paths, taskId)).toBe(false)
+    expect(rebaseEmptiedMarkerPresent(paths, otherId)).toBe(true)
   })
 
   it('completes a scan without commits and without recording a merge', async () => {

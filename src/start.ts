@@ -6,7 +6,9 @@ import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
-import { branchName, finalMessageFile, logFile, worktreeDir, type OrchPaths } from './paths.ts'
+import {
+  branchName, finalMessageFile, logFile, rebaseEmptiedMarkerFile, worktreeDir, type OrchPaths,
+} from './paths.ts'
 import { execShellSync } from './shell.ts'
 import { forgetTaskProcess, recordTaskProcess } from './processRegistry.ts'
 import { readStatus, resumeCompletedStatus, writeStatus } from './status.ts'
@@ -106,6 +108,7 @@ export async function startTask(
   const finalMessage = finalMessageFile(paths, taskId)
   writeFileSync(log, '')
   rmSync(finalMessage, { force: true })
+  rmSync(rebaseEmptiedMarkerFile(paths, taskId), { force: true })
   let launchedPid: number | undefined
 
   try {
@@ -212,6 +215,7 @@ export async function resumeTask(
   const finalMessage = finalMessageFile(paths, taskId)
   const earlierFinal = existsSync(finalMessage) ? readFileSync(finalMessage) : undefined
   rmSync(finalMessage, { force: true })
+  rmSync(rebaseEmptiedMarkerFile(paths, taskId), { force: true })
   appendFileSync(log, `\n=== Merge gate handback: ${followUpSpec} ===\n`)
   let launchedPid: number | undefined
 
