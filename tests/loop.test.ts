@@ -3162,6 +3162,73 @@ describe('remote issue queue idle detection', () => {
     expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
   })
 
+  function stillClaimedWithWarning(issueNumber: number, runBranch: string) {
+    expect(logText()).toContain(
+      `WARN run branch ${runBranch} has no pull request; issues #${issueNumber} stay claimed`)
+    expect(logText()).not.toContain(`Released #${issueNumber}`)
+    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('stranded-task')
+  }
+
+  it('keeps the issues of a run branch never pushed that still exists locally', async () => {
+    git(['switch', '--quiet', '-c', 'run/unpushed'])
+    writeFileSync(join(repoRoot, 'unpushed.txt'), 'unpushed\n')
+    git(['add', 'unpushed.txt'])
+    git(['commit', '--quiet', '-m', 'unpushed merge'])
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    git(['switch', '--quiet', 'main'])
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/unpushed')
+
+    await loop.poll()
+
+    stillClaimedWithWarning(issueNumber, 'run/unpushed')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
+  it('keeps the issues of a deleted run branch the current HEAD was cut from', async () => {
+    git(['switch', '--quiet', '-c', 'run/earlier'])
+    writeFileSync(join(repoRoot, 'earlier.txt'), 'earlier\n')
+    git(['add', 'earlier.txt'])
+    git(['commit', '--quiet', '-m', 'earlier merge'])
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    git(['switch', '--quiet', 'main'])
+    git(['merge', '--quiet', '--ff-only', 'run/earlier'])
+    git(['branch', '--quiet', '-D', 'run/earlier'])
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/earlier')
+
+    await loop.poll()
+
+    stillClaimedWithWarning(issueNumber, 'run/earlier')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
+  it('keeps the issues of a deleted run branch whose merge commit is unknown locally', async () => {
+    const { loop, issueNumber } = await noPullRequestLoop('f'.repeat(40), 'run/unknown')
+
+    await loop.poll()
+
+    stillClaimedWithWarning(issueNumber, 'run/unknown')
+    expect(logText()).not.toContain('ERROR')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
+  it('keeps the issues of a run branch without a pull request when the remote lookup fails', async () => {
+    git(['switch', '--quiet', '-c', 'run/unreachable'])
+    writeFileSync(join(repoRoot, 'unreachable.txt'), 'unreachable\n')
+    git(['add', 'unreachable.txt'])
+    git(['commit', '--quiet', '-m', 'unreachable merge'])
+    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
+    git(['switch', '--quiet', 'main'])
+    git(['branch', '--quiet', '-D', 'run/unreachable'])
+    git(['remote', 'add', 'missing', join(repoRoot, 'missing.git')])
+    git(['config', 'branch.main.pushRemote', 'missing'])
+    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/unreachable')
+
+    await loop.poll()
+
+    stillClaimedWithWarning(issueNumber, 'run/unreachable')
+    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
+  })
+
   async function promotedIssueLoop(headSha: string) {
     setPaths({
       ...paths,

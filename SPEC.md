@@ -1464,11 +1464,15 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     the issue's earlier `MERGED:` marker, so a later claim of it is reaped as usual. A run
     branch other than the one the loop holds that never got a pull request, because the
     run restarted on a new branch before its cycle gate opened one or the branch was
-    deleted with `autoPr` off, is settled from git instead: once the push remote no longer
-    has the branch, each issue whose merge commit the default branch does not contain is
-    returned the same way, its comment stating that the branch was deleted without a pull
-    request. Every other issue of such a branch, including any whose answer git could not
-    give, stays claimed and is named in a warning. Workers never
+    deleted with `autoPr` off, is settled from git instead. A run branch is pushed only at
+    its cycle gate, so absence from the push remote alone does not mean it was deleted: an
+    issue is returned the same way, its comment stating that the branch was deleted without
+    a pull request, only when the push remote no longer has the branch, the checkout has no
+    local branch of that name either, and the current `HEAD` does not contain the issue's
+    recorded merge commit, which the default branch must not contain either. A merge commit
+    unknown to the checkout cannot be placed, so its issue is not returned on that poll.
+    Every other issue of such a branch, including any whose answer git could not give, such
+    as a failed remote lookup, stays claimed and is named in a warning. Workers never
     close promoted issues. Immediately after merging, the merger comments on every linked issue with the
     merge commit and run branch and states that closure happens on promotion; this refreshes
     `updatedAt` across the ordinary

@@ -1692,6 +1692,10 @@ async function removeClosedPromotionRecords(
 export interface RunBranchProbe {
   /** Whether the remote still has the run branch. */
   remoteBranchExists(runBranch: string): boolean | undefined
+  /** Whether the checkout still has a local branch of that name. */
+  localBranchExists(runBranch: string): boolean | undefined
+  /** Whether the current HEAD contains the merge commit; undefined when the commit is unknown. */
+  onHead(mergeCommit: string): boolean | undefined
   /** Whether the default branch contains the merge commit. */
   onDefaultBranch(mergeCommit: string): boolean | undefined
   /** Report issues of a run branch without a pull request that cannot be settled. */
@@ -1719,9 +1723,9 @@ export interface PromotedIssueOutcome {
  *
  * A run branch other than the held one that never got a pull request, because the run
  * restarted before its cycle gate opened one or the branch was deleted with automatic
- * pull requests off, is settled through `probe`: once the remote branch is gone, each
- * issue whose merge commit the default branch does not contain goes back to ready as for
- * a closed pull request, and every other issue of that branch is reported as stranded.
+ * pull requests off, is settled through `probe`: once neither the remote nor the checkout
+ * has the branch, each issue whose merge commit neither the current HEAD nor the default
+ * branch contains goes back to ready as for a closed pull request, and every other issue of that branch is reported as stranded.
  * Without a probe such a branch is left for later.
  */
 export async function closePromotedIssues(
@@ -1781,12 +1785,16 @@ export async function closePromotedIssues(
     }
     if (pr.state === 'none') {
       if (probe === undefined || runBranch === heldBranch) continue
-      // A branch still on the remote may yet get its pull request, and a merge commit
-      // already on the default branch has landed, so only the rest are abandoned. An
-      // unanswered question keeps the issue waiting rather than returning it.
+      // A run branch is pushed only at its cycle gate, so a branch absent from the remote
+      // may still exist locally or be what the current run was cut from. A branch still on
+      // the remote or in the checkout may yet get its pull request, and a merge commit
+      // already in HEAD or on the default branch has landed, so only the rest are
+      // abandoned. An unanswered question keeps the issue waiting rather than returning it.
       const branchGone = probe.remoteBranchExists(runBranch) === false
+        && probe.localBranchExists(runBranch) === false
       const abandoned = branchGone
-        ? branchPromotions.filter((promotion) => probe.onDefaultBranch(promotion.mergeCommit) === false)
+        ? branchPromotions.filter((promotion) => probe.onHead(promotion.mergeCommit) === false
+          && probe.onDefaultBranch(promotion.mergeCommit) === false)
         : []
       const stranded = branchPromotions.filter((promotion) => !abandoned.includes(promotion))
       if (stranded.length > 0) {

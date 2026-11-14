@@ -586,6 +586,11 @@ export function createLoop(deps: LoopDeps) {
         }
         return gitAnswer(['ls-remote', '--exit-code', '--heads', remote, `refs/heads/${runBranch}`], 2)
       },
+      localBranchExists: (runBranch) =>
+        gitAnswer(['show-ref', '--verify', '--quiet', `refs/heads/${runBranch}`], 1),
+      // An unknown merge commit makes merge-base fail with a status other than 1, which
+      // leaves the question unanswered rather than treating the work as lost.
+      onHead: (mergeCommit) => gitAnswer(['merge-base', '--is-ancestor', mergeCommit, 'HEAD'], 1),
       onDefaultBranch: (mergeCommit) => {
         const ref = fetchedDefaultRef()
         return ref === undefined
