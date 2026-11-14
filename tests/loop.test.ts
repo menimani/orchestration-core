@@ -6010,6 +6010,52 @@ describe('documentation findings held for the cycle', () => {
     expect(logged.filter((line) => line.startsWith('Released'))).toHaveLength(1)
   })
 
+  it('warns without stopping when a release fails after the scan that held it recovered', async () => {
+    initializeGitRepo()
+    let failEnqueue = true
+    const loop = makeLoop(
+      gateConfig, gatedProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
+      (queuePaths, taskId, depth) => {
+        if (failEnqueue) throw new Error('temporary local queue failure')
+        return enqueueTask(queuePaths, taskId, depth)
+      },
+    )
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const scanId = '20250101_000000_049_scan'
+    writeFinal(scanId, [
+      'NEXT_TASK: [DOCS] `README.md` names a removed flag',
+      'NEXT_TASK: [BUG] `src/parse.ts` drops the last line',
+    ].join('\n'))
+
+    expect((await loop.scanForNextTasks(scanId, 0)).reconciled).toBe(false)
+    expect(logText()).toContain(
+      'WARN could not enqueue finding from 049_scan: temporary local queue failure',
+    )
+
+    failEnqueue = false
+    expect((await loop.scanForNextTasks(scanId, 0)).reconciled).toBe(true)
+    const [bugId] = taskIdsNow()
+    expect(backlogEntries()).toEqual([`${bugId}:1`])
+    expect(heldRecords()).toHaveLength(1)
+
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
+    writeRawStatus(bugId!, 'merged')
+    failEnqueue = true
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(heldRecords()).toHaveLength(1)
+    expect(logText().match(/WARN could not enqueue finding from 049_scan/g)).toHaveLength(2)
+    expect(logText()).not.toContain('ERROR could not enqueue finding')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    failEnqueue = false
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(heldRecords()).toEqual([])
+    expect(logged).toContain('Released docs        1 documentation finding(s) as one task')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
   it('does not file held findings again when listing fails after their issue was created', async () => {
     initializeGitRepo()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')

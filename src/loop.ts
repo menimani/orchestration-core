@@ -1458,6 +1458,8 @@ export function createLoop(deps: LoopDeps) {
     // findings counts once, so the stop file waits for the failure to survive a retry.
     if (enqueueFailure !== undefined) {
       reportGateFailure(enqueueFailure, `completion-scan-${taskId}`)
+    } else {
+      previousGateFailures.delete(`completion-scan-${taskId}`)
     }
     return { findings, destinations, reconciled }
   }
@@ -1679,7 +1681,7 @@ export function createLoop(deps: LoopDeps) {
         desc, parentId, depth, 'auto', combined ? findings : undefined, first.finding,
       )
       if (failure !== undefined) {
-        reportGateFailure(failure, `completion-scan-${parentId}`)
+        reportGateFailure(failure, 'release-documentation')
         gateWaitTarget = 'documentation release'
         return true
       }
