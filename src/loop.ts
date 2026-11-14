@@ -135,6 +135,10 @@ const MAX_WORKER_PUBLICATION_FAILURES = 5
 // outage blip, and short enough that a failure that never clears, such as an expired git
 // credential, does not keep the loop spinning on the same issue for hours.
 const MAX_CONSECUTIVE_ADOPTION_DEFERRALS = 20
+// A completed task whose issue claims cannot be read on this many consecutive polls is
+// reported as a gate failure, which stops the loop when the failure repeats on the next
+// poll. The bound matches adoption deferrals for the same reason.
+const MAX_CONSECUTIVE_MERGE_CLAIM_READ_FAILURES = 20
 
 class InvalidPersistedCounterError extends Error {}
 // A finished worker task whose output can never be published as it stands. Retrying the
@@ -289,6 +293,8 @@ export function createLoop(deps: LoopDeps) {
   const postedMergeMarkers = new Map<number, string>()
   // Consecutive transient adoption deferrals per merge-ready issue, kept in memory only.
   const adoptionDeferrals = new Map<number, number>()
+  // Consecutive failed claim reads per completed task awaiting merge, kept in memory only.
+  const mergeClaimReadFailures = new Map<string, number>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
   // The check names the previous CI gate poll saw, for the PR and head it saw them on.
@@ -3340,12 +3346,25 @@ export function createLoop(deps: LoopDeps) {
             if (issue.state === 'open' && (!issue.labels.includes(LABEL_IN_PROGRESS)
               || issue.labels.includes(LABEL_READY))) lost.push(issueNumber)
           }
+          mergeClaimReadFailures.delete(taskId)
+          previousGateFailures.delete(`merge-claim-${taskId}`)
           warningLog.recovered(`merge-claim-${taskId}`)
         } catch (error) {
           if (!(error instanceof ForgeRateLimitError)) {
+            const failures = (mergeClaimReadFailures.get(taskId) ?? 0) + 1
+            mergeClaimReadFailures.set(taskId, failures)
             warning(`merge-claim-${taskId}`, `merging ${shortTaskId(taskId)}`,
               `${shortTaskId(taskId)} merge deferred: its issue claims could not be read: `
               + errorSummary(error))
+            // A read that never succeeds would hold the cycle gate on this merge for ever,
+            // so a bounded run of them stops the loop with the reason.
+            if (failures >= MAX_CONSECUTIVE_MERGE_CLAIM_READ_FAILURES) {
+              reportGateFailure(
+                `${shortTaskId(taskId)} merge deferred: its issue claims could not be read on `
+                + `${failures} consecutive polls: ${errorSummary(error)}`,
+                `merge-claim-${taskId}`,
+              )
+            }
           }
           return
         }
