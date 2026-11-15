@@ -57,7 +57,7 @@ const ESCAPED_NON_ENGLISH_FIXTURE_LINES: ReadonlyMap<string, ReadonlySet<string>
     `const specification = 'non-ASCII specification ${BACKSLASH}u65e5${BACKSLASH}u672c${BACKSLASH}u8a9e${BACKSLASH}n'.repeat(1_000)`,
   ])],
   // A byte cap must not split a two-byte character or leave a replacement character behind.
-  ['tests/loop-gate-fix.test.ts', new Set([
+  ['tests/loop-gate-fix-runner.test.ts', new Set([
     `const accented = String.fromCharCode(${'0xe9'}).repeat(50)`,
     `expect(tail).not.toContain(String.fromCharCode(${'0xfffd'}))`,
     // A frame marker split by an invisible character must still be recognised.
