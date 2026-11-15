@@ -236,7 +236,7 @@ function processTreePids(
   runtime: WindowsOperatingSystemRuntime,
   rootPid: number,
   stopping = false,
-  stoppedRootCreatedAt?: number,
+  exitedRootCreatedAt?: number,
 ): ProcessTree | undefined {
   let processes: readonly WindowsProcess[]
   try {
@@ -253,11 +253,12 @@ function processTreePids(
     processes, rootPid, () => runtime.processStartIdentity?.(rootPid),
   )
   // An exited root has no start time left to read. One this adapter stopped is dated by
-  // the creation time its stop saw: nothing created before that process descends from it
+  // the creation time its stop saw, and a vanished recorded runner by the creation time
+  // its recorded identity holds: nothing created before that process descends from it
   // or from any later holder of the PID, while an earlier holder may have left such a
   // process still naming the PID as its parent.
-  if (!rootDated && stoppedRootCreatedAt !== undefined) {
-    createdAtByPid.set(rootPid, stoppedRootCreatedAt)
+  if (!rootDated && exitedRootCreatedAt !== undefined) {
+    createdAtByPid.set(rootPid, exitedRootCreatedAt)
   }
   const rootUndated = !runningPids.has(rootPid) && !createdAtByPid.has(rootPid)
   const childrenByParent = new Map<number, number[]>()
@@ -407,9 +408,16 @@ export function createOperatingSystem(
       const orphans = recordedOrphanTreePids(runtime, pid, recordedStartIdentity)
       if (orphans !== null) return anyProcessIsAlive(runtime, orphans)
     }
-    return anyProcessIsAlive(
-      runtime, processTreePids(runtime, pid, false, stoppedRootCreatedAt.get(pid)),
-    )
+    // Should the root have exited, it is dated by the earlier of the creation time its stop
+    // saw and the one its recorded identity holds, so neither leaves out a process the
+    // other would count. A root still running is dated by the snapshot instead.
+    const knownCreatedAt = [
+      stoppedRootCreatedAt.get(pid), startIdentityMilliseconds(recordedStartIdentity),
+    ].filter((createdAt) => createdAt !== undefined)
+    const exitedRootCreatedAt = knownCreatedAt.length === 0
+      ? undefined
+      : Math.min(...knownCreatedAt)
+    return anyProcessIsAlive(runtime, processTreePids(runtime, pid, false, exitedRootCreatedAt))
   }
   const terminateProcessTree = (pid: number): boolean => {
     let trackedPids = processTreePids(runtime, pid, true)

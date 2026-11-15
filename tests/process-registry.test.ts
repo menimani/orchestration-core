@@ -318,6 +318,94 @@ describe('task process registry', () => {
     expect(existsSync(registryFile())).toBe(true)
   })
 
+  // A runner that exited by itself left its PID vacant, and a process an earlier holder of
+  // that PID started long before the runner still named it as its parent. Every poll
+  // deferred the merge until a person removed the registry entry.
+  it('forgets a runner whose vacant PID only an older process names as its parent', () => {
+    recordReusedRunner()
+    const { os } = reusedPidOs([
+      { pid: 4500, parentPid: 4321, createdAt: 500 },
+    ], () => undefined)
+
+    expect(os.processTreeIsAlive(4321)).toBe(true)
+    expect(taskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(false)
+  })
+
+  it('blocks on a vacant PID while a child created after the runner lives', () => {
+    recordReusedRunner()
+    const { alive, os } = reusedPidOs([
+      { pid: 4500, parentPid: 4321, createdAt: 500 },
+      { pid: 4501, parentPid: 4321, createdAt: 2_000 },
+    ], () => undefined)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBe(4321)
+    expect(terminableTaskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(true)
+
+    alive.delete(4501)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBeUndefined()
+    expect(existsSync(registryFile())).toBe(false)
+  })
+
+  it('blocks on a vacant PID while a grandchild created after the runner lives', () => {
+    recordReusedRunner()
+    const { os } = reusedPidOs([
+      { pid: 4501, parentPid: 4321, createdAt: 2_000 },
+      { pid: 4502, parentPid: 4501, createdAt: 3_000 },
+    ], () => undefined)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBe(4321)
+    expect(existsSync(registryFile())).toBe(true)
+  })
+
+  it('blocks on a vacant PID while a child without a creation time names it', () => {
+    recordReusedRunner()
+    const { os } = reusedPidOs([
+      { pid: 4501, parentPid: 4321 },
+    ], () => undefined)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBe(4321)
+    expect(existsSync(registryFile())).toBe(true)
+  })
+
+  it('blocks on a vacant PID when the recorded identity holds no creation time', () => {
+    recordTaskProcess(paths, taskId, 4321, () => 'started:runner')
+    const { os } = reusedPidOs([
+      { pid: 4500, parentPid: 4321, createdAt: 500 },
+    ], () => undefined)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBe(4321)
+    expect(existsSync(registryFile())).toBe(true)
+  })
+
+  it('blocks on a vacant PID recorded without an identity while anything names it', () => {
+    recordTaskProcess(paths, taskId, 4321, () => undefined, () => true)
+    const { os } = reusedPidOs([
+      { pid: 4500, parentPid: 4321, createdAt: 500 },
+    ], () => undefined)
+
+    expect(taskProcessPid(
+      paths, taskId, undefined, os.processStartIdentity, os.processTreeIsAlive,
+    )).toBe(4321)
+    expect(existsSync(registryFile())).toBe(true)
+  })
+
   /**
    * The POSIX adapter in which 4321 now reads as `holder` and its process group answers
    * `groupAlive`.

@@ -498,9 +498,13 @@ interface MergeRepositoryState {
   mergeInProgress: boolean
 }
 
-function mergeRepositoryState(cwd: string, runtime: MergeRuntime): MergeRepositoryState {
+/**
+ * A caller that has just read HEAD in `cwd`, with nothing between that read and this one,
+ * passes it as `head` so the same question is not asked twice.
+ */
+function mergeRepositoryState(cwd: string, runtime: MergeRuntime, head?: string): MergeRepositoryState {
   return {
-    head: runtime.git(cwd, ['rev-parse', 'HEAD']).trim(),
+    head: head ?? runtime.git(cwd, ['rev-parse', 'HEAD']).trim(),
     status: runtime.git(cwd, ['status', '--porcelain']),
     mergeInProgress: mergeIsInProgress(cwd, runtime),
   }
@@ -523,8 +527,9 @@ function mergeWithVerifiedRecovery(
   args: string[],
   conflictMessage: string,
   runtime: MergeRuntime,
+  head?: string,
 ): void {
-  const before = mergeRepositoryState(cwd, runtime)
+  const before = mergeRepositoryState(cwd, runtime, head)
   if (before.mergeInProgress) {
     throw new MergeRecoveryError(
       'The integration worktree already has a merge in progress. '
@@ -666,15 +671,18 @@ function adoptStrandedTaskCommits(worktree: string, branch: string, io: MergeIo)
   git(worktree, ['switch', '--quiet', branch])
 }
 
-/** Bring a completed local task up to the run tip before any merge-gate work begins. */
+/**
+ * Bring a completed local task up to the run tip before any merge-gate work begins.
+ * Returns whether it rebased, since only a rebase rewrites the task's commits.
+ */
 function rebaseTaskOntoRunTip(
   worktree: string,
   currentBranch: string,
   io: MergeIo,
-): void {
+): boolean {
   try {
     git(worktree, ['merge-base', '--is-ancestor', currentBranch, 'HEAD'])
-    return
+    return false
   } catch {
     // The task started before later work landed on the run branch.
   }
@@ -711,6 +719,7 @@ function rebaseTaskOntoRunTip(
       conflict,
     )
   }
+  return true
 }
 
 /**
@@ -1569,8 +1578,10 @@ async function mergeTaskWithGuardHeld(
     await finalizeNoChange(paths, taskId, branch, worktree, io, options)
     return { outcome: 'no-change' }
   }
-  rebaseTaskOntoRunTip(worktree, currentBranch, io)
-  if (!isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
+  // The check above found a commit with a change of its own, and nothing but a rebase can
+  // have rewritten the commits since, so they are read again only after one.
+  const rebased = rebaseTaskOntoRunTip(worktree, currentBranch, io)
+  if (rebased && !isInspectionTaskId(paths, taskId) && taskCommitsAreEmpty(worktree, currentBranch)) {
     // Recorded before reconciliation can fail: the rebase has already rewritten the
     // branch, and without this the retry would read the emptied commits as the worker's.
     recordRebaseEmptiedMarker(paths, taskId)
@@ -1609,6 +1620,7 @@ async function mergeTaskWithGuardHeld(
     ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage],
     'A merge conflict occurred. Rebase the worktree, then retry the merge.',
     mergeRuntime,
+    headBeforeMerge,
   )
 
   const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
@@ -1775,6 +1787,7 @@ export async function mergeRemoteTask(
     ['merge', '--quiet', '--no-ff', remoteRef, '-m', mergeMessage],
     `A merge conflict occurred while adopting ${branch}.`,
     mergeRuntime,
+    headBeforeMerge,
   )
   const mergeCommit = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
   // As in mergeTask, an unmoved HEAD means none of the worker's commits landed, so the

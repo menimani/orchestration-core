@@ -520,7 +520,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
    proceeds on that poll without the warning. When all
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
-   requiring the worker to have predicted that outcome. That verdict is recorded under
+   requiring the worker to have predicted that outcome. Only a rebase can empty them,
+   so a task already on the run branch tip is not read for that a second time. That verdict is recorded under
    `queue/rebase-emptied/<task-id>` before linked issues are reconciled, so when
    reconciliation fails or is rate limited the task stays `completed` and a later poll
    still completes it as `no-change` without counting a merge failure, although the
@@ -1154,7 +1155,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
     read back. An entry's start identity decides what its PID means now. A matching
     identity is the recorded runner itself. An identity that cannot be read is not proof
     the runner is gone, so the entry blocks while anything under the PID lives, and an
-    entry recorded without an identity blocks the same way and is never terminable. A
+    entry recorded without an identity blocks the same way and is never terminable. On
+    Windows, when nothing holds the PID any more, what lives under it is asked with the
+    recorded identity, which dates the vanished runner by the creation time it records
+    (item 25): a process created before the runner, which an earlier holder of the PID
+    left naming it as parent, neither keeps the entry nor defers the task's merge, while
+    one created at or after that time, a descendant of such a process while every process
+    between them is still listed, and one without a creation time still block. A process
+    whose parent has left the listing cannot be tied to the PID by parent links and does
+    not block, which leaves one still working in the task worktree to the process sweep
+    before that worktree is removed. An identity from which no creation time can be read keeps
+    the entry blocking while anything under the PID lives. A
     known identity that differs means the PID was reassigned and the runner is gone: the
     entry then blocks only while the runner's own orphans live, and is dropped as it is
     read once they are gone. The process now holding the PID, and anything it started, is
@@ -1207,7 +1218,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     itself stopped is the exception: once it has exited, a liveness check dates it by the
     creation time its stop saw, so a process created before it, which an earlier holder
     of the PID left naming it as parent, never makes the check that verifies a stop
-    answer `alive`, nor a stopped task's `cleanup` retain its state. A snapshot
+    answer `alive`, nor a stopped task's `cleanup` retain its state. A root that exited
+    by itself, asked about with the start identity recorded for it (item 24a), is dated
+    by the creation time that identity records, by the same rule and at the same
+    resolution; when both times are known, the earlier one dates the root. A snapshot
     that cannot be taken is taken again while waiting for the tree to exit; a tree still
     unlisted at the deadline fails as `Could not stop process tree <pid>. Its processes
     could not be listed.`, and one with survivors names them as `Still running: PID <pid>`.
@@ -1795,8 +1809,11 @@ writing a `stop` file into any that holds an `orchestration/queue` first, and ne
 touches newer or foreign entries. It then prints the platform-only suites this platform
 leaves uncollected and why, from `tests/platformCoverage.ts`, so a run that skipped a
 suite says so. The files listed in `tests/sequentialSuites.ts` launch long-lived
-processes or wait on deadlines; they run one at a time after the rest of the suite has
-run in parallel.
+processes or wait on deadlines; none of them starts before the rest of the suite has run
+in parallel. On a host with twelve or more processors, as `os.availableParallelism()`
+reports them, up to three of them then run at once; below that they run one at a time.
+Files that share a machine-wide resource, which that file names with the resource, run
+one at a time in a group of their own after the others.
 
 Every run prints one line per test file with its project, test count and duration, also
 when standard output is not a terminal and Vitest detects a coding agent, and ends with
