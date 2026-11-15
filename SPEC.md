@@ -761,8 +761,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
     (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
     counter once, at the gate, only when every expected scan has delivered a yield or
-    been recorded as failed. A
-    scan launch failure stops the loop without advancing the cycle number, discarding
+    been recorded as failed. The cycle number advances before the first scan starts,
+    so a `stop` or a scan yield that arrives while later scans are still launching
+    names the cycle the live scans belong to. A
+    scan launch failure stops the loop and restores the previous cycle number, discarding
     the task state of every scan that attempt had already started so the next daemon
     dispatches the cycle's full scan set again rather than inheriting scans no cycle
     accounts for. The scan whose own startup failed is kept when the loop cannot account
