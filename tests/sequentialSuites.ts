@@ -10,6 +10,7 @@
 
 export const SEQUENTIAL_SUITES: string[] = [
   'tests/cli-daemon.test.ts',
+  'tests/cli-daemon-lifecycle.test.ts',
   'tests/run-tests.test.ts',
   'tests/windows-run-tests-cancellation.test.ts',
   'tests/windows-console.test.ts',
