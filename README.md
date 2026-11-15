@@ -176,10 +176,13 @@ carries `TASK_COMPLETE` on a line of its own, written last. Before it, the file 
 `NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, `NO_FINDINGS`, and
 `DECISION_REQUIRED: <text>` lines. `NO_FINDINGS` is a review's explicit empty result and
 never overrides a `NEXT_TASK:` line in the same message (`SPEC.md` item 30). A standalone
-marker (`TASK_COMPLETE`, `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) still counts when its line
-carries surrounding white space or one pair of Markdown inline formatting around the whole
-token — backticks, `*`, `**`, `_`, or `__` — but not with anything else on the line, under
-two layers of formatting, in a list item or `>` quote, or inside a fenced code block. Markers that
+marker (`TASK_COMPLETE`, `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) starts at the first column
+and still counts when its line carries trailing white space or one pair of Markdown inline
+formatting around the whole token — backticks, `*`, `**`, `_`, or `__` — but not after
+leading white space (git indents commit messages and diff lines), with anything else on the
+line, under two layers of formatting, or in a list item or `>` quote. A closed fenced code
+block counts as a marker only when the marker is its only non-blank line; one that never
+closes hides nothing, so the lines after it read as outside a fence. Markers that
 appear only in the transcript log are ignored; the task lifecycle in `SPEC.md` states the
 rule.
 

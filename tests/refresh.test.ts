@@ -234,17 +234,89 @@ describe('markerLinePresent', () => {
     it(`recognises ${marker} bare, padded, and in one layer of inline formatting`, () => {
       for (const line of [
         marker,
-        `   ${marker}  \t`,
+        `${marker}  \t`,
         `\`${marker}\``,
         `**${marker}**`,
         `__${marker}__`,
         `*${marker}*`,
         `_${marker}_`,
-        `  \`${marker}\`  `,
+        `\`${marker}\`  `,
       ]) {
         expect(markerLinePresent(`work done\n${line}\n`, marker), line).toBe(true)
         expect(markerLinePresent(`work done\r\n${line}\r\n`, marker), line).toBe(true)
       }
+      for (const line of [`   ${marker}  \t`, `  \`${marker}\`  `]) {
+        expect(markerLinePresent(`work done\n${line}\n`, marker), line).toBe(false)
+        expect(markerLinePresent(`work done\r\n${line}\r\n`, marker), line).toBe(false)
+      }
+    })
+
+    it(`does not recognise ${marker} after leading white space, as git indents it`, () => {
+      for (const line of [
+        `  ${marker}`,
+        `\t${marker}`,
+        `    ${marker}`,
+        ` ${marker}`,
+        `    \`${marker}\``,
+      ]) {
+        expect(markerLinePresent(`work done\n${line}\n`, marker), line).toBe(false)
+      }
+      expect(markerLinePresent(
+        `commit 0da4564\nAuthor: someone\n\n    fix: something\n\n    ${marker}\n`, marker,
+      )).toBe(false)
+      expect(markerLinePresent(
+        `@@ -1,3 +1,4 @@\n Output this line:\n ${marker}\n+added\n`, marker,
+      )).toBe(false)
+    })
+
+    it(`recognises ${marker} followed by trailing spaces, a tab, or a carriage return`, () => {
+      for (const line of [`${marker}   `, `${marker}\t`, `${marker}\r`, `**${marker}**\t\r`]) {
+        expect(markerLinePresent(`work done\n${line}\n`, marker), line).toBe(true)
+        expect(markerLinePresent(`work done\n${line}`, marker), line).toBe(true)
+      }
+    })
+
+    it(`recognises ${marker} as the only line of a closed fenced code block`, () => {
+      for (const text of [
+        `work done\n\`\`\`\n${marker}\n\`\`\`\n`,
+        `work done\n~~~\n${marker}\n~~~\n`,
+        `work done\n\`\`\`text\n${marker}\n\`\`\`\n`,
+        `work done\n~~~ text\n${marker}\n~~~~\n`,
+        `work done\n\`\`\`\n\n  \n${marker}\n\n\`\`\`\n`,
+        `work done\r\n\`\`\`\r\n${marker}\r\n\`\`\`  \r\n`,
+        `work done\n\`\`\`\n\`${marker}\`\n\`\`\`\n`,
+      ]) {
+        expect(markerLinePresent(text, marker), text).toBe(true)
+      }
+      expect(markerLinePresent(`work done\n\`\`\`\n  ${marker}\n\`\`\`\n`, marker)).toBe(false)
+    })
+
+    it(`does not recognise ${marker} beside other lines in a closed fenced code block`, () => {
+      for (const text of [
+        `The prompt says:\n\`\`\`\nfinish the work\n${marker}\n\`\`\`\n`,
+        `~~~text\n${marker}\nmore\n~~~\n`,
+        `\`\`\`\`\n\`\`\`\n${marker}\n\`\`\`\n\`\`\`\`\n`,
+        `\`\`\`\nsteps\n~~~\n${marker}\n\`\`\`\n`,
+      ]) {
+        expect(markerLinePresent(text, marker), text).toBe(false)
+      }
+    })
+
+    it(`recognises a bare final ${marker} after fences that never close`, () => {
+      const misNested = [
+        'work done', '```markdown', 'Run:', '```bash', 'npm test', '```', 'more', '```',
+        marker, '',
+      ].join('\n')
+      expect(markerLinePresent(misNested, marker)).toBe(true)
+      expect(markerLinePresent(`work done\n\`\`\`\nnpm test\n${marker}\n`, marker)).toBe(true)
+      expect(markerLinePresent(`work done\n~~~~\nlog\n~~~\n${marker}\n`, marker)).toBe(true)
+    })
+
+    it(`does not treat a line that continues after three backticks as a fence`, () => {
+      expect(markerLinePresent(`\`\`\`npm test\`\`\` passes\n${marker}\n`, marker)).toBe(true)
+      expect(markerLinePresent(
+        `\`\`\`npm test\`\`\` passes\nnotes\n\`\`\`\nlog\n${marker}\n\`\`\`\n`, marker,
+      )).toBe(false)
     })
 
     it(`does not recognise ${marker} with anything else on its line`, () => {
@@ -271,9 +343,9 @@ describe('markerLinePresent', () => {
       }
     })
 
-    it(`does not recognise ${marker} inside a fenced code block the message quotes`, () => {
-      expect(markerLinePresent(`The prompt says:\n\`\`\`\n${marker}\n\`\`\`\n`, marker)).toBe(false)
-      expect(markerLinePresent(`~~~text\n${marker}\n~~~\n`, marker)).toBe(false)
+    it(`recognises ${marker} alone in a fenced code block and bare after one`, () => {
+      expect(markerLinePresent(`The prompt says:\n\`\`\`\n${marker}\n\`\`\`\n`, marker)).toBe(true)
+      expect(markerLinePresent(`~~~text\n${marker}\n~~~\n`, marker)).toBe(true)
       expect(markerLinePresent(`\`\`\`\n${marker}\n\`\`\`\n${marker}\n`, marker)).toBe(true)
     })
   }

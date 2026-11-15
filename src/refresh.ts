@@ -18,28 +18,56 @@ import { readStatus, transitionStatus, type TaskStatus } from './status.ts'
 const MARKER_WRAPPERS = ['', '`', '**', '*', '__', '_']
 
 /**
- * Whether a final message carries a standalone marker. A line counts when it is the marker
- * alone once surrounding white space and at most one pair of Markdown inline formatting
- * around the whole token are removed, since a model writing Markdown naturally formats a
- * literal token that way. Anything else on the line — words, punctuation, a list or quote
- * prefix, a second layer of formatting, an enclosing fenced code block — keeps it from
- * counting, so echoed prompt text cannot pass for a marker.
+ * A fenced code block's opening line by the CommonMark rule: three or more backticks or
+ * tildes at the first column, then an optional info string holding no backtick.
+ */
+const FENCE_OPENER = /^(`{3,}|~{3,})[^`]*$/
+
+/** A fence's closing line: a run of fence characters with nothing after it but white space. */
+const FENCE_CLOSER = /^(`{3,}|~{3,})\s*$/
+
+/**
+ * Whether one line is a standalone marker: the marker alone at the first column once
+ * trailing white space and at most one pair of Markdown inline formatting around the whole
+ * token are removed. Leading white space is never tolerated, since git prints commit
+ * messages and diff context indented, and that text comes from accounts the loop does not
+ * control.
+ */
+function markerLine(line: string, marker: string): boolean {
+  const trimmed = line.trimEnd()
+  return MARKER_WRAPPERS.some((wrapper) => trimmed === `${wrapper}${marker}${wrapper}`)
+}
+
+/** The index of the line closing the fence opened by `opener`, if any line closes it. */
+function fenceCloser(lines: string[], from: number, opener: string): number | undefined {
+  for (let index = from; index < lines.length; index++) {
+    const run = FENCE_CLOSER.exec(lines[index] ?? '')?.[1]
+    if (run !== undefined && run[0] === opener[0] && run.length >= opener.length) return index
+  }
+  return undefined
+}
+
+/**
+ * Whether a final message carries a standalone marker line (see `markerLine`), since a
+ * model writing Markdown naturally formats a literal token that way. A marker inside a
+ * closed fenced code block counts only when it is the block's sole non-blank line — one
+ * more layer of the runner's own formatting — so quoted prompt or forge text stays inert.
+ * An opening fence that nothing closes hides nothing: the lines after it are read as
+ * outside a fence, so a mis-nested or unterminated block cannot hide a final marker.
  */
 export function markerLinePresent(text: string, marker: string): boolean {
-  let fence: string | undefined
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    const opener = /^(`{3,}|~{3,})/.exec(trimmed)?.[1]
-    if (fence !== undefined) {
-      if (opener !== undefined && opener[0] === fence[0] && opener.length >= fence.length
-        && trimmed === opener) fence = undefined
+  const lines = text.split('\n')
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? ''
+    const opener = FENCE_OPENER.exec(line.trimEnd())?.[1]
+    const closer = opener === undefined ? undefined : fenceCloser(lines, index + 1, opener)
+    if (closer !== undefined) {
+      const content = lines.slice(index + 1, closer).filter((inner) => inner.trim() !== '')
+      if (content.length === 1 && markerLine(content[0] ?? '', marker)) return true
+      index = closer
       continue
     }
-    if (opener !== undefined) {
-      fence = opener
-      continue
-    }
-    if (MARKER_WRAPPERS.some((wrapper) => trimmed === `${wrapper}${marker}${wrapper}`)) return true
+    if (markerLine(line, marker)) return true
   }
   return false
 }

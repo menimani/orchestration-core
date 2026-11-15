@@ -1296,12 +1296,25 @@ are not parsed by `loadConfig` and are not operator-file settings.
     final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
     rendering behavior inside the adapter. A standalone marker (`TASK_COMPLETE`,
-    `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) is on its own line when that line is the marker
-    and nothing else once surrounding white space and at most one pair of Markdown inline
-    formatting around the whole token — backticks, `*`, `**`, `_`, or `__` — are removed;
-    one rule applies to all three. A marker inside a sentence, with other words or trailing
-    punctuation on the line, in a list item, quoted with `>`, under two layers of
-    formatting, with an unpaired backtick, or inside a fenced code block is not a marker.
+    `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) is on its own line when that line starts with the
+    marker at the first column and is the marker and nothing else once trailing white space
+    (spaces, tabs, a carriage return) and at most one pair of Markdown inline formatting
+    around the whole token — backticks, `*`, `**`, `_`, or `__` — are removed; one rule
+    applies to all three. Leading white space is not tolerated, since `git log` and `git show`
+    indent commit messages and a diff indents its unchanged lines, and that text comes from
+    accounts the loop does not control. A marker inside a sentence, after leading white
+    space, with other words or trailing punctuation on the line, in a list item, quoted with
+    `>`, under two layers of formatting, or with an unpaired backtick is not a marker.
+    Fenced code blocks are recognised by the CommonMark rule and no more: an opening line is
+    three or more backticks or tildes at the first column with an optional info string that
+    contains no backtick, closed by a line of the same character at least as long with
+    nothing after it but white space. A marker inside a closed fenced block that holds any
+    other non-blank line is not a marker, so quoted prompt or forge text stays inert; a
+    closed fenced block whose only non-blank line is the marker counts, as one more layer of
+    the runner's own formatting. An opening fence that is never closed hides nothing: the
+    lines after it are read as outside a fence, so a mis-nested or unterminated block cannot
+    keep a final marker from counting, and a line that continues after its three backticks,
+    such as ```` ```npm test``` passes ````, opens no fence.
     Templates still tell the runner to write the bare marker. `NO_FINDINGS`, a standalone line, is an
     explicit empty result from a review; it never overrides a `NEXT_TASK:` line in
     the same final message (item 17). Any runner honoring the contract is
