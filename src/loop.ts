@@ -53,7 +53,9 @@ import {
   reviewScopeTemplateValues,
 } from './templates.ts'
 import { pitfallsFileForDesc } from './gates.ts'
-import { currentBranchPushRemote, currentBranchTrackingRemote } from './gitRemote.ts'
+import {
+  currentBranchPushRemote, currentBranchRemotes, currentBranchTrackingRemote,
+} from './gitRemote.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
@@ -2413,8 +2415,9 @@ export function createLoop(deps: LoopDeps) {
     let pushRemote: string
     let baseRemote: string
     try {
-      pushRemote = currentBranchPushRemote(paths.repoRoot)
-      baseRemote = currentBranchTrackingRemote(paths.repoRoot)
+      const remotes = currentBranchRemotes(paths.repoRoot, branch)
+      pushRemote = remotes.push
+      baseRemote = remotes.tracking
       const hasUpstream = optionalGit([
         'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}',
       ]).trim() !== ''
