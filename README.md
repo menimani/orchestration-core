@@ -175,7 +175,11 @@ write `options.finalMessageFile`, and the task counts as completed once that fil
 carries `TASK_COMPLETE` on a line of its own, written last. Before it, the file may carry
 `NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, `NO_FINDINGS`, and
 `DECISION_REQUIRED: <text>` lines. `NO_FINDINGS` is a review's explicit empty result and
-never overrides a `NEXT_TASK:` line in the same message (`SPEC.md` item 30). Markers that
+never overrides a `NEXT_TASK:` line in the same message (`SPEC.md` item 30). A standalone
+marker (`TASK_COMPLETE`, `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) still counts when its line
+carries surrounding white space or one pair of Markdown inline formatting around the whole
+token — backticks, `*`, `**`, `_`, or `__` — but not with anything else on the line, under
+two layers of formatting, in a list item or `>` quote, or inside a fenced code block. Markers that
 appear only in the transcript log are ignored; the task lifecycle in `SPEC.md` states the
 rule.
 

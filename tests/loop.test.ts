@@ -895,6 +895,26 @@ describe('actionable findings', () => {
     expect(logText()).toContain('WARN final message has NO_FINDINGS and NEXT_TASK')
   })
 
+  it('reads a NO_FINDINGS line in inline formatting as the marker', () => {
+    const loop = makeLoop()
+    const finding = '[BUG] `src/search.ts` drops valid results'
+    writeFinal('t-formatted-no-findings', `\`NO_FINDINGS\`\nNEXT_TASK: ${finding}\n`)
+
+    expect(loop.actionableFindings(finalMessageFile(paths, 't-formatted-no-findings')))
+      .toEqual([finding])
+    expect(logText()).toContain('WARN final message has NO_FINDINGS and NEXT_TASK')
+  })
+
+  it('does not read NO_FINDINGS inside a sentence as the marker', () => {
+    const loop = makeLoop()
+    const finding = '[BUG] `src/search.ts` drops valid results'
+    writeFinal('t-prose-no-findings', `Print NO_FINDINGS when clean.\nNEXT_TASK: ${finding}\n`)
+
+    expect(loop.actionableFindings(finalMessageFile(paths, 't-prose-no-findings')))
+      .toEqual([finding])
+    expect(logged).toEqual([])
+  })
+
   it('ignores descriptions that only report no findings', () => {
     const loop = makeLoop()
     writeFinal('t4', [
