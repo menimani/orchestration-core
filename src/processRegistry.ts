@@ -182,9 +182,12 @@ function registeredTaskProcessPid(
     currentStartIdentity = undefined
   }
   if (currentStartIdentity === undefined) {
+    // Nothing may hold the PID any more. The recorded identity dates the vanished runner,
+    // so a process created before it, left naming the PID by an earlier holder, is not
+    // counted as the runner's tree.
     let alive = true
     try {
-      alive = processTreeIsAlive(entry.pid)
+      alive = processTreeIsAlive(entry.pid, entry.startIdentity ?? undefined)
     } catch {
       // An unavailable liveness probe does not prove that the process stopped.
     }

@@ -1155,7 +1155,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     read back. An entry's start identity decides what its PID means now. A matching
     identity is the recorded runner itself. An identity that cannot be read is not proof
     the runner is gone, so the entry blocks while anything under the PID lives, and an
-    entry recorded without an identity blocks the same way and is never terminable. A
+    entry recorded without an identity blocks the same way and is never terminable. On
+    Windows, when nothing holds the PID any more, what lives under it is asked with the
+    recorded identity, which dates the vanished runner by the creation time it records
+    (item 25): a process created before the runner, which an earlier holder of the PID
+    left naming it as parent, neither keeps the entry nor defers the task's merge, while
+    one created at or after that time, a descendant of such a process, and one without a
+    creation time still block. An identity from which no creation time can be read keeps
+    the entry blocking while anything under the PID lives. A
     known identity that differs means the PID was reassigned and the runner is gone: the
     entry then blocks only while the runner's own orphans live, and is dropped as it is
     read once they are gone. The process now holding the PID, and anything it started, is
@@ -1208,7 +1215,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     itself stopped is the exception: once it has exited, a liveness check dates it by the
     creation time its stop saw, so a process created before it, which an earlier holder
     of the PID left naming it as parent, never makes the check that verifies a stop
-    answer `alive`, nor a stopped task's `cleanup` retain its state. A snapshot
+    answer `alive`, nor a stopped task's `cleanup` retain its state. A root that exited
+    by itself, asked about with the start identity recorded for it (item 24a), is dated
+    by the creation time that identity records, by the same rule and at the same
+    resolution; when both times are known, the earlier one dates the root. A snapshot
     that cannot be taken is taken again while waiting for the tree to exit; a tree still
     unlisted at the deadline fails as `Could not stop process tree <pid>. Its processes
     could not be listed.`, and one with survivors names them as `Still running: PID <pid>`.

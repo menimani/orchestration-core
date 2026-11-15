@@ -92,8 +92,12 @@ export interface OperatingSystem {
    * process's surviving descendants, never the holder or anything the holder started.
    * Where the holder's identity cannot be read or matches, or the two identities are of a
    * form whose difference does not prove a different process, the answer is unchanged.
-   * After `terminateProcessTree` has stopped the PID's root, a process created before
-   * that root is never counted, so an earlier holder's orphan cannot fail the stop.
+   * Where parent links decide the tree and its root has exited, the root is dated by the
+   * creation time seen when `terminateProcessTree` stopped it, or by the one the
+   * recorded identity holds (the earlier of the two when both are known): a process
+   * created before that time is not counted, so an earlier holder's orphan cannot keep
+   * the tree alive. A process without a creation time, a root that cannot be dated, and
+   * a listing that fails are still counted as alive.
    */
   processTreeIsAlive(pid: number, recordedStartIdentity?: string): boolean
   /**
