@@ -844,8 +844,9 @@ describe('operating-system adapters', () => {
     }
   })
 
-  it('counts a grandchild of the runner of a vacant recorded PID once its parent has exited', () => {
-    // 562 was started by the runner at 2 s and 563 by 562 at 3 s; 562 has since exited.
+  it('keeps a descendant counted while its listed parent no longer answers its probe', () => {
+    // 562 was started by the runner at 2 s and 563 by 562 at 3 s; 562 is still in the
+    // listing but no longer answers its probe.
     const { alive, os } = processTreeOs([
       { pid: 562, parentPid: 561, createdAt: 2_000 },
       { pid: 563, parentPid: 562, createdAt: 3_000 },
@@ -855,6 +856,18 @@ describe('operating-system adapters', () => {
     expect(os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
     alive.delete(563)
     expect(os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(false)
+  })
+
+  it('does not count a descendant whose parent is absent from the listing', () => {
+    // 563 was started at 3 s by 562, which the runner started and which has exited, so
+    // 562 is no longer listed. Parent links alone cannot tie 563 to 561; the sweep of the
+    // task worktree's processes before its removal is what ends such a process instead.
+    const { os } = processTreeOs([
+      { pid: 563, parentPid: 562, createdAt: 3_000 },
+    ], () => {}, () => undefined)
+
+    expect(os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(false)
+    expect(os.processTreeIsAlive(561)).toBe(false)
   })
 
   it('keeps the undated answer for a vacant PID whose identity holds no creation time', () => {

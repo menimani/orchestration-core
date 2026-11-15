@@ -1160,8 +1160,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     recorded identity, which dates the vanished runner by the creation time it records
     (item 25): a process created before the runner, which an earlier holder of the PID
     left naming it as parent, neither keeps the entry nor defers the task's merge, while
-    one created at or after that time, a descendant of such a process, and one without a
-    creation time still block. An identity from which no creation time can be read keeps
+    one created at or after that time, a descendant of such a process while every process
+    between them is still listed, and one without a creation time still block. A process
+    whose parent has left the listing cannot be tied to the PID by parent links and does
+    not block, which leaves one still working in the task worktree to the process sweep
+    before that worktree is removed. An identity from which no creation time can be read keeps
     the entry blocking while anything under the PID lives. A
     known identity that differs means the PID was reassigned and the runner is gone: the
     entry then blocks only while the runner's own orphans live, and is dropped as it is
