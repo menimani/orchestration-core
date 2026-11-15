@@ -52,12 +52,12 @@ const separatorFixtureLines: ReadonlySet<string> = new Set([
 const ESCAPED_NON_ENGLISH_FIXTURE_LINES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   // Held findings must round-trip the separators a regular expression's `.` does not match.
   ['tests/held-findings.test.ts', separatorFixtureLines],
-  ['tests/loop.test.ts', separatorFixtureLines],
+  ['tests/loop-issue-queue.test.ts', separatorFixtureLines],
   ['tests/runner-codex.test.ts', new Set([
     `const specification = 'non-ASCII specification ${BACKSLASH}u65e5${BACKSLASH}u672c${BACKSLASH}u8a9e${BACKSLASH}n'.repeat(1_000)`,
   ])],
   // A byte cap must not split a two-byte character or leave a replacement character behind.
-  ['tests/loop-gate-fix.test.ts', new Set([
+  ['tests/loop-gate-fix-runner.test.ts', new Set([
     `const accented = String.fromCharCode(${'0xe9'}).repeat(50)`,
     `expect(tail).not.toContain(String.fromCharCode(${'0xfffd'}))`,
     // A frame marker split by an invisible character must still be recognised.

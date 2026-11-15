@@ -175,7 +175,14 @@ write `options.finalMessageFile`, and the task counts as completed once that fil
 carries `TASK_COMPLETE` on a line of its own, written last. Before it, the file may carry
 `NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, `NO_FINDINGS`, and
 `DECISION_REQUIRED: <text>` lines. `NO_FINDINGS` is a review's explicit empty result and
-never overrides a `NEXT_TASK:` line in the same message (`SPEC.md` item 30). Markers that
+never overrides a `NEXT_TASK:` line in the same message (`SPEC.md` item 30). A standalone
+marker (`TASK_COMPLETE`, `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) starts at the first column
+and still counts when its line carries trailing white space or one pair of Markdown inline
+formatting around the whole token — backticks, `*`, `**`, `_`, or `__` — but not after
+leading white space (git indents commit messages and diff lines), with anything else on the
+line, under two layers of formatting, or in a list item or `>` quote. A closed fenced code
+block counts as a marker only when the marker is its only non-blank line; one that never
+closes hides nothing, so the lines after it read as outside a fence. Markers that
 appear only in the transcript log are ignored; the task lifecycle in `SPEC.md` states the
 rule.
 
@@ -401,8 +408,15 @@ node scripts/test-spawn-profile.mjs /tmp/spawn-profile
 
 Each test file then records every child process its worker creates through
 `node:child_process`: the executable, the subcommand for `git`, `node`, `powershell` and
-`cmd`, and the time until it exits. The report totals them by executable and subcommand
-and by test file, and lists the twenty files with the most spawns per test. Processes a
+`cmd`, and the time until it exits. Each record also names who asked for the child: its
+caller, the first stack frame outside Node internals, `node_modules` and the profile
+itself, as a repository-relative `file:line`, and the next frame outside the caller's
+file, so a `git()` wrapper is attributed to whoever called it. The report totals them by
+executable and subcommand and by test file, and lists the twenty files with the most
+spawns per test. It then totals them by the origin of the caller (`src/`, the shared test
+helpers, the test files, or other), lists the forty call sites with the most child wall
+time, and counts by call site the git questions asked twice in a row: the same arguments
+in the same directory within one test, with no other git process in between. Processes a
 child CLI starts in turn are outside the worker and are not counted. Without the variable
 nothing is wrapped or written.
 

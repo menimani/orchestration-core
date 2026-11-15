@@ -318,8 +318,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 
 ## Task lifecycle
 
-1. A task is `completed` once `TASK_COMPLETE` appears on its own line in the task's
-   `.final` file (written by the runner through its last-message output), even if its
+1. A task is `completed` once `TASK_COMPLETE` appears on its own line (item 30 states
+   the formatting tolerated around it) in the task's `.final` file (written by the runner through its last-message output), even if its
    runner process is still alive. Without that marker, it remains `running` while the
    process is alive and becomes `failed` when the process is gone. The daemon bounds how
    long that may last: a live task without the marker whose status file's `started_at` is
@@ -911,7 +911,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Docker preflight and failure diagnosis, item 9), ensure/update
     the draft PR, emit `CYCLE_COMPLETE: <n>/<max>` with the PR URL to the machine-marker
     sink and a formatted copy to `loop.log`, then the CI gate,
-    then review. Remote work defers the gate with a `Waiting remote` event when its
+    then review. The draft PR's branch is pushed to the current branch's push remote:
+    the first of `branch.<name>.pushRemote`, `remote.pushDefault`, the upstream's remote,
+    and `branch.<name>.remote` that names an existing remote, else the only remote; its
+    base comes from the tracking remote, chosen from the same candidates with the
+    upstream's remote and `branch.<name>.remote` first. Both are answered from one read
+    of the branch and its remotes, made fresh at every gate and never cached across polls,
+    and a candidate after the first match is not looked up. Remote work defers the gate with a `Waiting remote` event when its
     pending issue set changes and every ten minutes while unchanged. When every pending
     issue carries `loop:merge-failed` and neither `loop:ready` nor `loop:in-progress` — a
     `loop:merge-ready` left beside it is a failure relabel that did not finish, which
@@ -1197,7 +1203,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     snapshot omitted is dated by its start identity; when that query times out or fails,
     a stop leaves out every child with a creation time still naming the root, because
     an unknown identity never widens the set beyond what a known one would confirm,
-    while a liveness check keeps those links and answers `alive`. A snapshot
+    while a liveness check keeps those links and answers `alive`. A root the process
+    itself stopped is the exception: once it has exited, a liveness check dates it by the
+    creation time its stop saw, so a process created before it, which an earlier holder
+    of the PID left naming it as parent, never makes the check that verifies a stop
+    answer `alive`, nor a stopped task's `cleanup` retain its state. A snapshot
     that cannot be taken is taken again while waiting for the tree to exit; a tree still
     unlisted at the deadline fails as `Could not stop process tree <pid>. Its processes
     could not be listed.`, and one with survivors names them as `Still running: PID <pid>`.
@@ -1285,7 +1295,27 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `NO_FINDINGS`, `DECISION_REQUIRED:` in the
     final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
-    rendering behavior inside the adapter. `NO_FINDINGS`, a standalone line, is an
+    rendering behavior inside the adapter. A standalone marker (`TASK_COMPLETE`,
+    `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) is on its own line when that line starts with the
+    marker at the first column and is the marker and nothing else once trailing white space
+    (spaces, tabs, a carriage return) and at most one pair of Markdown inline formatting
+    around the whole token — backticks, `*`, `**`, `_`, or `__` — are removed; one rule
+    applies to all three. Leading white space is not tolerated, since `git log` and `git show`
+    indent commit messages and a diff indents its unchanged lines, and that text comes from
+    accounts the loop does not control. A marker inside a sentence, after leading white
+    space, with other words or trailing punctuation on the line, in a list item, quoted with
+    `>`, under two layers of formatting, or with an unpaired backtick is not a marker.
+    Fenced code blocks are recognised by the CommonMark rule and no more: an opening line is
+    three or more backticks or tildes at the first column with an optional info string that
+    contains no backtick, closed by a line of the same character at least as long with
+    nothing after it but white space. A marker inside a closed fenced block that holds any
+    other non-blank line is not a marker, so quoted prompt or forge text stays inert; a
+    closed fenced block whose only non-blank line is the marker counts, as one more layer of
+    the runner's own formatting. An opening fence that is never closed hides nothing: the
+    lines after it are read as outside a fence, so a mis-nested or unterminated block cannot
+    keep a final marker from counting, and a line that continues after its three backticks,
+    such as ```` ```npm test``` passes ````, opens no fence.
+    Templates still tell the runner to write the bare marker. `NO_FINDINGS`, a standalone line, is an
     explicit empty result from a review; it never overrides a `NEXT_TASK:` line in
     the same final message (item 17). Any runner honoring the contract is
     substitutable. Additional interactive-agent skill destinations and rendering are
@@ -1756,8 +1786,8 @@ issue's update and merge reconciliation wait for a later poll instead of posting
 ## Test coverage
 
 The suite drives real git repositories in temporary directories. Its cycle-gate cases in
-`tests/loop.test.ts` are the load-bearing ones: they pin the gate's state machine — cycle
-flags, CI outcomes, review rounds, final promotion, and stop conditions.
+`tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's state
+machine — cycle flags, CI outcomes, review rounds, final promotion, and stop conditions.
 `tests/documented-defaults.test.ts` holds the configuration tables in this file and in
 `README.md` to the defaults the source resolves. The suite's global setup removes this
 suite's own fixture directories older than six hours from the OS temporary directory,
@@ -1778,9 +1808,21 @@ when it finishes: its project, test count and duration, and for every child proc
 executable's base name, the subcommand when the executable is `git`, `node`, `powershell`
 or `cmd` (the first argument after Git's own options, a script path's base name for
 `node`, and the first word of the argument for `powershell` and `cmd`), and the wall time until it exits, or until the file finished for a child still
-running then. A wrapper returns, throws and inherits what the wrapped call does, and a
+running then. Each record also carries the arguments and working directory of the child,
+the order it started in, the full name of the test running then (none in a file-level
+hook), and its caller: the first stack frame outside Node internals, `node_modules` and
+the profile's own wrapper, as a repository-relative `file:line` (absolute outside the
+repository), and the next frame outside the caller's file, so a helper such as a `git()`
+wrapper is attributed to whoever called it. A wrapper returns, throws and inherits what
+the wrapped call does, a failure to read the stack only leaves the caller empty, and a
 call one wrapper makes into another is counted once. Without the variable nothing is
-wrapped, recorded or written. `scripts/test-spawn-profile.mjs <directory>` aggregates
-those files into total spawns and child wall time, a table by executable and subcommand,
-a table by test file, and the twenty files with the most spawns per test; processes a
-child CLI starts are outside the worker and are not counted.
+wrapped, recorded or written, and no stack is read. `scripts/test-spawn-profile.mjs
+<directory>` aggregates those files into total spawns and child wall time, a table by
+executable and subcommand, a table by test file, the twenty files with the most spawns
+per test, the spawns and child wall time by the origin of the caller (`src/`, a shared
+helper under `tests/`, a `*.test.*` file under `tests/`, or other, which includes a record
+without a caller, so the rows add up to the totals), the forty call sites, by caller,
+next frame, executable and subcommand, with the most child wall time, and, by call site,
+the git children that repeat the arguments and working directory of the git child
+started just before them in the same test; processes a child CLI starts are outside the
+worker and are not counted.
