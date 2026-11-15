@@ -578,7 +578,7 @@ export function createGithubForge(
       // name carries a colon — which every label this loop uses does — makes it fail
       // rather than match. It also costs one call instead of one per label.
       const labelArgs = [
-        'label', 'list', '--repo', options.repository, '--limit', '100', '--json', 'name',
+        'label', 'list', '--repo', options.repository, '--limit', '1000', '--json', 'name',
       ]
       const available = parseGhJson(
         labelArgs, await checkedGh(repoRoot, labelArgs), labelListSchema,
