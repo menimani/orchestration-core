@@ -451,4 +451,31 @@ describe('integration branch topology', () => {
     )
     expect(git(topology.paths.repoRoot, ['status', '--porcelain'])).toBe('')
   })
+
+  it('warns and continues when the default-branch merge fails before it starts', () => {
+    const topology = prepareBranchTopology(paths, 'integration/run')
+    const integrationHead = git(topology.paths.repoRoot, ['rev-parse', 'HEAD'])
+    pushRemoteDefaultChange('default-change.txt', 'default work\n')
+    const indexLock = git(topology.paths.repoRoot, [
+      'rev-parse', '--path-format=absolute', '--git-path', 'index.lock',
+    ])
+    writeFileSync(indexLock, '')
+    const commands: string[][] = []
+    const recordingGit = (root: string, args: string[]): string => {
+      commands.push(args)
+      return git(root, args)
+    }
+    const events: string[] = []
+
+    absorbDefaultBranch(topology.paths,
+      (name, subject, detail = '') => events.push(`${name} ${subject} ${detail}`.trim()),
+      recordingGit)
+
+    expect(commands).not.toContainEqual(['merge', '--abort'])
+    expect(git(topology.paths.repoRoot, ['rev-parse', 'HEAD'])).toBe(integrationHead)
+    expect(git(topology.paths.repoRoot, ['status', '--porcelain'])).toBe('')
+    expect(events.some((line) => line.startsWith(
+      'WARN default branch merge failed; continuing:',
+    ))).toBe(true)
+  })
 })
