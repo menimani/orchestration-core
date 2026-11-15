@@ -60,7 +60,7 @@ import { readStatus } from './status.ts'
 import { startTask } from './start.ts'
 import {
   liveTaskProcesses, orphanedWorktreeDirectories, orphanedWorktreeReport,
-  terminateLiveTaskProcesses, type TaskProcessTermination,
+  sweepAbandonedTemporaryWorktrees, terminateLiveTaskProcesses, type TaskProcessTermination,
 } from './taskProcesses.ts'
 import { recordInterruptedScans } from './scanRecovery.ts'
 import {
@@ -70,13 +70,18 @@ import {
 import { observeNextPoll } from './wake.ts'
 import { runWorkerCommand } from './worker.ts'
 import {
-  loopRestartPredecessorPid, publishLoopReplacementPid, signalLoopRestartReady,
-  startLoopReplacement,
+  loopRestartPredecessorPid, loopRestartPredecessorProcessPid, publishLoopReplacementPid,
+  signalLoopRestartReady, startLoopReplacement,
 } from './restart.ts'
 import {
   prepareBranchTopology, prepareIntegrationWorktree,
 } from './branchTopology.ts'
-import { LOOP_STARTUP_RESULT_FILE_ENV } from './internalEnvironment.ts'
+import {
+  LOOP_RESTART_READY_FILE_ENV, LOOP_STARTUP_RESULT_FILE_ENV,
+} from './internalEnvironment.ts'
+import {
+  markStartupInstalling, startupDeadline, startupInstallingFile,
+} from './startupInstall.ts'
 
 // The command surface: each package.json script dispatches here with the command name
 // as the first argument. CLI tokens such as `Enqueued:`, `Created:`, `CYCLE_COMPLETE:`,
@@ -280,7 +285,7 @@ async function waitForLoopStartup(
   daemon: Awaited<ReturnType<OperatingSystem['launchDaemon']>>,
   resultFile: string,
 ): Promise<LoopStartupResult> {
-  const deadline = Date.now() + LOOP_STARTUP_TIMEOUT_MS
+  let deadline = Date.now() + LOOP_STARTUP_TIMEOUT_MS
   let spawnError: string | undefined
   const onError = (error: Error): void => { spawnError = errorHeadline(error) }
   daemon.onError(onError)
@@ -336,6 +341,7 @@ async function waitForLoopStartup(
           error: 'daemon exited before reporting startup readiness',
         }
       }
+      deadline = startupDeadline(resultFile, deadline, LOOP_STARTUP_TIMEOUT_MS)
       if (Date.now() >= deadline) {
         try {
           daemon.terminate()
@@ -358,6 +364,7 @@ async function waitForLoopStartup(
   } finally {
     daemon.offError(onError)
     rmSync(resultFile, { force: true })
+    rmSync(startupInstallingFile(resultFile), { force: true })
   }
 }
 
@@ -1355,7 +1362,7 @@ const cmdLoop: Command = async (paths, args) => {
         status: 'ready',
         pid: operatingSystem.processTreeRootPid(),
       })
-    })
+    }, startupResultFile)
     if (result !== 0) {
       reportStartup({
         status: 'error',
@@ -1433,6 +1440,7 @@ async function runLoopDaemon(
   config: LoopConfig,
   installCycleCap: (recorder: CycleCapRecorder) => void,
   ready: () => void = () => {},
+  startupResultFile?: string,
 ): Promise<number> {
   const daemonPid = operatingSystem.processTreeRootPid()
   const daemonOwner = processMarker(daemonPid)
@@ -1515,6 +1523,17 @@ async function runLoopDaemon(
 
   try {
     const foreignTasks = liveTaskProcesses(paths)
+    const sweep = sweepAbandonedTemporaryWorktrees(paths, log, [
+      restartPredecessorPid, loopRestartPredecessorProcessPid(),
+    ].filter((pid) => pid !== undefined))
+    for (const worktree of sweep.removed) {
+      log(formatEventLine('Removed', 'worktree', relative(paths.repoRoot, worktree)))
+    }
+    for (const failure of sweep.failures) {
+      log(formatEventLine(
+        'WARN', 'worktree', `${relative(paths.repoRoot, failure.worktree)}: ${failure.error}`,
+      ))
+    }
     const orphanedWorktrees = orphanedWorktreeDirectories(paths)
     if (foreignTasks.length > 0 || orphanedWorktrees.length > 0) {
       for (const task of foreignTasks) {
@@ -1573,25 +1592,40 @@ async function runLoopDaemon(
       warn: (detail) => log(formatEventLine('WARN', 'cycle cap', detail)),
     }))
 
-    syncOrchestrationDepsAtStartup(
-      paths,
-      (name, subject) => log(name === 'Installed'
-        ? formatEventLine(name, 'orchestration deps', subject)
-        : formatEventLine(name, subject)),
-    )
+    // Whoever launched this process — the start command or a restarting predecessor —
+    // enforces a startup deadline. An install announces itself so that deadline waits
+    // for it rather than killing this process with node_modules half emptied.
+    const syncDepsAtStartup = (
+      depsPaths: OrchPaths,
+      runtime?: Parameters<typeof syncOrchestrationDepsAtStartup>[2],
+    ): void => {
+      let clearInstalling = (): void => {}
+      try {
+        syncOrchestrationDepsAtStartup(
+          depsPaths,
+          (name, subject) => log(name === 'Installed'
+            ? formatEventLine(name, 'orchestration deps', subject)
+            : formatEventLine(name, subject)),
+          runtime,
+          () => {
+            clearInstalling = markStartupInstalling([
+              startupResultFile, process.env[LOOP_RESTART_READY_FILE_ENV],
+            ])
+            return true
+          },
+        )
+      } finally {
+        clearInstalling()
+      }
+    }
+    syncDepsAtStartup(paths)
     const topology = prepareBranchTopology(paths, config.integrationBranch)
     const loopPaths = topology.paths
     // A dependency-changing merge may have landed in the integration worktree before a
     // surviving task process forced the previous daemon to stop. Its package-scoped
     // pending marker must be retried here; synchronizing the frozen daemon checkout above
     // cannot satisfy or clear that worktree's state.
-    syncOrchestrationDepsAtStartup(
-      loopPaths,
-      (name, subject) => log(name === 'Installed'
-        ? formatEventLine(name, 'orchestration deps', subject)
-        : formatEventLine(name, subject)),
-      orchestrationDepsRuntimeForPackage(topology.packageRoot),
-    )
+    syncDepsAtStartup(loopPaths, orchestrationDepsRuntimeForPackage(topology.packageRoot))
     const forge = await loadPathsForge(
       config.forge,
       loopPaths,

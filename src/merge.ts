@@ -174,7 +174,8 @@ export interface MergeOptions {
   /**
    * Persist what follows from the merge before post-merge work begins or this function
    * returns. A dependency install that fails afterwards stops the loop, and a restart
-   * that finds the merge already recorded never repeats this step.
+   * that finds the merge already recorded never repeats this step. A local merge logs a
+   * failure here as a warning and still synchronizes dependencies and removes the worktree.
    */
   onMerged?: ((mergeCommit: string) => void) | undefined
 }
@@ -375,6 +376,8 @@ export function syncOrchestrationDepsAtStartup(
   paths: OrchPaths,
   event: OrchestrationDepsEvent,
   runtime: OrchestrationDepsRuntime = orchestrationDepsRuntime,
+  /** Runs once an install is certain, just before it starts; false leaves the tree untouched. */
+  beforeInstall?: (() => boolean) | undefined,
 ): void {
   const root = runtime.packageRoot ?? PACKAGE_ROOT
   // Only the repository this loop was started against gets its package synchronized. A
@@ -391,7 +394,7 @@ export function syncOrchestrationDepsAtStartup(
   if (!isInside(paths.repoRoot, root)) return
   const pendingFile = pendingOrchestrationDepsFile(paths, root)
   if (!existsSync(pendingFile) && !orchestrationDepsMissing(root)) return
-  installOrchestrationDeps('at startup', event, runtime, pendingFile)
+  installOrchestrationDeps('at startup', event, runtime, pendingFile, beforeInstall)
 }
 
 interface MergeIo {
@@ -532,6 +535,10 @@ function mergeWithVerifiedRecovery(
     runtime.git(cwd, args)
     return
   } catch (mergeError) {
+    // Read before the abort clears it. Git refuses a merge that would overwrite a file in
+    // the checkout without starting one, and blaming the task for that sends every retry
+    // into the same refusal.
+    const conflicted = mergeStoppedOnConflict(cwd, runtime)
     let abortError: unknown
     try {
       runtime.git(cwd, ['merge', '--abort'])
@@ -562,8 +569,64 @@ function mergeWithVerifiedRecovery(
         + 'Inspect and restore the integration worktree before restarting orchestration.',
       )
     }
-    throw new MergeError(conflictMessage)
+    if (conflicted) throw new MergeError(conflictMessage)
+    throw new MergeError(
+      `Git refused the merge into ${cwd} without a conflict; the checkout was left as it was. `
+      + `Merge failure: ${commandFailureSummary(mergeError)}`,
+    )
   }
+}
+
+/**
+ * Whether a failed merge stopped on a conflict: one leaves a merge in progress or unmerged
+ * paths. A lookup that fails proves nothing either way, so it keeps the conflict verdict
+ * the merge reported before refusals were told apart.
+ */
+function mergeStoppedOnConflict(cwd: string, runtime: MergeRuntime): boolean {
+  try {
+    return mergeIsInProgress(cwd, runtime)
+      || runtime.git(cwd, ['diff', '--name-only', '--diff-filter=U']).trim() !== ''
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Refuse a merge whose changes would overwrite an uncommitted or untracked file in the
+ * main checkout. Git refuses that merge, so it would fail only after the whole gate had
+ * run, and again on every retry, for a reason the task cannot fix. The check refuses only
+ * the states git refuses, so a merge git would make is never stopped by it: a `--no-ff`
+ * merge refuses any staged or intent-to-add entry wherever it is, and an unstaged
+ * modification or an untracked file only where the merge changes that path, a path inside
+ * it, or the directory holding it. An unstaged deletion, and anything else elsewhere in
+ * the checkout, such as orchestration state kept beside the code, do not stop the merge.
+ */
+function requireMergeableIntegrationCheckout(
+  repoRoot: string,
+  currentBranch: string,
+  mergedRef: string,
+): void {
+  if (git(repoRoot, ['status', '--porcelain']).trim() === '') return
+  const changed = gitPaths(repoRoot, [
+    'diff', '--name-only', '--no-renames', `${currentBranch}...${mergedRef}`,
+  ])
+  const entries = git(repoRoot, ['status', '--porcelain', '--no-renames', '--untracked-files=all', '-z'])
+    .split('\0')
+    .filter((entry) => entry.length > 3)
+    .map((entry) => ({ index: entry[0], worktree: entry[1], path: entry.slice(3) }))
+  const collisions = entries.filter(({ index, worktree, path }) => {
+    if (index !== ' ' && index !== '?') return true
+    if (worktree === 'A') return true
+    if (worktree === 'D') return false
+    return changed.some((changedPath) => changedPath === path
+      || changedPath.startsWith(`${path}/`) || path.startsWith(`${changedPath}/`))
+  }).map(({ path }) => path)
+  if (collisions.length === 0) return
+  throw new MergeError(
+    `The main checkout has uncommitted or untracked changes the merge would overwrite: ${repoRoot}\n`
+    + `${collisions.join('\n')}\n`
+    + 'Commit, move, or remove them there, then retry the merge.',
+  )
 }
 
 /**
@@ -1055,7 +1118,13 @@ async function finalizeLocalMerge(
   options.beforeMergeRecorded?.()
   await writeMergedStatus(paths, taskId, mergeCommit, currentBranch)
   removeRebaseEmptiedMarker(paths, taskId)
-  options.onMerged?.(mergeCommit)
+  // The merge is recorded by now, and no later poll returns to a merged task, so a
+  // callback that throws must not skip the dependency sync and the cleanup below.
+  try {
+    options.onMerged?.(mergeCommit)
+  } catch (error) {
+    io.out(`WARN: post-merge bookkeeping failed for ${taskId}: ${commandFailureSummary(error)}`)
+  }
   syncOrchestrationDepsAfterRecordedMerge(
     paths, mergeCommit, taskId, depsEvent, options.orchestrationDepsRuntime,
     options.beforeOrchestrationDepsInstall,
@@ -1513,6 +1582,7 @@ async function mergeTaskWithGuardHeld(
     await finalizeNoChange(paths, taskId, branch, worktree, io, options)
     return { outcome: 'no-change' }
   }
+  requireMergeableIntegrationCheckout(paths.repoRoot, currentBranch, branch)
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
@@ -1681,6 +1751,7 @@ export async function mergeRemoteTask(
     )
     return appliedCommit
   }
+  requireMergeableIntegrationCheckout(paths.repoRoot, currentBranch, remoteRef)
   inTemporaryWorktree(paths, worktree, io.out, () => {
     git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
     mergeWithVerifiedRecovery(

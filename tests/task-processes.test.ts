@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { OperatingSystem } from '../src/adapters/os.ts'
+import type { WorktreeRemovalRuntime } from '../src/worktree.ts'
 import {
   createOperatingSystem as createPosixOperatingSystem,
   type PosixOperatingSystemRuntime,
@@ -14,8 +15,8 @@ import {
 import { fleetPaths, orchPaths, statusFile, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
 import {
-  orphanedWorktreeDirectories, orphanedWorktreeReport, terminateLiveTaskProcesses,
-  worktreeHolderHint,
+  orphanedWorktreeDirectories, orphanedWorktreeReport, sweepAbandonedTemporaryWorktrees,
+  terminateLiveTaskProcesses, worktreeHolderHint,
 } from '../src/taskProcesses.ts'
 
 let repoRoot: string
@@ -208,6 +209,122 @@ describe('orphanedWorktreeDirectories', () => {
     expect(looked).toEqual([orphan])
     expect(isAbsolute(orphan)).toBe(true)
     expect(report.holderHint).toContain(orphan)
+  })
+})
+
+describe('sweepAbandonedTemporaryWorktrees', () => {
+  function runtime(alive: Set<number>, removable = true): {
+    runtime: WorktreeRemovalRuntime
+    gitCalls: string[][]
+  } {
+    const gitCalls: string[][] = []
+    return {
+      gitCalls,
+      runtime: {
+        os: {
+          processIsAlive: (pid: number) => alive.has(pid),
+          terminateWorktreeProcesses: () => {},
+          worktreePathFor: (path: string) => ({ removalPath: path, removalFallback: 'rm' }),
+          removeDirectory: (path: string) => {
+            if (!removable) throw new Error('EBUSY: still held')
+            rmSync(path, { recursive: true, force: true })
+          },
+        } as unknown as OperatingSystem,
+        git: (_cwd, args) => {
+          gitCalls.push(args)
+          if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('not a working tree')
+          return ''
+        },
+      },
+    }
+  }
+
+  it('removes only gate worktrees whose owner is gone, then prunes the registration', () => {
+    const abandonedMerge = join(paths.worktreesDir, '.merge-0101_task-111-1700000000000')
+    const abandonedAdopt = join(paths.worktreesDir, '.adopt-42-222-1700000000000')
+    const liveMerge = join(paths.worktreesDir, '.merge-0101_task-333-1700000000000')
+    const task = join(paths.worktreesDir, 'task-without-status')
+    for (const directory of [abandonedMerge, abandonedAdopt, liveMerge, task]) {
+      mkdirSync(directory, { recursive: true })
+    }
+    const fake = runtime(new Set([333]))
+
+    const sweep = sweepAbandonedTemporaryWorktrees(paths, () => {}, undefined, fake.runtime)
+
+    expect(sweep).toEqual({ removed: [abandonedAdopt, abandonedMerge], failures: [] })
+    expect(existsSync(liveMerge)).toBe(true)
+    expect(existsSync(task)).toBe(true)
+    expect(fake.gitCalls).toContainEqual(['worktree', 'prune'])
+    expect(orphanedWorktreeDirectories(paths)).toEqual([liveMerge, task])
+  })
+
+  it('treats the restart predecessor as settled even while it is still alive', () => {
+    const predecessorMerge = join(paths.worktreesDir, '.merge-0101_task-444-1700000000000')
+    mkdirSync(predecessorMerge, { recursive: true })
+
+    const sweep = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, 444, runtime(new Set([444])).runtime,
+    )
+
+    expect(sweep.removed).toEqual([predecessorMerge])
+    expect(existsSync(predecessorMerge)).toBe(false)
+  })
+
+  // Behind the Windows wrapper the predecessor's tree root is the wrapper, while the gate
+  // worktree carries the PID of the Node process inside it.
+  it('treats a predecessor whose tree root differs from its own PID as settled', () => {
+    const predecessorMerge = join(paths.worktreesDir, '.merge-0101_task-601-1700000000000')
+    mkdirSync(predecessorMerge, { recursive: true })
+
+    const sweep = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, [600, 601], runtime(new Set([600, 601])).runtime,
+    )
+
+    expect(sweep).toEqual({ removed: [predecessorMerge], failures: [] })
+    expect(existsSync(predecessorMerge)).toBe(false)
+  })
+
+  it('keeps a wrapped daemon worktree while that daemon lives and is not the predecessor', () => {
+    const liveMerge = join(paths.worktreesDir, '.merge-0101_task-601-1700000000000')
+    mkdirSync(liveMerge, { recursive: true })
+
+    const unsettled = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, undefined, runtime(new Set([600, 601])).runtime,
+    )
+    const rootOnly = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, 600, runtime(new Set([600, 601])).runtime,
+    )
+
+    expect(unsettled).toEqual({ removed: [], failures: [] })
+    expect(rootOnly).toEqual({ removed: [], failures: [] })
+    expect(existsSync(liveMerge)).toBe(true)
+  })
+
+  it('keeps a worktree naming an unrelated live PID at a wrapped handover', () => {
+    const unrelated = join(paths.worktreesDir, '.adopt-42-777-1700000000000')
+    mkdirSync(unrelated, { recursive: true })
+
+    const sweep = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, [600, 601], runtime(new Set([600, 601, 777])).runtime,
+    )
+
+    expect(sweep).toEqual({ removed: [], failures: [] })
+    expect(orphanedWorktreeDirectories(paths)).toEqual([unrelated])
+  })
+
+  it('reports a worktree it cannot remove and leaves it for the orphan check', () => {
+    const held = join(paths.worktreesDir, '.adopt-42-555-1700000000000')
+    mkdirSync(held, { recursive: true })
+
+    const sweep = sweepAbandonedTemporaryWorktrees(
+      paths, () => {}, undefined, runtime(new Set(), false).runtime,
+    )
+
+    expect(sweep.removed).toEqual([])
+    expect(sweep.failures).toEqual([{
+      worktree: held, error: 'git: not a working tree; fallback: EBUSY: still held',
+    }])
+    expect(orphanedWorktreeDirectories(paths)).toEqual([held])
   })
 })
 

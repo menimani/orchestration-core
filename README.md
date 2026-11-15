@@ -173,9 +173,11 @@ requests, workflow dispatch, and the issue queue — so start from that file, or
 What makes a runner substitutable is the marker protocol, not its CLI. The agent must
 write `options.finalMessageFile`, and the task counts as completed once that file
 carries `TASK_COMPLETE` on a line of its own, written last. Before it, the file may carry
-`NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, and `DECISION_REQUIRED: <text>`
-lines. Markers that appear only in the transcript log are ignored; the task lifecycle in
-`SPEC.md` states the rule.
+`NO_CHANGE_WARRANTED`, `NEXT_TASK: <description>`, `NO_FINDINGS`, and
+`DECISION_REQUIRED: <text>` lines. `NO_FINDINGS` is a review's explicit empty result and
+never overrides a `NEXT_TASK:` line in the same message (`SPEC.md` item 30). Markers that
+appear only in the transcript log are ignored; the task lifecycle in `SPEC.md` states the
+rule.
 
 A forge factory's `target` names the repositories to act on when they are not the
 checkout's own: `codeRepository` for branches, pull requests, and workflow runs, and
@@ -381,6 +383,28 @@ With multiple repositories, `loop-status` prints one named line per repository w
 running state, run branch, queued count, and in-flight count. With zero or one explicit
 repository, it retains the existing detailed single-repository output. Repository paths
 are supplied per invocation; the core keeps no repository registry or checkout inventory.
+
+### Measuring the suite
+
+Every `npm test` run prints one line per test file with its project, test count and
+duration, then the ten slowest files and the wall time of the parallel and sequential
+groups. That holds for a run without a terminal too, such as a merge gate or a worktree
+agent, where Vitest would otherwise switch to a reporter that names only failing files.
+
+To see which child processes the time goes to, point `ORCH_TEST_SPAWN_PROFILE` at a
+directory and summarize what the run wrote there:
+
+```bash
+ORCH_TEST_SPAWN_PROFILE=/tmp/spawn-profile npm test
+node scripts/test-spawn-profile.mjs /tmp/spawn-profile
+```
+
+Each test file then records every child process its worker creates through
+`node:child_process`: the executable, the subcommand for `git`, `node`, `powershell` and
+`cmd`, and the time until it exits. The report totals them by executable and subcommand
+and by test file, and lists the twenty files with the most spawns per test. Processes a
+child CLI starts in turn are outside the worker and are not counted. Without the variable
+nothing is wrapped or written.
 
 ### Running from a fleet
 

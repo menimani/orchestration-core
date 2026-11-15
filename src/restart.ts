@@ -7,11 +7,13 @@ import {
 import { errorHeadline } from './errorText.ts'
 import { PACKAGE_ROOT } from './paths.ts'
 import {
-  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_READY_FILE_ENV,
+  LOOP_RESTART_PREDECESSOR_PID_ENV, LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV,
+  LOOP_RESTART_READY_FILE_ENV,
 } from './internalEnvironment.ts'
 import {
   currentProcessMarkerPid, parseProcessMarker, processMarker, processMarkerText,
 } from './processMarker.ts'
+import { startupDeadline, startupInstallingFile } from './startupInstall.ts'
 
 export interface LoopRestartCommand {
   executable: string
@@ -39,7 +41,22 @@ interface LoopRestartRuntime {
 export function loopRestartPredecessorPid(
   env: NodeJS.ProcessEnv = process.env,
 ): number | undefined {
-  const value = env[LOOP_RESTART_PREDECESSOR_PID_ENV]
+  return positivePid(env[LOOP_RESTART_PREDECESSOR_PID_ENV])
+}
+
+/**
+ * The predecessor's own process, which names its gate worktrees with its own PID. Behind
+ * the Windows wrapper that differs from the tree root holding the reservation, so it is
+ * believed only when handed over together with that root.
+ */
+export function loopRestartPredecessorProcessPid(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  if (loopRestartPredecessorPid(env) === undefined) return undefined
+  return positivePid(env[LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV])
+}
+
+function positivePid(value: string | undefined): number | undefined {
   if (value === undefined || !/^\d+$/.test(value)) return undefined
   const pid = Number(value)
   return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
@@ -100,6 +117,7 @@ export function signalLoopRestartReady(
   } finally {
     delete env[LOOP_RESTART_READY_FILE_ENV]
     delete env[LOOP_RESTART_PREDECESSOR_PID_ENV]
+    delete env[LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]
   }
 }
 
@@ -109,6 +127,7 @@ export async function startLoopReplacement(
   runtime: LoopRestartRuntime = {},
 ): Promise<LoopRestartResult> {
   rmSync(readyFile, { force: true })
+  rmSync(startupInstallingFile(readyFile), { force: true })
   const command = loopRestartCommand(runtime.argv, runtime.packageRoot)
   const os = runtime.operatingSystem ?? operatingSystem
   const predecessorPid = os.processTreeRootPid(runtime.env ?? process.env)
@@ -118,6 +137,7 @@ export async function startLoopReplacement(
       ...(runtime.env ?? process.env),
       [LOOP_RESTART_READY_FILE_ENV]: readyFile,
       [LOOP_RESTART_PREDECESSOR_PID_ENV]: `${predecessorPid}`,
+      [LOOP_RESTART_PREDECESSOR_PROCESS_PID_ENV]: `${process.pid}`,
     }
     if (runtime.outputFile === undefined) throw new Error('A loop log file is required to restart the daemon')
     replacement = await os.launchDaemon({
@@ -132,6 +152,7 @@ export async function startLoopReplacement(
   }
 
   const pid = replacement.pid
+  const startupTimeoutMs = runtime.startupTimeoutMs ?? 30_000
 
   return await new Promise((resolve) => {
     let settled = false
@@ -145,6 +166,7 @@ export async function startLoopReplacement(
       replacement.offExit(onExit)
       try {
         rmSync(readyFile, { force: true })
+        rmSync(startupInstallingFile(readyFile), { force: true })
       } catch {
         // Readiness has already been decided. Marker cleanup must not keep the
         // replacement attached or leave the caller's restart promise unsettled.
@@ -186,6 +208,10 @@ export async function startLoopReplacement(
       })
     }
     const poll = setInterval(() => {
+      // Sampling the install marker only when the timeout fires would count the renewed
+      // allowance from that sample rather than from the install's end, so an install
+      // finishing just before it fired left the rest of initialization almost nothing.
+      deadline = startupDeadline(readyFile, deadline, startupTimeoutMs)
       if (!existsSync(readyFile)) {
         // The exit and error listeners are the richer signal, but an adapter cannot
         // always offer them: a Windows daemon is launched through a detached wrapper, so
@@ -226,13 +252,23 @@ export async function startLoopReplacement(
       }
       finish({ ok: true, pid })
     }, 10)
-    const timeout = setTimeout(() => {
+    // A replacement installing dependencies at startup is making progress the deadline
+    // must not cut short: killing it mid-install leaves node_modules half emptied.
+    let deadline = Date.now() + startupTimeoutMs
+    const expire = (): void => {
+      deadline = startupDeadline(readyFile, deadline, startupTimeoutMs)
+      const remaining = deadline - Date.now()
+      if (remaining > 0) {
+        timeout = setTimeout(expire, remaining)
+        return
+      }
       fail({
         ok: false,
         pid,
         error: 'replacement did not become ready before the startup timeout',
       })
-    }, runtime.startupTimeoutMs ?? 30_000)
+    }
+    let timeout = setTimeout(expire, startupTimeoutMs)
     replacement.onError(onError)
     replacement.onExit(onExit)
   })

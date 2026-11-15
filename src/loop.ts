@@ -161,6 +161,9 @@ class LostWorkerClaimError extends UnpublishableWorkerTaskError {
 // trusting nor ignoring the report is safe, so the step that needed it waits for a later
 // poll.
 class UndeterminedWorkerReportError extends Error {
+  /** What kind of step failed, for the log line that stops the loop on a lookup that never clears. */
+  readonly kind = 'permission lookup'
+
   constructor(issueNumber: number) {
     super(`the worker branch report on issue #${issueNumber} has an author whose write access could not be determined`)
   }
@@ -1023,17 +1026,13 @@ export function createLoop(deps: LoopDeps) {
           event('WARN', `${subject} adoption deferred: the repository test lock stayed busy`)
           continue
         }
-        // Not a failure either: a transient permission lookup says nothing about the
+        // Not a failure either: a permission lookup that failed says nothing about the
         // report, and a forge or network error says nothing about the pushed work, so
-        // every member stays merge-ready for the next poll.
-        if (error instanceof UndeterminedWorkerReportError) {
-          event('WARN', `issue #${issue.number} adoption deferred: ${message}`)
-          continue
-        }
-        // A transient failure that never clears would defer the issue on every poll for
-        // ever while the cycle gate waits on it, so a bounded run of them stops the loop.
-        // The issue keeps its labels and comments, so a person finds the branch untouched.
-        if (error instanceof TransientAdoptionError) {
+        // every member stays merge-ready for the next poll. Either one that never clears
+        // would defer the issue on every poll for ever while the cycle gate waits on it,
+        // so a bounded run of them stops the loop. The issue keeps its labels and
+        // comments, so a person finds the branch untouched.
+        if (error instanceof UndeterminedWorkerReportError || error instanceof TransientAdoptionError) {
           const deferrals = (adoptionDeferrals.get(issue.number) ?? 0) + 1
           adoptionDeferrals.set(issue.number, deferrals)
           warning(`adoption-deferred-${issue.number}`, `adopting issue #${issue.number}`,
@@ -2990,11 +2989,16 @@ export function createLoop(deps: LoopDeps) {
             try {
               await reconcileClosedIssueLifecycleLabels(forge)
               warningLog.recovered('reconcile-closed-issue-labels')
+              previousGateFailures.delete('reconcile-closed-issue-labels')
               reconciledCycleGates.add(currentScans)
             } catch (error) {
               if (error instanceof ForgeRateLimitError) return 'continue'
-              warning('reconcile-closed-issue-labels', 'reconciling closed issue labels',
-                `could not reconcile closed issue labels: ${errorSummary(error)}`)
+              // The gate holds every later step of the cycle, so a failure that keeps
+              // recurring stops the loop like any other gate instead of holding it forever.
+              reportGateFailure(
+                `could not reconcile closed issue labels: ${errorSummary(error)}`,
+                'reconcile-closed-issue-labels',
+              )
               return 'continue'
             }
           }
@@ -3231,7 +3235,12 @@ export function createLoop(deps: LoopDeps) {
         try {
           cleanupTask(paths, scanId, undefined, false, log)
         } catch (error) {
-          event('WARN', `${shortTaskId(scanId)} scan startup cleanup failed: ${errorSummary(error)}`)
+          // A scan that could not be discarded is kept like one whose runner could not be
+          // accounted for, so the operator learns why rather than meeting it later.
+          event(
+            'ERROR', shortTaskId(scanId),
+            `scan startup cleanup failed: ${errorSummary(error)}; task retained and loop stopped`,
+          )
         }
       }
       writeFileSync(stopFile, '')

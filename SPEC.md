@@ -234,7 +234,9 @@ comments and other items cite items by number, so a number is never reused.
 commands use. The operator file is `orchestration/config.json`; its keys are the existing
 uppercase setting names. Resolution order is file, then environment, then the defaults
 below. A missing file therefore preserves the previous behavior and existing launch
-commands remain valid. Use
+commands remain valid. A leading UTF-8 byte order mark, which Windows PowerShell 5.1 and
+some editors write, is accepted in this file and in `fleet.json` and `fleet.local.json`.
+Use
 `npm run config -- list`, `get <SETTING>`, `set <SETTING> <value>`, or `unset <SETTING>`
 (with the installed package's command prefix) to read and update it. The command writes a
 temporary file in the same directory and renames it into place atomically, so the loop
@@ -575,7 +577,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
    used both retries is instead parked under `loop:retry-exhausted` by the same release,
    with a `Parked` event that does not stop the loop; its record and branches are kept. When a retry merges or
    completes without changes, or a remote worker branch is adopted for one of its linked
-   issues, every branch kept for its chain is deleted and its records are removed. Pre-merge tests are chosen from the paths the
+   issues, every branch kept for its chain is deleted and its records are removed.
+   A merge whose changes would overwrite an uncommitted or untracked file in the main
+   checkout is refused before its gate, naming that checkout and those paths. The check
+   refuses exactly the states git refuses a `--no-ff` merge for: any staged or
+   intent-to-add entry, wherever it is, and an unstaged modification or an untracked file
+   at a path the merge changes, inside it, or holding it. An unstaged deletion, and
+   unstaged or untracked changes elsewhere in the checkout, do not stop it. A merge git refuses without starting one,
+   leaving no merge in progress and no unmerged paths, fails with git's reason rather
+   than as a conflict in the task. Pre-merge tests are chosen from the paths the
    rebased worktree touched. `TASK_GATE=full` asks the project adapter for its full merge
    checks; `TASK_GATE=light` asks it for reduced merge checks. At each cycle-gate entry,
    light mode runs every step in the adapter's cycle suite, while full mode runs only
@@ -723,7 +733,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     same install runs when a pending record exists — even if the recorded hash matches —
     or when that recorded hash does not match or a declared dependency is missing
     (`tests/loop-merge-recovery.test.ts` and `tests/loop.test.ts` pin the skip and the
-    forced startup install). Startup synchronization is limited to the package copy inside the repository
+    forced startup install). While that startup install runs, the daemon announces it
+    beside the readiness file its launcher polls, and both the start command and a
+    restarting predecessor hold their startup timeout open until the install finishes,
+    then allow the rest of initialization the full timeout again: killing the daemon
+    partway through `npm ci` would leave `node_modules` half emptied
+    (`tests/restart.test.ts` and `tests/startup-install.test.ts`). Startup synchronization is limited to the package copy inside the repository
     being orchestrated, so pointing the CLI at another checkout cannot reinstall the copy
     it is running from. Install output is captured; a failure stops the loop or startup
     with an error that names the package root and the `npm ci --no-audit --no-fund`
@@ -752,7 +767,12 @@ are not parsed by `loadConfig` and are not operator-file settings.
     worktree, branch, and specification in place. It belongs to no cycle: the cycle
     still records no expectation and is dispatched again in full by the next daemon,
     and the retained scan stays until the operator removes it with `cleanup`, which
-    first stops any runner the process registry recorded for it. A cycle missing any expected yield stops rather than
+    first stops any runner the process registry recorded for it. A scan the attempt
+    started whose discard fails, such as a worktree still held after cleanup's last
+    removal pass, is reported the same way, with an `ERROR` for that scan reading
+    `scan startup cleanup failed: <reason>; task retained and loop stopped`, and keeps
+    whatever of its state cleanup had not yet removed, its status record included, until
+    the operator runs `cleanup` for it. A cycle missing any expected yield stops rather than
     advancing to another cycle or completion.
     A scan the cycle recorded as failed counts towards the expected total as a delivered
     but silent yield: the cycle closes, its id still reaches the decisions and the pull
@@ -1105,8 +1125,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
     one that times out) is asked up to three times in all, 250 ms apart, so a slow
     query never fails a daemon start or handover that a later attempt can answer, and only
     then fails with an error naming the timed-out or failed query. Before task or issue work begins, startup refuses any
-    live PID an earlier daemon left in the task process registry (item 24a). A worktree with no corresponding
-    task status also blocks startup and is reported with an OS-specific handle diagnostic.
+    live PID an earlier daemon left in the task process registry (item 24a). It then sweeps
+    the temporary gate worktrees, `.merge-<task>-<pid>-<ms>` and `.adopt-<issue>-<pid>-<ms>`,
+    which nothing records but the process ID in their name: one whose creating process is
+    gone, or which belongs to the restart predecessor handing over its lock, is removed and
+    logged as `Removed worktree`. The name holds the creating Node process's own PID, which
+    for a daemon behind the Windows wrapper is not its process-tree root, so the
+    predecessor hands its replacement both and either one counts as the predecessor. One
+    whose creator still lives is left alone, and one that
+    cannot be removed is logged as `WARN worktree` and stays. A worktree left after the
+    sweep with no corresponding task status blocks startup and is reported with an
+    OS-specific handle diagnostic.
     A run which publishes work also refuses to start when its branch has no unambiguous
     push target, logging `ERROR` and writing the stop file before task or issue work.
 24a. A task's runner PID is held in `queue/pids/<task-id>`, not in its status record, so
@@ -1182,6 +1211,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     is terminated is logged once, with its PID, executable name, and the worktree path, in
     the log of the removal: the merge output, `cleanup`, or the loop log. A process that
     survives keeps holding the worktree: its removal fails and the task state is retained.
+    `cleanup` makes a second pass, looking for holders and removing the worktree again,
+    when the first leaves the directory behind, since a process just stopped or a scanner
+    that opened the worktree's files can hold it for a moment. When both passes fail its
+    error names, for each pass, the git failure and the fallback removal's error with its
+    code, followed by the platform's hint for finding the holder.
     Other platforms stop the runner's detached process group and do nothing further.
     Before publishing its stop file, the `stop` command durably records any live scan so
     the next daemon can discard it and restart the interrupted cycle instead of treating
@@ -1553,7 +1587,9 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     except that an issue whose comments include an author whose access is undetermined
     (see the trust model) is not cached, so the next poll asks again.
     Closed lifecycle labels are reconciled at startup and once on cycle-gate entry, not on
-    every idle poll. A forge rate-limit response pauses further forge calls until its
+    every idle poll; a cycle-gate reconciliation that fails for any reason other than a
+    rate limit holds the gate and logs a WARN, and a second consecutive failure stops the
+    loop. A forge rate-limit response pauses further forge calls until its
     reported reset (querying `rate_limit` when needed), logs one aligned `Waiting forge`
     event, and resumes without attributing even a long wait to the branch.
     The daemon records issue mode in
@@ -1662,15 +1698,16 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     next poll to adopt again.
     A worker report counts only from an author with write access. When the newest
     report-shaped comment on a member comes from an author whose access is undetermined
-    (see the trust model), the adoption is deferred the same way, with a WARN naming the
-    issue, and that issue's comments are not cached, so the next poll asks again.
+    (see the trust model), the adoption is deferred the same way, and that issue's
+    comments are not cached, so the next poll asks again.
     A failure that says nothing about the pushed work — a comment listing the forge
     fails to answer for any reason but a rate limit, or a fetch of the reported branch
     that fails without git reporting the remote ref missing, matched without regard to
-    case — defers the adoption the same way, with a deduplicated WARN keyed by the issue,
-    logged as recovered when the adoption proceeds, and git's or the forge's reason kept
-    in the merge log. Only a reported branch the remote does not have counts as a failure.
-    These deferrals are counted per issue in memory; the count clears when the issue's
+    case — defers the adoption the same way. Both kinds of deferral log a deduplicated
+    WARN keyed by the issue, logged as recovered when the adoption proceeds, and keep
+    git's or the forge's reason in the merge log. Only a reported branch the remote does not have counts as a failure.
+    Both kinds are counted together per issue in memory, so a permission lookup that
+    keeps failing is bounded like an outage; the count clears when the issue's
     adoption gets past the fetch, succeeds, fails for another reason, or the issue leaves
     `loop:merge-ready`. The twentieth consecutive deferral of one issue — about ten
     minutes at the default poll interval — logs an `ERROR` naming the issue and the kind
@@ -1730,3 +1767,20 @@ leaves uncollected and why, from `tests/platformCoverage.ts`, so a run that skip
 suite says so. The files listed in `tests/sequentialSuites.ts` launch long-lived
 processes or wait on deadlines; they run one at a time after the rest of the suite has
 run in parallel.
+
+Every run prints one line per test file with its project, test count and duration, also
+when standard output is not a terminal and Vitest detects a coding agent, and ends with
+the ten slowest files and the wall time of each group, measured from its first file being
+queued to its last file finishing. When `ORCH_TEST_SPAWN_PROFILE` names a directory, the
+test setup wraps `spawn`, `spawnSync`, `execFile`, `execFileSync`, `exec`, `execSync` and
+`fork` of `node:child_process` in each test worker and writes one JSON file per test file
+when it finishes: its project, test count and duration, and for every child process the
+executable's base name, the subcommand when the executable is `git`, `node`, `powershell`
+or `cmd` (the first argument after Git's own options, a script path's base name for
+`node`, and the first word of the argument for `powershell` and `cmd`), and the wall time until it exits, or until the file finished for a child still
+running then. A wrapper returns, throws and inherits what the wrapped call does, and a
+call one wrapper makes into another is counted once. Without the variable nothing is
+wrapped, recorded or written. `scripts/test-spawn-profile.mjs <directory>` aggregates
+those files into total spawns and child wall time, a table by executable and subcommand,
+a table by test file, and the twenty files with the most spawns per test; processes a
+child CLI starts are outside the worker and are not counted.

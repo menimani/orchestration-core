@@ -237,6 +237,25 @@ describe('daemon startup', () => {
     expect(install).toHaveBeenCalledOnce()
   })
 
+  it('announces a startup install before it starts and only when one runs', () => {
+    writeOrchestrationManifests('{"lockfileVersion":3}\n')
+    const order: string[] = []
+    const install = vi.fn(() => {
+      order.push('install')
+      successfulInstall()
+    })
+    const beforeInstall = vi.fn(() => {
+      order.push('announce')
+      return true
+    })
+    const packageRoot = fixturePackageRoot()
+
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot }, beforeInstall)
+    syncOrchestrationDepsAtStartup(paths, vi.fn(), { install, packageRoot }, beforeInstall)
+
+    expect(order).toEqual(['announce', 'install'])
+  })
+
   it('retries a durable pending sync even when the recorded lockfile is current', () => {
     writeOrchestrationManifests('{"lockfileVersion":3}\n')
     const install = vi.fn(successfulInstall)
@@ -1780,6 +1799,36 @@ describe('cycle gate', () => {
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(attempts).toBe(2)
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it('stops the loop when closed-issue label removal keeps failing', async () => {
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      autoPr: false,
+      reviewEnabled: true,
+      autoReview: false,
+    })
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const issueNumber = await fakeForge.createIssue({
+      title: 'closed finding', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    await fakeForge.closeIssue(issueNumber, 'done')
+    const removeLabel = vi.fn(async () => { throw new Error('label removal failed') })
+    fakeForge.removeLabel = removeLabel
+    const stopFile = join(paths.queueDir, 'stop')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(existsSync(stopFile)).toBe(false)
+    expect(logText()).toContain('WARN could not reconcile closed issue labels: label removal failed')
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+    expect(removeLabel).toHaveBeenCalledTimes(2)
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
+    expect(existsSync(stopFile)).toBe(true)
+    expect(logText()).toContain(
+      'ERROR could not reconcile closed issue labels: label removal failed (repeated 2 times)',
+    )
   })
 
   it.each([
@@ -2031,6 +2080,52 @@ describe('cycle gate', () => {
     }
     expect(scanPid).toBeDefined()
     expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
+  })
+
+  it('reports a scan it could not discard after a launch failure as retained', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n',
+    )
+    const attempted: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attempted.push(basename(options.specFile, '.md'))
+        if (attempted.length === 2) throw new Error('runner unavailable')
+        // This scan's worktree stays held through the discard, as a handle that outlives
+        // the runner's termination would hold it.
+        cleanupFailure.taskId = attempted[0]
+        return process.pid
+      },
+    }
+    const loop = makeLoop(
+      { scanParallel: 2, autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(attempted).toHaveLength(2)
+    const [heldScan, failedScan] = attempted as [string, string]
+    expect(existsSync(join(paths.queueDir, 'scan-expected-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'scan-count.txt'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain('ERROR scan startup failed: runner unavailable (log:')
+    expect(logText()).toContain(formatEventLine(
+      'ERROR', shortTaskId(heldScan),
+      'scan startup cleanup failed: worktree is locked; task retained and loop stopped',
+    ))
+    expect(logText()).not.toContain('WARN')
+    // The held scan keeps the state the loop documents for a retained scan.
+    expect(existsSync(worktreeDir(paths, heldScan))).toBe(true)
+    expect(existsSync(statusFile(paths, heldScan))).toBe(true)
+    expect(git(['branch', '--list', branchName(heldScan)])).not.toBe('')
+    expect(existsSync(worktreeDir(paths, failedScan))).toBe(false)
+    expect(existsSync(statusFile(paths, failedScan))).toBe(false)
+    expect(git(['branch', '--list', branchName(failedScan)])).toBe('')
   })
 
   it('retains a scan whose runner returned an invalid PID and discards the rest', async () => {

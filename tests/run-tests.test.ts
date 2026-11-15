@@ -5,6 +5,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createProcessIdentityCache } from '../scripts/process-identity-cache.mjs'
 
@@ -441,5 +442,71 @@ describe('test suite wrapper', () => {
     expect(result.stderr).toContain('Lock owner: owner record not yet available.')
     expect(performance.now() - startedAt).toBeGreaterThanOrEqual(200)
     expect(existsSync(lock)).toBe(true)
+  })
+})
+
+describe('test suite durations', () => {
+  it('prints every file, the slowest files and each group wall time in a run without a terminal', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'orch-run-tests-durations-'))
+    fixtures.push(fixture)
+    const repository = join(import.meta.dirname, '..')
+    const scripts = join(fixture, 'scripts')
+    const vitest = join(fixture, 'node_modules', 'vitest')
+    mkdirSync(scripts, { recursive: true })
+    mkdirSync(vitest, { recursive: true })
+    copyIdentityCache(scripts)
+    writeFileSync(join(scripts, 'run-tests.mjs'), readFileSync(join(repository, 'scripts', 'run-tests.mjs')))
+    // The wrapper resolves Vitest from the fixture, which hands over to the real one.
+    writeFileSync(join(vitest, 'package.json'), '{"name":"vitest","version":"0.0.0"}\n')
+    writeFileSync(
+      join(vitest, 'vitest.mjs'),
+      `import ${JSON.stringify(pathToFileURL(join(repository, 'node_modules', 'vitest', 'vitest.mjs')).href)}\n`,
+    )
+    // The reporters are the repository's own; only the projects are the fixture's.
+    writeFileSync(join(fixture, 'vitest.config.mjs'), [
+      `import repositoryConfig from ${JSON.stringify(pathToFileURL(join(repository, 'vitest.config.ts')).href)}`,
+      'export default {',
+      '  test: {',
+      '    globals: true,',
+      '    reporters: repositoryConfig.test.reporters,',
+      '    projects: [',
+      "      { extends: true, test: { name: 'parallel', include: ['first.test.mjs', 'second.test.mjs'], sequence: { groupOrder: 0 } } },",
+      "      { extends: true, test: { name: 'sequential', include: ['third.test.mjs'], fileParallelism: false, sequence: { groupOrder: 1 } } },",
+      '    ],',
+      '  },',
+      '}',
+      '',
+    ].join('\n'))
+    writeFileSync(join(fixture, 'first.test.mjs'), "it('passes', () => {})\nit('passes again', () => {})\n")
+    writeFileSync(join(fixture, 'second.test.mjs'), "it('passes', () => {})\n")
+    writeFileSync(join(fixture, 'third.test.mjs'), "it('waits', async () => { await new Promise((resolve) => setTimeout(resolve, 200)) })\n")
+    // Vitest picks its minimal reporter, which prints no line for a passing file, when
+    // this variable says a coding agent is running it — as it does for the merge gate.
+    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', NO_COLOR: '1' }
+    delete env.GITHUB_ACTIONS
+    delete env.FORCE_COLOR
+    delete env.ORCH_TEST_SPAWN_PROFILE
+
+    const result = await run(process.execPath, [join(scripts, 'run-tests.mjs')], fixture, env)
+    const report = describeResults([result])
+
+    expect(result.status, report).toBe(0)
+    // The state symbol is left to the exit status, which already says every file passed.
+    const lines = result.stdout.split(/\r?\n/)
+    expect(lines, report).toContainEqual(expect.stringMatching(/^ \S \|parallel\| first\.test\.mjs \(2 tests\) \d+ms$/))
+    expect(lines, report).toContainEqual(expect.stringMatching(/^ \S \|parallel\| second\.test\.mjs \(1 test\) \d+ms$/))
+    expect(lines, report).toContainEqual(expect.stringMatching(/^ \S \|sequential\| third\.test\.mjs \(1 test\) \d+ms$/))
+    const slowest = lines.indexOf('Slowest 3 test files:')
+    expect(slowest, report).toBeGreaterThan(lines.findIndex((line) => line.includes('Test Files')))
+    expect(lines.slice(slowest + 1, slowest + 5), report).toEqual([
+      expect.stringMatching(/^ +\d+\.\ds {2}sequential {2}third\.test\.mjs \(1 test\)$/),
+      expect.stringMatching(/^ +\d+\.\ds {2}parallel {4}(first\.test\.mjs \(2 tests\)|second\.test\.mjs \(1 test\))$/),
+      expect.stringMatching(/^ +\d+\.\ds {2}parallel {4}(first\.test\.mjs \(2 tests\)|second\.test\.mjs \(1 test\))$/),
+      expect.stringMatching(/^Wall time by group: parallel \d+\.\ds, sequential \d+\.\ds$/),
+    ])
+    expect(lines.slice(slowest + 2, slowest + 4).sort(), report).toEqual([
+      expect.stringContaining('first.test.mjs'),
+      expect.stringContaining('second.test.mjs'),
+    ])
   })
 })

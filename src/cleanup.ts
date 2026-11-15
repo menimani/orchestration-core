@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
+import { commandFailureSummary } from './errorText.ts'
 import { gateFixStateFiles } from './gateFix.ts'
 import {
   branchName, finalMessageFile, rebaseEmptiedMarkerFile, statusFile, worktreeDir, type OrchPaths,
@@ -11,6 +12,11 @@ import {
 } from './processRegistry.ts'
 import { readStatus } from './status.ts'
 import { removeWorktreeWithFallback, worktreeListIncludes } from './worktree.ts'
+
+// A process that has just been stopped, or a scanner that opened the worktree's files,
+// can hold it for a moment after the first removal. A second pass looks for holders
+// again and retries the removal before the task state is retained.
+const WORKTREE_REMOVAL_PASSES = 2
 
 interface CommandOptions {
   cwd?: string
@@ -85,8 +91,10 @@ function stopTaskProcess(
     }
     console.log(`Stopping running process: pid=${terminablePid}`)
     forgetTaskProcess(paths, taskId)
-  } catch {
-    throw new Error(`Could not stop process ${terminablePid}; task state was retained.`)
+  } catch (error) {
+    throw new Error(
+      `Could not stop process ${terminablePid}; task state was retained. (${commandFailureSummary(error)})`,
+    )
   }
 }
 
@@ -117,14 +125,24 @@ export function cleanupTask(
   }
 
   const worktree = worktreeDir(paths, taskId)
-  if (runtime.exists(worktree)) {
-    removeWorktreeWithFallback(paths.repoRoot, worktree, {
+  const removalFailures: string[] = []
+  for (let pass = 1; pass <= WORKTREE_REMOVAL_PASSES && runtime.exists(worktree); pass++) {
+    const result = removeWorktreeWithFallback(paths.repoRoot, worktree, {
       os: runtime.os,
       git: (_cwd, args) => git(runtime, paths, args),
     }, report)
+    if (result.gitFailure !== undefined) {
+      removalFailures.push(
+        `pass ${pass}: git: ${result.gitFailure}; ${result.fallback}: ${result.fallbackFailure ?? 'no error'}`,
+      )
+    }
   }
   if (runtime.exists(worktree)) {
-    throw new Error(`Could not remove worktree ${worktree}; task state was retained.`)
+    // Each step's error, with its code, and how to find the holder name the cause.
+    const details = [...removalFailures, runtime.os.worktreePathFor(worktree).holderHint]
+    throw new Error(
+      `Could not remove worktree ${worktree}; task state was retained. (${details.join('; ')})`,
+    )
   }
 
   try {

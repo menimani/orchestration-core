@@ -588,6 +588,26 @@ describe('mergeTask', () => {
     expect(readStatus(paths, taskId)?.status).toBe('merged')
   })
 
+  it('removes the worktree and reports the merge when post-merge bookkeeping throws', async () => {
+    const taskId = '20261115_034847_013_auto-throwing-on-merged'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const branch = branchName(taskId)
+    const outputFile = join(repoRoot, 'throwing-on-merged-output.log')
+
+    const result = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: noCheckProject, outputFile,
+      onMerged: () => { throw new Error('EBUSY: resource busy or locked') },
+    })
+
+    expect(result).toMatchObject({ outcome: 'merged' })
+    const output = readFileSync(outputFile, 'utf8')
+    expect(output).toContain(`WARN: post-merge bookkeeping failed for ${taskId}: EBUSY`)
+    expect(output).toContain(`Merged ${taskId} and removed the worktree.`)
+    expect(existsSync(worktree)).toBe(false)
+    expect(git(repoRoot, ['branch', '--list', branch]).trim()).toBe('')
+    expect(readStatus(paths, taskId)?.status).toBe('merged')
+  })
+
   it('ends processes left in the task worktree before removing it', async () => {
     const taskId = '20261029_040729_001_user-orphaned-worktree-shell'
     const worktree = await makeCompletedTask(taskId, { commit: true })
@@ -1903,7 +1923,12 @@ describe('mergeRemoteTask', () => {
     })
     await expect(failure).rejects.toThrow(MergeError)
     await expect(failure).rejects.not.toThrow(MergeRecoveryError)
-    await expect(failure).rejects.toThrow(`A merge conflict occurred while adopting ${branch}.`)
+    // The merge left neither a merge in progress nor unmerged paths, so git refused it
+    // rather than stopping on a conflict, and the task is not blamed for one.
+    await expect(failure).rejects.toThrow(
+      'without a conflict; the checkout was left as it was. Merge failure: merge did not start',
+    )
+    await expect(failure).rejects.not.toThrow('A merge conflict occurred')
     expectNoTemporaryWorktree('.adopt-')
   })
 })
