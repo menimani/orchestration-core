@@ -1778,9 +1778,21 @@ when it finishes: its project, test count and duration, and for every child proc
 executable's base name, the subcommand when the executable is `git`, `node`, `powershell`
 or `cmd` (the first argument after Git's own options, a script path's base name for
 `node`, and the first word of the argument for `powershell` and `cmd`), and the wall time until it exits, or until the file finished for a child still
-running then. A wrapper returns, throws and inherits what the wrapped call does, and a
+running then. Each record also carries the arguments and working directory of the child,
+the order it started in, the full name of the test running then (none in a file-level
+hook), and its caller: the first stack frame outside Node internals, `node_modules` and
+the profile's own wrapper, as a repository-relative `file:line` (absolute outside the
+repository), and the next frame outside the caller's file, so a helper such as a `git()`
+wrapper is attributed to whoever called it. A wrapper returns, throws and inherits what
+the wrapped call does, a failure to read the stack only leaves the caller empty, and a
 call one wrapper makes into another is counted once. Without the variable nothing is
-wrapped, recorded or written. `scripts/test-spawn-profile.mjs <directory>` aggregates
-those files into total spawns and child wall time, a table by executable and subcommand,
-a table by test file, and the twenty files with the most spawns per test; processes a
-child CLI starts are outside the worker and are not counted.
+wrapped, recorded or written, and no stack is read. `scripts/test-spawn-profile.mjs
+<directory>` aggregates those files into total spawns and child wall time, a table by
+executable and subcommand, a table by test file, the twenty files with the most spawns
+per test, the spawns and child wall time by the origin of the caller (`src/`, a shared
+helper under `tests/`, a `*.test.*` file under `tests/`, or other, which includes a record
+without a caller, so the rows add up to the totals), the forty call sites, by caller,
+next frame, executable and subcommand, with the most child wall time, and, by call site,
+the git children that repeat the arguments and working directory of the git child
+started just before them in the same test; processes a child CLI starts are outside the
+worker and are not counted.

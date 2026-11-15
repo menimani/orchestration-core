@@ -1,9 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
-import { join, win32 } from 'node:path'
+import { isAbsolute, join, relative, win32 } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { afterAll, type RunnerTestFile, type RunnerTestSuite } from 'vitest'
+import { afterAll, afterEach, beforeEach, type RunnerTestFile, type RunnerTestSuite } from 'vitest'
 
 // An opt-in record of every child process a test file creates in its worker, so the
 // suite's cost can be traced to the processes it starts. It is off unless this variable
@@ -17,6 +18,20 @@ export interface SpawnRecord {
   // False for a child still running when its test file finished; its duration then runs
   // to that moment.
   exited: boolean
+  // Everything after the executable, and the directory the child started in, so a
+  // question asked twice in a row can be recognised.
+  argv?: string[]
+  cwd?: string | null
+  // Who asked for the child, as a repository-relative `file:line`: the first stack frame
+  // outside Node internals, node_modules and this profile, then the next frame outside
+  // that frame's file, so a `git()` wrapper is attributed to whoever called it. A frame
+  // outside the repository keeps its absolute path.
+  caller?: string | null
+  via?: string | null
+  // The full name of the test running when the child started; null in a file-level hook.
+  test?: string | null
+  // The order in which the children of one file started.
+  sequence?: number
 }
 
 export interface SpawnProfileFile {
@@ -30,6 +45,8 @@ export interface SpawnProfileFile {
 export interface SpawnRecorder {
   records(): SpawnRecord[]
   reset(): void
+  // Names the test the next children belong to, or null between tests.
+  startTest(name: string | null): void
 }
 
 type Mode = 'sync' | 'child' | 'promise'
@@ -51,6 +68,11 @@ const GIT_VALUE_OPTIONS = new Set(['-C', '-c'])
 // Shared by every module instance in a worker, because the worker keeps one
 // child_process module while each test file loads this helper afresh.
 const RECORDER = Symbol.for('orchestration.spawnProfile')
+// Deep enough to pass a test runner's frames and reach the code that asked for a child.
+const CALLER_STACK_DEPTH = 64
+const REPOSITORY = join(import.meta.dirname, '..')
+
+type Invocation = Omit<SpawnRecord, 'durationMs' | 'exited'>
 
 // The base name a profile groups by: `git.exe`, `/usr/bin/git` and `git` are one row.
 export function executableName(command: string): string {
@@ -81,35 +103,96 @@ function subcommandOf(executable: string, argv: readonly string[]): string | nul
   return first.trim().split(/\s+/)[0] ?? first
 }
 
+interface CallOptions {
+  execPath?: unknown
+  shell?: unknown
+  cwd?: unknown
+}
+
+function callOptions(name: string, args: readonly unknown[]): CallOptions | undefined {
+  const options = name === 'exec' || name === 'execSync' || !Array.isArray(args[1]) ? args[1] : args[2]
+  return options !== null && typeof options === 'object' ? options as CallOptions : undefined
+}
+
+// The executable and the arguments a call to one of the profiled functions starts.
+function invocationWords(name: string, args: readonly unknown[]): string[] {
+  if (name === 'exec' || name === 'execSync') return commandLineWords(String(args[0]))
+  const argumentList = Array.isArray(args[1]) ? args[1].map(String) : []
+  const options = callOptions(name, args)
+  if (name === 'fork') {
+    const execPath = typeof options?.execPath === 'string' ? options.execPath : process.execPath
+    return [execPath, String(args[0]), ...argumentList]
+  }
+  const file = String(args[0])
+  return options?.shell ? [...commandLineWords(file), ...argumentList] : [file, ...argumentList]
+}
+
 // Which executable and subcommand a call to one of the profiled functions starts.
 export function describeInvocation(name: string, args: readonly unknown[]): Pick<SpawnRecord, 'executable' | 'subcommand'> {
-  let words: string[]
-  if (name === 'exec' || name === 'execSync') {
-    words = commandLineWords(String(args[0]))
-  } else {
-    const argumentList = Array.isArray(args[1]) ? args[1].map(String) : []
-    const options = (Array.isArray(args[1]) ? args[2] : args[1]) as { execPath?: unknown, shell?: unknown } | undefined
-    if (name === 'fork') {
-      const execPath = typeof options?.execPath === 'string' ? options.execPath : process.execPath
-      words = [execPath, String(args[0]), ...argumentList]
-    } else {
-      const file = String(args[0])
-      words = options !== null && typeof options === 'object' && options.shell
-        ? [...commandLineWords(file), ...argumentList]
-        : [file, ...argumentList]
-    }
-  }
+  const words = invocationWords(name, args)
   const executable = executableName(words[0] ?? '')
   return { executable, subcommand: subcommandOf(executable, words.slice(1)) }
 }
 
 // Arguments the wrapped call would reject must reach it and fail there, as they would
 // without the profile, rather than fail here first.
-function describeOrUnknown(name: string, args: readonly unknown[]): Pick<SpawnRecord, 'executable' | 'subcommand'> {
+function describeOrUnknown(name: string, args: readonly unknown[]): Pick<SpawnRecord, 'executable' | 'subcommand' | 'argv' | 'cwd'> {
   try {
-    return describeInvocation(name, args)
+    const words = invocationWords(name, args)
+    const executable = executableName(words[0] ?? '')
+    const cwd = callOptions(name, args)?.cwd
+    return {
+      executable,
+      subcommand: subcommandOf(executable, words.slice(1)),
+      argv: words.slice(1),
+      cwd: cwd === undefined || cwd === null ? process.cwd() : String(cwd),
+    }
   } catch {
-    return { executable: 'unknown', subcommand: null }
+    return { executable: 'unknown', subcommand: null, argv: [], cwd: null }
+  }
+}
+
+// A stack frame's file, relative to the repository when it lies inside it, or null for a
+// frame that names no file on disk, such as `node:internal/...` or `<anonymous>`.
+function frameFile(location: string): string | null {
+  const file = location.startsWith('file://') ? fileURLToPath(location) : location
+  if (!isAbsolute(file)) return null
+  const inRepository = relative(REPOSITORY, file)
+  const shown = inRepository === '' || inRepository.startsWith('..') || isAbsolute(inRepository) ? file : inRepository
+  return shown.replace(/\\/g, '/')
+}
+
+const PROFILE_FILE = frameFile(fileURLToPath(import.meta.url))
+
+// The caller, and the frame that called into the caller's file, out of a V8 stack.
+export function callerFrames(stack: string): Pick<SpawnRecord, 'caller' | 'via'> {
+  const frames: { file: string, line: string }[] = []
+  for (const text of stack.split('\n')) {
+    const match = /^\s*at (?:.*?\()?(.+?):(\d+):\d+\)?$/.exec(text)
+    if (match === null) continue
+    const file = frameFile(match[1]!)
+    if (file === null || file === PROFILE_FILE || /(^|\/)node_modules\//.test(file)) continue
+    frames.push({ file, line: match[2]! })
+  }
+  const caller = frames[0]
+  if (caller === undefined) return { caller: null, via: null }
+  const via = frames.find((frame) => frame.file !== caller.file)
+  return { caller: `${caller.file}:${caller.line}`, via: via === undefined ? null : `${via.file}:${via.line}` }
+}
+
+// Reads the stack above `wrapper` without disturbing the call: a failure here only
+// leaves the record without a caller.
+function callerOf(wrapper: (...args: unknown[]) => unknown): Pick<SpawnRecord, 'caller' | 'via'> {
+  const limit = Error.stackTraceLimit
+  try {
+    Error.stackTraceLimit = CALLER_STACK_DEPTH
+    const holder: { stack?: string } = {}
+    Error.captureStackTrace(holder, wrapper)
+    return callerFrames(holder.stack ?? '')
+  } catch {
+    return { caller: null, via: null }
+  } finally {
+    Error.stackTraceLimit = limit
   }
 }
 
@@ -131,10 +214,12 @@ export function profileChildProcesses(target: Record<string | symbol, unknown>):
 
   let generation = 0
   let depth = 0
+  let sequence = 0
+  let test: string | null = null
   let completed: SpawnRecord[] = []
-  const running = new Set<{ invocation: Pick<SpawnRecord, 'executable' | 'subcommand'>, startedAt: number }>()
+  const running = new Set<{ invocation: Invocation, startedAt: number }>()
 
-  function track(child: unknown, invocation: Pick<SpawnRecord, 'executable' | 'subcommand'>, startedAt: number): void {
+  function track(child: unknown, invocation: Invocation, startedAt: number): void {
     if (!isExitObservable(child)) return
     const entry = { invocation, startedAt }
     const recordedGeneration = generation
@@ -156,7 +241,8 @@ export function profileChildProcesses(target: Record<string | symbol, unknown>):
   function wrap(name: string, original: (...args: unknown[]) => unknown, mode: Mode): (...args: unknown[]) => unknown {
     return function profiled(this: unknown, ...args: unknown[]): unknown {
       if (depth > 0) return Reflect.apply(original, this, args)
-      const invocation = describeOrUnknown(name, args)
+      const invocation: Invocation = { ...describeOrUnknown(name, args), ...callerOf(profiled), test, sequence }
+      sequence += 1
       const startedAt = performance.now()
       depth += 1
       let result: unknown
@@ -203,8 +289,13 @@ export function profileChildProcesses(target: Record<string | symbol, unknown>):
     ],
     reset: () => {
       generation += 1
+      sequence = 0
+      test = null
       completed = []
       running.clear()
+    },
+    startTest: (name) => {
+      test = name
     },
   }
   Object.defineProperty(target, RECORDER, { value: recorder })
@@ -235,6 +326,8 @@ export function recordSpawnProfile(environment: NodeJS.ProcessEnv): void {
   // ES module imports of node:child_process read the wrapped functions from here on.
   syncBuiltinESMExports()
   recorder.reset()
+  beforeEach(({ task }) => recorder.startTest(task.fullTestName ?? task.name))
+  afterEach(() => recorder.startTest(null))
   const startedAt = performance.now()
   afterAll(({}, suite) => {
     const profile: SpawnProfileFile = {

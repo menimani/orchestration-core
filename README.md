@@ -401,8 +401,15 @@ node scripts/test-spawn-profile.mjs /tmp/spawn-profile
 
 Each test file then records every child process its worker creates through
 `node:child_process`: the executable, the subcommand for `git`, `node`, `powershell` and
-`cmd`, and the time until it exits. The report totals them by executable and subcommand
-and by test file, and lists the twenty files with the most spawns per test. Processes a
+`cmd`, and the time until it exits. Each record also names who asked for the child: its
+caller, the first stack frame outside Node internals, `node_modules` and the profile
+itself, as a repository-relative `file:line`, and the next frame outside the caller's
+file, so a `git()` wrapper is attributed to whoever called it. The report totals them by
+executable and subcommand and by test file, and lists the twenty files with the most
+spawns per test. It then totals them by the origin of the caller (`src/`, the shared test
+helpers, the test files, or other), lists the forty call sites with the most child wall
+time, and counts by call site the git questions asked twice in a row: the same arguments
+in the same directory within one test, with no other git process in between. Processes a
 child CLI starts in turn are outside the worker and are not counted. Without the variable
 nothing is wrapped or written.
 
