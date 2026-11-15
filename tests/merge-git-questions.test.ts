@@ -46,6 +46,15 @@ function asked(started: { cwd: string, argv: string[] }[], cwd: string, argv: st
     process.cwd === cwd && JSON.stringify(process.argv) === JSON.stringify(argv)).length
 }
 
+// The git processes of a step, without the one `removeWorktreeWithFallback` adds only when
+// `git worktree remove --force` fails and the directory fallback runs, which on Windows
+// happens whenever something briefly holds a file in the worktree. Every other process
+// still counts, so a question the step did not ask before still changes the total.
+function stepProcesses(started: { cwd: string, argv: string[] }[]): number {
+  return started.filter((process) =>
+    JSON.stringify(process.argv) !== JSON.stringify(['worktree', 'prune'])).length
+}
+
 function commitOnMain(file: string): string {
   writeFileSync(join(repoRoot, file), `${file}\n`)
   git(repoRoot, ['add', file])
@@ -65,7 +74,7 @@ describe('git questions of one merge step', () => {
     expect(answer.outcome).toBe('merged')
     expect(asked(started, worktree, ['rev-list', '--reverse', 'main..HEAD'])).toBe(1)
     // Before, the commits and each commit's trees were read twice: 35 processes.
-    expect(started).toHaveLength(31)
+    expect(stepProcesses(started)).toBe(31)
   })
 
   it('reads the task commits again after a moved run branch made it rebase', async () => {
@@ -80,7 +89,7 @@ describe('git questions of one merge step', () => {
     expect(answer.outcome).toBe('merged')
     expect(asked(started, worktree, ['rev-list', '--reverse', 'main..HEAD'])).toBe(2)
     // Before, the checkout HEAD was read twice: 37 processes.
-    expect(started).toHaveLength(36)
+    expect(stepProcesses(started)).toBe(36)
     const mergeCommit = answer.outcome === 'merged' ? answer.mergeCommit : ''
     expect(git(repoRoot, ['rev-parse', `${mergeCommit}^2^`]).trim()).toBe(runTip)
   })
@@ -146,7 +155,7 @@ describe('git questions of one merge step', () => {
 
     expect(asked(started, repoRoot, ['rev-parse', 'HEAD'])).toBe(2)
     // Before, the checkout HEAD was read twice: 20 processes.
-    expect(started).toHaveLength(19)
+    expect(stepProcesses(started)).toBe(19)
     expect(git(repoRoot, ['rev-parse', `${answer}^1`]).trim()).toBe(headBefore)
     expect(git(repoRoot, ['rev-parse', `${answer}^2`]).trim()).toBe(expectedHead)
   })

@@ -33,7 +33,8 @@ failing check reads as a pass — redirect to a file and check `$?` instead.
 
 The suite drives real git repositories in temporary directories. `vitest.config.ts` runs
 its git-fixture files in parallel, then the process- and deadline-sensitive files listed
-in `tests/sequentialSuites.ts` after them, at most three at a time. To run every file one
+in `tests/sequentialSuites.ts` after them, at most three at a time, and one at a time
+below twelve processors or when they share a machine-wide resource. To run every file one
 at a time instead:
 
 ```
