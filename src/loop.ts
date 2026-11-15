@@ -4064,9 +4064,14 @@ export function createLoop(deps: LoopDeps) {
             }
             if (!permissionUnknown) warningLog.recovered('issue-author-permission')
           }
+          previousGateFailures.delete('issue-queue-sync')
           warningLog.recovered('issue-queue-sync')
         } catch (error) {
-          if (error instanceof IssueReleaseReconciliationError) {
+          if (error instanceof MalformedFingerprintLedgerError) {
+            // No later poll can repair the ledger, so idling on local-only work would
+            // stop reaping and claiming for good: it counts toward a stop instead.
+            reportGateFailure(`could not sync the issue queue: ${errorSummary(error)}`, 'issue-queue-sync')
+          } else if (error instanceof IssueReleaseReconciliationError) {
             issueReconciliationPending = true
             noteIssueReleaseFailure(error)
           } else if (!(error instanceof ForgeRateLimitError)) {
