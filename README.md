@@ -393,9 +393,14 @@ are supplied per invocation; the core keeps no repository registry or checkout i
 
 ### Measuring the suite
 
+The suite runs in two groups. The parallel group runs most files on six workers. The
+sequential group, the files in `tests/sequentialSuites.ts` that wait on deadlines or time
+process exits, starts only once the parallel group has finished; it runs up to three of
+them at once on a host with twelve or more processors and one at a time below that, and
+files that share a machine-wide resource run one at a time after the others.
+
 Every `npm test` run prints one line per test file with its project, test count and
-duration, then the ten slowest files and the wall time of the parallel and sequential
-groups. That holds for a run without a terminal too, such as a merge gate or a worktree
+duration, then the ten slowest files and the wall time of each group. That holds for a run without a terminal too, such as a merge gate or a worktree
 agent, where Vitest would otherwise switch to a reporter that names only failing files.
 
 To see which child processes the time goes to, point `ORCH_TEST_SPAWN_PROFILE` at a

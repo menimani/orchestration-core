@@ -62,7 +62,8 @@ worse than reporting it unfinished.
 
 The suite drives real git repositories in temporary directories. Its git-fixture files
 run in parallel; the process- and deadline-sensitive files listed in
-`tests/sequentialSuites.ts` run one at a time afterwards. Reproduce a stubborn failure
+`tests/sequentialSuites.ts` run afterwards, at most three at a time, and one at a time
+below twelve processors or when they share a machine-wide resource. Reproduce a stubborn failure
 with `npm test -- --pool=threads --no-file-parallelism` before calling it a flake, and
 move a file that proves timing-sensitive under parallel load onto that list rather than
 loosening its tests. Do not run builds or installs while a loop is running — they lock files its
