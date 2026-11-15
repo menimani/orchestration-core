@@ -950,6 +950,32 @@ describe('operating-system adapters', () => {
     expect(mixedDead.os.processTreeIsAlive(551, 'linux:100')).toBe(false)
   })
 
+  it('trusts a start-identity difference on POSIX only when neither side is ps start-time text', () => {
+    const os = createPosixOperatingSystem()
+    const recorded = 'darwin:Sat Nov 14 12:00:00 2026'
+
+    expect(os.startIdentitiesProveDifferentProcess('linux:100', 'linux:500')).toBe(true)
+    expect(os.startIdentitiesProveDifferentProcess('started-at-1', 'started-at-2')).toBe(true)
+    expect(os.startIdentitiesProveDifferentProcess('linux:100', 'linux:100')).toBe(false)
+    // The same live process read under another time zone or locale prints another lstart.
+    expect(os.startIdentitiesProveDifferentProcess(recorded, 'darwin:Sat Nov 14 03:00:00 2026'))
+      .toBe(false)
+    expect(os.startIdentitiesProveDifferentProcess(recorded, 'linux:500')).toBe(false)
+    expect(os.startIdentitiesProveDifferentProcess('linux:500', recorded)).toBe(false)
+    // A Linux host without procfs falls back to the same listing.
+    expect(os.startIdentitiesProveDifferentProcess('linux:Sat Nov 14 12:00:00 2026', 'linux:500'))
+      .toBe(false)
+  })
+
+  it('trusts any start-identity difference on Windows, where it is a creation time', () => {
+    const os = createWindowsOperatingSystem()
+
+    expect(os.startIdentitiesProveDifferentProcess(windowsIdentity(1_000), windowsIdentity(5_000)))
+      .toBe(true)
+    expect(os.startIdentitiesProveDifferentProcess(windowsIdentity(1_000), windowsIdentity(1_000)))
+      .toBe(false)
+  })
+
   /**
    * A reused Windows PID 561 recorded for a runner created at 1 s, whose holder was
    * created at 5 s by its start identity; the snapshot lists the holder only when

@@ -72,6 +72,14 @@ export interface OperatingSystem {
   processTreeRootPid(env?: NodeJS.ProcessEnv): number
   /** Stable identity for this particular use of a PID, or undefined when unverifiable. */
   processStartIdentity(pid: number): string | undefined
+  /**
+   * Whether a PID whose identity reads `currentStartIdentity` now cannot be the process
+   * recorded with `recordedStartIdentity`. Equal identities never prove that, nor do
+   * identities of a form that can read differently for the same process.
+   */
+  startIdentitiesProveDifferentProcess(
+    recordedStartIdentity: string, currentStartIdentity: string,
+  ): boolean
   terminateProcessTree(pid: number): boolean
   /**
    * Spawn options that keep a child's tree reachable by `terminateProcessTree`. POSIX stops
