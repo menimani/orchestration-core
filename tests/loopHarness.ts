@@ -18,7 +18,7 @@ import {
 } from '../src/paths.ts'
 import { forgetTaskProcess, recordTaskProcess } from '../src/processRegistry.ts'
 import { startTask } from '../src/start.ts'
-import { enqueueTask } from '../src/tasks.ts'
+import { enqueueTask, specFile } from '../src/tasks.ts'
 import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -213,6 +213,35 @@ export function makeCompletedTask(taskId: string, writeCompletedStatus = true): 
   execFileSync('git', ['commit', '-qm', 'fix: complete fixture task'], { cwd: worktree })
   writeFinal(taskId, 'TASK_COMPLETE\n')
   if (writeCompletedStatus) writeRawStatus(taskId, 'completed')
+}
+
+/** A completed local task whose only commit conflicts with a later run-branch commit. */
+export function makeConflictingLocalTask(taskId: string): {
+  initialHead: string
+  runHead: string
+  taskTip: string
+} {
+  const initialHead = initializeGitRepo()
+  makeCompletedTask(taskId)
+  writeFileSync(specFile(paths, taskId), [
+    `# ${taskId}: delegated task`,
+    '',
+    '## Requirement',
+    '',
+    'Change the tracked line.',
+    '',
+    'TASK_COMPLETE',
+    '',
+  ].join('\n'))
+  const worktree = worktreeDir(paths, taskId)
+  writeFileSync(join(worktree, 'tracked.txt'), 'task change\n')
+  execFileSync('git', ['add', 'tracked.txt'], { cwd: worktree })
+  execFileSync('git', ['commit', '-qm', 'fix: change tracked line'], { cwd: worktree })
+  const taskTip = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim()
+  writeFileSync(join(repoRoot, 'tracked.txt'), 'run change\n')
+  git(['add', 'tracked.txt'])
+  git(['commit', '-m', 'fix: advance run branch'])
+  return { initialHead, runHead: git(['rev-parse', 'HEAD']), taskTip }
 }
 
 /** Registers the hooks every loop test file runs, in the order they always ran. */
