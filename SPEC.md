@@ -1806,8 +1806,11 @@ writing a `stop` file into any that holds an `orchestration/queue` first, and ne
 touches newer or foreign entries. It then prints the platform-only suites this platform
 leaves uncollected and why, from `tests/platformCoverage.ts`, so a run that skipped a
 suite says so. The files listed in `tests/sequentialSuites.ts` launch long-lived
-processes or wait on deadlines; they run one at a time after the rest of the suite has
-run in parallel.
+processes or wait on deadlines; none of them starts before the rest of the suite has run
+in parallel. On a host with twelve or more processors, as `os.availableParallelism()`
+reports them, up to three of them then run at once; below that they run one at a time.
+Files that share a machine-wide resource, which that file names with the resource, run
+one at a time in a group of their own after the others.
 
 Every run prints one line per test file with its project, test count and duration, also
 when standard output is not a terminal and Vitest detects a coding agent, and ends with
