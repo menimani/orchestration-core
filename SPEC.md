@@ -520,7 +520,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
    proceeds on that poll without the warning. When all
    of a task's commits become empty while rebasing because their changes are already on
    the run branch, the task follows the same `no-change` completion path without
-   requiring the worker to have predicted that outcome. That verdict is recorded under
+   requiring the worker to have predicted that outcome. Only a rebase can empty them,
+   so a task already on the run branch tip is not read for that a second time. That verdict is recorded under
    `queue/rebase-emptied/<task-id>` before linked issues are reconciled, so when
    reconciliation fails or is rate limited the task stays `completed` and a later poll
    still completes it as `no-change` without counting a merge failure, although the
