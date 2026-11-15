@@ -14,6 +14,36 @@ import { readStatus, transitionStatus, type TaskStatus } from './status.ts'
 // the running→completed/failed decision goes through the compare-and-swap transition
 // so a merge that won the lock first is preserved rather than overwritten.
 
+/** The Markdown inline formatting a marker line may carry as one pair around the token. */
+const MARKER_WRAPPERS = ['', '`', '**', '*', '__', '_']
+
+/**
+ * Whether a final message carries a standalone marker. A line counts when it is the marker
+ * alone once surrounding white space and at most one pair of Markdown inline formatting
+ * around the whole token are removed, since a model writing Markdown naturally formats a
+ * literal token that way. Anything else on the line — words, punctuation, a list or quote
+ * prefix, a second layer of formatting, an enclosing fenced code block — keeps it from
+ * counting, so echoed prompt text cannot pass for a marker.
+ */
+export function markerLinePresent(text: string, marker: string): boolean {
+  let fence: string | undefined
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    const opener = /^(`{3,}|~{3,})/.exec(trimmed)?.[1]
+    if (fence !== undefined) {
+      if (opener !== undefined && opener[0] === fence[0] && opener.length >= fence.length
+        && trimmed === opener) fence = undefined
+      continue
+    }
+    if (opener !== undefined) {
+      fence = opener
+      continue
+    }
+    if (MARKER_WRAPPERS.some((wrapper) => trimmed === `${wrapper}${marker}${wrapper}`)) return true
+  }
+  return false
+}
+
 /**
  * Completion is detected only from the final-message file the runner wrote, never the
  * transcript — TASK_COMPLETE appearing in prompt text echoed to the log is not
@@ -22,15 +52,14 @@ import { readStatus, transitionStatus, type TaskStatus } from './status.ts'
 export function completionMarkerPresent(paths: OrchPaths, taskId: string): boolean {
   const file = finalMessageFile(paths, taskId)
   if (!existsSync(file)) return false
-  return readFileSync(file, 'utf8').split(/\r?\n/).some((line) => line === 'TASK_COMPLETE')
+  return markerLinePresent(readFileSync(file, 'utf8'), 'TASK_COMPLETE')
 }
 
 /** An explicit verdict that a completed implementation task legitimately needs no commit. */
 export function noChangeMarkerPresent(paths: OrchPaths, taskId: string): boolean {
   const file = finalMessageFile(paths, taskId)
   if (!existsSync(file)) return false
-  return readFileSync(file, 'utf8').split(/\r?\n/)
-    .some((line) => line === 'NO_CHANGE_WARRANTED')
+  return markerLinePresent(readFileSync(file, 'utf8'), 'NO_CHANGE_WARRANTED')
 }
 
 /**

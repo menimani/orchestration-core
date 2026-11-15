@@ -38,7 +38,7 @@ import {
 } from './gateFix.ts'
 import { buildPrBody, GENERATED_BODY_MARKER, prTitle } from './prbody.ts'
 import {
-  refreshTask, listTaskIds, noChangeMarkerPresent, type DeadlineVerdict,
+  refreshTask, listTaskIds, markerLinePresent, noChangeMarkerPresent, type DeadlineVerdict,
 } from './refresh.ts'
 import { readStatus, readTaskState, transitionStatus, type TaskState } from './status.ts'
 import {
@@ -1184,8 +1184,9 @@ export function createLoop(deps: LoopDeps) {
    */
   function actionableFindings(finalFile: string): string[] {
     if (!existsSync(finalFile)) return []
-    const lines = readFileSync(finalFile, 'utf8').split(/\r?\n/)
-    if (lines.some((line) => line === 'NO_FINDINGS')
+    const text = readFileSync(finalFile, 'utf8')
+    const lines = text.split(/\r?\n/)
+    if (markerLinePresent(text, 'NO_FINDINGS')
       && lines.some((line) => line.startsWith('NEXT_TASK:'))) {
       event('WARN', 'final message has NO_FINDINGS and NEXT_TASK; keeping findings')
     }

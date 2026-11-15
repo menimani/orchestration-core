@@ -318,8 +318,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 
 ## Task lifecycle
 
-1. A task is `completed` once `TASK_COMPLETE` appears on its own line in the task's
-   `.final` file (written by the runner through its last-message output), even if its
+1. A task is `completed` once `TASK_COMPLETE` appears on its own line (item 30 states
+   the formatting tolerated around it) in the task's `.final` file (written by the runner through its last-message output), even if its
    runner process is still alive. Without that marker, it remains `running` while the
    process is alive and becomes `failed` when the process is gone. The daemon bounds how
    long that may last: a live task without the marker whose status file's `started_at` is
@@ -1291,7 +1291,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `NO_CHANGE_WARRANTED`, `NEXT_TASK:`, `NO_FINDINGS`, `DECISION_REQUIRED:` in the
     final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
-    rendering behavior inside the adapter. `NO_FINDINGS`, a standalone line, is an
+    rendering behavior inside the adapter. A standalone marker (`TASK_COMPLETE`,
+    `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) is on its own line when that line is the marker
+    and nothing else once surrounding white space and at most one pair of Markdown inline
+    formatting around the whole token — backticks, `*`, `**`, `_`, or `__` — are removed;
+    one rule applies to all three. A marker inside a sentence, with other words or trailing
+    punctuation on the line, in a list item, quoted with `>`, under two layers of
+    formatting, with an unpaired backtick, or inside a fenced code block is not a marker.
+    Templates still tell the runner to write the bare marker. `NO_FINDINGS`, a standalone line, is an
     explicit empty result from a review; it never overrides a `NEXT_TASK:` line in
     the same final message (item 17). Any runner honoring the contract is
     substitutable. Additional interactive-agent skill destinations and rendering are

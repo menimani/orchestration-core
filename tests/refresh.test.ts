@@ -8,7 +8,7 @@ import {
 } from '../src/paths.ts'
 import { recordTaskProcess, terminableTaskProcessPid } from '../src/processRegistry.ts'
 import {
-  completionMarkerPresent, noChangeMarkerPresent, refreshAll, refreshTask,
+  completionMarkerPresent, markerLinePresent, noChangeMarkerPresent, refreshAll, refreshTask,
 } from '../src/refresh.ts'
 
 let repoRoot: string
@@ -224,6 +224,68 @@ describe('noChangeMarkerPresent', () => {
     expect(noChangeMarkerPresent(paths, 'x')).toBe(false)
     writeFileSync(finalMessageFile(paths, 'x'), 'NO_CHANGE_WARRANTED\nTASK_COMPLETE\n')
     expect(noChangeMarkerPresent(paths, 'x')).toBe(true)
+  })
+})
+
+describe('markerLinePresent', () => {
+  const markers = ['TASK_COMPLETE', 'NO_CHANGE_WARRANTED', 'NO_FINDINGS']
+
+  for (const marker of markers) {
+    it(`recognises ${marker} bare, padded, and in one layer of inline formatting`, () => {
+      for (const line of [
+        marker,
+        `   ${marker}  \t`,
+        `\`${marker}\``,
+        `**${marker}**`,
+        `__${marker}__`,
+        `*${marker}*`,
+        `_${marker}_`,
+        `  \`${marker}\`  `,
+      ]) {
+        expect(markerLinePresent(`work done\n${line}\n`, marker), line).toBe(true)
+        expect(markerLinePresent(`work done\r\n${line}\r\n`, marker), line).toBe(true)
+      }
+    })
+
+    it(`does not recognise ${marker} with anything else on its line`, () => {
+      for (const line of [
+        `print ${marker} at the end`,
+        `${marker}.`,
+        `\`${marker}\`.`,
+        `- ${marker}`,
+        `* ${marker}`,
+        `1. ${marker}`,
+        `> ${marker}`,
+        `>${marker}`,
+        `\`${marker}`,
+        `${marker}\``,
+        `**\`${marker}\`**`,
+        `\`**${marker}**\``,
+        `***${marker}***`,
+        `\`\`${marker}\`\``,
+        `\`\`\`${marker}\`\`\``,
+        `**${marker}*`,
+        `\` ${marker} \``,
+      ]) {
+        expect(markerLinePresent(`work done\n${line}\n`, marker), line).toBe(false)
+      }
+    })
+
+    it(`does not recognise ${marker} inside a fenced code block the message quotes`, () => {
+      expect(markerLinePresent(`The prompt says:\n\`\`\`\n${marker}\n\`\`\`\n`, marker)).toBe(false)
+      expect(markerLinePresent(`~~~text\n${marker}\n~~~\n`, marker)).toBe(false)
+      expect(markerLinePresent(`\`\`\`\n${marker}\n\`\`\`\n${marker}\n`, marker)).toBe(true)
+    })
+  }
+
+  it('recognises a formatted marker only from the final message, never the transcript', () => {
+    writeFileSync(join(paths.logsDir, 'z.log'), '`TASK_COMPLETE`\n**NO_CHANGE_WARRANTED**\n')
+    writeFileSync(finalMessageFile(paths, 'z'), 'work done\n')
+    expect(completionMarkerPresent(paths, 'z')).toBe(false)
+    expect(noChangeMarkerPresent(paths, 'z')).toBe(false)
+    writeFileSync(finalMessageFile(paths, 'z'), 'work done\n`NO_CHANGE_WARRANTED`\n`TASK_COMPLETE`\n')
+    expect(completionMarkerPresent(paths, 'z')).toBe(true)
+    expect(noChangeMarkerPresent(paths, 'z')).toBe(true)
   })
 })
 
