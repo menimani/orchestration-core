@@ -899,7 +899,16 @@ export async function importedIssues(forge: Forge): Promise<Map<string, number>>
     ...await forge.listOpenIssues(LABEL_IMPORTED),
     ...await forge.listClosedIssues(LABEL_IMPORTED),
   ]) {
-    if (!isTrustedFingerprintOwner(issue)) continue
+    if (!isTrustedFingerprintOwner(issue)) {
+      // Every import shares one author, so a failed permission lookup hides them all and
+      // the caller would file each one again. Only a definite verdict may skip an issue.
+      if (issue.author.permissionLookupFailed === true && !issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)) {
+        throw new Error(
+          `Could not verify the author of imported issue #${issue.number}; try the import again`,
+        )
+      }
+      continue
+    }
     for (const fingerprint of issueFingerprints(issue)) {
       if (fingerprint.startsWith(SOURCE_FINGERPRINT_PREFIX) && !imported.has(fingerprint)) {
         imported.set(fingerprint, issue.number)

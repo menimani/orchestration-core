@@ -124,6 +124,22 @@ describe('publishImportedIssue', () => {
       .toEqual(new Map([[sourceFingerprint(REPOSITORY, 11), first.issueNumber]]))
   })
 
+  it('refuses to import again while the queue author cannot be verified', async () => {
+    const first = await publishImportedIssue(queue, paths, REPOSITORY, source(15, 'Body'), true)
+    await queue.closeIssue(first.issueNumber, 'Closed by a person')
+    queue.issues.get(first.issueNumber)!.author = {
+      login: queue.user, hasWriteAccess: false, permissionLookupFailed: true,
+    }
+    const otherMachine = fleetPaths({
+      dir: join(fleet, 'other'), project: 'app', repository: REPOSITORY, issueRepository: 'owner/fleet',
+    }, join(fleet, 'app'))
+
+    await expect(importedIssues(queue)).rejects.toThrow(/try the import again/)
+    await expect(publishImportedIssue(queue, otherMachine, REPOSITORY, source(15, 'Body'), true))
+      .rejects.toThrow(/try the import again/)
+    expect(queue.issues.size).toBe(1)
+  })
+
   it('ignores a source fingerprint on an imported issue from an untrusted author', async () => {
     const outsider = await queue.createIssue({
       title: 'Posing as an import',
