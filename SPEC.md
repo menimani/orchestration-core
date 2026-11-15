@@ -911,7 +911,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     Docker preflight and failure diagnosis, item 9), ensure/update
     the draft PR, emit `CYCLE_COMPLETE: <n>/<max>` with the PR URL to the machine-marker
     sink and a formatted copy to `loop.log`, then the CI gate,
-    then review. Remote work defers the gate with a `Waiting remote` event when its
+    then review. The draft PR's branch is pushed to the current branch's push remote:
+    the first of `branch.<name>.pushRemote`, `remote.pushDefault`, the upstream's remote,
+    and `branch.<name>.remote` that names an existing remote, else the only remote; its
+    base comes from the tracking remote, chosen from the same candidates with the
+    upstream's remote and `branch.<name>.remote` first. Both are answered from one read
+    of the branch and its remotes, made fresh at every gate and never cached across polls,
+    and a candidate after the first match is not looked up. Remote work defers the gate with a `Waiting remote` event when its
     pending issue set changes and every ten minutes while unchanged. When every pending
     issue carries `loop:merge-failed` and neither `loop:ready` nor `loop:in-progress` — a
     `loop:merge-ready` left beside it is a failure relabel that did not finish, which
