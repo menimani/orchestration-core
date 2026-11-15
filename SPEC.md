@@ -1131,8 +1131,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     record the owner's process-start identity; a query that answers "unknown" (on Windows,
     one that times out) is asked up to three times in all, 250 ms apart, so a slow
     query never fails a daemon start or handover that a later attempt can answer, and only
-    then fails with an error naming the timed-out or failed query. Before task or issue work begins, startup refuses any
-    live PID an earlier daemon left in the task process registry (item 24a). It then sweeps
+    then fails with an error naming the timed-out or failed query. Before task or issue work begins, startup sweeps
     the temporary gate worktrees, `.merge-<task>-<pid>-<ms>` and `.adopt-<issue>-<pid>-<ms>`,
     which nothing records but the process ID in their name: one whose creating process is
     gone, or which belongs to the restart predecessor handing over its lock, is removed and
@@ -1140,9 +1139,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     for a daemon behind the Windows wrapper is not its process-tree root, so the
     predecessor hands its replacement both and either one counts as the predecessor. One
     whose creator still lives is left alone, and one that
-    cannot be removed is logged as `WARN worktree` and stays. A worktree left after the
-    sweep with no corresponding task status blocks startup and is reported with an
-    OS-specific handle diagnostic.
+    cannot be removed is logged as `WARN worktree` and stays. Only then does startup refuse
+    any live PID an earlier daemon left in the task process registry (item 24a), and a
+    worktree left after the sweep with no corresponding task status blocks startup and is
+    reported with an OS-specific handle diagnostic; a start refused this way has already
+    run the sweep.
     A run which publishes work also refuses to start when its branch has no unambiguous
     push target, logging `ERROR` and writing the stop file before task or issue work.
 24a. A task's runner PID is held in `queue/pids/<task-id>`, not in its status record, so
