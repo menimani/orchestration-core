@@ -176,6 +176,15 @@ export function initializeGitRepoWithRemote(): string {
   return initialRepositoryWithRemote.value
 }
 
+export function configureLocalRemote(): void {
+  initializeGitRepo()
+  const remote = join(repoRoot, 'remote.git')
+  execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
+  git(['remote', 'add', 'origin', remote])
+  git(['push', '-u', 'origin', 'main'])
+  git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+}
+
 export function backlogEntries(): string[] {
   const backlog = join(paths.queueDir, 'backlog.txt')
   return existsSync(backlog)
