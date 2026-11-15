@@ -1,6 +1,6 @@
-// The second half of the mergeTask tests, kept apart from tests/merge.test.ts so the two
-// halves run on separate workers. The describe name is the same, so reported test names
-// do not change.
+// Part of the mergeTask tests, kept apart from the other parts (tests/merge.test.ts,
+// tests/merge-task-cleanup.test.ts and tests/merge-task-no-change.test.ts) so the parts run
+// on separate workers. The describe name is the same, so reported test names do not change.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
