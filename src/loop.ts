@@ -2276,6 +2276,38 @@ export function createLoop(deps: LoopDeps) {
     }
   }
 
+  /** Parse the stopped-scan marker, rejecting any line recovery could not act on. */
+  function readInterruptedScans(marker: string): { cycle: number, taskId: string }[] {
+    return readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => {
+      const match = /^([1-9][0-9]*)\t([^\t]+)$/.exec(line)
+      const cycle = match === null ? Number.NaN : Number(match[1])
+      const taskId = match?.[2] ?? ''
+      if (!Number.isSafeInteger(cycle) || !isScanTaskId(taskId)) {
+        throw new Error(`invalid stopped-scan recovery entry: ${line}`)
+      }
+      return { cycle, taskId }
+    })
+  }
+
+  /**
+   * A new run branch resets the scan counter, so a marker written in any cycle of the
+   * previous run no longer matches it. Its scans are renumbered as the new run's first
+   * cycle, which recovery treats as a marker one cycle ahead of the counter: the scans
+   * are discarded before the marker goes. A malformed marker is left as it is for
+   * recovery to report.
+   */
+  function renumberInterruptedScansForNewRun(): void {
+    const marker = join(paths.queueDir, interruptedScansFileName)
+    if (!existsSync(marker)) return
+    let entries: { cycle: number, taskId: string }[]
+    try {
+      entries = readInterruptedScans(marker)
+    } catch {
+      return
+    }
+    writeFileSync(marker, entries.map((entry) => `1\t${entry.taskId}\n`).join(''))
+  }
+
   /**
    * An operator stop is not evidence that a scan failed. Discard every scan that was
    * live when stop was requested and rewind the incomplete cycle so its full scan set
@@ -2287,15 +2319,7 @@ export function createLoop(deps: LoopDeps) {
     if (!existsSync(marker)) return true
 
     try {
-      const entries = readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => {
-        const match = /^([1-9][0-9]*)\t([^\t]+)$/.exec(line)
-        const cycle = match === null ? Number.NaN : Number(match[1])
-        const taskId = match?.[2] ?? ''
-        if (!Number.isSafeInteger(cycle) || !isScanTaskId(taskId)) {
-          throw new Error(`invalid stopped-scan recovery entry: ${line}`)
-        }
-        return { cycle, taskId }
-      })
+      const entries = readInterruptedScans(marker)
       if (entries.length === 0) {
         rmSync(marker, { force: true })
         return true
@@ -2305,10 +2329,10 @@ export function createLoop(deps: LoopDeps) {
       const currentCycle = readCount(scanCountFile)
       // The counter is rewound only after every other recovery step, so a marker one
       // cycle ahead of it means a previous start finished recovery but could not remove
-      // the marker. A new run branch also resets the counter, so a stop during a live
-      // first-cycle scan lands here with its scans untouched; cleanup is idempotent, so
-      // the named scans are discarded before the marker goes, or the new run would count
-      // them as its own failures.
+      // the marker. A new run branch resets the counter and renumbers the marker as its
+      // first cycle, so a stop during a live scan of any cycle lands here with its scans
+      // untouched; cleanup is idempotent, so the named scans are discarded before the
+      // marker goes, or the new run would count them as its own failures.
       if (cycles.size === 1 && cycles.has(currentCycle + 1)) {
         for (const taskId of new Set(entries.map((entry) => entry.taskId))) {
           cleanupTask(paths, taskId, undefined, false, log)
@@ -2382,6 +2406,7 @@ export function createLoop(deps: LoopDeps) {
       // Status files span branches, so their announcement markers must span branches
       // too; explicit task cleanup removes a marker when a retry is wanted.
       cleanupSessionState(true)
+      renumberInterruptedScansForNewRun()
     }
     writeFileSync(mergeFailureFile, '0\n')
     writeFileSync(runBranchFile, `${currentBranch}\n`)
