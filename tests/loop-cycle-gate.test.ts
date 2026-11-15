@@ -10,6 +10,7 @@ import { LABEL_FINDING, LABEL_IN_PROGRESS } from '../src/issueQueue.ts'
 import { shortTaskId } from '../src/ids.ts'
 import { formatEventLine } from '../src/loop.ts'
 import { branchName, statusFile, worktreeDir } from '../src/paths.ts'
+import { recordInterruptedScans } from '../src/scanRecovery.ts'
 import { enqueueTask } from '../src/tasks.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -580,6 +581,104 @@ describe('cycle gate', () => {
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
     expect(logText()).toContain('Recovered scan cycle  2 after operator stop')
     expect(logText()).not.toContain('did not receive every expected scan yield')
+  })
+
+  it.each([
+    { counter: undefined, cycle: 1 },
+    { counter: '1\n', cycle: 2 },
+  ])('recovers cycle $cycle when stop arrives while its scans are still dispatching', async ({
+    counter, cycle,
+  }) => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    if (counter !== undefined) writeFileSync(join(paths.queueDir, 'scan-count.txt'), counter)
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    const attempted: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        const scanId = basename(options.specFile, '.md')
+        attempted.push(scanId)
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        // The operator's stop lands before the dispatching poll returns, as it does when
+        // the command snapshots a scan that is live while its partners still start.
+        recordInterruptedScans(paths, [{ taskId: scanId, pid: child.pid }])
+        writeFileSync(join(paths.queueDir, 'stop'), '')
+        return child.pid
+      },
+    }
+    const dispatching = makeLoop(
+      { autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+    dispatching.initializeSessionStateForBranch()
+
+    expect(await dispatching.triggerScanIfIdle()).toBe('continue')
+
+    expect(attempted).toHaveLength(1)
+    const [interrupted] = attempted as [string]
+    expect(readFileSync(marker, 'utf8')).toBe(`${cycle}\t${interrupted}\n`)
+    expect(await dispatching.poll()).toBe('stopped')
+
+    const restarted = makeLoop({ autoPr: false, reviewEnabled: false })
+    restarted.initializeSessionStateForBranch()
+
+    expect(await restarted.poll()).toBe('continue')
+
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(existsSync(worktreeDir(paths, interrupted))).toBe(false)
+    expect(existsSync(statusFile(paths, interrupted))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe(`${cycle}\n`)
+    expect(readFileSync(join(paths.queueDir, `scan-expected-${cycle}`), 'utf8')).toBe('1\n')
+    expect(runnerStarts).toHaveLength(1)
+    expect(logText()).toContain(`Recovered scan cycle  ${cycle} after operator stop`)
+    expect(logText()).not.toContain('does not match current cycle')
+  })
+
+  it('gives a launched cycle its number back when a later scan fails to launch', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n',
+    )
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const countsAtStart: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async () => {
+        countsAtStart.push(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8'))
+        if (countsAtStart.length === 2) throw new Error('runner unavailable')
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        return child.pid
+      },
+    }
+    const loop = makeLoop(
+      { scanParallel: 2, autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    // Each scan started under the cycle it belongs to; the failed cycle then gave it back.
+    expect(countsAtStart).toEqual(['2\n', '2\n'])
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(existsSync(join(paths.queueDir, 'scan-expected-2'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain('ERROR scan startup failed: runner unavailable (log:')
   })
 
   it('removes a marker left behind after its cycle was already rewound and starts', async () => {

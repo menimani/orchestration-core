@@ -3217,6 +3217,11 @@ export function createLoop(deps: LoopDeps) {
     let launchFailed = false
     let retainedScan: string | undefined
     const attemptedScans: string[] = []
+    // The cycle consumes its number before its first scan exists. A stop during dispatch
+    // records the live scans under the counter, and a scan finishing meanwhile records
+    // its yield there, so both must already name the cycle the scans belong to.
+    const counterExisted = existsSync(scanCountFile)
+    writeFileSync(scanCountFile, `${nextCycle}\n`)
     for (let i = 1; i <= nScans; i++) {
       const scanId = newTaskId(paths, 'scan', now())
       const scope = nScans === 1
@@ -3254,7 +3259,7 @@ export function createLoop(deps: LoopDeps) {
       }
     }
     if (launchFailed) {
-      // The cycle neither consumed its number nor recorded an expectation, so the next
+      // The cycle gives its number back and never recorded an expectation, so the next
       // start dispatches it again from the beginning. Discard what this attempt
       // materialized: left behind, each scan would be swept into the relaunched cycle's
       // failure list and counted against an expectation it was never part of, and the
@@ -3272,11 +3277,12 @@ export function createLoop(deps: LoopDeps) {
           )
         }
       }
+      if (counterExisted) writeFileSync(scanCountFile, `${currentScans}\n`)
+      else rmSync(scanCountFile, { force: true })
       writeFileSync(stopFile, '')
       return 'continue'
     }
     writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
-    writeFileSync(scanCountFile, `${nextCycle}\n`)
     return 'continue'
   }
 
