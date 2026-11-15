@@ -31,7 +31,7 @@ export const PLATFORM_SUITES: PlatformSuite[] = [
   {
     file: 'tests/posix-process-group.test.ts',
     platform: 'linux',
-    reason: 'ends the shell of a timed command with a signal, which Windows cannot send',
+    reason: 'signals a real detached process group and reads /proc to see who survived',
   },
   {
     file: 'tests/posix-test-process.test.ts',
