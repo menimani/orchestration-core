@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { ForgeIssueNotFoundError, ForgeRateLimitError } from '../src/adapters/forge.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
+import { createOperatingSystem as createWindowsOperatingSystem } from '../src/adapters/os-windows.ts'
 import {
   issueCompletionForIssue, issueNumbersForTask, issuePromotionForIssue, recordIssuesForTask,
   LABEL_FINDING, LABEL_GROUP_SINGLETON, LABEL_IN_PROGRESS, LABEL_READY,
@@ -239,6 +240,68 @@ describe('completed task merge recovery', () => {
       expect(terminate).not.toHaveBeenCalled()
       expect(logText()).not.toContain('cannot be verified yet')
       expect(logged.some((line) => line.startsWith('Merged 040_auto'))).toBe(true)
+    } finally {
+      terminate.mockRestore()
+      treeAlive.mockRestore()
+      processAlive.mockRestore()
+      startIdentity.mockRestore()
+    }
+  })
+
+  // A runner exited by itself and nothing held its PID, but a process an earlier holder of
+  // that PID started hours before the runner still named it as its parent. Every poll
+  // deferred the merge until a person removed the registry entry.
+  it('merges a completed task on the next poll when only an older process names its vacant runner PID', async () => {
+    const runnerPid = 18508
+    // The runner was created at 20 s; 18528 at 1 s, by an earlier holder of PID 18508.
+    const runnerIdentity = `windows:${621_355_968_000_000_000n + 20_000n * 10_000n}`
+    const windows = createWindowsOperatingSystem({
+      spawn: () => {},
+      listProcesses: () => [{ pid: 18528, parentPid: runnerPid, createdAt: 1_000 }],
+      probeProcess: (pid) => {
+        if (pid === 18528) return
+        const error = new Error('gone') as NodeJS.ErrnoException
+        error.code = 'ESRCH'
+        throw error
+      },
+      remove: () => {},
+      now: () => 0,
+      sleep: () => {},
+      processStartIdentity: () => undefined,
+    })
+    const startIdentity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockReturnValue(runnerIdentity)
+    const processAlive = vi.spyOn(operatingSystem, 'processIsAlive').mockReturnValue(true)
+    const treeAlive = vi.spyOn(operatingSystem, 'processTreeIsAlive')
+      .mockImplementation((pid, recordedStartIdentity) => (pid === runnerPid
+        ? windows.processTreeIsAlive(pid, recordedStartIdentity)
+        : false))
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
+    try {
+      const taskId = '20260815_125300_041_auto-runner-pid-vacant'
+      const initialHead = initializeGitRepo()
+      makeCompletedTask(taskId, false)
+      writeRawStatus(taskId, 'completed', runnerPid)
+      // The runner has exited, and nothing holds its PID now.
+      startIdentity.mockImplementation(() => undefined)
+      const loop = makeLoop({
+        autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+      })
+      loop.initializeSessionStateForBranch()
+      const issueNumber = await fakeForge.createIssue({
+        title: 'vacant runner pid', body: '',
+        labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      })
+      recordIssuesForTask(paths, taskId, [issueNumber])
+
+      expect(windows.processTreeIsAlive(runnerPid)).toBe(true)
+      expect(await loop.poll()).toBe('continue')
+
+      expect(readStatus(paths, taskId)?.status).toBe('merged')
+      expect(git(['rev-parse', 'HEAD'])).not.toBe(initialHead)
+      expect(terminate).not.toHaveBeenCalled()
+      expect(logText()).not.toContain('cannot be verified yet')
+      expect(logged.some((line) => line.startsWith('Merged 041_auto'))).toBe(true)
     } finally {
       terminate.mockRestore()
       treeAlive.mockRestore()

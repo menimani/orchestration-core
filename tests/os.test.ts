@@ -816,6 +816,70 @@ describe('operating-system adapters', () => {
     }
   })
 
+  it('leaves an older process out of the tree of a vacant recorded PID', () => {
+    // Nothing holds 561, recorded for a runner created at 1 s; 562 was started at 0.5 s
+    // by an earlier holder of the PID and still names it as its parent.
+    const { os } = processTreeOs([
+      { pid: 562, parentPid: 561, createdAt: 500 },
+    ], () => {}, () => undefined)
+
+    expect(os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(false)
+    // Without the recorded identity the vacant root cannot be dated, and stays alive.
+    expect(os.processTreeIsAlive(561)).toBe(true)
+  })
+
+  it('still counts what the runner of a vacant recorded PID may have started', () => {
+    const dated = processTreeOs([
+      { pid: 562, parentPid: 561, createdAt: 2_000 },
+    ], () => {}, () => undefined)
+    const sameMillisecond = processTreeOs([
+      { pid: 562, parentPid: 561, createdAt: 1_000 },
+    ], () => {}, () => undefined)
+    const undated = processTreeOs([
+      { pid: 562, parentPid: 561 },
+    ], () => {}, () => undefined)
+
+    for (const { os } of [dated, sameMillisecond, undated]) {
+      expect(os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+    }
+  })
+
+  it('counts a grandchild of the runner of a vacant recorded PID once its parent has exited', () => {
+    // 562 was started by the runner at 2 s and 563 by 562 at 3 s; 562 has since exited.
+    const { alive, os } = processTreeOs([
+      { pid: 562, parentPid: 561, createdAt: 2_000 },
+      { pid: 563, parentPid: 562, createdAt: 3_000 },
+    ], () => {}, () => undefined)
+    alive.delete(562)
+
+    expect(os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+    alive.delete(563)
+    expect(os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(false)
+  })
+
+  it('keeps the undated answer for a vacant PID whose identity holds no creation time', () => {
+    const { os } = processTreeOs([
+      { pid: 562, parentPid: 561, createdAt: 500 },
+    ], () => {}, () => undefined)
+
+    expect(os.processTreeIsAlive(561, 'started:runner')).toBe(true)
+    expect(os.processTreeIsAlive(561, 'Mon Nov 15 20:25:18 2026')).toBe(true)
+  })
+
+  it('answers alive for a vacant recorded PID when its processes cannot be listed', () => {
+    const os = createWindowsOperatingSystem({
+      spawn: () => {},
+      listProcesses: () => { throw new Error('CIM unavailable') },
+      probeProcess: () => {},
+      remove: () => {},
+      now: () => 0,
+      sleep: () => {},
+      processStartIdentity: () => undefined,
+    })
+
+    expect(os.processTreeIsAlive(561, windowsIdentity(1_000))).toBe(true)
+  })
+
   it('answers no recorded group on POSIX once a process with another identity holds its ID', () => {
     const signalProcessGroup = vi.fn()
     const posixOs = (identity: string | undefined) => createPosixOperatingSystem({
