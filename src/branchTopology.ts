@@ -217,13 +217,18 @@ export function absorbDefaultBranch(
     gitCommand(paths.repoRoot, ['merge-base', '--is-ancestor', baseCommit, 'HEAD'])
     event('Updated', 'default branch', baseRef)
   } catch (error) {
-    try {
-      gitCommand(paths.repoRoot, ['merge', '--abort'])
-    } catch (abortError) {
-      throw new Error(
-        `default branch merge failed and merge abort failed: ${commandFailureSummary(abortError)}; `
-        + `merge failure: ${commandFailureSummary(error)}`,
-      )
+    // A merge that failed before writing MERGE_HEAD, such as one stopped by a stale index
+    // lock, left nothing to abort; the recovery check below still proves HEAD and the tree.
+    const conflicted = mergeInProgress(paths.repoRoot, gitCommand)
+    if (conflicted) {
+      try {
+        gitCommand(paths.repoRoot, ['merge', '--abort'])
+      } catch (abortError) {
+        throw new Error(
+          `default branch merge failed and merge abort failed: ${commandFailureSummary(abortError)}; `
+          + `merge failure: ${commandFailureSummary(error)}`,
+        )
+      }
     }
     let recoveredHead: string
     let recoveredStatus: string
@@ -243,6 +248,18 @@ export function absorbDefaultBranch(
         + `working tree ${recoveredStatus === '' ? 'clean' : `dirty (${recoveredStatus.replaceAll(/\r?\n/g, ', ')})`}`,
       )
     }
-    event('WARN', `default branch merge conflicted; continuing: ${commandFailureSummary(error)}`)
+    event('WARN', `default branch merge ${conflicted ? 'conflicted' : 'failed'}; continuing: `
+      + commandFailureSummary(error))
+  }
+}
+
+function mergeInProgress(
+  repoRoot: string,
+  gitCommand: (cwd: string, args: string[]) => string,
+): boolean {
+  try {
+    return gitCommand(repoRoot, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']).trim() !== ''
+  } catch {
+    return false
   }
 }
