@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { operatingSystem } from '../src/adapters/os.ts'
 
@@ -78,31 +78,30 @@ function runFixtureProcessWrapper(parentPid: number, encodedDescriptor: string):
   const descriptor = JSON.parse(
     Buffer.from(encodedDescriptor, 'base64').toString('utf8'),
   ) as FixtureProcessDescriptor
+  // The adapter's own spawn options keep the fixture's tree reachable by the same
+  // terminateProcessTree the core uses, so this cleanup inherits every fix made there.
   const fixture = spawn(descriptor.command, descriptor.args, {
-    detached: false,
+    ...operatingSystem.terminableSpawnOptions(),
     stdio: 'inherit',
     windowsHide: true,
   })
   let settled = false
 
   const stopFixture = (): void => {
-    if (settled) return
-    settled = true
-    if (process.platform === 'win32') {
-      if (fixture.pid !== undefined) {
-        spawnSync('taskkill', ['/PID', String(fixture.pid), '/T', '/F'], {
-          stdio: 'ignore',
-          windowsHide: true,
-        })
+    if (!settled && fixture.pid !== undefined) {
+      settled = true
+      try {
+        operatingSystem.terminateProcessTree(fixture.pid)
+      } catch {
+        // Exit regardless: the registry or the next run reports a survivor.
       }
-      process.exit(1)
     }
-    try {
-      process.kill(-process.pid, 'SIGKILL')
-    } catch {
-      process.exit(1)
-    }
+    process.exit(1)
   }
+
+  // Where the fixture leads its own process group, a signal the registry sends to this
+  // wrapper's group no longer reaches it, so the wrapper passes the stop on.
+  for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM'] as const) process.once(signal, stopFixture)
 
   const parentMonitor = setInterval(() => {
     if (!processIsAlive(parentPid)) stopFixture()
