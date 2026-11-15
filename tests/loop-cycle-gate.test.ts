@@ -643,6 +643,44 @@ describe('cycle gate', () => {
     expect(logText()).not.toContain('tasks failed in one poll')
   })
 
+  it('discards later-cycle scans stopped before a new run branch reset the counter', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const live = '20260809_000000_007_scan'
+    const gone = '20260809_000000_008_scan'
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    writeFileSync(join(paths.queueDir, 'run-branch.txt'), 'previous-run\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(marker, `2\t${live}\n2\t${gone}\n`)
+    writeRawStatus(live, 'running', null)
+    const liveWorktree = worktreeDir(paths, live)
+    git(['worktree', 'add', '-q', liveWorktree, '-b', branchName(live)])
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false, maxBurstFailures: 1 })
+    loop.initializeSessionStateForBranch()
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of [live, gone]) {
+      expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
+      expect(git(['branch', '--list', branchName(taskId)]).trim()).toBe('')
+      expect(existsSync(statusFile(paths, taskId))).toBe(false)
+      expect(logged.join('\n')).not.toContain(`FAILED: ${taskId}`)
+    }
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'failed-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(runnerStarts).toHaveLength(1)
+    expect(logText()).toContain('Recovered scan cycle  1 after operator stop')
+    expect(logText()).not.toContain('does not match current cycle')
+    expect(logText()).not.toContain('tasks failed in one poll')
+  })
+
   it('stops and retains a malformed interrupted-scan marker without rewinding', async () => {
     initializeGitRepo()
     const marker = join(paths.queueDir, 'stop-interrupted-scans')
