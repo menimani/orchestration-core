@@ -763,6 +763,59 @@ describe('operating-system adapters', () => {
     expect(matching.os.processTreeIsAlive(531, windowsIdentity(1_000))).toBe(true)
   })
 
+  /**
+   * Root 541, created at 1 s, which taskkill ends, beside `others` naming 541 as their
+   * parent; each is listed from the start, or only once the root has been stopped.
+   */
+  function stoppedRootOs(others: readonly (WindowsProcess & { afterStop?: true })[]) {
+    let stopped = false
+    let now = 0
+    return createWindowsOperatingSystem({
+      spawn: (command) => { if (command === 'taskkill') stopped = true },
+      listProcesses: () => [
+        ...(stopped ? [] : [{ pid: 541, parentPid: 1, createdAt: 1_000 }]),
+        ...others.filter(({ afterStop }) => stopped || afterStop !== true)
+          .map(({ afterStop: _afterStop, ...entry }) => entry),
+      ],
+      probeProcess: (pid) => {
+        if (pid !== 541 || !stopped) return
+        const error = new Error('gone') as NodeJS.ErrnoException
+        error.code = 'ESRCH'
+        throw error
+      },
+      remove: () => {},
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds },
+      processStartIdentity: (pid) => (pid === 541 && !stopped ? windowsIdentity(1_000) : undefined),
+    })
+  }
+
+  it('leaves an earlier holder\'s orphan out of a stopped root\'s tree once the root has exited', () => {
+    // 542 was started at 0.5 s by an earlier holder of PID 541 and outlives the stop.
+    const os = stoppedRootOs([{ pid: 542, parentPid: 541, createdAt: 500 }])
+    const unstopped = processTreeOs([
+      { pid: 542, parentPid: 541, createdAt: 500 },
+    ], () => {}, () => undefined)
+
+    expect(os.terminateProcessTree(541)).toBe(true)
+    expect(os.processTreeIsAlive(541)).toBe(false)
+    // An adapter that never saw the root cannot date it, and keeps answering alive.
+    expect(unstopped.os.processTreeIsAlive(541)).toBe(true)
+  })
+
+  it('still counts a process created after a stopped root once the root has exited', () => {
+    const dated = stoppedRootOs([{ pid: 542, parentPid: 541, createdAt: 2_000, afterStop: true }])
+    const undated = stoppedRootOs([{ pid: 542, parentPid: 541, afterStop: true }])
+    const sameMillisecond = stoppedRootOs([
+      { pid: 542, parentPid: 541, createdAt: 1_000, afterStop: true },
+    ])
+
+    for (const os of [dated, undated, sameMillisecond]) {
+      expect(os.terminateProcessTree(541)).toBe(true)
+      expect(os.processTreeIsAlive(541)).toBe(true)
+    }
+  })
+
   it('answers no recorded group on POSIX once a process with another identity holds its ID', () => {
     const signalProcessGroup = vi.fn()
     const posixOs = (identity: string | undefined) => createPosixOperatingSystem({

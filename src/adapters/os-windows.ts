@@ -236,6 +236,7 @@ function processTreePids(
   runtime: WindowsOperatingSystemRuntime,
   rootPid: number,
   stopping = false,
+  stoppedRootCreatedAt?: number,
 ): ProcessTree | undefined {
   let processes: readonly WindowsProcess[]
   try {
@@ -251,7 +252,14 @@ function processTreePids(
   const { createdAt: createdAtByPid, dated: rootDated } = processCreationTimes(
     processes, rootPid, () => runtime.processStartIdentity?.(rootPid),
   )
-  const rootUndated = !runningPids.has(rootPid) && !rootDated
+  // An exited root has no start time left to read. One this adapter stopped is dated by
+  // the creation time its stop saw: nothing created before that process descends from it
+  // or from any later holder of the PID, while an earlier holder may have left such a
+  // process still naming the PID as its parent.
+  if (!rootDated && stoppedRootCreatedAt !== undefined) {
+    createdAtByPid.set(rootPid, stoppedRootCreatedAt)
+  }
+  const rootUndated = !runningPids.has(rootPid) && !createdAtByPid.has(rootPid)
   const childrenByParent = new Map<number, number[]>()
   for (const { pid, parentPid, createdAt } of processes) {
     // Windows never updates ParentProcessId when a parent exits, so an orphan keeps
@@ -391,12 +399,17 @@ function anyProcessIsAlive(
 export function createOperatingSystem(
   runtime: WindowsOperatingSystemRuntime = systemRuntime,
 ): OperatingSystem {
+  // The creation time of each root this adapter stopped, keyed by PID, for the liveness
+  // check that verifies the stop once the root can no longer be dated.
+  const stoppedRootCreatedAt = new Map<number, number>()
   const processTreeIsAlive = (pid: number, recordedStartIdentity?: string): boolean => {
     if (recordedStartIdentity !== undefined) {
       const orphans = recordedOrphanTreePids(runtime, pid, recordedStartIdentity)
       if (orphans !== null) return anyProcessIsAlive(runtime, orphans)
     }
-    return anyProcessIsAlive(runtime, processTreePids(runtime, pid))
+    return anyProcessIsAlive(
+      runtime, processTreePids(runtime, pid, false, stoppedRootCreatedAt.get(pid)),
+    )
   }
   const terminateProcessTree = (pid: number): boolean => {
     let trackedPids = processTreePids(runtime, pid, true)
@@ -407,6 +420,8 @@ export function createOperatingSystem(
         + ` through ${treeChain(trackedPids, process.pid)}.`,
       )
     }
+    const rootCreatedAt = trackedPids?.createdAt.get(pid)
+    if (rootCreatedAt !== undefined) stoppedRootCreatedAt.set(pid, rootCreatedAt)
 
     try {
       runtime.spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
