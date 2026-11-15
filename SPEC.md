@@ -1756,8 +1756,8 @@ issue's update and merge reconciliation wait for a later poll instead of posting
 ## Test coverage
 
 The suite drives real git repositories in temporary directories. Its cycle-gate cases in
-`tests/loop.test.ts` are the load-bearing ones: they pin the gate's state machine — cycle
-flags, CI outcomes, review rounds, final promotion, and stop conditions.
+`tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's state
+machine — cycle flags, CI outcomes, review rounds, final promotion, and stop conditions.
 `tests/documented-defaults.test.ts` holds the configuration tables in this file and in
 `README.md` to the defaults the source resolves. The suite's global setup removes this
 suite's own fixture directories older than six hours from the OS temporary directory,
