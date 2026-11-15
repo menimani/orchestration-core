@@ -92,6 +92,8 @@ export interface OperatingSystem {
    * process's surviving descendants, never the holder or anything the holder started.
    * Where the holder's identity cannot be read or matches, or the two identities are of a
    * form whose difference does not prove a different process, the answer is unchanged.
+   * After `terminateProcessTree` has stopped the PID's root, a process created before
+   * that root is never counted, so an earlier holder's orphan cannot fail the stop.
    */
   processTreeIsAlive(pid: number, recordedStartIdentity?: string): boolean
   /**

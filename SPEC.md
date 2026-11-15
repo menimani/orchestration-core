@@ -1203,7 +1203,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     snapshot omitted is dated by its start identity; when that query times out or fails,
     a stop leaves out every child with a creation time still naming the root, because
     an unknown identity never widens the set beyond what a known one would confirm,
-    while a liveness check keeps those links and answers `alive`. A snapshot
+    while a liveness check keeps those links and answers `alive`. A root the process
+    itself stopped is the exception: once it has exited, a liveness check dates it by the
+    creation time its stop saw, so a process created before it, which an earlier holder
+    of the PID left naming it as parent, never makes the check that verifies a stop
+    answer `alive`, nor a stopped task's `cleanup` retain its state. A snapshot
     that cannot be taken is taken again while waiting for the tree to exit; a tree still
     unlisted at the deadline fails as `Could not stop process tree <pid>. Its processes
     could not be listed.`, and one with survivors names them as `Still running: PID <pid>`.

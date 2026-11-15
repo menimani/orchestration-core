@@ -365,6 +365,38 @@ describe('cleanupTask', () => {
     expect(existsSync(statusFile(paths, taskId))).toBe(false)
   })
 
+  it('stops a runner whose reused PID an earlier holder\'s orphan still names as parent', () => {
+    // 4242 was recorded for a runner created at 5 s; 4243 was started at 1 s by an
+    // earlier holder of the same PID and outlives the runner, still naming 4242.
+    const windowsIdentity = (milliseconds: number): string => (
+      `windows:${621_355_968_000_000_000n + BigInt(milliseconds) * 10_000n}`
+    )
+    const alive = new Set([4242, 4243])
+    seedTask(null)
+    recordTaskProcess(paths, taskId, 4242, () => windowsIdentity(5_000))
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const runtime = makeRuntime({ os: windowsOperatingSystem({
+      spawn: (command) => { if (command === 'taskkill') alive.delete(4242) },
+      listProcesses: () => [
+        ...(alive.has(4242) ? [{ pid: 4242, parentPid: 1, createdAt: 5_000 }] : []),
+        { pid: 4243, parentPid: 4242, createdAt: 1_000 },
+      ],
+      probeProcess: (pid) => { if (!alive.has(pid)) throw gone() },
+      processStartIdentity: (pid) => {
+        if (!alive.has(pid)) return undefined
+        return windowsIdentity(pid === 4242 ? 5_000 : 1_000)
+      },
+      remove: (path, options) => { rmSync(plainPath(path), options) },
+    }) })
+
+    cleanupTask(paths, taskId, runtime, false)
+
+    expect(alive).toEqual(new Set([4243]))
+    expect(log).toHaveBeenCalledWith('Stopping running process: pid=4242')
+    expect(existsSync(worktree)).toBe(false)
+    expect(existsSync(statusFile(paths, taskId))).toBe(false)
+  })
+
   it('names each failed removal step and the holder hint when the worktree never goes', () => {
     seedTask(null)
     const runtime = makeRuntime({
