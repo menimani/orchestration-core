@@ -1264,6 +1264,32 @@ describe('cycle gate', () => {
       .toHaveLength(2)
   })
 
+  it('passes the CI gate for a merged PR holding HEAD without waiting for its checks', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>()
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 1,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    prepareFailedCiGate()
+    setForgeStatus({
+      ...forgeStatus,
+      state: 'merged',
+      isDraft: false,
+      headSha: git(['rev-parse', 'HEAD']).trim(),
+      checks: [{ name: 'frontend', conclusion: 'pending', startedAt: '' }],
+    })
+
+    expect(await loop.checkPrCiStatus()).toBe('success')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(prStatusCalls).toBe(2)
+    expect(enqueue).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
   it('stops instead of resetting a malformed CI fix attempt count', async () => {
     const enqueue = vi.fn<typeof enqueueTask>()
     const loop = makeLoop({

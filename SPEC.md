@@ -756,7 +756,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
     (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
-    counter once, at the gate, only when every expected scan completed successfully. A
+    counter once, at the gate, only when every expected scan has delivered a yield or
+    been recorded as failed. A
     scan launch failure stops the loop without advancing the cycle number, discarding
     the task state of every scan that attempt had already started so the next daemon
     dispatches the cycle's full scan set again rather than inheriting scans no cycle
@@ -969,7 +970,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the order the forge lists the checks in, but a name listed twice must be listed twice
     again. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
-    explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
+    explicitly sets `ciChecksExpected: false`. A merged PR passes at once, without
+    reading its checks or comparing its head with the local `HEAD`: it receives no
+    further pushes or checks to wait for, and the final gate reaches it only after the
+    pull request step has confirmed that the merged head holds `HEAD`, or when the PR is
+    merged between that step and the CI read. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
     the pending ID remains while the attempt count and cycle-complete flag remain
     unchanged; the next poll regenerates and retries the task with that same ID. An
