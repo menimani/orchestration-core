@@ -52,7 +52,7 @@ const separatorFixtureLines: ReadonlySet<string> = new Set([
 const ESCAPED_NON_ENGLISH_FIXTURE_LINES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   // Held findings must round-trip the separators a regular expression's `.` does not match.
   ['tests/held-findings.test.ts', separatorFixtureLines],
-  ['tests/loop.test.ts', separatorFixtureLines],
+  ['tests/loop-issue-queue.test.ts', separatorFixtureLines],
   ['tests/runner-codex.test.ts', new Set([
     `const specification = 'non-ASCII specification ${BACKSLASH}u65e5${BACKSLASH}u672c${BACKSLASH}u8a9e${BACKSLASH}n'.repeat(1_000)`,
   ])],
