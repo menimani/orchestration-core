@@ -442,6 +442,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    count, and the error, and the next such poll stops the loop; a successful check
    clears the count and logs `Recovered`. A rate-limited check neither counts nor clears
    the count.
+   The poll's issue-queue sync records fingerprints in the same ledger before it reaps
+   and claims, and fails the same way: a ledger that cannot be parsed counts a gate
+   failure under the sync's own key, so the second consecutive poll stops the loop
+   rather than idling on local work without reaping or claiming.
    A worker-mode daemon (item 36) has no gate to count against: it files a completion's
    findings before publishing it, so a check or filing failure is one of its publication errors,
    retried on later polls until the fifth consecutive failure marks the task failed, and
