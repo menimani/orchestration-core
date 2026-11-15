@@ -74,6 +74,9 @@ export const SEQUENTIAL_SUITES: string[] = [
   // Timed exit: an eval fixture must stop once its parent exits, within a process
   // deadline.
   'tests/test-process.test.ts',
+  // Timed exit (Linux): fixtures that outlive SIGTERM must be gone once the registry's
+  // cleanup returns, past two five-second grace periods.
+  'tests/posix-test-process.test.ts',
   // Deadline and timed exit: a fake docker exits before reading the archive, with a
   // long-lived helper and 10 s and 30 s deadlines.
   'tests/test-linux.test.ts',

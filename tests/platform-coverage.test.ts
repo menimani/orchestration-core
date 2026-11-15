@@ -5,7 +5,10 @@ import {
 
 describe('platform coverage', () => {
   it('leaves a suite uncollected only on the platforms that cannot attempt it', () => {
-    expect(uncollectedSuites('win32')).toEqual(['tests/posix-process-group.test.ts'])
+    expect(uncollectedSuites('win32')).toEqual([
+      'tests/posix-process-group.test.ts',
+      'tests/posix-test-process.test.ts',
+    ])
     expect(uncollectedSuites('linux')).toEqual([
       'tests/windows-cmd-arguments.test.ts',
       'tests/windows-console.test.ts',
