@@ -3,14 +3,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   processIsAlive: vi.fn(),
   processStartIdentity: vi.fn(),
+  startIdentitiesProveDifferentProcess: vi.fn(),
 }))
 
 vi.mock('../src/adapters/os.ts', () => ({
   operatingSystem: {
     processIsAlive: mocks.processIsAlive,
     processStartIdentity: mocks.processStartIdentity,
+    startIdentitiesProveDifferentProcess: mocks.startIdentitiesProveDifferentProcess,
   },
 }))
+
+import { createOperatingSystem as createPosixOperatingSystem } from '../src/adapters/os-posix.ts'
 
 import {
   currentProcessStartIdentity,
@@ -87,11 +91,30 @@ describe('lockOwnerIsCurrent', () => {
 
   it('is not current when a live process reuses the PID with a different identity', () => {
     mocks.processStartIdentity.mockReturnValue('started-at-2')
+    mocks.startIdentitiesProveDifferentProcess.mockReturnValue(true)
     mocks.processIsAlive.mockReturnValue(true)
 
     expect(lockOwnerIsCurrent(4321, 'started-at-1')).toBe(false)
+    expect(mocks.startIdentitiesProveDifferentProcess)
+      .toHaveBeenCalledWith('started-at-1', 'started-at-2')
     expect(mocks.processIsAlive).not.toHaveBeenCalled()
   })
+
+  it.each([true, false])(
+    'falls back to processIsAlive (%s) when a POSIX ps start-time difference proves nothing',
+    (alive) => {
+      // Without procfs the identity is `ps -o lstart=` text, which follows the time zone
+      // and locale of the process asking: the same live owner reads differently.
+      const posix = createPosixOperatingSystem()
+      mocks.startIdentitiesProveDifferentProcess
+        .mockImplementation(posix.startIdentitiesProveDifferentProcess)
+      mocks.processStartIdentity.mockReturnValue('darwin:Sat Nov 14 03:00:00 2026')
+      mocks.processIsAlive.mockReturnValue(alive)
+
+      expect(lockOwnerIsCurrent(4321, 'darwin:Sat Nov 14 12:00:00 2026')).toBe(alive)
+      expect(mocks.processIsAlive).toHaveBeenCalledWith(4321)
+    },
+  )
 
   it.each([true, false])('falls back to processIsAlive (%s) when the identity lookup throws', (alive) => {
     mocks.processStartIdentity.mockImplementation(() => {
