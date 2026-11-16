@@ -677,8 +677,13 @@ export async function reconcileFindingFingerprints(
   knownOpenFindings: readonly ForgeIssue[],
 ): Promise<void> {
   let openFindings = [...knownOpenFindings]
+  // A failed permission lookup hides every issue the loop filed, so dropping their
+  // entries would let the next scan file each finding again. Only a definite verdict
+  // removes an issue from the ledger; an unverified one is merely left unreconciled.
   const excludedIssueNumbers = new Set(openFindings
-    .filter((issue) => !isTrustedFingerprintOwner(issue))
+    .filter((issue) => !isTrustedFingerprintOwner(issue)
+      && (issue.author.permissionLookupFailed !== true
+        || issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)))
     .map((issue) => issue.number))
   if (excludedIssueNumbers.size > 0) {
     updateFingerprintLedger(paths, (ledger) => {
@@ -1433,21 +1438,27 @@ export async function reconcileIssueReleaseIntent(
   }
   const remaining = new Set(issueNumbers)
   const results = await Promise.allSettled(issueNumbers.map(async (issueNumber) => {
-    let claimedElsewhere: boolean
+    let claimedElsewhere = false
     const failures = issueFailureCount(paths, issueNumber)
     // A parked issue keeps its conflict record, so a person who readies it again hands
     // the kept commits to the next claim, and the merge that lands deletes their branches.
     const attempts = readConflictedAttempts(paths, issueConflictKey(issueNumber))
-    if (failures >= (options.maxIssueRetries ?? Number.POSITIVE_INFINITY)) {
-      const outcome = await parkIssue(forge, issueNumber, claimant)
-      if (outcome === 'parked') options.onPark?.(issueNumber, failures)
-      claimedElsewhere = outcome === 'claimed-elsewhere'
-    } else if (conflictRetriesExhausted(attempts)) {
-      const outcome = await parkIssue(forge, issueNumber, claimant)
-      if (outcome === 'parked') options.onConflictPark?.(issueNumber, attempts.length)
-      claimedElsewhere = outcome === 'claimed-elsewhere'
-    } else {
-      claimedElsewhere = !await returnIssueToReady(forge, issueNumber, keepSingleton, claimant)
+    try {
+      if (failures >= (options.maxIssueRetries ?? Number.POSITIVE_INFINITY)) {
+        const outcome = await parkIssue(forge, issueNumber, claimant)
+        if (outcome === 'parked') options.onPark?.(issueNumber, failures)
+        claimedElsewhere = outcome === 'claimed-elsewhere'
+      } else if (conflictRetriesExhausted(attempts)) {
+        const outcome = await parkIssue(forge, issueNumber, claimant)
+        if (outcome === 'parked') options.onConflictPark?.(issueNumber, attempts.length)
+        claimedElsewhere = outcome === 'claimed-elsewhere'
+      } else {
+        claimedElsewhere = !await returnIssueToReady(forge, issueNumber, keepSingleton, claimant)
+      }
+    } catch (error) {
+      // A deleted issue has nothing left to release, so it leaves the intent as settled;
+      // keeping it would fail every later reconciliation for good.
+      if (!(error instanceof ForgeIssueNotFoundError)) throw error
     }
     if (claimedElsewhere) options.onClaimedElsewhere?.(issueNumber)
     remaining.delete(issueNumber)

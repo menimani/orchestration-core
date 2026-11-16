@@ -530,6 +530,115 @@ describe('failure announcement and burst stop (via poll)', () => {
     expect(logText()).toContain('; could not requeue: Task specification not found:')
   })
 
+  it('stops dispatching local tasks once startup failures reach the burst limit', async () => {
+    initializeGitRepo()
+    const attemptedTaskIds: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
+        throw new Error('runner CLI not found')
+      },
+    }
+    const loop = makeLoop(
+      { autoMerge: false, scanEnabled: false, maxParallel: 3, maxBurstFailures: 2 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const taskIds = [1, 2, 3, 4].map((n) => `20260809_00000${n}_00${n}_auto-runner-missing`)
+    for (const taskId of taskIds) writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+    writeFileSync(
+      join(paths.queueDir, 'backlog.txt'),
+      taskIds.map((taskId) => `${taskId}:0\n`).join(''),
+    )
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(attemptedTaskIds).toEqual(taskIds.slice(0, 2))
+    expect(readStatus(paths, taskIds[0]!)?.status).toBe('failed')
+    expect(readStatus(paths, taskIds[1]!)?.status).toBe('failed')
+    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8'))
+      .toBe(taskIds.slice(2).map((taskId) => `${taskId}:0\n`).join(''))
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain('ERROR 2 tasks failed in one poll; stopping for environment repair')
+  })
+
+  it('does not count a local startup failure again when a later poll announces it', async () => {
+    initializeGitRepoWithRemote()
+    // A task still running keeps the cycle open across the polls below.
+    writeRawStatus('20260808_110000_000_user-busy', 'running', process.pid)
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async () => { throw new Error('runner CLI not found') },
+    }
+    const loop = makeLoop(
+      { autoMerge: false, scanEnabled: false, maxParallel: 3, maxBurstFailures: 2 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const first = '20260809_000001_001_auto-first-failure'
+    const second = '20260809_000002_002_auto-second-failure'
+    writeFileSync(join(paths.tasksDir, `${first}.md`), '# spec\n')
+    writeFileSync(join(paths.tasksDir, `${second}.md`), '# spec\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${first}:0\n`)
+
+    expect(await loop.poll()).toBe('continue')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${second}:0\n`)
+    expect(await loop.poll()).toBe('continue')
+
+    expect(logged).toContain(`FAILED: ${first} — log: ${join(paths.logsDir, `${first}.log`)}`)
+    expect(readStatus(paths, second)?.status).toBe('failed')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).not.toContain('tasks failed in one poll')
+  })
+
+  it('stops claiming work once issue startup failures reach the burst limit', async () => {
+    initializeGitRepo()
+    const attemptedTaskIds: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attemptedTaskIds.push(options.specFile.replace(/^.*[\\/]/, '').replace(/\.md$/, ''))
+        throw new Error('runner CLI not found')
+      },
+    }
+    const loop = makeLoop(
+      { issueQueueEnabled: true, scanEnabled: false, maxParallel: 3, maxBurstFailures: 2 },
+      stubProject,
+      undefined,
+      () => new Date(2026, 7, 8, 12, 0, 0),
+      runner,
+    )
+    loop.initializeSessionStateForBranch()
+    const issueNumbers: number[] = []
+    for (const n of [1, 2, 3]) {
+      issueNumbers.push(await fakeForge.createIssue({
+        title: `runner outage ${n}`,
+        body: buildIssueBody(`[BUG] runner outage finding ${n}`, 'scan-task'),
+        labels: [LABEL_FINDING, LABEL_READY],
+      }))
+    }
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(attemptedTaskIds).toHaveLength(2)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain('ERROR 2 tasks failed in one poll; stopping for environment repair')
+    for (const issueNumber of issueNumbers.slice(0, 2)) {
+      const released = await fakeForge.getIssue(issueNumber)
+      expect(released.labels).toContain(LABEL_READY)
+      expect(released.assignees).toEqual([])
+    }
+  })
+
   it('releases a claimed issue immediately when task startup fails', async () => {
     initializeGitRepo()
     const description = '[BUG] recover a claimed task after startup fails'

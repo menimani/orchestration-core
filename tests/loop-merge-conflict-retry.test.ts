@@ -414,6 +414,38 @@ describe('completed task merge recovery', () => {
     expect(logged.some((line) => line.startsWith('Failed 038_auto'))).toBe(false)
   })
 
+  it('defers a merge whose run branch moved while the gate ran without counting a failure', async () => {
+    const taskId = '20260815_125258_040_auto-run-branch-moved'
+    initializeGitRepo()
+    makeCompletedTask(taskId)
+    // A hand merge lands on the run branch each time the gate reads its checks.
+    const project: ProjectAdapter = {
+      ...stubProject,
+      mergeChecks: () => {
+        git(['commit', '-q', '--allow-empty', '-m', 'chore: land a hand merge'])
+        return []
+      },
+    }
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: false, scanEnabled: false, maxParallel: 0,
+    }, project)
+    loop.initializeSessionStateForBranch()
+    writeFileSync(join(paths.queueDir, 'merge-failure-count.txt'), '2\n')
+
+    expect(await loop.poll()).toBe('continue')
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expect(git(['log', '-1', '--format=%s'])).toBe('chore: land a hand merge')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logged.filter((line) => line.startsWith('Merging 040_auto'))).toHaveLength(2)
+    expect(logText()).toContain('WARN 040_auto merge deferred: the run branch moved while the gate ran')
+    expect(logged.some((line) => line.startsWith('Failed 040_auto'))).toBe(false)
+    expect(readFileSync(join(paths.logsDir, `${taskId}.merge.log`), 'utf8'))
+      .toContain('The integration checkout moved while the merge gate ran')
+  })
+
   it('heartbeats a completed task while its merge stays deferred', async () => {
     const taskId = '20260815_125258_039_auto-deferred-heartbeat'
     initializeGitRepo()

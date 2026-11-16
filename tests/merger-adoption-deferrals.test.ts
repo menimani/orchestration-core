@@ -158,6 +158,34 @@ describe('remote task adoption', () => {
     expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
   })
 
+  it('defers adoption without counting a failure when the run branch moved while the gate ran', async () => {
+    const task = pushWorkerBranch('20260809_000000_025_auto-run-branch-moved')
+    const issueNumber = await mergeReadyIssue(task.branch, task.head)
+    const project: ProjectAdapter = {
+      ...stubProject,
+      name: 'adoption-run-branch-moved',
+      mergeChecks: () => {
+        git(repoRoot, ['commit', '-q', '--allow-empty', '-m', 'chore: land a hand merge'])
+        return []
+      },
+    }
+
+    await makeLoop(project).adoptRemoteTasks()
+
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe('chore: land a hand merge')
+    const issue = await forge.getIssue(issueNumber)
+    expect(issue.labels).toContain(LABEL_MERGE_READY)
+    expect(issue.labels).not.toContain(LABEL_MERGE_FAILED)
+    expect(forge.issueComments.get(issueNumber)?.join('\n'))
+      .not.toContain('Remote task adoption failed')
+    expect(readFileSync(join(paths.queueDir, 'merge-failure-count.txt'), 'utf8').trim()).toBe('0')
+    expect(readFileSync(join(paths.logsDir, `issue-${issueNumber}.merge.log`), 'utf8'))
+      .toContain('The integration checkout moved while the merge gate ran')
+    expect(logged.join('\n'))
+      .toContain('025_auto adoption deferred: the run branch moved while the gate ran')
+    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
+  })
+
   it('defers adoption without counting a failure when the reporter\'s access is undetermined', async () => {
     const task = pushWorkerBranch('20260809_000000_019_auto-report-permission-unknown')
     const issueNumber = await mergeReadyIssue(task.branch, task.head)

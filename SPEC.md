@@ -646,6 +646,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     failed, the merge is deferred with a WARN that the repository test lock stayed busy,
     the task stays `completed` for the next poll to merge again, and this count does not
     advance. Every other non-zero exit is still `Tests failed. Aborting merge.`
+    The gate verifies the merge against the integration checkout's commit as it stood
+    when the gate began, and the merge lands only there: a checkout that has since moved
+    to another commit or branch, by a hand merge during the run say, defers the merge
+    with a WARN that the run branch moved while the gate ran, leaves the task
+    `completed` for the next poll to gate again, and neither advances this count nor
+    hands the task back. An adopted worker branch merges the reported head commit, not
+    whatever its remote-tracking ref holds by then, and defers the same way.
     A merge deferred because a linked issue's claim cannot be read (item 34) likewise
     leaves this count alone, and a lost claim fails the task before its gate runs.
     A conflicting pre-merge rebase is terminal for that task and contributes at most one
@@ -984,13 +991,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
     count, and a forge rate limit is not counted. An open
     PR whose reported head commit is not the local `HEAD` is pending, whatever its
     checks say, because the forge can still report the previous head after a push. A
-    success or failure verdict also needs the same check names on two consecutive polls
-    of the same head, because a dependent job or an external status can appear only
+    success or failure verdict about a non-empty check list also needs the same check
+    names on two consecutive polls of the same head, because a dependent job or an external status can appear only
     after the listed checks finish; until then the gate is pending. The comparison ignores
     the order the forge lists the checks in, but a name listed twice must be listed twice
     again. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
-    explicitly sets `ciChecksExpected: false`. A merged PR passes at once, without
+    explicitly sets `ciChecksExpected: false`; then it succeeds on the first such poll,
+    exempt from the two-poll comparison, because a project that declares it has no checks
+    has no late check to wait for. A merged PR passes at once, without
     reading its checks or comparing its head with the local `HEAD`: it receives no
     further pushes or checks to wait for, and the final gate reaches it only after the
     pull request step has confirmed that the merged head holds `HEAD`, or when the PR is
@@ -1112,7 +1121,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     run's announced failures (item 20) — as a `status` query after a crash or a run on
     another branch leaves it — is treated the same way: announced once, recorded
     against the cycle, and counted toward its issues' consecutive failure counts, but
-    not toward the burst. A task that fails after startup counts as before.
+    not toward the burst. A task that fails after startup counts as before. A task whose
+    startup fails after its status or claim is recorded — the runner CLI missing, a
+    worktree that cannot be added — counts toward the burst of the poll that dequeued
+    it, and that poll dequeues nothing further once the limit is reached; the later
+    poll that announces it does not count it again.
 19a. In issue-queue mode, every failed-task release increments a persistent per-issue
      consecutive failure count in the queue directory. Before `MAX_ISSUE_RETRIES`
      (default 3), the issue returns to `loop:ready`; at the bound it is unassigned and
@@ -1123,7 +1136,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
      has claimed since, since a lapsed claim may have been reaped and handed elsewhere;
      an operator cleanup still releases whoever holds the issue. Each issue leaves the
      persisted release intent as soon as its own release verifies, so retrying a partial
-     release never releases an issue a second time.
+     release never releases an issue a second time. An issue the forge reports as deleted
+     has nothing left to release and leaves the intent the same way; any other error keeps
+     the issue in the intent for the next poll.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks. A finished run lists the failures it announced,
     so the next run neither reports them again nor counts them toward a failure burst.
@@ -1478,11 +1493,17 @@ it and records a counted warning, so a transient outage never quarantines a trus
 author's issue for good; the unlabelled issue keeps holding the idle gate open meanwhile.
 
 Authorship is checked both when a ready issue is claimed and when fingerprint ownership
-is reconciled. An untrusted issue remains unassigned and ready, receives
-`loop:untrusted-author`, and emits a warning naming its author so a maintainer can inspect
-it and re-file genuine work. An issue whose author lacks write access, or which already
-carries that label, never suppresses or closes a trusted finding and is never recorded in
-the local fingerprint ledger.
+is reconciled. Only the claim gate acts on the issue itself: an untrusted issue remains
+unassigned and ready, receives `loop:untrusted-author`, and emits a warning naming its
+author so a maintainer can inspect it and re-file genuine work. Reconciliation neither
+labels nor warns; it only leaves the issue out. An issue whose author lacks write access,
+or which already carries that label, never suppresses or closes a trusted finding and is
+never recorded in the local fingerprint ledger. An issue whose author's access is
+undetermined is left out of that poll's reconciliation as well, but keeps the ledger
+entries it already has: a failed lookup would otherwise drop the entries of every finding
+the loop itself filed, and the next scan would file each of them again. Only a verdict of
+no write access or the label removes such an entry, and a kept entry suppresses a finding
+only once its issue, read again at that moment, passes the author check.
 
 An issue imported into a fleet's queue (item 38) is authored by whoever ran the import,
 so the claim gate alone would trust any project issue. The import is therefore the trust
@@ -1766,6 +1787,8 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     deferred with a WARN that the repository test lock stayed busy, without the comment,
     the relabel, or a failure count, and every member stays `loop:merge-ready` for the
     next poll to adopt again.
+    An integration checkout that moved while the gate ran (item 10) defers the adoption
+    the same way, with a WARN that the run branch moved while the gate ran.
     A worker report counts only from an author with write access. When the newest
     report-shaped comment on a member comes from an author whose access is undetermined
     (see the trust model), the adoption is deferred the same way, and that issue's

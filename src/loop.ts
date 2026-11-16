@@ -17,7 +17,8 @@ import {
   shortTaskId,
 } from './ids.ts'
 import {
-  completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
+  completeTaskWithoutChanges, MergeBaseMovedError, mergeRemoteTask, mergeTask, MergeError,
+  MergeRecoveryError,
   NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
   UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterRecordedMerge,
   VerificationFailedError, withMergeGuard, type OrchestrationDepsRuntime,
@@ -282,6 +283,10 @@ export function createLoop(deps: LoopDeps) {
   // their issues released, but they count toward neither an issue's retry budget nor
   // the burst guard.
   const tasksStoppedForDependencyInstall = new Set<string>()
+  // A task whose startup failed after its status was recorded is counted toward the
+  // burst by the poll that dequeued it. The next poll still announces it, but must not
+  // count the same failure a second time.
+  const tasksCountedAtDispatch = new Set<string>()
 
   // Resolved once per process; the login cannot change under a running loop.
   let cachedUser: string | undefined
@@ -1026,6 +1031,15 @@ export function createLoop(deps: LoopDeps) {
             ? `issue #${issue.number}`
             : shortTaskId(adoptionTaskId)
           event('WARN', `${subject} adoption deferred: the repository test lock stayed busy`)
+          continue
+        }
+        // Nor is a checkout that moved while the gate ran: the gate tested another base,
+        // so nothing landed and the pushed work is no more suspect than before.
+        if (error instanceof MergeBaseMovedError) {
+          const subject = adoptionTaskId === undefined
+            ? `issue #${issue.number}`
+            : shortTaskId(adoptionTaskId)
+          event('WARN', `${subject} adoption deferred: the run branch moved while the gate ran`)
           continue
         }
         // Not a failure either: a permission lookup that failed says nothing about the
@@ -3328,6 +3342,11 @@ export function createLoop(deps: LoopDeps) {
     const remoteOperationsAvailable = await initializeIssueQueue()
 
     let burstFailures = 0
+    const stopOnBurstFailures = (): void => {
+      if (burstFailures < config.maxBurstFailures) return
+      event('ERROR', `${burstFailures} tasks failed in one poll; stopping for environment repair`)
+      writeFileSync(stopFile, '')
+    }
     const mergeAttempts = new Set<string>()
     const locallyRunningIssues = new Set<number>()
     let issueReconciliationPending = false
@@ -3588,6 +3607,15 @@ export function createLoop(deps: LoopDeps) {
           event('WARN', `${shortTaskId(taskId)} merge gate deferred: the repository test lock stayed busy`)
           return
         }
+        // Nor is a checkout that moved while the gate ran, by a hand merge or a branch
+        // switch: the gate tested another base, so the task stays completed for the next
+        // poll to gate again, and neither the task nor the failure count is blamed.
+        if (error instanceof MergeBaseMovedError) {
+          appendFileSync(mergeLog, `${error.message}
+`)
+          event('WARN', `${shortTaskId(taskId)} merge deferred: the run branch moved while the gate ran`)
+          return
+        }
         appendFileSync(mergeLog, `${errorSummary(error)}\n`)
         if (error instanceof OrchestrationDepsInstallError || error instanceof MergeRecoveryError) {
           throw error
@@ -3750,6 +3778,7 @@ export function createLoop(deps: LoopDeps) {
       const status = await settleHandback(taskId, refreshed)
       const wasDeadAtStartup = tasksDeadAtStartup.delete(taskId)
       const wasFailedAtStartup = tasksFailedAtStartup.delete(taskId)
+      const wasCountedAtDispatch = tasksCountedAtDispatch.delete(taskId)
       // A task can finish between the stop and this refresh; only once it leaves
       // running is the stop's verdict known, so the mark is kept until then.
       const wasStoppedByLoop = status !== 'running'
@@ -3828,7 +3857,8 @@ export function createLoop(deps: LoopDeps) {
           rmSync(join(paths.queueDir, `cycle-complete-${cycleNow}`), { force: true })
         }
         writeFileSync(failedFlag, '')
-        if (!wasDeadAtStartup && !wasFailedAtStartup && !wasStoppedByLoop) {
+        if (!wasDeadAtStartup && !wasFailedAtStartup && !wasStoppedByLoop
+          && !wasCountedAtDispatch) {
           burstFailures += 1
         }
       }
@@ -3939,10 +3969,7 @@ export function createLoop(deps: LoopDeps) {
     // Several tasks failing at once is the environment, not the work. Eleven tasks once
     // died together because DNS stopped resolving the Codex endpoint; the loop carried
     // on starting more, and each burned its tokens reaching the same wall.
-    if (burstFailures >= config.maxBurstFailures) {
-      event('ERROR', `${burstFailures} tasks failed in one poll; stopping for environment repair`)
-      writeFileSync(stopFile, '')
-    }
+    stopOnBurstFailures()
 
     let openFindings: ForgeIssue[] | null = null
     if (config.issueQueueEnabled && remoteOperationsAvailable && !existsSync(stopFile)
@@ -4143,8 +4170,13 @@ export function createLoop(deps: LoopDeps) {
             writeFileSync(stopFile, '')
             break
           }
+          // A startup failure is the environment's as much as a task that dies after
+          // starting: a missing runner CLI or a failing worktree add fails every entry
+          // the same way, so it counts toward this poll's burst and ends dispatch there.
           const issueNumbers = issueNumbersForTask(paths, entry.taskId)
           if (config.issueQueueEnabled && issueNumbers.length > 0) {
+            burstFailures += 1
+            stopOnBurstFailures()
             recordIssueFailure(paths, entry.taskId)
             // The status sweep counts a failed task that has no flag. A release that fails
             // here leaves the task behind for later polls, so mark the failure as counted.
@@ -4183,6 +4215,9 @@ export function createLoop(deps: LoopDeps) {
               break
             }
             event('WARN', `${shortTaskId(entry.taskId)} startup failed: ${errorSummary(error)}`)
+            tasksCountedAtDispatch.add(entry.taskId)
+            burstFailures += 1
+            stopOnBurstFailures()
           }
         }
       }

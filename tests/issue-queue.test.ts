@@ -601,6 +601,24 @@ describe('publishFinding', () => {
       .toBe(`${fingerprint} ${trusted}\n`)
   })
 
+  it('keeps fingerprint ledger entries whose author permission lookup failed', async () => {
+    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
+    const second = await publishFinding(forge, paths, '[BUG] `src/c/d.ts` leaks', 'scan-1')
+    const ledgerFile = join(paths.queueDir, 'issue-fingerprints')
+    const ledgerBefore = readFileSync(ledgerFile, 'utf8')
+    for (const issueNumber of [first.issueNumber, second.issueNumber]) {
+      const stored = forge.issues.get(issueNumber)
+      if (stored === undefined) throw new Error('expected published issue')
+      stored.author = { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true }
+    }
+
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
+
+    expect(readFileSync(ledgerFile, 'utf8')).toBe(ledgerBefore)
+    expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
+    expect((await forge.getIssue(second.issueNumber)).state).toBe('open')
+  })
+
   it('files different requirements with the same tag and path as separate issues', async () => {
     const closeButtons = '[LAYOUT] Remove close buttons from `src/frontend/src/pages/CalendarPage.tsx`'
     const addButtons = '[LAYOUT] Collapse add buttons in `src/frontend/src/pages/CalendarPage.tsx`'
@@ -2294,6 +2312,43 @@ describe('issue claim release', () => {
     expect(retried.labels).not.toContain(LABEL_IN_PROGRESS)
     expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([])
     expect(issueNumbersForTask(paths, 'task-release')).toEqual([])
+  })
+
+  it('settles a release whose issue was deleted before reconciliation', async () => {
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `grouped claim ${index}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [forge.user],
+    })))
+    const [kept, deleted] = issueNumbers as [number, number]
+    recordIssuesForTask(paths, 'task-release', issueNumbers)
+    recordIssueReleaseIntent(paths, 'task-release', issueNumbers, true)
+    forge.issues.delete(deleted)
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-release')).resolves.toEqual([])
+
+    const released = await forge.getIssue(kept)
+    expect(released.assignees).toEqual([])
+    expect(released.labels).toEqual(expect.arrayContaining([LABEL_READY, LABEL_GROUP_SINGLETON]))
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(false)
+    expect(issueNumbersForTask(paths, 'task-release')).toEqual([])
+  })
+
+  it('settles a deleted issue due for parking without failing the release', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'exhausted claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [forge.user],
+    })
+    recordIssuesForTask(paths, 'task-park', [issueNumber])
+    recordIssueReleaseIntent(paths, 'task-park', [issueNumber])
+    forge.issues.delete(issueNumber)
+    const onPark = vi.fn()
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-park', {
+      maxIssueRetries: 0, onPark,
+    })).resolves.toEqual([])
+
+    expect(onPark).not.toHaveBeenCalled()
+    expect(issueReleaseIntentForTask(paths, 'task-park')).toEqual([])
   })
 
   it('reports a cleanup failure after a full release without keeping the released issues', async () => {
