@@ -66,10 +66,11 @@ export const SEQUENTIAL_SUITES: string[] = [
   // Deadline: an installed copy of the core resolves a restart and runs a loop to its
   // first poll.
   'tests/consumer-smoke.test.ts',
-  // Timed exit (Linux): a shell killed by a signal must be reported within a 30 s
-  // command timeout.
+  // Timed exit (Linux): a detached process group must be gone within a process deadline,
+  // and a shell killed by a signal must be reported within a 30 s command timeout.
   'tests/posix-process-group.test.ts',
-  // Timed exit: a daemon's process tree must be gone within a process deadline.
+  // Timed exit (every platform): a daemon's process tree must be gone within a process
+  // deadline.
   'tests/process-tree-termination.test.ts',
   // Timed exit: an eval fixture must stop once its parent exits, within a process
   // deadline.
