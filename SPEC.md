@@ -991,13 +991,15 @@ are not parsed by `loadConfig` and are not operator-file settings.
     count, and a forge rate limit is not counted. An open
     PR whose reported head commit is not the local `HEAD` is pending, whatever its
     checks say, because the forge can still report the previous head after a push. A
-    success or failure verdict also needs the same check names on two consecutive polls
-    of the same head, because a dependent job or an external status can appear only
+    success or failure verdict about a non-empty check list also needs the same check
+    names on two consecutive polls of the same head, because a dependent job or an external status can appear only
     after the listed checks finish; until then the gate is pending. The comparison ignores
     the order the forge lists the checks in, but a name listed twice must be listed twice
     again. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
-    explicitly sets `ciChecksExpected: false`. A merged PR passes at once, without
+    explicitly sets `ciChecksExpected: false`; then it succeeds on the first such poll,
+    exempt from the two-poll comparison, because a project that declares it has no checks
+    has no late check to wait for. A merged PR passes at once, without
     reading its checks or comparing its head with the local `HEAD`: it receives no
     further pushes or checks to wait for, and the final gate reaches it only after the
     pull request step has confirmed that the merged head holds `HEAD`, or when the PR is
@@ -1489,11 +1491,12 @@ it and records a counted warning, so a transient outage never quarantines a trus
 author's issue for good; the unlabelled issue keeps holding the idle gate open meanwhile.
 
 Authorship is checked both when a ready issue is claimed and when fingerprint ownership
-is reconciled. An untrusted issue remains unassigned and ready, receives
-`loop:untrusted-author`, and emits a warning naming its author so a maintainer can inspect
-it and re-file genuine work. An issue whose author lacks write access, or which already
-carries that label, never suppresses or closes a trusted finding and is never recorded in
-the local fingerprint ledger.
+is reconciled. Only the claim gate acts on the issue itself: an untrusted issue remains
+unassigned and ready, receives `loop:untrusted-author`, and emits a warning naming its
+author so a maintainer can inspect it and re-file genuine work. Reconciliation neither
+labels nor warns; it only leaves the issue out. An issue whose author lacks write access,
+or which already carries that label, never suppresses or closes a trusted finding and is
+never recorded in the local fingerprint ledger.
 
 An issue imported into a fleet's queue (item 38) is authored by whoever ran the import,
 so the claim gate alone would trust any project issue. The import is therefore the trust
