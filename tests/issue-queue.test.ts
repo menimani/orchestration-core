@@ -2296,6 +2296,43 @@ describe('issue claim release', () => {
     expect(issueNumbersForTask(paths, 'task-release')).toEqual([])
   })
 
+  it('settles a release whose issue was deleted before reconciliation', async () => {
+    const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
+      title: `grouped claim ${index}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [forge.user],
+    })))
+    const [kept, deleted] = issueNumbers as [number, number]
+    recordIssuesForTask(paths, 'task-release', issueNumbers)
+    recordIssueReleaseIntent(paths, 'task-release', issueNumbers, true)
+    forge.issues.delete(deleted)
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-release')).resolves.toEqual([])
+
+    const released = await forge.getIssue(kept)
+    expect(released.assignees).toEqual([])
+    expect(released.labels).toEqual(expect.arrayContaining([LABEL_READY, LABEL_GROUP_SINGLETON]))
+    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(false)
+    expect(issueNumbersForTask(paths, 'task-release')).toEqual([])
+  })
+
+  it('settles a deleted issue due for parking without failing the release', async () => {
+    const issueNumber = await forge.createIssue({
+      title: 'exhausted claim', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+      assignees: [forge.user],
+    })
+    recordIssuesForTask(paths, 'task-park', [issueNumber])
+    recordIssueReleaseIntent(paths, 'task-park', [issueNumber])
+    forge.issues.delete(issueNumber)
+    const onPark = vi.fn()
+
+    await expect(reconcileIssueReleaseIntent(forge, paths, 'task-park', {
+      maxIssueRetries: 0, onPark,
+    })).resolves.toEqual([])
+
+    expect(onPark).not.toHaveBeenCalled()
+    expect(issueReleaseIntentForTask(paths, 'task-park')).toEqual([])
+  })
+
   it('reports a cleanup failure after a full release without keeping the released issues', async () => {
     const issueNumbers = await Promise.all([1, 2].map((index) => forge.createIssue({
       title: `grouped claim ${index}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
