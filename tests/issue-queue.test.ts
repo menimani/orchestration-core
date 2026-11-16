@@ -601,6 +601,24 @@ describe('publishFinding', () => {
       .toBe(`${fingerprint} ${trusted}\n`)
   })
 
+  it('keeps fingerprint ledger entries whose author permission lookup failed', async () => {
+    const first = await publishFinding(forge, paths, '[BUG] `src/a/b.ts` breaks', 'scan-1')
+    const second = await publishFinding(forge, paths, '[BUG] `src/c/d.ts` leaks', 'scan-1')
+    const ledgerFile = join(paths.queueDir, 'issue-fingerprints')
+    const ledgerBefore = readFileSync(ledgerFile, 'utf8')
+    for (const issueNumber of [first.issueNumber, second.issueNumber]) {
+      const stored = forge.issues.get(issueNumber)
+      if (stored === undefined) throw new Error('expected published issue')
+      stored.author = { login: 'maintainer-one', hasWriteAccess: false, permissionLookupFailed: true }
+    }
+
+    await reconcileFindingFingerprints(forge, paths, await forge.listOpenIssues(LABEL_FINDING))
+
+    expect(readFileSync(ledgerFile, 'utf8')).toBe(ledgerBefore)
+    expect((await forge.getIssue(first.issueNumber)).state).toBe('open')
+    expect((await forge.getIssue(second.issueNumber)).state).toBe('open')
+  })
+
   it('files different requirements with the same tag and path as separate issues', async () => {
     const closeButtons = '[LAYOUT] Remove close buttons from `src/frontend/src/pages/CalendarPage.tsx`'
     const addButtons = '[LAYOUT] Collapse add buttons in `src/frontend/src/pages/CalendarPage.tsx`'
