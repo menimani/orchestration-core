@@ -9,8 +9,8 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { MergeCheck, ProjectAdapter } from '../src/adapters/project.ts'
 import {
-  describeCommandFailure, MergeError, MergeRecoveryError, mergeTask, RebaseConflictError,
-  TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
+  describeCommandFailure, MergeBaseMovedError, MergeError, MergeRecoveryError, mergeTask,
+  RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
 } from '../src/merge.ts'
 import { readStatus } from '../src/status.ts'
 import {
@@ -388,5 +388,55 @@ describe('mergeTask', () => {
     await makeCompletedTask(taskId)
     await expect(mergeTask(paths, taskId, { taskGate: 'light', project: stubProject }))
       .rejects.toBeInstanceOf(MergeError)
+  })
+
+  it('defers a merge whose run branch received a hand merge while the gate ran', async () => {
+    const taskId = '20260808_000000_093_user-run-branch-moved'
+    await makeCompletedTask(taskId, { commit: true })
+    // The gate's check list is read while the gate runs, the window a hand merge lands in.
+    const handMerge: ProjectAdapter = {
+      ...noCheckProject,
+      name: 'hand-merge-during-gate',
+      mergeChecks: () => {
+        git(repoRoot, ['commit', '-q', '--allow-empty', '-m', 'chore: land a hand merge'])
+        return []
+      },
+    }
+
+    const deferred = mergeTask(paths, taskId, { taskGate: 'light', project: handMerge })
+
+    await expect(deferred).rejects.toBeInstanceOf(MergeBaseMovedError)
+    await expect(deferred).rejects.toThrow('The integration checkout moved while the merge gate ran')
+    const movedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(git(repoRoot, ['log', '-1', '--format=%s', movedHead]).trim()).toBe('chore: land a hand merge')
+    expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
+    expectNoTemporaryWorktree('.merge-')
+
+    // The next attempt gates the task against the moved branch and lands on it.
+    const result = await mergeTask(paths, taskId, { taskGate: 'light', project: noCheckProject })
+    expect(result.outcome).toBe('merged')
+    expect(git(repoRoot, ['rev-parse', 'HEAD^1']).trim()).toBe(movedHead)
+  })
+
+  it('defers a merge whose checkout switched branches while the gate ran', async () => {
+    const taskId = '20260808_000000_094_user-run-branch-switched'
+    await makeCompletedTask(taskId, { commit: true })
+    const head = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    const branchSwitch: ProjectAdapter = {
+      ...noCheckProject,
+      name: 'branch-switch-during-gate',
+      mergeChecks: () => {
+        git(repoRoot, ['switch', '-qc', 'other-run'])
+        return []
+      },
+    }
+
+    await expect(mergeTask(paths, taskId, { taskGate: 'light', project: branchSwitch }))
+      .rejects.toThrow('but the checkout is now on other-run')
+
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(head)
+    expect(git(repoRoot, ['rev-parse', 'main']).trim()).toBe(head)
+    expect(readStatus(paths, taskId)?.status).toBe('completed')
   })
 })

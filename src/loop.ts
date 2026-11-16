@@ -17,7 +17,8 @@ import {
   shortTaskId,
 } from './ids.ts'
 import {
-  completeTaskWithoutChanges, mergeRemoteTask, mergeTask, MergeError, MergeRecoveryError,
+  completeTaskWithoutChanges, MergeBaseMovedError, mergeRemoteTask, mergeTask, MergeError,
+  MergeRecoveryError,
   NoChangeReconciliationError, RebaseConflictError, TEST_LOCK_BUSY_EXIT_CODE, TestLockBusyError,
   UnverifiedRunnerError, OrchestrationDepsInstallError, syncOrchestrationDepsAfterRecordedMerge,
   VerificationFailedError, withMergeGuard, type OrchestrationDepsRuntime,
@@ -1030,6 +1031,15 @@ export function createLoop(deps: LoopDeps) {
             ? `issue #${issue.number}`
             : shortTaskId(adoptionTaskId)
           event('WARN', `${subject} adoption deferred: the repository test lock stayed busy`)
+          continue
+        }
+        // Nor is a checkout that moved while the gate ran: the gate tested another base,
+        // so nothing landed and the pushed work is no more suspect than before.
+        if (error instanceof MergeBaseMovedError) {
+          const subject = adoptionTaskId === undefined
+            ? `issue #${issue.number}`
+            : shortTaskId(adoptionTaskId)
+          event('WARN', `${subject} adoption deferred: the run branch moved while the gate ran`)
           continue
         }
         // Not a failure either: a permission lookup that failed says nothing about the
@@ -3595,6 +3605,15 @@ export function createLoop(deps: LoopDeps) {
         if (error instanceof TestLockBusyError) {
           appendFileSync(mergeLog, `${error.message}\n`)
           event('WARN', `${shortTaskId(taskId)} merge gate deferred: the repository test lock stayed busy`)
+          return
+        }
+        // Nor is a checkout that moved while the gate ran, by a hand merge or a branch
+        // switch: the gate tested another base, so the task stays completed for the next
+        // poll to gate again, and neither the task nor the failure count is blamed.
+        if (error instanceof MergeBaseMovedError) {
+          appendFileSync(mergeLog, `${error.message}
+`)
+          event('WARN', `${shortTaskId(taskId)} merge deferred: the run branch moved while the gate ran`)
           return
         }
         appendFileSync(mergeLog, `${errorSummary(error)}\n`)

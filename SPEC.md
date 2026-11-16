@@ -646,6 +646,13 @@ are not parsed by `loadConfig` and are not operator-file settings.
     failed, the merge is deferred with a WARN that the repository test lock stayed busy,
     the task stays `completed` for the next poll to merge again, and this count does not
     advance. Every other non-zero exit is still `Tests failed. Aborting merge.`
+    The gate verifies the merge against the integration checkout's commit as it stood
+    when the gate began, and the merge lands only there: a checkout that has since moved
+    to another commit or branch, by a hand merge during the run say, defers the merge
+    with a WARN that the run branch moved while the gate ran, leaves the task
+    `completed` for the next poll to gate again, and neither advances this count nor
+    hands the task back. An adopted worker branch merges the reported head commit, not
+    whatever its remote-tracking ref holds by then, and defers the same way.
     A merge deferred because a linked issue's claim cannot be read (item 34) likewise
     leaves this count alone, and a lost claim fails the task before its gate runs.
     A conflicting pre-merge rebase is terminal for that task and contributes at most one
@@ -1770,6 +1777,8 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     deferred with a WARN that the repository test lock stayed busy, without the comment,
     the relabel, or a failure count, and every member stays `loop:merge-ready` for the
     next poll to adopt again.
+    An integration checkout that moved while the gate ran (item 10) defers the adoption
+    the same way, with a WARN that the run branch moved while the gate ran.
     A worker report counts only from an author with write access. When the newest
     report-shaped comment on a member comes from an author whose access is undetermined
     (see the trust model), the adoption is deferred the same way, and that issue's

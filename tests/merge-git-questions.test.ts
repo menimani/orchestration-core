@@ -73,8 +73,10 @@ describe('git questions of one merge step', () => {
 
     expect(answer.outcome).toBe('merged')
     expect(asked(started, worktree, ['rev-list', '--reverse', 'main..HEAD'])).toBe(1)
-    // Before, the commits and each commit's trees were read twice: 35 processes.
-    expect(stepProcesses(started)).toBe(31)
+    // Before, the commits and each commit's trees were read twice: 35 processes. Two
+    // more questions since pin the gate's base: resolving it once, and confirming the
+    // checkout is still on its branch before the merge lands there.
+    expect(stepProcesses(started)).toBe(33)
   })
 
   it('reads the task commits again after a moved run branch made it rebase', async () => {
@@ -88,8 +90,9 @@ describe('git questions of one merge step', () => {
 
     expect(answer.outcome).toBe('merged')
     expect(asked(started, worktree, ['rev-list', '--reverse', 'main..HEAD'])).toBe(2)
-    // Before, the checkout HEAD was read twice: 37 processes.
-    expect(stepProcesses(started)).toBe(36)
+    // Before, the checkout HEAD was read twice: 37 processes. The two questions that pin
+    // the gate's base add two.
+    expect(stepProcesses(started)).toBe(38)
     const mergeCommit = answer.outcome === 'merged' ? answer.mergeCommit : ''
     expect(git(repoRoot, ['rev-parse', `${mergeCommit}^2^`]).trim()).toBe(runTip)
   })
@@ -154,8 +157,9 @@ describe('git questions of one merge step', () => {
     ))
 
     expect(asked(started, repoRoot, ['rev-parse', 'HEAD'])).toBe(2)
-    // Before, the checkout HEAD was read twice: 20 processes.
-    expect(stepProcesses(started)).toBe(19)
+    // Before, the checkout HEAD was read twice: 20 processes. The two questions that pin
+    // the gate's base add two.
+    expect(stepProcesses(started)).toBe(21)
     expect(git(repoRoot, ['rev-parse', `${answer}^1`]).trim()).toBe(headBefore)
     expect(git(repoRoot, ['rev-parse', `${answer}^2`]).trim()).toBe(expectedHead)
   })
