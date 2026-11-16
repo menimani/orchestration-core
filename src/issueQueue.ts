@@ -677,8 +677,13 @@ export async function reconcileFindingFingerprints(
   knownOpenFindings: readonly ForgeIssue[],
 ): Promise<void> {
   let openFindings = [...knownOpenFindings]
+  // A failed permission lookup hides every issue the loop filed, so dropping their
+  // entries would let the next scan file each finding again. Only a definite verdict
+  // removes an issue from the ledger; an unverified one is merely left unreconciled.
   const excludedIssueNumbers = new Set(openFindings
-    .filter((issue) => !isTrustedFingerprintOwner(issue))
+    .filter((issue) => !isTrustedFingerprintOwner(issue)
+      && (issue.author.permissionLookupFailed !== true
+        || issue.labels.includes(LABEL_UNTRUSTED_AUTHOR)))
     .map((issue) => issue.number))
   if (excludedIssueNumbers.size > 0) {
     updateFingerprintLedger(paths, (ledger) => {
