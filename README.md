@@ -460,7 +460,10 @@ project's repository, merge commits name no fleet issue; the merger closes each 
 queue, each once. Imports wait under `loop:triage` until you relabel them `loop:ready`;
 `--ready-trusted` makes those written by accounts with write access to the project ready
 at once, and `--dry-run` shows what would be filed. When imported work merges, its merge
-commit closes the original issue in the project's repository.
+commit closes the original issue in the project's repository. If the forge cannot confirm
+the write access of the account that filed an earlier import, the command files nothing
+and exits with `Could not verify the author of imported issue #<n>; try the import
+again`; run it again once the forge answers.
 
 Shared skills such as `git-commit` and `loop-start` are installed once per user rather
 than into each repository: `install-skills --fleet <dir>` writes them to
