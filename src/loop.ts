@@ -3215,74 +3215,84 @@ export function createLoop(deps: LoopDeps) {
     // Round-robin groups cover every discovered section exactly once while keeping
     // group sizes within one, without assuming what any section asks the scan to do.
     let launchFailed = false
+    let dispatched = false
     let retainedScan: string | undefined
     const attemptedScans: string[] = []
-    // The cycle consumes its number before its first scan exists. A stop during dispatch
-    // records the live scans under the counter, and a scan finishing meanwhile records
-    // its yield there, so both must already name the cycle the scans belong to.
+    // The cycle consumes its number before its first scan exists. Polls are sequential,
+    // so no scan yield can be recorded during dispatch, but the operator's `stop` command
+    // runs in its own process and records the live scans under the counter, which must
+    // already name the cycle they belong to. The expectation is written first: a daemon
+    // killed after the counter then leaves a cycle the gate stops on until every
+    // expected scan has answered, never one it closes and counts without its scans.
     const counterExisted = existsSync(scanCountFile)
+    const expectedFile = join(paths.queueDir, `scan-expected-${nextCycle}`)
+    writeFileSync(expectedFile, `${nScans}\n`)
     writeFileSync(scanCountFile, `${nextCycle}\n`)
-    for (let i = 1; i <= nScans; i++) {
-      const scanId = newTaskId(paths, 'scan', now())
-      const scope = nScans === 1
-        ? 'Perform the full scan described below.'
-        : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
-      writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
-      attemptedScans.push(scanId)
-      try {
-        await startTaskImpl(paths, runner, scanId, {
-          effort: config.scanEffort as 'high',
-          model: config.scanModel === '' ? undefined : config.scanModel,
-          setup: project.scanWorktreeSetup,
-        })
-        event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
-      } catch (error) {
-        // A runner the loop could not identify, or could not stop, may still be writing
-        // to this scan's worktree, so the scan is left for the owner rather than removed.
-        if (error instanceof StartupOwnershipUnknownError) {
-          event(
-            'ERROR', shortTaskId(scanId),
-            'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
-          )
-          retainedScan = scanId
-        } else if (error instanceof StartupProcessRetainedError) {
-          event(
-            'ERROR', shortTaskId(scanId),
-            `startup process tree PID ${error.pid} survived; task retained and loop stopped`,
-          )
-          retainedScan = scanId
-        } else {
-          event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
-        }
-        launchFailed = true
-        break
-      }
-    }
-    if (launchFailed) {
-      // The cycle gives its number back and never recorded an expectation, so the next
-      // start dispatches it again from the beginning. Discard what this attempt
-      // materialized: left behind, each scan would be swept into the relaunched cycle's
-      // failure list and counted against an expectation it was never part of, and the
-      // gate would then stop every later start over a scan yield that cannot arrive.
-      for (const scanId of attemptedScans) {
-        if (scanId === retainedScan) continue
+    try {
+      for (let i = 1; i <= nScans; i++) {
+        const scanId = newTaskId(paths, 'scan', now())
+        const scope = nScans === 1
+          ? 'Perform the full scan described below.'
+          : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
+        writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
+        attemptedScans.push(scanId)
         try {
-          cleanupTask(paths, scanId, undefined, false, log)
+          await startTaskImpl(paths, runner, scanId, {
+            effort: config.scanEffort as 'high',
+            model: config.scanModel === '' ? undefined : config.scanModel,
+            setup: project.scanWorktreeSetup,
+          })
+          event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
         } catch (error) {
-          // A scan that could not be discarded is kept like one whose runner could not be
-          // accounted for, so the operator learns why rather than meeting it later.
-          event(
-            'ERROR', shortTaskId(scanId),
-            `scan startup cleanup failed: ${errorSummary(error)}; task retained and loop stopped`,
-          )
+          // A runner the loop could not identify, or could not stop, may still be writing
+          // to this scan's worktree, so the scan is left for the owner rather than removed.
+          if (error instanceof StartupOwnershipUnknownError) {
+            event(
+              'ERROR', shortTaskId(scanId),
+              'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+            )
+            retainedScan = scanId
+          } else if (error instanceof StartupProcessRetainedError) {
+            event(
+              'ERROR', shortTaskId(scanId),
+              `startup process tree PID ${error.pid} survived; task retained and loop stopped`,
+            )
+            retainedScan = scanId
+          } else {
+            event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
+          }
+          launchFailed = true
+          break
         }
       }
-      if (counterExisted) writeFileSync(scanCountFile, `${currentScans}\n`)
-      else rmSync(scanCountFile, { force: true })
-      writeFileSync(stopFile, '')
-      return 'continue'
+      dispatched = !launchFailed
+    } finally {
+      if (!dispatched) {
+        // A launch failure, or anything the dispatch threw, gives the cycle its number
+        // and expectation back, so the next start dispatches it again from the beginning.
+        // Discard what this attempt materialized: left behind, each scan would be swept
+        // into the relaunched cycle's failure list and counted against an expectation it
+        // was never part of, and the gate would then stop every later start over a scan
+        // yield that cannot arrive.
+        for (const scanId of attemptedScans) {
+          if (scanId === retainedScan) continue
+          try {
+            cleanupTask(paths, scanId, undefined, false, log)
+          } catch (error) {
+            // A scan that could not be discarded is kept like one whose runner could not
+            // be accounted for, so the operator learns why rather than meeting it later.
+            event(
+              'ERROR', shortTaskId(scanId),
+              `scan startup cleanup failed: ${errorSummary(error)}; task retained and loop stopped`,
+            )
+          }
+        }
+        if (counterExisted) writeFileSync(scanCountFile, `${currentScans}\n`)
+        else rmSync(scanCountFile, { force: true })
+        rmSync(expectedFile, { force: true })
+      }
     }
-    writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
+    if (launchFailed) writeFileSync(stopFile, '')
     return 'continue'
   }
 

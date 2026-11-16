@@ -681,6 +681,88 @@ describe('cycle gate', () => {
     expect(logText()).toContain('ERROR scan startup failed: runner unavailable (log:')
   })
 
+  it('gives the cycle back when writing a later scan specification throws', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    const template = join(paths.root, 'templates', 'scan-template.md')
+    const templateText = '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n'
+    writeFileSync(template, templateText)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const attempted: string[] = []
+    let scanPid: number | undefined
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attempted.push(basename(options.specFile, '.md'))
+        // The template turns unreadable once the first scan is live, so rendering the
+        // second scan's specification throws outside the launch's own error handling.
+        rmSync(template, { force: true })
+        mkdirSync(template)
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        scanPid = child.pid
+        return child.pid
+      },
+    }
+    const interrupted = makeLoop(
+      { scanParallel: 2, autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+
+    await expect(interrupted.triggerScanIfIdle()).rejects.toThrow()
+
+    expect(attempted).toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(existsSync(join(paths.queueDir, 'scan-expected-2'))).toBe(false)
+    const [launched] = attempted as [string]
+    expect(existsSync(worktreeDir(paths, launched))).toBe(false)
+    expect(existsSync(statusFile(paths, launched))).toBe(false)
+    expect(git(['branch', '--list', branchName(launched)])).toBe('')
+    expect(scanPid).toBeDefined()
+    expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
+
+    rmSync(template, { recursive: true, force: true })
+    writeFileSync(template, templateText)
+    const restarted = makeLoop({ scanParallel: 2, autoPr: false, reviewEnabled: false })
+
+    expect(await restarted.triggerScanIfIdle()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(2)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-2'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it.each([
+    { launched: 0 },
+    { launched: 1 },
+  ])('stops a start after a kill during dispatch left $launched of 2 scans launched', async ({
+    launched,
+  }) => {
+    // A kill between the counter and the last launch leaves what dispatch writes first:
+    // the advanced counter and the cycle's expectation, with only some scans behind them.
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-2'), '2\n')
+    const launchedScan = '20260809_000000_001_scan'
+    if (launched === 1) writeRawStatus(launchedScan, 'failed')
+    const loop = makeLoop({ maxScanCycles: 2, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR cycle 2 did not receive every expected scan yield; stopping the loop',
+    )
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-2'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
+    expect(logged.some((line) => line.includes('CYCLE_COMPLETE'))).toBe(false)
+    expect(runnerStarts).toHaveLength(0)
+  })
+
   it('removes a marker left behind after its cycle was already rewound and starts', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
