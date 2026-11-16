@@ -442,6 +442,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
    count, and the error, and the next such poll stops the loop; a successful check
    clears the count and logs `Recovered`. A rate-limited check neither counts nor clears
    the count.
+   The poll's issue-queue sync records fingerprints in the same ledger before it reaps
+   and claims, and fails the same way: a ledger that cannot be parsed counts a gate
+   failure under the sync's own key, so the second consecutive poll stops the loop
+   rather than idling on local work without reaping or claiming.
    A worker-mode daemon (item 36) has no gate to count against: it files a completion's
    findings before publishing it, so a check or filing failure is one of its publication errors,
    retried on later polls until the fifth consecutive failure marks the task failed, and
@@ -756,17 +760,25 @@ are not parsed by `loadConfig` and are not operator-file settings.
     every scan in it found nothing; `MAX_EMPTY_SCANS` consecutive empty cycles end the
     run early. The expected scan count (`queue/scan-expected-<n>`) and scan yield
     (`queue/scan-yield-<n>`) are recorded per cycle. Yields are folded into the empty
-    counter once, at the gate, only when every expected scan completed successfully. A
-    scan launch failure stops the loop without advancing the cycle number, discarding
+    counter once, at the gate, only when every expected scan has delivered a yield or
+    been recorded as failed. A new cycle records its expected scan count and then
+    advances the cycle number before its first scan starts. Polls run one at a time, so
+    no scan yield is recorded while scans are launching; the operator's `stop` command
+    runs in its own process, and a `stop` that arrives while later scans are still
+    launching records the live scans under the cycle they belong to. A
+    scan launch failure, or any error the dispatch throws, such as a scan specification
+    that cannot be written, restores the previous cycle number and removes the cycle's
+    expected scan count, discarding
     the task state of every scan that attempt had already started so the next daemon
     dispatches the cycle's full scan set again rather than inheriting scans no cycle
-    accounts for. The scan whose own startup failed is kept when the loop cannot account
+    accounts for. A launch failure stops the loop; a thrown error ends the daemon. The
+    scan whose own startup failed is kept when the loop cannot account
     for its runner: the runner returned a PID that is not a positive safe integer, or the
     startup process tree it launched survived termination. Discarding that scan could
     leave a live runner writing into a worktree nobody tracks, so the loop logs an
     `ERROR` for that scan ending `task retained and loop stopped` and leaves its
     worktree, branch, and specification in place. It belongs to no cycle: the cycle
-    still records no expectation and is dispatched again in full by the next daemon,
+    gives its expectation back and is dispatched again in full by the next daemon,
     and the retained scan stays until the operator removes it with `cleanup`, which
     first stops any runner the process registry recorded for it. A scan the attempt
     started whose discard fails, such as a worktree still held after cleanup's last
@@ -774,7 +786,14 @@ are not parsed by `loadConfig` and are not operator-file settings.
     `scan startup cleanup failed: <reason>; task retained and loop stopped`, and keeps
     whatever of its state cleanup had not yet removed, its status record included, until
     the operator runs `cleanup` for it. A cycle missing any expected yield stops rather than
-    advancing to another cycle or completion.
+    advancing to another cycle or completion. A daemon killed while it dispatches a
+    cycle, after the cycle number advanced and before the last scan started, leaves
+    that number and its expected scan count with fewer scans than expected. Nothing
+    records that the dispatch was cut short, and the scans that did start may still be
+    running, so the next daemon does not dispatch the cycle again: once those scans have
+    finished or failed, the gate stops with the missing-yield error rather than closing
+    a cycle that did not scan every section, and the operator decides what to discard.
+    Until then the cycle is neither closed nor counted towards `MAX_SCAN_CYCLES`.
     A scan the cycle recorded as failed counts towards the expected total as a delivered
     but silent yield: the cycle closes, its id still reaches the decisions and the pull
     request through the cycle's loss note, and a failed scan by itself neither resets nor
@@ -783,9 +802,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     A scan interrupted by the operator `stop` command is the exception: the command
     records the live scan before terminating it, and the next daemon discards that scan's
     task state, rewinds the incomplete cycle, and dispatches the cycle's full scan set
-    again. A stop record one cycle ahead of the counter belongs to a recovery that
-    rewound the cycle but could not remove the record, or to a first-cycle scan stopped
-    before a start on another branch reset the counter: either way the daemon discards
+    again. A start on another branch resets the counter and rewrites every stop record
+    of the previous run, whatever its cycle, as one for the new run's first cycle. A
+    stop record one cycle ahead of the counter therefore belongs to a recovery that
+    rewound the cycle but could not remove the record, or to scans of any cycle of the
+    previous run stopped before a start on another branch: either way the daemon discards
     the task state of every scan the record names, tolerating scans already gone, then
     removes the record, so none of them counts as a failure of the new run.
     A scan that dies without that stop record remains a failure.
@@ -969,7 +990,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     the order the forge lists the checks in, but a name listed twice must be listed twice
     again. A PR with
     zero checks remains unknown regardless of its age unless the project adapter
-    explicitly sets `ciChecksExpected: false`. Before generating a ci-fix task, the loop
+    explicitly sets `ciChecksExpected: false`. A merged PR passes at once, without
+    reading its checks or comparing its head with the local `HEAD`: it receives no
+    further pushes or checks to wait for, and the final gate reaches it only after the
+    pull request step has confirmed that the merged head holds `HEAD`, or when the PR is
+    merged between that step and the CI read. Before generating a ci-fix task, the loop
     persists its candidate task ID in a per-cycle pending-ID file. If enqueueing fails,
     the pending ID remains while the attempt count and cycle-complete flag remain
     unchanged; the next poll regenerates and retries the task with that same ID. An
@@ -1131,8 +1156,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
     record the owner's process-start identity; a query that answers "unknown" (on Windows,
     one that times out) is asked up to three times in all, 250 ms apart, so a slow
     query never fails a daemon start or handover that a later attempt can answer, and only
-    then fails with an error naming the timed-out or failed query. Before task or issue work begins, startup refuses any
-    live PID an earlier daemon left in the task process registry (item 24a). It then sweeps
+    then fails with an error naming the timed-out or failed query. Before task or issue work begins, startup sweeps
     the temporary gate worktrees, `.merge-<task>-<pid>-<ms>` and `.adopt-<issue>-<pid>-<ms>`,
     which nothing records but the process ID in their name: one whose creating process is
     gone, or which belongs to the restart predecessor handing over its lock, is removed and
@@ -1140,9 +1164,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     for a daemon behind the Windows wrapper is not its process-tree root, so the
     predecessor hands its replacement both and either one counts as the predecessor. One
     whose creator still lives is left alone, and one that
-    cannot be removed is logged as `WARN worktree` and stays. A worktree left after the
-    sweep with no corresponding task status blocks startup and is reported with an
-    OS-specific handle diagnostic.
+    cannot be removed is logged as `WARN worktree` and stays. Only then does startup refuse
+    any live PID an earlier daemon left in the task process registry (item 24a), and a
+    worktree left after the sweep with no corresponding task status blocks startup and is
+    reported with an OS-specific handle diagnostic; a start refused this way has already
+    run the sweep.
     A run which publishes work also refuses to start when its branch has no unambiguous
     push target, logging `ERROR` and writing the stop file before task or issue work.
 24a. A task's runner PID is held in `queue/pids/<task-id>`, not in its status record, so
@@ -1777,7 +1803,14 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     the fleet's queue and requires a fleet whose `fleet.json` names an `issueRepository`;
     anywhere else it exits non-zero. It reads the project repository's open issues,
     excluding pull requests, judging each author's write access on the project repository,
-    and files them oldest first. Each import has the fingerprint
+    and files them oldest first. Before filing anything, including under `--dry-run`, it
+    reads the queue's existing imports, open and closed, trusting only those whose author
+    has write access to the queue repository. When the permission lookup for the author of
+    an existing import fails and the import carries no `loop:untrusted-author` label, the
+    command files nothing and exits non-zero with `Could not verify the author of imported
+    issue #<n>; try the import again`: every import shares one author, so skipping them
+    would file each one again. An import whose author is confirmed to lack write access,
+    or that carries that label, is still ignored. Each import has the fingerprint
     `source:<owner/repository>#<number>` (repository lowercased) and is filed once: an
     import already in the queue, open or closed, is reported as `Skipped:` and not filed
     again, because the merge that resolves it closes the project issue and anything else
@@ -1809,9 +1842,10 @@ writing a `stop` file into any that holds an `orchestration/queue` first, and ne
 touches newer or foreign entries. It then prints the platform-only suites this platform
 leaves uncollected and why, from `tests/platformCoverage.ts`, so a run that skipped a
 suite says so. The files listed in `tests/sequentialSuites.ts` launch long-lived
-processes or wait on deadlines; none of them starts before the rest of the suite has run
-in parallel. On a host with twelve or more processors, as `os.availableParallelism()`
-reports them, up to three of them then run at once; below that they run one at a time.
+processes, wait on deadlines, or create enough git processes in one test to near the test
+timeout; none of them starts before the rest of the suite has run in parallel. On a host
+with twelve or more processors, as `os.availableParallelism()` reports them, up to three
+of them then run at once; below that they run one at a time.
 Files that share a machine-wide resource, which that file names with the resource, run
 one at a time in a group of their own after the others.
 

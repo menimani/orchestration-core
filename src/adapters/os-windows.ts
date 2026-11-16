@@ -508,6 +508,8 @@ export function createOperatingSystem(
     agentCommand,
     processTreeRootPid,
     processStartIdentity: runtime.processStartIdentity ?? systemRuntime.processStartIdentity!,
+    // A creation time reads the same for every caller, so any difference is a new process.
+    startIdentitiesProveDifferentProcess: (recorded, current) => recorded !== current,
     processIsAlive: (pid) => isAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree,

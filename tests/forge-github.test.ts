@@ -284,7 +284,7 @@ describe('GitHub upstream issue creation', () => {
     // fails there instead of matching. The list is fetched once and filtered locally.
     expect(calls[0]).toEqual([
       'label', 'list', '--repo', 'menimani/orchestration-core',
-      '--limit', '100', '--json', 'name',
+      '--limit', '1000', '--json', 'name',
     ])
     expect(calls[1]).toEqual([
       'issue', 'create', '--repo', 'menimani/orchestration-core',
@@ -292,6 +292,36 @@ describe('GitHub upstream issue creation', () => {
       ...(expectedLabel ? ['--label', 'upstream:report'] : []),
     ])
     expect(submittedBody).toBe('Report body')
+  })
+
+  it('applies an optional label listed after the hundredth label', async () => {
+    const listed = [
+      ...Array.from({ length: 120 }, (_, index) => ({ name: `area:${index}` })),
+      { name: 'upstream:report' },
+    ]
+    const calls: string[][] = []
+    // Honours --limit the way gh does, so a short page would drop the wanted label.
+    const command: GithubCommand = async (_root, args) => {
+      calls.push(args)
+      if (args[0] === 'label') {
+        return JSON.stringify(listed.slice(0, Number(args[args.indexOf('--limit') + 1])))
+      }
+      return 'https://github.com/menimani/orchestration-core/issues/43\n'
+    }
+    const forge = createGithubForge('repo-root', command)
+
+    await forge.createIssueInRepository({
+      repository: 'menimani/orchestration-core',
+      title: 'Core defect report',
+      body: 'Report body',
+      optionalLabels: ['upstream:report'],
+    })
+
+    expect(calls[1]).toEqual([
+      'issue', 'create', '--repo', 'menimani/orchestration-core',
+      '--title', 'Core defect report', '--body-file', expect.any(String),
+      '--label', 'upstream:report',
+    ])
   })
 })
 

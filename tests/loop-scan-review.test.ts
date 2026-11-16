@@ -9,6 +9,7 @@ import { pitfallsFileForDesc } from '../src/gates.ts'
 import { shortTaskId } from '../src/ids.ts'
 import { cleanupTask } from '../src/cleanup.ts'
 import { runCleanupCommand } from '../src/cleanupCommand.ts'
+import { buildIssueBody, LABEL_FINDING, LABEL_READY } from '../src/issueQueue.ts'
 import type { Loop } from '../src/loop.ts'
 import {
   branchName, PACKAGE_ROOT, shellPathSpelling, statusFile, worktreeDir,
@@ -1032,6 +1033,39 @@ describe('scanForNextTasks', () => {
       /ERROR could not check documentation findings from 029_scan: Malformed fingerprint ledger .* \(repeated 2 times\)/,
     )
     expect(existsSync(stopFile)).toBe(true)
+    expect(readFileSync(ledgerFile, 'utf8')).toBe('malformed line here\n')
+  })
+
+  it('stops when the issue-queue sync meets a malformed ledger twice', async () => {
+    initializeGitRepo()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const description = '[BUG] `src/shared.ts` finding behind a malformed ledger'
+    const issueNumber = await fakeForge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const ledgerFile = join(paths.queueDir, 'issue-fingerprints')
+    writeFileSync(ledgerFile, 'malformed line here\n')
+    const stopFile = join(paths.queueDir, 'stop')
+
+    await loop.poll()
+
+    expect(logText()).toMatch(/WARN could not sync the issue queue: Malformed fingerprint ledger/)
+    expect(logText()).not.toContain('issue queue unreachable')
+    expect(existsSync(stopFile)).toBe(false)
+
+    await loop.poll()
+
+    expect(logText()).toMatch(
+      /ERROR could not sync the issue queue: Malformed fingerprint ledger .* \(repeated 2 times\)/,
+    )
+    expect(existsSync(stopFile)).toBe(true)
+    expect(runnerStarts).toEqual([])
+    expect(fakeForge.issues.get(issueNumber)?.labels).toContain(LABEL_READY)
     expect(readFileSync(ledgerFile, 'utf8')).toBe('malformed line here\n')
   })
 

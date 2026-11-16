@@ -13,6 +13,7 @@ import { PROCESS_TEST_TIMEOUT_MS } from './testProcess.ts'
 // such a test and POSIX did not, so the behaviour a merged fix repaired here — killing a
 // daemon's whole process group rather than the daemon alone — was never exercised for
 // real. vitest.config.ts collects this on POSIX alone; see tests/platformCoverage.ts.
+// process-tree-termination.test.ts runs the same daemon-tree stop on every platform.
 
 const roots: string[] = []
 const groups: number[] = []

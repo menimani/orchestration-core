@@ -4,9 +4,9 @@ import type { TestProjectInlineConfiguration } from 'vitest/config'
 //
 // Most files drive real git repositories in their own temporary directories and share
 // nothing, so `vitest.config.ts` runs them on several workers at once. The files listed
-// here launch long-lived processes, wait on deadlines, or time a child process's exit;
-// the parallel group creating git processes beside them is enough to push one past its
-// deadline. Once that group is done the host is nearly idle, so on a host with at least
+// here launch long-lived processes, wait on deadlines, time a child process's exit, or
+// create so many git processes in one test that it nears the test timeout; the parallel
+// group creating git processes beside them is enough to push one past its deadline. Once that group is done the host is nearly idle, so on a host with at least
 // SEQUENTIAL_MIN_PROCESSORS processors up to SEQUENTIAL_WORKERS of these files run side
 // by side; below that they run strictly one at a time. Files that share a machine-wide
 // resource (a named lock, a port, the repository test lock, a global temporary name)
@@ -66,11 +66,18 @@ export const SEQUENTIAL_SUITES: string[] = [
   // Deadline: an installed copy of the core resolves a restart and runs a loop to its
   // first poll.
   'tests/consumer-smoke.test.ts',
-  // Timed exit (Linux): a detached process group must be gone within a process deadline.
+  // Timed exit (Linux): a detached process group must be gone within a process deadline,
+  // and a shell killed by a signal must be reported within a 30 s command timeout.
   'tests/posix-process-group.test.ts',
+  // Timed exit (every platform): a daemon's process tree must be gone within a process
+  // deadline.
+  'tests/process-tree-termination.test.ts',
   // Timed exit: an eval fixture must stop once its parent exits, within a process
   // deadline.
   'tests/test-process.test.ts',
+  // Timed exit (Linux): fixtures that outlive SIGTERM must be gone once the registry's
+  // cleanup returns, past two five-second grace periods.
+  'tests/posix-test-process.test.ts',
   // Deadline and timed exit: a fake docker exits before reading the archive, with a
   // long-lived helper and 10 s and 30 s deadlines.
   'tests/test-linux.test.ts',
@@ -84,6 +91,15 @@ export const SEQUENTIAL_SUITES: string[] = [
   // Deadline and timed exit: handed-back runners past the task deadline and runner
   // process trees that must be stopped.
   'tests/loop-gate-fix-runner.test.ts',
+  // Process creation: one test drives many real polls, each creating git child
+  // processes, and the cost of creating them under parallel load pushes it past the 60 s
+  // test timeout; "counts the deferrals of two issues separately" took 45 to 59 s in
+  // green runs and timed out under load at six, eight and ten workers.
+  'tests/merger-adoption-deferrals.test.ts',
+  // Process creation: the same poll-heavy adoption fixture; "resets the deferral count
+  // and logs recovery once the adoption gets past the fetch" timed out at 60 s in a merge
+  // gate while another gate ran on the host, and took 32 to 51 s alone on a loaded host.
+  'tests/merger-adoption-recovery.test.ts',
 ]
 
 // Machine-wide resources that two or more files of SEQUENTIAL_SUITES share, each with

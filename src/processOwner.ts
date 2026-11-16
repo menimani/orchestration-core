@@ -28,7 +28,8 @@ export function decodeProcessStartIdentity(encoded: string | undefined): string 
 
 /**
  * Whether the process described by lock metadata is still its owner. Legacy or
- * temporarily unverifiable metadata falls back to the conservative PID-only verdict.
+ * temporarily unverifiable metadata, and an identity difference that the operating
+ * system cannot vouch for, fall back to the conservative PID-only verdict.
  */
 export function lockOwnerIsCurrent(pid: number, startIdentity?: string | null): boolean {
   if (typeof startIdentity === 'string') {
@@ -38,7 +39,13 @@ export function lockOwnerIsCurrent(pid: number, startIdentity?: string | null): 
     } catch {
       currentIdentity = undefined
     }
-    if (currentIdentity !== undefined) return currentIdentity === startIdentity
+    if (currentIdentity === startIdentity) return true
+    if (
+      currentIdentity !== undefined &&
+      operatingSystem.startIdentitiesProveDifferentProcess(startIdentity, currentIdentity)
+    ) {
+      return false
+    }
   }
   return operatingSystem.processIsAlive(pid)
 }

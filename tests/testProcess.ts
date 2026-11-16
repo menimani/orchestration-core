@@ -1,4 +1,7 @@
-import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { operatingSystem } from '../src/adapters/os.ts'
 
@@ -15,8 +18,16 @@ interface FixtureProcessDescriptor {
   command: string
 }
 
+/** What a wrapper publishes about the fixture it started, for the registry to stop. */
+interface PublishedFixture {
+  pid: number
+  startIdentity?: string
+}
+
 interface TrackedProcess {
   child?: ChildProcess
+  /** Where the wrapper publishes its fixture, when the fixture leaves the wrapper's tree. */
+  fixturePublication?: string
   pid: () => number | undefined
   tree: boolean
 }
@@ -74,34 +85,50 @@ function processIsAlive(pid: number): boolean {
  * it stays alive for the fixture's lifetime and tears the fixture down if its parent
  * disappears.
  */
-function runFixtureProcessWrapper(parentPid: number, encodedDescriptor: string): void {
+function runFixtureProcessWrapper(
+  parentPid: number, encodedDescriptor: string, publication: string | undefined,
+): void {
   const descriptor = JSON.parse(
     Buffer.from(encodedDescriptor, 'base64').toString('utf8'),
   ) as FixtureProcessDescriptor
-  const fixture = spawn(descriptor.command, descriptor.args, {
-    detached: false,
-    stdio: 'inherit',
-    windowsHide: true,
-  })
+  let fixture: ChildProcess | undefined
   let settled = false
 
   const stopFixture = (): void => {
-    if (settled) return
-    settled = true
-    if (process.platform === 'win32') {
-      if (fixture.pid !== undefined) {
-        spawnSync('taskkill', ['/PID', String(fixture.pid), '/T', '/F'], {
-          stdio: 'ignore',
-          windowsHide: true,
-        })
+    if (!settled && fixture?.pid !== undefined) {
+      settled = true
+      try {
+        operatingSystem.terminateProcessTree(fixture.pid)
+      } catch {
+        // Exit regardless: the registry stops a published fixture itself and reports one
+        // it cannot end. A fixture whose registry has exited as well goes unreported.
       }
-      process.exit(1)
     }
-    try {
-      process.kill(-process.pid, 'SIGKILL')
-    } catch {
-      process.exit(1)
+    process.exit(1)
+  }
+
+  // Where the fixture leads its own process group, a signal the registry sends to this
+  // wrapper's group no longer reaches it, so the wrapper passes the stop on. The handlers
+  // come first: from here on a stop waits for the event loop, so it cannot end this
+  // wrapper between starting the fixture and publishing it.
+  for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM'] as const) process.once(signal, stopFixture)
+
+  // The adapter's own spawn options keep the fixture's tree reachable by the same
+  // terminateProcessTree the core uses, so this cleanup inherits every fix made there.
+  fixture = spawn(descriptor.command, descriptor.args, {
+    ...operatingSystem.terminableSpawnOptions(),
+    stdio: 'inherit',
+    windowsHide: true,
+  })
+  if (publication !== undefined && fixture.pid !== undefined) {
+    // This wrapper has not reaped the fixture yet, so the identity read is the fixture's.
+    const published: PublishedFixture = {
+      pid: fixture.pid,
+      startIdentity: operatingSystem.processStartIdentity(fixture.pid),
     }
+    // Renamed into place, so a reader never sees half a record.
+    writeFileSync(`${publication}.tmp`, JSON.stringify(published))
+    renameSync(`${publication}.tmp`, publication)
   }
 
   const parentMonitor = setInterval(() => {
@@ -120,16 +147,48 @@ function runFixtureProcessWrapper(parentPid: number, encodedDescriptor: string):
   })
 }
 
+/**
+ * Stop the fixture a wrapper published, through the adapter. Called once the wrapper is
+ * gone, when the record can no longer change; a survivor makes terminateProcessTree throw.
+ */
+function stopPublishedFixture(publication: string): void {
+  let published: PublishedFixture
+  try {
+    published = JSON.parse(readFileSync(publication, 'utf8')) as PublishedFixture
+  } catch (error) {
+    // A wrapper that never started its fixture published nothing.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (operatingSystem.processTreeIsAlive(published.pid, published.startIdentity)) {
+    operatingSystem.terminateProcessTree(published.pid)
+  }
+}
+
 /** Registers real child processes at spawn time for failure-safe afterEach cleanup. */
 export class TestProcessRegistry {
   private readonly processes: TrackedProcess[] = []
+  private publications: string | undefined
 
   spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
     const descriptor: FixtureProcessDescriptor = { command, args: [...args] }
     const encodedDescriptor = Buffer.from(JSON.stringify(descriptor)).toString('base64')
+    // Where the adapter detaches the fixture from the wrapper's tree, stopping that tree
+    // does not reach the fixture, and the registry's kill of the wrapper can land before
+    // the wrapper's own stop of the fixture does. The wrapper then publishes the fixture,
+    // and cleanup stops it directly once the wrapper is gone. Waiting longer for the
+    // wrapper instead would still miss a fixture whose wrapper died before stopping it.
+    // Where the fixture stays in the wrapper's tree, stopping the tree ends it and reports
+    // a survivor, so nothing is published.
+    let fixturePublication: string | undefined
+    if (operatingSystem.terminableSpawnOptions().detached) {
+      this.publications ??= mkdtempSync(join(tmpdir(), 'orch-test-process-fixtures-'))
+      fixturePublication = join(this.publications, `${this.processes.length}.json`)
+    }
     const child = spawn(process.execPath, [
       fileURLToPath(import.meta.url), '--fixture-process-wrapper',
       String(process.pid), encodedDescriptor,
+      ...(fixturePublication === undefined ? [] : [fixturePublication]),
     ], {
       ...options,
       // A dedicated process group lets cleanup stop descendants, not only the immediate
@@ -141,7 +200,7 @@ export class TestProcessRegistry {
     child.stderr?.on('data', (chunk: Buffer) => {
       fixtureStderr.set(child, `${fixtureStderr.get(child) ?? ''}${chunk.toString()}`)
     })
-    this.processes.push({ child, pid: () => child.pid, tree: true })
+    this.processes.push({ child, fixturePublication, pid: () => child.pid, tree: true })
     return child
   }
 
@@ -154,14 +213,33 @@ export class TestProcessRegistry {
 
   async cleanup(): Promise<void> {
     const processes = this.processes.splice(0).reverse()
+    const publications = this.publications
+    this.publications = undefined
+    try {
+      await this.cleanupProcesses(processes)
+    } finally {
+      if (publications !== undefined) rmSync(publications, { recursive: true, force: true })
+    }
+  }
+
+  private async cleanupProcesses(processes: TrackedProcess[]): Promise<void> {
     const cleanedPids = new Set<number>()
     for (const tracked of processes) {
       const pid = tracked.pid()
       if (pid === undefined || pid <= 0 || cleanedPids.has(pid)) continue
       cleanedPids.add(pid)
       // The watchdog does not exit until its fixture has exited, so a reaped wrapper is
-      // proof that the whole fixture tree completed normally.
-      if (tracked.child?.exitCode !== null && tracked.child?.exitCode !== undefined) continue
+      // proof that it saw the fixture go or tried to stop it. A published fixture is
+      // checked regardless, since the wrapper's stop may have failed or been cut short.
+      const wrapperExited = tracked.child?.exitCode !== null && tracked.child?.exitCode !== undefined
+      if (tracked.fixturePublication !== undefined) {
+        if (!wrapperExited && operatingSystem.processTreeIsAlive(pid)) {
+          operatingSystem.terminateProcessTree(pid)
+        }
+        stopPublishedFixture(tracked.fixturePublication)
+        continue
+      }
+      if (wrapperExited) continue
       if (tracked.tree) {
         if (operatingSystem.processTreeIsAlive(pid)) operatingSystem.terminateProcessTree(pid)
         continue
@@ -187,6 +265,6 @@ if (process.argv[2] === '--fixture-process-wrapper') {
   if (!Number.isSafeInteger(parentPid) || parentPid <= 0 || descriptor === undefined) {
     process.exitCode = 1
   } else {
-    runFixtureProcessWrapper(parentPid, descriptor)
+    runFixtureProcessWrapper(parentPid, descriptor, process.argv[5])
   }
 }

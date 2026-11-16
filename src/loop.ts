@@ -2276,6 +2276,38 @@ export function createLoop(deps: LoopDeps) {
     }
   }
 
+  /** Parse the stopped-scan marker, rejecting any line recovery could not act on. */
+  function readInterruptedScans(marker: string): { cycle: number, taskId: string }[] {
+    return readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => {
+      const match = /^([1-9][0-9]*)\t([^\t]+)$/.exec(line)
+      const cycle = match === null ? Number.NaN : Number(match[1])
+      const taskId = match?.[2] ?? ''
+      if (!Number.isSafeInteger(cycle) || !isScanTaskId(taskId)) {
+        throw new Error(`invalid stopped-scan recovery entry: ${line}`)
+      }
+      return { cycle, taskId }
+    })
+  }
+
+  /**
+   * A new run branch resets the scan counter, so a marker written in any cycle of the
+   * previous run no longer matches it. Its scans are renumbered as the new run's first
+   * cycle, which recovery treats as a marker one cycle ahead of the counter: the scans
+   * are discarded before the marker goes. A malformed marker is left as it is for
+   * recovery to report.
+   */
+  function renumberInterruptedScansForNewRun(): void {
+    const marker = join(paths.queueDir, interruptedScansFileName)
+    if (!existsSync(marker)) return
+    let entries: { cycle: number, taskId: string }[]
+    try {
+      entries = readInterruptedScans(marker)
+    } catch {
+      return
+    }
+    writeFileSync(marker, entries.map((entry) => `1\t${entry.taskId}\n`).join(''))
+  }
+
   /**
    * An operator stop is not evidence that a scan failed. Discard every scan that was
    * live when stop was requested and rewind the incomplete cycle so its full scan set
@@ -2287,15 +2319,7 @@ export function createLoop(deps: LoopDeps) {
     if (!existsSync(marker)) return true
 
     try {
-      const entries = readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => {
-        const match = /^([1-9][0-9]*)\t([^\t]+)$/.exec(line)
-        const cycle = match === null ? Number.NaN : Number(match[1])
-        const taskId = match?.[2] ?? ''
-        if (!Number.isSafeInteger(cycle) || !isScanTaskId(taskId)) {
-          throw new Error(`invalid stopped-scan recovery entry: ${line}`)
-        }
-        return { cycle, taskId }
-      })
+      const entries = readInterruptedScans(marker)
       if (entries.length === 0) {
         rmSync(marker, { force: true })
         return true
@@ -2305,10 +2329,10 @@ export function createLoop(deps: LoopDeps) {
       const currentCycle = readCount(scanCountFile)
       // The counter is rewound only after every other recovery step, so a marker one
       // cycle ahead of it means a previous start finished recovery but could not remove
-      // the marker. A new run branch also resets the counter, so a stop during a live
-      // first-cycle scan lands here with its scans untouched; cleanup is idempotent, so
-      // the named scans are discarded before the marker goes, or the new run would count
-      // them as its own failures.
+      // the marker. A new run branch resets the counter and renumbers the marker as its
+      // first cycle, so a stop during a live scan of any cycle lands here with its scans
+      // untouched; cleanup is idempotent, so the named scans are discarded before the
+      // marker goes, or the new run would count them as its own failures.
       if (cycles.size === 1 && cycles.has(currentCycle + 1)) {
         for (const taskId of new Set(entries.map((entry) => entry.taskId))) {
           cleanupTask(paths, taskId, undefined, false, log)
@@ -2382,6 +2406,7 @@ export function createLoop(deps: LoopDeps) {
       // Status files span branches, so their announcement markers must span branches
       // too; explicit task cleanup removes a marker when a retry is wanted.
       cleanupSessionState(true)
+      renumberInterruptedScansForNewRun()
     }
     writeFileSync(mergeFailureFile, '0\n')
     writeFileSync(runBranchFile, `${currentBranch}\n`)
@@ -3190,68 +3215,84 @@ export function createLoop(deps: LoopDeps) {
     // Round-robin groups cover every discovered section exactly once while keeping
     // group sizes within one, without assuming what any section asks the scan to do.
     let launchFailed = false
+    let dispatched = false
     let retainedScan: string | undefined
     const attemptedScans: string[] = []
-    for (let i = 1; i <= nScans; i++) {
-      const scanId = newTaskId(paths, 'scan', now())
-      const scope = nScans === 1
-        ? 'Perform the full scan described below.'
-        : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
-      writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
-      attemptedScans.push(scanId)
-      try {
-        await startTaskImpl(paths, runner, scanId, {
-          effort: config.scanEffort as 'high',
-          model: config.scanModel === '' ? undefined : config.scanModel,
-          setup: project.scanWorktreeSetup,
-        })
-        event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
-      } catch (error) {
-        // A runner the loop could not identify, or could not stop, may still be writing
-        // to this scan's worktree, so the scan is left for the owner rather than removed.
-        if (error instanceof StartupOwnershipUnknownError) {
-          event(
-            'ERROR', shortTaskId(scanId),
-            'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
-          )
-          retainedScan = scanId
-        } else if (error instanceof StartupProcessRetainedError) {
-          event(
-            'ERROR', shortTaskId(scanId),
-            `startup process tree PID ${error.pid} survived; task retained and loop stopped`,
-          )
-          retainedScan = scanId
-        } else {
-          event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
-        }
-        launchFailed = true
-        break
-      }
-    }
-    if (launchFailed) {
-      // The cycle neither consumed its number nor recorded an expectation, so the next
-      // start dispatches it again from the beginning. Discard what this attempt
-      // materialized: left behind, each scan would be swept into the relaunched cycle's
-      // failure list and counted against an expectation it was never part of, and the
-      // gate would then stop every later start over a scan yield that cannot arrive.
-      for (const scanId of attemptedScans) {
-        if (scanId === retainedScan) continue
-        try {
-          cleanupTask(paths, scanId, undefined, false, log)
-        } catch (error) {
-          // A scan that could not be discarded is kept like one whose runner could not be
-          // accounted for, so the operator learns why rather than meeting it later.
-          event(
-            'ERROR', shortTaskId(scanId),
-            `scan startup cleanup failed: ${errorSummary(error)}; task retained and loop stopped`,
-          )
-        }
-      }
-      writeFileSync(stopFile, '')
-      return 'continue'
-    }
-    writeFileSync(join(paths.queueDir, `scan-expected-${nextCycle}`), `${nScans}\n`)
+    // The cycle consumes its number before its first scan exists. Polls are sequential,
+    // so no scan yield can be recorded during dispatch, but the operator's `stop` command
+    // runs in its own process and records the live scans under the counter, which must
+    // already name the cycle they belong to. The expectation is written first: a daemon
+    // killed after the counter then leaves a cycle the gate stops on until every
+    // expected scan has answered, never one it closes and counts without its scans.
+    const counterExisted = existsSync(scanCountFile)
+    const expectedFile = join(paths.queueDir, `scan-expected-${nextCycle}`)
+    writeFileSync(expectedFile, `${nScans}\n`)
     writeFileSync(scanCountFile, `${nextCycle}\n`)
+    try {
+      for (let i = 1; i <= nScans; i++) {
+        const scanId = newTaskId(paths, 'scan', now())
+        const scope = nScans === 1
+          ? 'Perform the full scan described below.'
+          : `This scan runs alongside ${nScans - 1} partner scan(s). Perform only sections ${sectionGroups[i - 1]!.join(', ')}; the partners cover the rest. Stay inside them — overlapping findings merge away, duplicated reading does not.`
+        writeFileSync(specFile(paths, scanId), scanSpecification(scanId, scope))
+        attemptedScans.push(scanId)
+        try {
+          await startTaskImpl(paths, runner, scanId, {
+            effort: config.scanEffort as 'high',
+            model: config.scanModel === '' ? undefined : config.scanModel,
+            setup: project.scanWorktreeSetup,
+          })
+          event('Started', shortTaskId(scanId), `scan ${i}/${nScans}`)
+        } catch (error) {
+          // A runner the loop could not identify, or could not stop, may still be writing
+          // to this scan's worktree, so the scan is left for the owner rather than removed.
+          if (error instanceof StartupOwnershipUnknownError) {
+            event(
+              'ERROR', shortTaskId(scanId),
+              'runner returned an invalid PID; task ownership is unknown, task retained and loop stopped',
+            )
+            retainedScan = scanId
+          } else if (error instanceof StartupProcessRetainedError) {
+            event(
+              'ERROR', shortTaskId(scanId),
+              `startup process tree PID ${error.pid} survived; task retained and loop stopped`,
+            )
+            retainedScan = scanId
+          } else {
+            event('ERROR', `scan startup failed: ${errorSummary(error)} (log: ${shortLogPath(logFile(paths, scanId))}); stopping the loop`)
+          }
+          launchFailed = true
+          break
+        }
+      }
+      dispatched = !launchFailed
+    } finally {
+      if (!dispatched) {
+        // A launch failure, or anything the dispatch threw, gives the cycle its number
+        // and expectation back, so the next start dispatches it again from the beginning.
+        // Discard what this attempt materialized: left behind, each scan would be swept
+        // into the relaunched cycle's failure list and counted against an expectation it
+        // was never part of, and the gate would then stop every later start over a scan
+        // yield that cannot arrive.
+        for (const scanId of attemptedScans) {
+          if (scanId === retainedScan) continue
+          try {
+            cleanupTask(paths, scanId, undefined, false, log)
+          } catch (error) {
+            // A scan that could not be discarded is kept like one whose runner could not
+            // be accounted for, so the operator learns why rather than meeting it later.
+            event(
+              'ERROR', shortTaskId(scanId),
+              `scan startup cleanup failed: ${errorSummary(error)}; task retained and loop stopped`,
+            )
+          }
+        }
+        if (counterExisted) writeFileSync(scanCountFile, `${currentScans}\n`)
+        else rmSync(scanCountFile, { force: true })
+        rmSync(expectedFile, { force: true })
+      }
+    }
+    if (launchFailed) writeFileSync(stopFile, '')
     return 'continue'
   }
 
@@ -4039,9 +4080,14 @@ export function createLoop(deps: LoopDeps) {
             }
             if (!permissionUnknown) warningLog.recovered('issue-author-permission')
           }
+          previousGateFailures.delete('issue-queue-sync')
           warningLog.recovered('issue-queue-sync')
         } catch (error) {
-          if (error instanceof IssueReleaseReconciliationError) {
+          if (error instanceof MalformedFingerprintLedgerError) {
+            // No later poll can repair the ledger, so idling on local-only work would
+            // stop reaping and claiming for good: it counts toward a stop instead.
+            reportGateFailure(`could not sync the issue queue: ${errorSummary(error)}`, 'issue-queue-sync')
+          } else if (error instanceof IssueReleaseReconciliationError) {
             issueReconciliationPending = true
             noteIssueReleaseFailure(error)
           } else if (!(error instanceof ForgeRateLimitError)) {

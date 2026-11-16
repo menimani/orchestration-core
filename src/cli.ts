@@ -166,8 +166,8 @@ function repoRoot(repository?: string): string {
   return root
 }
 
-function loadRepositoryConfig(paths: OrchPaths, env: NodeJS.ProcessEnv = process.env): LoopConfig {
-  return loadConfig(env, { filePath: join(paths.projectRoot, 'config.json') })
+function loadRepositoryConfig(paths: OrchPaths): LoopConfig {
+  return loadConfig(process.env, { filePath: join(paths.projectRoot, 'config.json') })
 }
 
 interface RecoveryLockOwner {

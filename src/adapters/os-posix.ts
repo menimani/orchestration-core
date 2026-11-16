@@ -93,6 +93,26 @@ const systemRuntime: PosixOperatingSystemRuntime = {
   },
 }
 
+const POSIX_PLATFORMS: ReadonlySet<string> = new Set([
+  'aix', 'android', 'cygwin', 'darwin', 'freebsd', 'haiku', 'linux', 'netbsd', 'openbsd', 'sunos',
+])
+
+/**
+ * Whether an identity came from `ps -o lstart=`. That text follows the time zone and
+ * locale of the process asking, so one process reads differently to callers under
+ * another zone or locale, or across a daylight-saving change. Only the procfs form,
+ * boot-relative clock ticks, reads the same for every caller.
+ */
+function isListedStartIdentity(identity: string): boolean {
+  const platform = /^([a-z]+):/.exec(identity)?.[1]
+  if (platform === undefined || !POSIX_PLATFORMS.has(platform)) return false
+  return !/^linux:\d+$/.test(identity)
+}
+
+function startIdentitiesProveDifferentProcess(recorded: string, current: string): boolean {
+  return recorded !== current && !isListedStartIdentity(recorded) && !isListedStartIdentity(current)
+}
+
 function processIsAlive(runtime: PosixOperatingSystemRuntime, pid: number): boolean {
   try {
     runtime.probeProcess(pid)
@@ -258,6 +278,7 @@ export function createOperatingSystem(
     agentCommand: (program, args) => ({ command: program, args: [...args], verbatimArguments: false }),
     processTreeRootPid: () => process.pid,
     processStartIdentity: runtime.processStartIdentity ?? systemRuntime.processStartIdentity!,
+    startIdentitiesProveDifferentProcess,
     processIsAlive: (pid) => processIsAlive(runtime, pid),
     processTreeIsAlive,
     terminateProcessTree,

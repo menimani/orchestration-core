@@ -10,6 +10,7 @@ import { LABEL_FINDING, LABEL_IN_PROGRESS } from '../src/issueQueue.ts'
 import { shortTaskId } from '../src/ids.ts'
 import { formatEventLine } from '../src/loop.ts'
 import { branchName, statusFile, worktreeDir } from '../src/paths.ts'
+import { recordInterruptedScans } from '../src/scanRecovery.ts'
 import { enqueueTask } from '../src/tasks.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
@@ -582,6 +583,186 @@ describe('cycle gate', () => {
     expect(logText()).not.toContain('did not receive every expected scan yield')
   })
 
+  it.each([
+    { counter: undefined, cycle: 1 },
+    { counter: '1\n', cycle: 2 },
+  ])('recovers cycle $cycle when stop arrives while its scans are still dispatching', async ({
+    counter, cycle,
+  }) => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    if (counter !== undefined) writeFileSync(join(paths.queueDir, 'scan-count.txt'), counter)
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    const attempted: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        const scanId = basename(options.specFile, '.md')
+        attempted.push(scanId)
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        // The operator's stop lands before the dispatching poll returns, as it does when
+        // the command snapshots a scan that is live while its partners still start.
+        recordInterruptedScans(paths, [{ taskId: scanId, pid: child.pid }])
+        writeFileSync(join(paths.queueDir, 'stop'), '')
+        return child.pid
+      },
+    }
+    const dispatching = makeLoop(
+      { autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+    dispatching.initializeSessionStateForBranch()
+
+    expect(await dispatching.triggerScanIfIdle()).toBe('continue')
+
+    expect(attempted).toHaveLength(1)
+    const [interrupted] = attempted as [string]
+    expect(readFileSync(marker, 'utf8')).toBe(`${cycle}\t${interrupted}\n`)
+    expect(await dispatching.poll()).toBe('stopped')
+
+    const restarted = makeLoop({ autoPr: false, reviewEnabled: false })
+    restarted.initializeSessionStateForBranch()
+
+    expect(await restarted.poll()).toBe('continue')
+
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(existsSync(worktreeDir(paths, interrupted))).toBe(false)
+    expect(existsSync(statusFile(paths, interrupted))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe(`${cycle}\n`)
+    expect(readFileSync(join(paths.queueDir, `scan-expected-${cycle}`), 'utf8')).toBe('1\n')
+    expect(runnerStarts).toHaveLength(1)
+    expect(logText()).toContain(`Recovered scan cycle  ${cycle} after operator stop`)
+    expect(logText()).not.toContain('does not match current cycle')
+  })
+
+  it('gives a launched cycle its number back when a later scan fails to launch', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n',
+    )
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const countsAtStart: string[] = []
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async () => {
+        countsAtStart.push(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8'))
+        if (countsAtStart.length === 2) throw new Error('runner unavailable')
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        return child.pid
+      },
+    }
+    const loop = makeLoop(
+      { scanParallel: 2, autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    // Each scan started under the cycle it belongs to; the failed cycle then gave it back.
+    expect(countsAtStart).toEqual(['2\n', '2\n'])
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(existsSync(join(paths.queueDir, 'scan-expected-2'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain('ERROR scan startup failed: runner unavailable (log:')
+  })
+
+  it('gives the cycle back when writing a later scan specification throws', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    const template = join(paths.root, 'templates', 'scan-template.md')
+    const templateText = '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n'
+    writeFileSync(template, templateText)
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const attempted: string[] = []
+    let scanPid: number | undefined
+    const runner: Runner = {
+      sharedSkills: fakeRunnerSharedSkills,
+      start: async (options) => {
+        attempted.push(basename(options.specFile, '.md'))
+        // The template turns unreadable once the first scan is live, so rendering the
+        // second scan's specification throws outside the launch's own error handling.
+        rmSync(template, { force: true })
+        mkdirSync(template)
+        const child = testProcesses.spawn(process.execPath, [
+          '-e', 'setInterval(() => {}, 1000)',
+        ], { stdio: 'ignore', windowsHide: true })
+        if (child.pid === undefined) throw new Error('scan fixture published no PID')
+        child.unref()
+        scanPid = child.pid
+        return child.pid
+      },
+    }
+    const interrupted = makeLoop(
+      { scanParallel: 2, autoPr: false, reviewEnabled: false },
+      stubProject, undefined, undefined, runner,
+    )
+
+    await expect(interrupted.triggerScanIfIdle()).rejects.toThrow()
+
+    expect(attempted).toHaveLength(1)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(existsSync(join(paths.queueDir, 'scan-expected-2'))).toBe(false)
+    const [launched] = attempted as [string]
+    expect(existsSync(worktreeDir(paths, launched))).toBe(false)
+    expect(existsSync(statusFile(paths, launched))).toBe(false)
+    expect(git(['branch', '--list', branchName(launched)])).toBe('')
+    expect(scanPid).toBeDefined()
+    expect(operatingSystem.processTreeIsAlive(scanPid!)).toBe(false)
+
+    rmSync(template, { recursive: true, force: true })
+    writeFileSync(template, templateText)
+    const restarted = makeLoop({ scanParallel: 2, autoPr: false, reviewEnabled: false })
+
+    expect(await restarted.triggerScanIfIdle()).toBe('continue')
+
+    expect(runnerStarts).toHaveLength(2)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-2'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+  })
+
+  it.each([
+    { launched: 0 },
+    { launched: 1 },
+  ])('stops a start after a kill during dispatch left $launched of 2 scans launched', async ({
+    launched,
+  }) => {
+    // A kill between the counter and the last launch leaves what dispatch writes first:
+    // the advanced counter and the cycle's expectation, with only some scans behind them.
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(join(paths.queueDir, 'scan-expected-2'), '2\n')
+    const launchedScan = '20260809_000000_001_scan'
+    if (launched === 1) writeRawStatus(launchedScan, 'failed')
+    const loop = makeLoop({ maxScanCycles: 2, autoPr: false, reviewEnabled: false })
+
+    expect(await loop.poll()).toBe('continue')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      'ERROR cycle 2 did not receive every expected scan yield; stopping the loop',
+    )
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('2\n')
+    expect(readFileSync(join(paths.queueDir, 'scan-expected-2'), 'utf8')).toBe('2\n')
+    expect(existsSync(join(paths.queueDir, 'cycle-complete-2'))).toBe(false)
+    expect(logged.some((line) => line.includes('CYCLE_COMPLETE'))).toBe(false)
+    expect(runnerStarts).toHaveLength(0)
+  })
+
   it('removes a marker left behind after its cycle was already rewound and starts', async () => {
     initializeGitRepo()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
@@ -640,6 +821,44 @@ describe('cycle gate', () => {
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
     expect(runnerStarts).toHaveLength(1)
     expect(logText()).toContain('Recovered scan cycle  1 after operator stop')
+    expect(logText()).not.toContain('tasks failed in one poll')
+  })
+
+  it('discards later-cycle scans stopped before a new run branch reset the counter', async () => {
+    initializeGitRepo()
+    mkdirSync(join(paths.root, 'templates'), { recursive: true })
+    writeFileSync(
+      join(paths.root, 'templates', 'scan-template.md'),
+      '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n',
+    )
+    const live = '20260809_000000_007_scan'
+    const gone = '20260809_000000_008_scan'
+    const marker = join(paths.queueDir, 'stop-interrupted-scans')
+    writeFileSync(join(paths.queueDir, 'run-branch.txt'), 'previous-run\n')
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '2\n')
+    writeFileSync(marker, `2\t${live}\n2\t${gone}\n`)
+    writeRawStatus(live, 'running', null)
+    const liveWorktree = worktreeDir(paths, live)
+    git(['worktree', 'add', '-q', liveWorktree, '-b', branchName(live)])
+    const loop = makeLoop({ autoPr: false, reviewEnabled: false, maxBurstFailures: 1 })
+    loop.initializeSessionStateForBranch()
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
+
+    expect(await loop.poll()).toBe('continue')
+
+    for (const taskId of [live, gone]) {
+      expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
+      expect(git(['branch', '--list', branchName(taskId)]).trim()).toBe('')
+      expect(existsSync(statusFile(paths, taskId))).toBe(false)
+      expect(logged.join('\n')).not.toContain(`FAILED: ${taskId}`)
+    }
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'failed-1'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('1\n')
+    expect(runnerStarts).toHaveLength(1)
+    expect(logText()).toContain('Recovered scan cycle  1 after operator stop')
+    expect(logText()).not.toContain('does not match current cycle')
     expect(logText()).not.toContain('tasks failed in one poll')
   })
 
@@ -1262,6 +1481,32 @@ describe('cycle gate', () => {
     expect(logText()).not.toContain('repeated 2 times')
     expect(logText().match(/WARN could not enqueue CI fix: queue unavailable/g))
       .toHaveLength(2)
+  })
+
+  it('passes the CI gate for a merged PR holding HEAD without waiting for its checks', async () => {
+    const enqueue = vi.fn<typeof enqueueTask>()
+    const loop = makeLoop({
+      autoPr: false,
+      reviewEnabled: true,
+      ciGateEnabled: true,
+      maxCiFixAttempts: 1,
+    }, stubProject, undefined, undefined, undefined, enqueue)
+    prepareFailedCiGate()
+    setForgeStatus({
+      ...forgeStatus,
+      state: 'merged',
+      isDraft: false,
+      headSha: git(['rev-parse', 'HEAD']).trim(),
+      checks: [{ name: 'frontend', conclusion: 'pending', startedAt: '' }],
+    })
+
+    expect(await loop.checkPrCiStatus()).toBe('success')
+    expect(await loop.triggerScanIfIdle()).toBe('continue')
+
+    expect(prStatusCalls).toBe(2)
+    expect(enqueue).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'cycle-resume-1'))).toBe(true)
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
   })
 
   it('stops instead of resetting a malformed CI fix attempt count', async () => {
