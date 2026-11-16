@@ -33,6 +33,11 @@ export const PLATFORM_SUITES: PlatformSuite[] = [
     platform: 'linux',
     reason: 'ends the shell of a timed command with a signal, which Windows cannot send',
   },
+  {
+    file: 'tests/posix-test-process.test.ts',
+    platform: 'linux',
+    reason: 'stops fixtures that trap SIGTERM in process groups of their own, which Windows does not create',
+  },
 ]
 
 /** The suites this platform cannot attempt, so the config can leave them uncollected. */
