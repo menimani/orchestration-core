@@ -1136,7 +1136,9 @@ are not parsed by `loadConfig` and are not operator-file settings.
      has claimed since, since a lapsed claim may have been reaped and handed elsewhere;
      an operator cleanup still releases whoever holds the issue. Each issue leaves the
      persisted release intent as soon as its own release verifies, so retrying a partial
-     release never releases an issue a second time.
+     release never releases an issue a second time. An issue the forge reports as deleted
+     has nothing left to release and leaves the intent the same way; any other error keeps
+     the issue in the intent for the next poll.
 20. Failures are announced once per task (a `.failed` flag file), recorded against the
     cycle, and carried into the PR risks. A finished run lists the failures it announced,
     so the next run neither reports them again nor counts them toward a failure burst.
@@ -1496,7 +1498,12 @@ unassigned and ready, receives `loop:untrusted-author`, and emits a warning nami
 author so a maintainer can inspect it and re-file genuine work. Reconciliation neither
 labels nor warns; it only leaves the issue out. An issue whose author lacks write access,
 or which already carries that label, never suppresses or closes a trusted finding and is
-never recorded in the local fingerprint ledger.
+never recorded in the local fingerprint ledger. An issue whose author's access is
+undetermined is left out of that poll's reconciliation as well, but keeps the ledger
+entries it already has: a failed lookup would otherwise drop the entries of every finding
+the loop itself filed, and the next scan would file each of them again. Only a verdict of
+no write access or the label removes such an entry, and a kept entry suppresses a finding
+only once its issue, read again at that moment, passes the author check.
 
 An issue imported into a fleet's queue (item 38) is authored by whoever ran the import,
 so the claim gate alone would trust any project issue. The import is therefore the trust
