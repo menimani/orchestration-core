@@ -110,6 +110,14 @@ export const TEST_LOCK_BUSY_EXIT_CODE = 75
 export class TestLockBusyError extends MergeError {}
 
 /**
+ * The integration checkout left the commit the gate tested while the gate ran — a hand
+ * merge, say, or a branch switch. Merging now would land a combination no gate verified,
+ * and the task's work is no more suspect than before, so this too is a deferral: the next
+ * attempt gates the task again against the checkout as it then stands.
+ */
+export class MergeBaseMovedError extends MergeError {}
+
+/**
  * A verification command ran in the prospective worktree and failed. Unlike every other
  * gate refusal, this one can be the task's own content, so the loop may hand it back to
  * the task's runner to correct instead of retrying the same commits.
@@ -594,6 +602,25 @@ function mergeStoppedOnConflict(cwd: string, runtime: MergeRuntime): boolean {
   } catch {
     return true
   }
+}
+
+/**
+ * Refuse to merge unless the integration checkout, whose HEAD the caller has just read,
+ * is still on the branch, at the commit, that the gate verified the merge against.
+ */
+function requireGatedIntegrationHead(
+  repoRoot: string,
+  currentBranch: string,
+  gatedBase: string,
+  headNow: string,
+): void {
+  const branchNow = git(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+  if (branchNow === currentBranch && headNow === gatedBase) return
+  throw new MergeBaseMovedError(
+    `The integration checkout moved while the merge gate ran: the gate tested ${currentBranch} `
+    + `at ${gatedBase}, but the checkout is now on ${branchNow} at ${headNow}. `
+    + 'The merge was not attempted; a later attempt gates it again.',
+  )
 }
 
 /**
@@ -1594,11 +1621,13 @@ async function mergeTaskWithGuardHeld(
     return { outcome: 'no-change' }
   }
   requireMergeableIntegrationCheckout(paths.repoRoot, currentBranch, branch)
+  // Resolved once: the gate takes minutes, and the merge below lands only on this commit.
+  const gatedBase = git(paths.repoRoot, ['rev-parse', '--verify', 'HEAD^{commit}']).trim()
   const prospectiveWorktree = join(
     paths.worktreesDir, `.merge-${shortTaskId(taskId)}-${process.pid}-${Date.now()}`,
   )
   inTemporaryWorktree(paths, prospectiveWorktree, io.out, () => {
-    git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', prospectiveWorktree, currentBranch])
+    git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', prospectiveWorktree, gatedBase])
     mergeWithVerifiedRecovery(
       prospectiveWorktree,
       ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage],
@@ -1607,14 +1636,15 @@ async function mergeTaskWithGuardHeld(
     )
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     try {
-      io.out(git(prospectiveWorktree, ['diff', `${currentBranch}...HEAD`]))
+      io.out(git(prospectiveWorktree, ['diff', `${gatedBase}...HEAD`]))
     } catch {
       // an empty inspection diff is fine
     }
-    return runMergeChecks(prospectiveWorktree, currentBranch, options, io)
+    return runMergeChecks(prospectiveWorktree, gatedBase, options, io)
   })
 
   const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  requireGatedIntegrationHead(paths.repoRoot, currentBranch, gatedBase, headBeforeMerge)
   mergeWithVerifiedRecovery(
     paths.repoRoot,
     ['merge', '--quiet', '--no-ff', branch, '-m', mergeMessage],
@@ -1763,28 +1793,32 @@ export async function mergeRemoteTask(
     )
     return appliedCommit
   }
-  requireMergeableIntegrationCheckout(paths.repoRoot, currentBranch, remoteRef)
+  requireMergeableIntegrationCheckout(paths.repoRoot, currentBranch, expectedHead)
+  // Both sides are fixed commits: a refetch or a hand merge while the gate runs must not
+  // change what lands from what was tested.
+  const gatedBase = git(paths.repoRoot, ['rev-parse', '--verify', 'HEAD^{commit}']).trim()
   inTemporaryWorktree(paths, worktree, io.out, () => {
-    git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, currentBranch])
+    git(paths.repoRoot, ['worktree', 'add', '--quiet', '--detach', worktree, gatedBase])
     mergeWithVerifiedRecovery(
       worktree,
-      ['merge', '--quiet', '--no-ff', remoteRef, '-m', mergeMessage],
+      ['merge', '--quiet', '--no-ff', expectedHead, '-m', mergeMessage],
       `A merge conflict occurred while adopting ${branch}.`,
       mergeRuntime,
     )
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     try {
-      io.out(git(worktree, ['diff', `${currentBranch}...HEAD`]))
+      io.out(git(worktree, ['diff', `${gatedBase}...HEAD`]))
     } catch {
       // an empty inspection diff is fine
     }
-    return runMergeChecks(worktree, currentBranch, options, io)
+    return runMergeChecks(worktree, gatedBase, options, io)
   })
 
   const headBeforeMerge = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  requireGatedIntegrationHead(paths.repoRoot, currentBranch, gatedBase, headBeforeMerge)
   mergeWithVerifiedRecovery(
     paths.repoRoot,
-    ['merge', '--quiet', '--no-ff', remoteRef, '-m', mergeMessage],
+    ['merge', '--quiet', '--no-ff', expectedHead, '-m', mergeMessage],
     `A merge conflict occurred while adopting ${branch}.`,
     mergeRuntime,
     headBeforeMerge,

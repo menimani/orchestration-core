@@ -1,7 +1,9 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { MergeError, MergeRecoveryError, mergeRemoteTask, mergeTask } from '../src/merge.ts'
+import {
+  MergeBaseMovedError, MergeError, MergeRecoveryError, mergeRemoteTask, mergeTask,
+} from '../src/merge.ts'
 import { branchName } from '../src/paths.ts'
 import { readStatus } from '../src/status.ts'
 import {
@@ -481,6 +483,72 @@ describe('mergeRemoteTask', () => {
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(runHead)
     expect(existsSync(join(repoRoot, 'run.txt'))).toBe(true)
     expect(existsSync(join(repoRoot, 'task.txt'))).toBe(false)
+  })
+
+  it('merges the reported head even when the remote ref moves while the gate runs', async () => {
+    const branch = 'task/remote-ref-moves-during-gate'
+    const remoteRef = `refs/remotes/origin/${branch}`
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repoRoot, 'unverified.txt'), 'pushed after the report\n')
+    git(repoRoot, ['add', 'unverified.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add work nobody reported'])
+    const laterHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['branch', '-D', branch])
+    git(repoRoot, ['update-ref', remoteRef, expectedHead])
+    const refetch: typeof noCheckProject = {
+      ...noCheckProject,
+      name: 'refetch-during-gate',
+      mergeChecks: () => {
+        git(repoRoot, ['update-ref', remoteRef, laterHead])
+        return []
+      },
+    }
+
+    const mergeCommit = await mergeRemoteTask(paths, 230, 'origin', branch, expectedHead, {
+      taskGate: 'light', project: refetch,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })
+
+    expect(git(repoRoot, ['rev-parse', `${mergeCommit}^2`]).trim()).toBe(expectedHead)
+    expect(existsSync(join(repoRoot, 'task.txt'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'unverified.txt'))).toBe(false)
+  })
+
+  it('defers an adoption whose run branch received a hand merge while the gate ran', async () => {
+    const branch = 'task/remote-run-branch-moved'
+    git(repoRoot, ['switch', '-qc', branch])
+    writeFileSync(join(repoRoot, 'task.txt'), 'task work\n')
+    git(repoRoot, ['add', 'task.txt'])
+    git(repoRoot, ['commit', '-qm', 'feat: add remote task work'])
+    const expectedHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    git(repoRoot, ['switch', '-q', 'main'])
+    git(repoRoot, ['branch', '-D', branch])
+    git(repoRoot, ['update-ref', `refs/remotes/origin/${branch}`, expectedHead])
+    const handMerge: typeof noCheckProject = {
+      ...noCheckProject,
+      name: 'hand-merge-during-adoption-gate',
+      mergeChecks: () => {
+        git(repoRoot, ['commit', '-q', '--allow-empty', '-m', 'chore: land a hand merge'])
+        return []
+      },
+    }
+    const onMerged = vi.fn()
+
+    const deferred = mergeRemoteTask(paths, 231, 'origin', branch, expectedHead, {
+      taskGate: 'light', project: handMerge, onMerged,
+      forge: { issueClosingCommitMessage: (message) => message },
+    })
+
+    await expect(deferred).rejects.toBeInstanceOf(MergeBaseMovedError)
+    expect(git(repoRoot, ['log', '-1', '--format=%s']).trim()).toBe('chore: land a hand merge')
+    expect(existsSync(join(repoRoot, 'task.txt'))).toBe(false)
+    expect(onMerged).not.toHaveBeenCalled()
+    expectNoTemporaryWorktree('.adopt-')
   })
 
   it('aborts a conflicting adoption without changing the run branch or remote state', async () => {
