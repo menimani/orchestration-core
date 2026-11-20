@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, parse, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { OperatingSystem } from '../src/adapters/os.ts'
 import { findFleetDir, projectForDirectory, readFleet, resolveFleetProject } from '../src/fleet.ts'
 import {
   absolutePackageScriptCommand, fleetPaths, locationArgs, orchPaths, shellPathSpelling,
@@ -191,5 +192,23 @@ describe('project for a directory', () => {
     expect(projectForDirectory(dir, join(dir, 'checkouts'))).toBeUndefined()
     expect(projectForDirectory(dir, join(dir, 'checkouts', 'outer-sibling'))).toBeUndefined()
     expect(projectForDirectory(dir, join(dir, 'checkouts', 'stale'))).toBeUndefined()
+  })
+
+  it('finds a checkout kept at the root of a filesystem', () => {
+    const dir = fleetWithCheckouts()
+    const checkout = realpathSync.native(join(dir, 'checkouts', 'outer'))
+    const root = parse(checkout).root
+    // Present the outer checkout as the filesystem root, whose resolved spelling ends
+    // with a separator, and everything below it as the same path below the root.
+    const os = {
+      worktreePathFor(path: string) {
+        const below = relative(checkout, path)
+        const inside = below === '' || !(below.startsWith('..') || isAbsolute(below))
+        return { comparisonKey: inside ? join(root, below) : path }
+      },
+    } as unknown as OperatingSystem
+
+    expect(projectForDirectory(dir, join(dir, 'checkouts', 'outer'), os)).toBe('outer')
+    expect(projectForDirectory(dir, join(dir, 'checkouts', 'outer', 'vendor'), os)).toBe('outer')
   })
 })
