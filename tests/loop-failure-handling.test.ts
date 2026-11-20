@@ -20,10 +20,19 @@ import { StartupProcessRetainedError, startTask } from '../src/start.ts'
 import { enqueueTask, specFile } from '../src/tasks.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import {
-  fakeForge, forgeStatus, git, initializeGitRepo, initializeGitRepoWithRemote, logText,
-  logged, makeLoop, makeRunner, paths, registerLoopHooks, repoRoot, runnerStarts,
-  setForgeStatus, setLogged, stubProject, writeRawStatus,
+  fakeForge, fakeRepositoryDeps, forgeStatus, git, initializeGitRepo, initializeGitRepoWithRemote,
+  logText, logged, makeLoop, makeRunner, paths, registerLoopHooks, repoRoot, runnerStarts,
+  setForgeStatus, setLogged, stubProject, useFakeRepository, writeRawStatus,
 } from './loopHarness.ts'
+
+/** The checkout initializeGitRepoWithRemote leaves, described to the fake repository. */
+function withOriginRemote(): Parameters<typeof useFakeRepository>[0] {
+  return {
+    remotes: [{ name: 'origin', url: join(repoRoot, 'origin.git'), defaultBranch: 'main' }],
+    upstreams: { main: 'origin' },
+    commitsAhead: { 'origin/main': 0 },
+  }
+}
 
 const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
 
@@ -67,6 +76,7 @@ registerLoopHooks()
 
 describe('failure announcement and burst stop (via poll)', () => {
   it('reports an idle poll with its wait target', async () => {
+    useFakeRepository({ repository: false })
     const loop = makeLoop({ scanEnabled: false, maxScanCycles: 6 })
 
     expect(await loop.poll()).toBe('continue')
@@ -76,6 +86,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('ages and backs off idle status lines, then resets when work appears', async () => {
+    useFakeRepository({ repository: false })
     let current = new Date('2026-08-08T03:00:00Z')
     const loop = makeLoop(
       { scanEnabled: false, autoPr: false, issueQueueEnabled: true, maxScanCycles: 6 },
@@ -123,6 +134,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('omits Waiting while a scan is in flight', async () => {
+    useFakeRepository({ repository: false })
     const loop = makeLoop({ scanEnabled: false })
     writeRawStatus('20260809_000000_001_scan', 'running', process.pid)
 
@@ -132,6 +144,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('reports both phase groups when scans and tasks run together', async () => {
+    useFakeRepository({ repository: false })
     const loop = makeLoop({ scanEnabled: false })
     writeRawStatus('20260809_000000_001_scan', 'running', process.pid)
     writeRawStatus('20260809_000001_002_auto-fix', 'running', process.pid)
@@ -142,6 +155,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('announces a failure once, records it for the cycle, and stops on a burst', async () => {
+    useFakeRepository({ repository: false })
     const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
     for (const taskId of ['f1', 'f2', 'f3']) {
@@ -166,6 +180,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('stops and fails a task that outlives its deadline', async () => {
+    useFakeRepository({ repository: false })
     // A PID no test process owns, answered as a live runner whose identity still matches.
     const pid = process.pid + 1_000_000
     const taskId = '20260808_030000_001_auto-stuck'
@@ -205,6 +220,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('does not count tasks already dead at daemon startup as a failure burst', async () => {
+    useFakeRepository({ repository: false })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
     for (const taskId of ['old-f1', 'old-f2', 'old-f3']) {
       writeRawStatus(taskId, 'running', null)
@@ -236,6 +252,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('does not count tasks refreshed by status between a stop and a restart as a burst', async () => {
+    useFakeRepository({ repository: false })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
     const taskIds = ['stopped-f1', 'stopped-f2', 'stopped-f3']
     for (const taskId of taskIds) writeRawStatus(taskId, 'running', null)
@@ -256,6 +273,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('does not count tasks already failed at daemon startup as a failure burst', async () => {
+    useFakeRepository({ repository: false })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
     const taskIds = ['pre-f1', 'pre-f2', 'pre-f3']
     for (const taskId of taskIds) writeRawStatus(taskId, 'failed')
@@ -279,6 +297,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('still stops on a burst of fresh failures beside tasks failed at startup', async () => {
+    useFakeRepository({ repository: false })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '4\n')
     for (const taskId of ['pre-f1', 'pre-f2', 'pre-f3']) writeRawStatus(taskId, 'failed')
     const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxBurstFailures: 3 })
@@ -295,6 +314,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('does not announce a startup failure already listed as announced', async () => {
+    useFakeRepository({ repository: false })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeRawStatus('listed-f1', 'failed')
     writeRawStatus('unlisted-f1', 'failed')
@@ -366,7 +386,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('releases and counts the issue of a task already failed at startup', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     // The released issue is ready again, so the restarted loop may claim it anew.
     const runner = makeRunner()
     const config = {
@@ -395,6 +415,7 @@ describe('failure announcement and burst stop (via poll)', () => {
       project: stubProject,
       log: (line) => logged.push(line),
       now: () => new Date(2026, 7, 8, 12, 0, 0),
+      ...fakeRepositoryDeps(),
     })
     expect(await next.poll()).toBe('continue')
 
@@ -408,7 +429,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('neither announces nor counts failures left by a finished run', async () => {
-    initializeGitRepoWithRemote()
+    useFakeRepository(withOriginRemote())
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const finished = makeLoop({
       scanEnabled: false, autoPr: true, reviewEnabled: false, maxBurstFailures: 4,
@@ -439,6 +460,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('records a failed scan in its cycle before entering the cycle gate', async () => {
+    useFakeRepository({ repository: false })
     const taskId = '20260809_000000_001_scan'
     const loop = makeLoop({
       autoPr: false,
@@ -458,6 +480,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('invalidates a completed cycle gate when a new task failure is observed', async () => {
+    useFakeRepository({ repository: false })
     const taskId = '20260809_000001_002_auto-late-failure'
     const loop = makeLoop({
       autoPr: false,
@@ -477,6 +500,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('does not start queued work or scans while a stop is pending', async () => {
+    useFakeRepository({ repository: false })
     const loop = makeLoop({ autoMerge: false, scanEnabled: true, maxBurstFailures: 1 })
     writeRawStatus('f1', 'running', null)
     writeFileSync(join(paths.tasksDir, 'queued-task.md'), '# spec\n')
@@ -488,7 +512,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('requeues a local task when startup fails before a status can be persisted', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const taskId = '20260809_000002_003_auto-invalid-effort'
     const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 1 })
     loop.initializeSessionStateForBranch()
@@ -514,7 +538,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('stops cleanly when a statusless startup failure cannot be requeued', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const taskId = '20260809_000003_004_auto-missing-spec'
     const loop = makeLoop({ autoMerge: false, scanEnabled: false, maxParallel: 1 })
     loop.initializeSessionStateForBranch()
@@ -531,7 +555,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('stops dispatching local tasks once startup failures reach the burst limit', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const attemptedTaskIds: string[] = []
     const runner: Runner = {
       sharedSkills: fakeRunnerSharedSkills,
@@ -567,7 +591,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('does not count a local startup failure again when a later poll announces it', async () => {
-    initializeGitRepoWithRemote()
+    useFakeRepository(withOriginRemote())
     // A task still running keeps the cycle open across the polls below.
     writeRawStatus('20260808_110000_000_user-busy', 'running', process.pid)
     const runner: Runner = {
@@ -690,7 +714,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('stops without releasing or retrying a claimed task whose startup process survives', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const description = '[BUG] retain work owned by a surviving startup process'
     const retainedPid = process.pid
     const retainedStarts: string[] = []
@@ -739,7 +763,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('stops without releasing a claim when the runner returns an invalid PID', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const description = '[BUG] retain a claimed task with unknown runner ownership'
     const attemptedTaskIds: string[] = []
     const runner: Runner = {
@@ -782,7 +806,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('persists a startup-failure release and stops after three failed reconciliations', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const description = '[BUG] retain a claimed task until its issue can be released'
     const attemptedTaskIds: string[] = []
     const runner: Runner = {
@@ -842,7 +866,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('counts a startup failure once while its issue release is still pending', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const description = '[BUG] count a startup failure once across release retries'
     const attemptedTaskIds: string[] = []
     const runner: Runner = {
