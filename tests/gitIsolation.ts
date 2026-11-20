@@ -11,9 +11,19 @@ import { recordSpawnProfile } from './spawnProfile.ts'
 // suite starts, directly or through the code under test, inherits this environment, so
 // a fixture sees only the configuration it sets itself. A fixture that tests line-ending
 // behaviour sets core.autocrlf explicitly.
+//
+// The file is not empty, though: it carries settings that only change how fast git
+// writes. core.fsync=none skips flushing objects and refs to disk, and gc.auto=0 with
+// maintenance.auto=false stops a commit or merge from starting background housekeeping.
+// They change durability and housekeeping only, never what a command answers, and a
+// fixture that sets its own value in its repository still wins over this file.
 const configRoot = mkdtempSync(join(tmpdir(), 'orch-git-config-'))
 const globalConfig = join(configRoot, 'gitconfig')
-writeFileSync(globalConfig, '')
+writeFileSync(globalConfig, [
+  '[core]', '\tfsync = none',
+  '[gc]', '\tauto = 0',
+  '[maintenance]', '\tauto = false',
+].join('\n') + '\n')
 process.env.GIT_CONFIG_NOSYSTEM = '1'
 process.env.GIT_CONFIG_GLOBAL = globalConfig
 
