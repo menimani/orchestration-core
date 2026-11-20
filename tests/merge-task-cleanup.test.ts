@@ -6,7 +6,7 @@ import {
   completeTaskWithoutChanges, MergeError, mergeTask, UnverifiedRunnerError,
 } from '../src/merge.ts'
 import { branchName, finalMessageFile } from '../src/paths.ts'
-import { taskProcessPid } from '../src/processRegistry.ts'
+import { recordTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
 import { readStatus, writeStatus } from '../src/status.ts'
 import {
   failedWorktreeRemovalRuntime, git, makeCompletedTask, noCheckProject, paths, repoRoot,
@@ -162,6 +162,45 @@ describe('mergeTask', () => {
     expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).not.toBe('')
     expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
     expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: runnerPid })
+  })
+
+  it('does not terminate a runner whose ownership changed after the status read', async () => {
+    const taskId = '20261120_185047_009_user-runner-handed-over'
+    const worktree = await makeCompletedTask(taskId, { commit: true })
+    const runnerPid = 12345
+    const otherPid = 12344
+    const identity = vi.spyOn(operatingSystem, 'processStartIdentity')
+      .mockImplementation((pid) => `started:${pid}`)
+    await writeStatus(paths, taskId, 'completed', runnerPid)
+    // Once the guarded merge starts, the registry is rewritten between its status read
+    // and the termination check.
+    let armed = false
+    let handedOver = false
+    identity.mockImplementation((pid) => {
+      if (armed && !handedOver) {
+        handedOver = true
+        recordTaskProcess(paths, taskId, otherPid)
+      }
+      return `started:${pid}`
+    })
+    vi.spyOn(operatingSystem, 'processTreeIsAlive').mockReturnValue(true)
+    const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree').mockReturnValue(true)
+
+    const failure = await mergeTask(paths, taskId, {
+      taskGate: 'light', project: stubProject, onMergeStart: () => { armed = true },
+    }).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(MergeError)
+    expect(failure).not.toBeInstanceOf(UnverifiedRunnerError)
+    expect((failure as MergeError).message).toBe(
+      'Completed runner ownership changed; task state was retained.',
+    )
+
+    expect(handedOver).toBe(true)
+    expect(terminate).not.toHaveBeenCalled()
+    expect(existsSync(worktree)).toBe(true)
+    expect(git(repoRoot, ['branch', '--list', branchName(taskId)]).trim()).not.toBe('')
+    expect(existsSync(join(repoRoot, `${taskId}.txt`))).toBe(false)
+    expect(readStatus(paths, taskId)).toMatchObject({ status: 'completed', pid: otherPid })
   })
 
   it('does not terminate an unverified runner before merging', async () => {
