@@ -4,9 +4,11 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import { TEST_LOCK_BUSY_EXIT_CODE } from '../src/merge.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
+import { FAKE_COMMIT } from './fakeRepository.ts'
 import {
-  configureLocalRemote, fakeForge, forgeStatus, git, initializeGitRepo, logText, logged,
-  makeLoop, paths, prStatusCalls, registerLoopHooks, repoRoot, stubProject,
+  configureLocalRemote, fakeForge, forgeStatus, git, logText, logged, makeLoop, paths,
+  prStatusCalls, registerLoopHooks, repoRoot, stubProject, useFakeRepository,
+  useFakeRepositoryWithRemote,
 } from './loopHarness.ts'
 
 const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
@@ -51,8 +53,10 @@ registerLoopHooks()
 
 describe('completion marker output', () => {
   it('stops after a repeated push failure without rerunning a passing suite', async () => {
-    initializeGitRepo()
-    git(['remote', 'add', 'origin', join(repoRoot, 'missing-remote.git')])
+    useFakeRepository({
+      remotes: [{ name: 'origin', url: join(repoRoot, 'missing-remote.git') }],
+      missingRepositories: [join(repoRoot, 'missing-remote.git')],
+    })
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const suiteProject: ProjectAdapter = {
       ...stubProject,
@@ -80,7 +84,7 @@ describe('completion marker output', () => {
   })
 
   it('defers a cycle gate whose suite waited out the test lock without stopping the loop', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const suiteProject: ProjectAdapter = {
       ...stubProject,
@@ -104,7 +108,7 @@ describe('completion marker output', () => {
   })
 
   it('retains a suite verdict only while PR retries use the same branch tip', async () => {
-    configureLocalRemote()
+    const repository = useFakeRepositoryWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const suiteProject: ProjectAdapter = {
       ...stubProject,
@@ -123,9 +127,12 @@ describe('completion marker output', () => {
     expect(logText()).toContain('ERROR could not read PR body: body read failed (repeated 2 times)')
     expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
 
-    writeFileSync(join(repoRoot, 'tip-change.txt'), 'new tip\n')
-    git(['add', 'tip-change.txt'])
-    git(['commit', '-m', 'test: change the gate tip'])
+    repository.state.ancestors = [repository.state.head]
+    repository.state.head = FAKE_COMMIT
+    repository.state.commitsAhead['origin/main'] = 1
+    repository.state.commits['origin/main'] = [
+      { sha: FAKE_COMMIT, subject: 'test: change the gate tip', files: ['tip-change.txt'] },
+    ]
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
 
@@ -155,7 +162,7 @@ describe('completion marker output', () => {
   })
 
   it('retries the cycle gate when the existing PR body cannot be read', async () => {
-    configureLocalRemote()
+    useFakeRepositoryWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const loop = makeLoop({ autoPr: true, reviewEnabled: true, autoReview: false })
     let reads = 0
@@ -177,7 +184,7 @@ describe('completion marker output', () => {
   })
 
   it('retries the cycle gate when the PR status cannot be read', async () => {
-    configureLocalRemote()
+    useFakeRepositoryWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const loop = makeLoop({ autoPr: true, reviewEnabled: true, autoReview: false })
     let reads = 0
@@ -200,11 +207,14 @@ describe('completion marker output', () => {
   })
 
   it('waits for the default branch fetch before completing the cycle', async () => {
-    configureLocalRemote()
-    git(['switch', '-c', 'feature/fetch-retry'])
+    const repository = useFakeRepositoryWithRemote()
+    repository.state.branch = 'feature/fetch-retry'
+    repository.state.branches.push('feature/fetch-retry')
+    const [origin] = repository.state.remotes
     const remote = join(repoRoot, 'remote.git')
-    git(['remote', 'set-url', '--push', 'origin', remote])
-    git(['remote', 'set-url', 'origin', join(repoRoot, 'missing-remote.git')])
+    origin!.pushUrl = remote
+    origin!.url = join(repoRoot, 'missing-remote.git')
+    repository.state.missingRepositories.push(origin!.url)
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const loop = makeLoop({ autoPr: true, reviewEnabled: true, autoReview: false })
     const updatePr = vi.fn(async () => {})
@@ -217,7 +227,7 @@ describe('completion marker output', () => {
     expect(prStatusCalls).toBe(0)
     expect(updatePr).not.toHaveBeenCalled()
 
-    git(['remote', 'set-url', 'origin', remote])
+    origin!.url = remote
 
     expect(await loop.triggerScanIfIdle()).toBe('continue')
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
@@ -225,7 +235,7 @@ describe('completion marker output', () => {
   })
 
   it('returns failure when the generated PR body cannot be updated', async () => {
-    configureLocalRemote()
+    useFakeRepositoryWithRemote()
     const loop = makeLoop()
     fakeForge.prBody = async () => GENERATED_BODY_MARKER
     fakeForge.updatePr = async () => {

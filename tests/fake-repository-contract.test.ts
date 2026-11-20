@@ -292,6 +292,144 @@ describe('the fake repository against real git, pushing the run branch', () => {
   })
 })
 
+// A topic branch that tracks origin/main and holds one commit beyond it: the questions
+// a draft PR asks about its commits, and the comparison of a merged PR head with HEAD.
+// Real git pushes the branch first, and the fake then answers the same steps.
+describe('the fake repository against real git, opening a PR for a topic branch', () => {
+  it('describes the commits beyond the base and pushes the branch as git does', () => {
+    const root = join(workspace, 'topic')
+    mkdirSync(root)
+    const pushed = pushedToOrigin(root, initialRepository(root))
+    const base = pushed.head ?? ''
+    setup(root, 'switch', '-q', '-c', 'topic')
+    setup(root, 'branch', '-q', '--set-upstream-to', 'origin/main')
+    writeFileSync(join(root, 'feature.txt'), 'feature\n')
+    setup(root, 'add', 'feature.txt')
+    setup(root, 'commit', '-q', '-m', 'feat: a topic')
+    const head = setup(root, 'rev-parse', 'HEAD')
+    const state: Partial<FakeRepositoryState> = {
+      ...pushed,
+      branch: 'topic',
+      branches: ['main', 'topic'],
+      head,
+      upstreams: { main: 'origin', topic: 'origin' },
+      upstreamBranches: { topic: 'main' },
+      commitsAhead: { 'origin/main': 1 },
+      commits: { 'origin/main': [{ sha: head, subject: 'feat: a topic', files: ['feature.txt'] }] },
+      ancestors: [base],
+    }
+    const unknown = 'f'.repeat(40)
+    const steps: string[][] = [
+      ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
+      ['config', '--get', 'branch.topic.remote'],
+      ['for-each-ref', '--format=%(upstream:remotename)', 'refs/heads/topic'],
+      ['rev-list', '--count', 'origin/main..HEAD'],
+      ['log', 'origin/main..HEAD', '--no-merges', '--pretty=%H|%s'],
+      ['log', 'origin/main..HEAD', '--merges', '--first-parent', '--reverse', '--format=%s%x1f%b%x1e'],
+      ['show', '--name-only', '--pretty=format:', head],
+      ['diff', '--name-only', 'origin/main..HEAD'],
+      ['diff', '--name-only', '--diff-filter=D', 'origin/main..HEAD'],
+      ['merge-base', '--is-ancestor', head, head],
+      ['merge-base', '--is-ancestor', head, base],
+      ['merge-base', '--is-ancestor', head, unknown],
+      ['fetch', '--quiet', 'origin', unknown],
+      ['push', '--quiet', 'origin', 'topic'],
+      ['log', 'origin/topic..HEAD', '--no-merges', '--pretty=%H|%s'],
+      ['log', 'origin/topic..HEAD', '--merges', '--first-parent', '--reverse', '--format=%s%x1f%b%x1e'],
+      ['diff', '--name-only', 'origin/topic..HEAD'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const real = run(realGit)
+    const fake = new FakeRepository(root, state)
+
+    expect(run(fake.git)).toEqual(real)
+    expect(fake.unanswered).toEqual([])
+  })
+
+  it('records the upstream a first push sets as git does', () => {
+    const root = join(workspace, 'first-push')
+    mkdirSync(root)
+    const pushed = pushedToOrigin(root, initialRepository(root))
+    setup(root, 'switch', '-q', '-c', 'topic')
+    const state = { ...pushed, branch: 'topic', branches: ['main', 'topic'] }
+    const steps: string[][] = [
+      ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
+      ['push', '--quiet', '--set-upstream', 'origin', 'topic'],
+      ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
+      ['config', '--get', 'branch.topic.remote'],
+      ['rev-list', '--count', 'origin/topic..HEAD'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const real = run(realGit)
+    const fake = new FakeRepository(root, state)
+
+    expect(run(fake.git)).toEqual(real)
+    expect(fake.unanswered).toEqual([])
+  })
+})
+
+// A remote whose URL names no repository fails every fetch and push through it; a push
+// URL that names one still pushes. Real git runs the steps first, then the fake.
+describe('the fake repository against real git, reaching a missing repository', () => {
+  it('fails to fetch and push through the missing URL as git does', () => {
+    const root = join(workspace, 'missing')
+    mkdirSync(root)
+    const pushed = pushedToOrigin(root, initialRepository(root))
+    const missing = `${root}-missing.git`
+    const origin = { ...pushed.remotes?.[0], name: 'origin', url: missing }
+    setup(root, 'remote', 'set-url', 'origin', missing)
+    const state = { ...pushed, remotes: [origin], missingRepositories: [missing] }
+    const steps: string[][] = [
+      ['remote', 'get-url', 'origin'],
+      ['fetch', 'origin', 'main', '--quiet'],
+      ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+      ['push', '--quiet', 'origin', 'main'],
+      ['push', '--quiet', '--set-upstream', 'origin', 'main'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const real = run(realGit)
+    const fake = new FakeRepository(root, state)
+
+    expect(run(fake.git)).toEqual(real)
+    expect(fake.unanswered).toEqual([])
+  })
+
+  it('pushes through a push URL while the fetch URL is missing as git does', () => {
+    const root = join(workspace, 'push-url')
+    mkdirSync(root)
+    const pushed = pushedToOrigin(root, initialRepository(root))
+    const pushUrl = pushed.remotes?.[0]?.url ?? ''
+    const missing = `${root}-missing.git`
+    setup(root, 'remote', 'set-url', '--push', 'origin', pushUrl)
+    setup(root, 'remote', 'set-url', 'origin', missing)
+    const origin = { name: 'origin', url: missing, pushUrl, defaultBranch: 'main' }
+    const state = { ...pushed, remotes: [origin], missingRepositories: [missing] }
+    const steps: string[][] = [
+      ['remote', 'get-url', 'origin'],
+      ['fetch', 'origin', 'main', '--quiet'],
+      ['push', '--quiet', 'origin', 'main'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const real = run(realGit)
+    const fake = new FakeRepository(root, state)
+
+    expect(run(fake.git)).toEqual(real)
+    expect(fake.unanswered).toEqual([])
+  })
+})
+
 describe('the fake repository on a question it does not know', () => {
   it('refuses it loudly and remembers it', () => {
     const fake = new FakeRepository(workspace)

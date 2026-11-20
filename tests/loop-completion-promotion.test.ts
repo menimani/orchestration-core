@@ -1,10 +1,10 @@
-import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { FAKE_COMMIT, FAKE_HEAD, FAKE_LATER_COMMIT } from './fakeRepository.ts'
 import {
-  fakeForge, forgeStatus, git, initializeGitRepo, initializeGitRepoWithRemote, logText,
-  logged, makeLoop, paths, prStatusCalls, registerLoopHooks, repoRoot, setForgeStatus,
+  fakeForge, forgeStatus, logText, logged, makeLoop, paths, prStatusCalls, registerLoopHooks,
+  setForgeStatus, useFakeRepositoryWithRemote,
 } from './loopHarness.ts'
 
 const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
@@ -49,10 +49,10 @@ registerLoopHooks()
 
 describe('completion marker output', () => {
   it('treats a PR merged while it is being promoted as complete', async () => {
-    initializeGitRepoWithRemote()
+    const repository = useFakeRepositoryWithRemote()
     const loop = makeLoop()
     fakeForge.markPrReady = async () => {
-      setForgeStatus({ ...forgeStatus, state: 'merged', isDraft: false, headSha: git(['rev-parse', 'HEAD']).trim() })
+      setForgeStatus({ ...forgeStatus, state: 'merged', isDraft: false, headSha: repository.state.head })
     }
 
     expect(await loop.postLoopPr()).toBe(true)
@@ -63,15 +63,17 @@ describe('completion marker output', () => {
   })
 
   it('opens a new PR and reopens the cycle gate when a merged PR head is behind HEAD', async () => {
-    initializeGitRepoWithRemote()
-    git(['switch', '-c', 'feature/run-merged-early'])
-    writeFileSync(join(repoRoot, 'early.txt'), 'early\n')
-    git(['add', 'early.txt'])
-    git(['commit', '-m', 'feat: merged with the draft'])
-    const mergedHead = git(['rev-parse', 'HEAD']).trim()
-    writeFileSync(join(repoRoot, 'late.txt'), 'late\n')
-    git(['add', 'late.txt'])
-    git(['commit', '-m', 'feat: landed after the merge'])
+    const repository = useFakeRepositoryWithRemote()
+    const mergedHead = FAKE_COMMIT
+    repository.state.branch = 'feature/run-merged-early'
+    repository.state.branches.push('feature/run-merged-early')
+    repository.state.head = FAKE_LATER_COMMIT
+    repository.state.ancestors = [FAKE_HEAD, mergedHead]
+    repository.state.commitsAhead['origin/main'] = 2
+    repository.state.commits['origin/main'] = [
+      { sha: mergedHead, subject: 'feat: merged with the draft', files: ['early.txt'] },
+      { sha: FAKE_LATER_COMMIT, subject: 'feat: landed after the merge', files: ['late.txt'] },
+    ]
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     writeFileSync(join(paths.queueDir, 'cycle-complete-1'), '')
     writeFileSync(join(paths.queueDir, 'cycle-resume-1'), '')
@@ -107,10 +109,14 @@ describe('completion marker output', () => {
   })
 
   it('does not finish on a PR merged during promotion whose head is behind HEAD', async () => {
-    const headSha = initializeGitRepoWithRemote()
-    writeFileSync(join(repoRoot, 'late.txt'), 'late\n')
-    git(['add', 'late.txt'])
-    git(['commit', '-m', 'feat: landed after the merge'])
+    const repository = useFakeRepositoryWithRemote()
+    const headSha = repository.state.head
+    repository.state.head = FAKE_COMMIT
+    repository.state.ancestors = [headSha]
+    repository.state.commitsAhead['origin/main'] = 1
+    repository.state.commits['origin/main'] = [
+      { sha: FAKE_COMMIT, subject: 'feat: landed after the merge', files: ['late.txt'] },
+    ]
     const loop = makeLoop()
     fakeForge.markPrReady = async () => {
       setForgeStatus({ ...forgeStatus, state: 'merged', isDraft: false, headSha })
@@ -123,7 +129,7 @@ describe('completion marker output', () => {
   })
 
   it('records a PR merged before the final gate that holds HEAD without opening another', async () => {
-    const headSha = initializeGitRepoWithRemote()
+    const headSha = useFakeRepositoryWithRemote().state.head
     setForgeStatus({
       state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha, checks: [],
     })
@@ -140,7 +146,7 @@ describe('completion marker output', () => {
   })
 
   it('fails the final gate when a merged PR head cannot be compared with HEAD', async () => {
-    initializeGitRepoWithRemote()
+    useFakeRepositoryWithRemote()
     setForgeStatus({
       state: 'merged', isDraft: false, url: 'https://example.test/pull/1', headSha: 'f'.repeat(40), checks: [],
     })
@@ -158,7 +164,7 @@ describe('completion marker output', () => {
   })
 
   it('reports a PR closed while it is being promoted and stops after repetition', async () => {
-    initializeGitRepoWithRemote()
+    useFakeRepositoryWithRemote()
     const loop = makeLoop()
     const markPrReady = vi.fn(async () => {
       setForgeStatus({ ...forgeStatus, state: 'closed', isDraft: false })
@@ -179,12 +185,7 @@ describe('completion marker output', () => {
   })
 
   it('reports repeated pre-promotion status errors and stops the loop', async () => {
-    initializeGitRepo()
-    const remote = join(repoRoot, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-    git(['remote', 'add', 'origin', remote])
-    git(['push', '-u', 'origin', 'main'])
-    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    useFakeRepositoryWithRemote()
     const loop = makeLoop()
     let calls = 0
     fakeForge.prStatus = async () => {
@@ -208,18 +209,13 @@ describe('completion marker output', () => {
   })
 
   it('reports repeated post-promotion status errors and stops the loop', async () => {
-    initializeGitRepo()
-    const remote = join(repoRoot, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-    git(['remote', 'add', 'origin', remote])
-    git(['push', '-u', 'origin', 'main'])
-    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    const repository = useFakeRepositoryWithRemote()
     const loop = makeLoop()
     let calls = 0
     fakeForge.prStatus = async () => {
       calls += 1
       if (calls % 3 === 0) throw new Error('confirmation unavailable')
-      return { ...forgeStatus, headSha: git(['rev-parse', 'HEAD']) }
+      return { ...forgeStatus, headSha: repository.state.head }
     }
 
     expect(await loop.postLoopPr()).toBe(false)
@@ -237,12 +233,7 @@ describe('completion marker output', () => {
   })
 
   it('reports a persistently draft PR and stops without emitting LOOP_DONE', async () => {
-    initializeGitRepo()
-    const remote = join(repoRoot, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-    git(['remote', 'add', 'origin', remote])
-    git(['push', '-u', 'origin', 'main'])
-    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    useFakeRepositoryWithRemote()
     const loop = makeLoop()
 
     expect(await loop.postLoopPr()).toBe(false)
@@ -261,12 +252,7 @@ describe('completion marker output', () => {
   })
 
   it('keeps the final gate state until draft promotion is confirmed', async () => {
-    initializeGitRepo()
-    const remote = join(repoRoot, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-    git(['remote', 'add', 'origin', remote])
-    git(['push', '-u', 'origin', 'main'])
-    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    useFakeRepositoryWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const loop = makeLoop({ autoPr: true, reviewEnabled: false, maxScanCycles: 1 })
     let promotions = 0
