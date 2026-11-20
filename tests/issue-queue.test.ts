@@ -3507,6 +3507,83 @@ describe('publishDelegatedTask', () => {
     expect(existsSync(paths.tasksDir) ? readdirSync(paths.tasksDir) : []).toEqual([])
     expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
   })
+
+  it('reports a closed duplicate when a later preflight read fails', async () => {
+    const description = '[BUG] `src/a/b.ts` breaks delegated work'
+    for (const taskId of ['scan-a', 'scan-b', 'scan-c']) {
+      await forge.createIssue({
+        title: description,
+        body: buildIssueBody(description, taskId),
+        labels: [LABEL_FINDING, LABEL_READY],
+      })
+    }
+    const getIssue = forge.getIssue.bind(forge)
+    forge.getIssue = async (issueNumber) => {
+      // The close of #2 has landed; the re-read of the next duplicate then fails.
+      const second = forge.issues.get(2)
+      if (issueNumber === 3 && second?.state === 'closed') {
+        throw new Error('issue re-read unavailable')
+      }
+      return getIssue(issueNumber)
+    }
+    const createIssue = vi.fn(forge.createIssue.bind(forge))
+    forge.createIssue = createIssue
+
+    const failure = await publishDelegatedTask(forge, paths, description, 'user-task')
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(DelegatedTaskMutationError)
+    expect((failure as DelegatedTaskMutationError).issueNumber).toBe(2)
+    expect((failure as DelegatedTaskMutationError).message).toBe(
+      'Could not reconcile issue #2 after delegated work may have been published: '
+        + 'issue re-read unavailable',
+    )
+    expect((failure as DelegatedTaskMutationError).cause)
+      .toEqual(new Error('issue re-read unavailable'))
+    expect((await getIssue(1)).state).toBe('open')
+    expect((await getIssue(2)).state).toBe('closed')
+    expect((await getIssue(3)).state).toBe('open')
+    expect(forge.issueComments.get(2)).toEqual([
+      'Duplicate of #1; both issues carry the same loop finding fingerprint.',
+    ])
+    expect(createIssue).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'issue-fingerprints'))).toBe(false)
+
+    // The same failure reaching delegate must not fall back to a local-only task.
+    await forge.closeIssue(3, 'reset')
+    await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-d'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    forge.getIssue = async (issueNumber) => {
+      const fourth = forge.issues.get(4)
+      if (issueNumber === 5 && fourth?.state === 'closed') {
+        throw new Error('issue re-read unavailable')
+      }
+      return getIssue(issueNumber)
+    }
+    await forge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-e'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    createIssue.mockClear()
+    const warnings: string[] = []
+
+    await expect(delegateTaskVisible(paths, description, {}, {
+      env: { ISSUE_QUEUE_ENABLED: 'true' },
+      loadForge: async () => forge,
+      warn: (message) => warnings.push(message),
+    })).rejects.toThrow(new DelegatedTaskMutationError(new Error('issue re-read unavailable'), 4))
+
+    expect((await getIssue(4)).state).toBe('closed')
+    expect((await getIssue(5)).state).toBe('open')
+    expect(createIssue).not.toHaveBeenCalled()
+    expect(warnings).toEqual([])
+    expect(existsSync(paths.tasksDir) ? readdirSync(paths.tasksDir) : []).toEqual([])
+    expect(existsSync(join(paths.queueDir, 'backlog.txt'))).toBe(false)
+  })
 })
 
 describe('loop integration in issue mode', () => {
