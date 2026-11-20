@@ -840,9 +840,13 @@ function describeRebaseConflict(
 function taskCommitsAreEmpty(worktree: string, currentBranch: string): boolean {
   const commits = git(worktree, ['rev-list', '--reverse', `${currentBranch}..HEAD`])
     .trim().split(/\s+/).filter((commit) => commit !== '')
-  return commits.every((commit) =>
-    git(worktree, ['rev-parse', `${commit}^{tree}`]).trim()
-      === git(worktree, ['rev-parse', `${commit}^1^{tree}`]).trim())
+  // One process prints a commit's tree and its parent's, one per line. It fails, as the
+  // second of two separate questions did, for a commit without a parent.
+  return commits.every((commit) => {
+    const [tree, parentTree] = git(worktree, ['rev-parse', `${commit}^{tree}`, `${commit}^1^{tree}`])
+      .trim().split(/\r?\n/)
+    return tree === parentTree
+  })
 }
 
 function mergeIo(outputFile?: string): MergeIo {
