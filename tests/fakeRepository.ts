@@ -21,6 +21,13 @@ export interface FakeRemote {
   defaultBranch?: string | undefined
   /** remote.<name>.pushurl, which a push uses instead of the url. */
   pushUrl?: string | undefined
+  /** The remote's branches, which the checkout's remote-tracking refs match. */
+  branches?: Record<string, string> | undefined
+  /**
+   * Commits the remote holds outside its branches, each with every commit it contains;
+   * the checkout has one only once it fetches it by SHA.
+   */
+  commits?: Record<string, string[]> | undefined
 }
 
 /** A commit HEAD has beyond a base; the fake knows no merge commits. */
@@ -63,6 +70,8 @@ export interface FakeRepositoryState {
   commits: Record<string, FakeCommit[]>
   /** The commits HEAD descends from, other than HEAD itself. */
   ancestors: string[]
+  /** The checkout's commits besides HEAD and its ancestors, each with every commit it contains. */
+  otherCommits: Record<string, string[]>
   /** Remote URLs that name no repository, so fetching or pushing through them fails. */
   missingRepositories: string[]
 }
@@ -117,6 +126,7 @@ export class FakeRepository {
       commitsAhead: {},
       commits: {},
       ancestors: [],
+      otherCommits: {},
       missingRepositories: [],
       ...state,
       branch,
@@ -307,6 +317,7 @@ export class FakeRepository {
         }
         // The remote now holds the branch's HEAD, and so does its remote-tracking ref.
         state.commitsAhead[`${name}/${branch}`] = 0
+        if (remote.branches !== undefined) remote.branches = { ...remote.branches, [branch]: state.head }
         if (setUpstream !== undefined) state.upstreams[branch] = name
         return ''
       }
@@ -315,6 +326,63 @@ export class FakeRepository {
     const fetchUrl = remoteNamed(fetchRemote?.[1])?.url
     if (fetchUrl !== undefined && state.missingRepositories.includes(fetchUrl)) {
       return () => { throw missingRepository(fetchUrl) }
+    }
+
+    const contains = (descendant: string, ancestor: string): boolean => descendant === ancestor
+      || (descendant === state.head && state.ancestors.includes(ancestor))
+      || (state.otherCommits[descendant] ?? []).includes(ancestor)
+    const known = (sha: string): boolean => sha === state.head || state.ancestors.includes(sha)
+      || sha in state.otherCommits || Object.values(state.otherCommits).some((held) => held.includes(sha))
+    // The commit a name resolves to as git resolves it, null for one git cannot resolve, and
+    // undefined when the test did not describe what the name would point at.
+    const commitNamed = (name: string): string | null | undefined => {
+      if (name === 'HEAD' || state.commitsAhead[name] === 0) return state.head
+      const tracking = state.remotes.find((remote) => name.startsWith(`${remote.name}/`))
+      if (tracking !== undefined) {
+        if (tracking.branches === undefined) return undefined
+        return tracking.branches[name.slice(tracking.name.length + 1)] ?? null
+      }
+      if (/^[0-9a-f]{40}$/.test(name)) return known(name) ? name : null
+      return undefined
+    }
+
+    const remoteBranch = /^ls-remote --exit-code --heads (\S+) refs\/heads\/(\S+)$/.exec(command)
+    const listedRemote = remoteNamed(remoteBranch?.[1])
+    if (remoteBranch !== null && listedRemote !== undefined
+      && (listedRemote.branches !== undefined || state.missingRepositories.includes(listedRemote.url))) {
+      const branch = remoteBranch[2] ?? ''
+      return () => {
+        if (state.missingRepositories.includes(listedRemote.url)) throw missingRepository(listedRemote.url)
+        const sha = listedRemote.branches?.[branch]
+        if (sha === undefined) throw gitFailure(args, 2, '')
+        return `${sha}\trefs/heads/${branch}\n`
+      }
+    }
+    // A remote whose branches the test describes answers a fetch of any branch or commit.
+    const fetchAny = /^fetch --quiet (\S+) (\S+)$/.exec(command) ?? /^fetch (\S+) (\S+) --quiet$/.exec(command)
+    const fetched = remoteNamed(fetchAny?.[1])
+    const refspec = /^\+refs\/heads\/(\S+):refs\/remotes\/(\S+)$/.exec(fetchAny?.[2] ?? '')
+    if (fetchAny !== null && fetched?.branches !== undefined
+      && (refspec === null || refspec[2] === `${fetched.name}/${refspec[1]}`)) {
+      const wanted = refspec?.[1] ?? fetchAny[2] ?? ''
+      const branches = fetched.branches
+      return () => {
+        if (!/^[0-9a-f]{40}$/.test(wanted)) {
+          if (branches[wanted] === undefined) {
+            throw gitFailure(args, 128, `fatal: couldn't find remote ref ${wanted}\n`)
+          }
+          return ''
+        }
+        const outside = fetched.commits?.[wanted]
+        if (outside !== undefined) {
+          state.otherCommits[wanted] = outside
+          return ''
+        }
+        if (!Object.values(branches).some((tip) => contains(tip, wanted))) {
+          throw gitFailure(args, 128, `fatal: remote error: upload-pack: not our ref ${wanted}\n`)
+        }
+        return ''
+      }
     }
     // Only the remote's default branch is known to exist there; it holds what was fetched.
     const fetch = /^fetch (\S+) (\S+) --quiet$/.exec(command)
@@ -334,6 +402,13 @@ export class FakeRepository {
     }
     const verifyCommit = /^rev-parse --verify (.+)\^\{commit\}$/.exec(command)
     if (verifyCommit !== null && atHead(verifyCommit[1])) return () => `${state.head}\n`
+    const verified = verifyCommit === null ? undefined : commitNamed(verifyCommit[1] ?? '')
+    if (verified !== undefined) {
+      return () => {
+        if (verified === null) throw gitFailure(args, 128, 'fatal: Needed a single revision\n')
+        return `${verified}\n`
+      }
+    }
     const log = /^log (.+)\.\.HEAD --no-merges --pretty=%H\|%s$/.exec(command)
     if (log !== null && atHead(log[1])) return () => ''
     // Beyond a base the test lists commits for, the fake knows their subjects and files.
@@ -359,15 +434,19 @@ export class FakeRepository {
     if (ahead !== null && (ahead[1] ?? '') in state.commitsAhead) {
       return () => `${state.commitsAhead[ahead[1] ?? '']}\n`
     }
-    // Whether HEAD is contained in another commit: only in itself, never in one of its
-    // ancestors, and any other commit is not in the object store at all.
-    const containsHead = /^merge-base --is-ancestor (\S+) (\S+)$/.exec(command)
-    if (containsHead !== null && containsHead[1] === state.head) {
-      const other = containsHead[2] ?? ''
+    // Whether one commit is contained in another: HEAD in itself only, never in one of its
+    // ancestors, and a commit the checkout does not hold is not in the object store at all.
+    const isAncestor = /^merge-base --is-ancestor (\S+) (\S+)$/.exec(command)
+    const ancestor = isAncestor === null ? undefined : commitNamed(isAncestor[1] ?? '')
+    const descendant = isAncestor === null ? undefined : commitNamed(isAncestor[2] ?? '')
+    if (isAncestor !== null && ancestor !== undefined && descendant !== undefined) {
       return () => {
-        if (other === state.head) return ''
-        if (state.ancestors.includes(other)) throw gitFailure(args, 1, '')
-        throw gitFailure(args, 128, `fatal: Not a valid commit name ${other}\n`)
+        if (ancestor === null || descendant === null) {
+          const unknown = ancestor === null ? isAncestor[1] : isAncestor[2]
+          throw gitFailure(args, 128, `fatal: Not a valid commit name ${unknown}\n`)
+        }
+        if (!contains(descendant, ancestor)) throw gitFailure(args, 1, '')
+        return ''
       }
     }
     const fetchCommit = /^fetch --quiet (\S+) ([0-9a-f]{40})$/.exec(command)

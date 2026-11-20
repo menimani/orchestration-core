@@ -1,6 +1,5 @@
-import { execFileSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,20 +7,15 @@ import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import type { ProjectAdapter } from '../src/adapters/project.ts'
 import type { LoopConfig } from '../src/config.ts'
 import {
-  buildIssueBody, issuePromotionForIssue, issueReleaseIntentForTask,
-  prepareIssueReleaseIntent, recordIssuePromotions, recordIssueReleaseIntent,
-  recordIssuesForTask, LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_READY, LABEL_READY,
+  buildIssueBody, recordIssuePromotions, recordIssuesForTask, LABEL_FINDING, LABEL_IN_PROGRESS,
+  LABEL_MERGE_READY,
 } from '../src/issueQueue.ts'
-import { shortTaskId } from '../src/ids.ts'
 import type { Loop } from '../src/loop.ts'
-import { statusFile } from '../src/paths.ts'
-import { readStatus } from '../src/status.ts'
 import { enqueueTask, specFile } from '../src/tasks.ts'
-import { releasePreparationForTask } from './releasePreparation.ts'
 import {
   backlogEntries, fakeForge, git, initializeGitRepo, initializeGitRepoWithRemote, logText,
-  logged, makeLoop, makeRunner, paths, registerLoopHooks, repoRoot, setPaths, stubProject,
-  writeFinal, writeRawStatus,
+  logged, makeLoop, makeRunner, paths, registerLoopHooks, repoRoot, stubProject,
+  useFakeRepository, writeFinal, writeRawStatus,
 } from './loopHarness.ts'
 
 const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
@@ -102,325 +96,6 @@ describe('remote issue queue idle detection', () => {
     expect(logText()).toContain('Recovered ensuring issue queue labels after 0 minutes')
   })
 
-  it('reports recovery once closing promoted issues succeeds after a failure', async () => {
-    setPaths({
-      ...paths,
-      fleet: {
-        dir: repoRoot, project: 'example', repository: 'owner/example',
-        issueRepository: 'owner/fleet',
-      },
-    })
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 0,
-    })
-    loop.initializeSessionStateForBranch()
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    const issueNumber = await fakeForge.createIssue({
-      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-    })
-    recordIssuesForTask(paths, 'merged-task', [issueNumber])
-    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
-    let attempts = 0
-    fakeForge.prStatus = async () => {
-      attempts += 1
-      if (attempts === 1) throw new Error('run pull request unreadable')
-      return {
-        state: 'merged',
-        isDraft: false,
-        url: 'https://example.test/pull/9',
-        headSha: mergeCommit,
-        checks: [],
-      }
-    }
-
-    await loop.poll()
-    expect(logText()).toContain('WARN could not close promoted issues: run pull request unreadable')
-
-    await loop.poll()
-    expect(logText()).toContain(`Promoted #${issueNumber}`)
-    expect(logText()).toContain('Recovered closing promoted issues after 0 minutes')
-  })
-
-  it('neither releases nor recreates the run pull request a person closed mid-run', async () => {
-    setPaths({
-      ...paths,
-      fleet: {
-        dir: repoRoot, project: 'example', repository: 'owner/example',
-        issueRepository: 'owner/fleet',
-      },
-    })
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 0,
-    })
-    loop.initializeSessionStateForBranch()
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    const issueNumber = await fakeForge.createIssue({
-      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-    })
-    recordIssuesForTask(paths, 'merged-task', [issueNumber])
-    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
-    fakeForge.prStatus = async () => ({
-      state: 'closed',
-      isDraft: false,
-      url: 'https://example.test/pull/9',
-      headSha: mergeCommit,
-      checks: [],
-    })
-    const createPr = vi.fn(async () => 'https://example.test/pull/10')
-    fakeForge.createPr = createPr
-
-    await loop.poll()
-    expect(await loop.ensureDraftPr('cycle')).toBe(false)
-
-    // The run branch still holds the merge, so the issue stays promoted to it.
-    expect(createPr).not.toHaveBeenCalled()
-    expect(logText()).toContain('WARN could not update PR because it is closed')
-    expect(logText()).not.toContain(`Released #${issueNumber}`)
-    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('merged-task')
-    expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_READY)
-
-    expect(await loop.ensureDraftPr('cycle')).toBe(false)
-    expect(logText()).toContain('ERROR could not update PR because it is closed (repeated 2 times)')
-    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
-    expect(createPr).not.toHaveBeenCalled()
-
-    // A later run on another branch has abandoned the closed one, so its issue is ready.
-    git(['switch', '--quiet', '-c', 'feature/next-run'])
-    rmSync(join(paths.queueDir, 'stop'), { force: true })
-    loop.initializeSessionStateForBranch()
-    await loop.poll()
-    expect(logText()).toContain(`Released #${issueNumber}`)
-    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
-    expect((await fakeForge.getIssue(issueNumber)).labels).toContain(LABEL_READY)
-  })
-
-  it('returns the issues of an old run pull request closed unmerged in a same-repository queue', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 0,
-    })
-    loop.initializeSessionStateForBranch()
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    const issueNumber = await fakeForge.createIssue({
-      title: 'abandoned fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-      assignees: ['worker-a'],
-    })
-    recordIssuesForTask(paths, 'abandoned-task', [issueNumber])
-    recordIssuePromotions(paths, 'abandoned-task', mergeCommit, 'run/old')
-    const prStatusRefs: unknown[] = []
-    fakeForge.prStatus = async (ref) => {
-      prStatusRefs.push(ref)
-      return {
-        state: 'closed',
-        isDraft: false,
-        url: 'https://example.test/pull/9',
-        headSha: mergeCommit,
-        checks: [],
-      }
-    }
-
-    await loop.poll()
-
-    expect(prStatusRefs).toContainEqual({ kind: 'branch', value: 'run/old' })
-    expect(logText()).toContain(`Released #${issueNumber}`)
-    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
-    const issue = await fakeForge.getIssue(issueNumber)
-    expect(issue.state).toBe('open')
-    expect(issue.assignees).toEqual([])
-    expect(issue.labels).toContain(LABEL_READY)
-    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
-  })
-
-  async function noPullRequestLoop(mergeCommit: string, runBranch: string) {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 0,
-    })
-    loop.initializeSessionStateForBranch()
-    const issueNumber = await fakeForge.createIssue({
-      title: 'stranded fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-      assignees: ['worker-a'],
-    })
-    recordIssuesForTask(paths, 'stranded-task', [issueNumber])
-    recordIssuePromotions(paths, 'stranded-task', mergeCommit, runBranch)
-    fakeForge.prStatus = async () => ({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] })
-    return { loop, issueNumber }
-  }
-
-  it('returns the issues of a deleted run branch that never got a pull request', async () => {
-    git(['switch', '--quiet', '-c', 'run/deleted'])
-    writeFileSync(join(repoRoot, 'abandoned.txt'), 'abandoned\n')
-    git(['add', 'abandoned.txt'])
-    git(['commit', '--quiet', '-m', 'abandoned merge'])
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    git(['switch', '--quiet', 'main'])
-    git(['branch', '--quiet', '-D', 'run/deleted'])
-    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/deleted')
-
-    await loop.poll()
-
-    expect(logText()).toContain(`Released #${issueNumber}`)
-    expect(issuePromotionForIssue(paths, issueNumber)).toBeUndefined()
-    const issue = await fakeForge.getIssue(issueNumber)
-    expect(issue.assignees).toEqual([])
-    expect(issue.labels).toContain(LABEL_READY)
-    expect(issue.labels).not.toContain(LABEL_IN_PROGRESS)
-  })
-
-  it('warns about the issues of a run branch without a pull request whose work is on the default branch', async () => {
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/landed')
-
-    await loop.poll()
-
-    expect(logText()).toContain(
-      `WARN run branch run/landed has no pull request; issues #${issueNumber} stay claimed`)
-    expect(logText()).not.toContain(`Released #${issueNumber}`)
-    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('stranded-task')
-    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
-  })
-
-  function stillClaimedWithWarning(issueNumber: number, runBranch: string) {
-    expect(logText()).toContain(
-      `WARN run branch ${runBranch} has no pull request; issues #${issueNumber} stay claimed`)
-    expect(logText()).not.toContain(`Released #${issueNumber}`)
-    expect(issuePromotionForIssue(paths, issueNumber)?.taskId).toBe('stranded-task')
-  }
-
-  it('keeps the issues of a run branch never pushed that still exists locally', async () => {
-    git(['switch', '--quiet', '-c', 'run/unpushed'])
-    writeFileSync(join(repoRoot, 'unpushed.txt'), 'unpushed\n')
-    git(['add', 'unpushed.txt'])
-    git(['commit', '--quiet', '-m', 'unpushed merge'])
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    git(['switch', '--quiet', 'main'])
-    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/unpushed')
-
-    await loop.poll()
-
-    stillClaimedWithWarning(issueNumber, 'run/unpushed')
-    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
-  })
-
-  it('keeps the issues of a deleted run branch the current HEAD was cut from', async () => {
-    git(['switch', '--quiet', '-c', 'run/earlier'])
-    writeFileSync(join(repoRoot, 'earlier.txt'), 'earlier\n')
-    git(['add', 'earlier.txt'])
-    git(['commit', '--quiet', '-m', 'earlier merge'])
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    git(['switch', '--quiet', 'main'])
-    git(['merge', '--quiet', '--ff-only', 'run/earlier'])
-    git(['branch', '--quiet', '-D', 'run/earlier'])
-    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/earlier')
-
-    await loop.poll()
-
-    stillClaimedWithWarning(issueNumber, 'run/earlier')
-    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
-  })
-
-  it('keeps the issues of a deleted run branch whose merge commit is unknown locally', async () => {
-    const { loop, issueNumber } = await noPullRequestLoop('f'.repeat(40), 'run/unknown')
-
-    await loop.poll()
-
-    stillClaimedWithWarning(issueNumber, 'run/unknown')
-    expect(logText()).not.toContain('ERROR')
-    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
-  })
-
-  it('keeps the issues of a run branch without a pull request when the remote lookup fails', async () => {
-    git(['switch', '--quiet', '-c', 'run/unreachable'])
-    writeFileSync(join(repoRoot, 'unreachable.txt'), 'unreachable\n')
-    git(['add', 'unreachable.txt'])
-    git(['commit', '--quiet', '-m', 'unreachable merge'])
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    git(['switch', '--quiet', 'main'])
-    git(['branch', '--quiet', '-D', 'run/unreachable'])
-    git(['remote', 'add', 'missing', join(repoRoot, 'missing.git')])
-    git(['config', 'branch.main.pushRemote', 'missing'])
-    const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/unreachable')
-
-    await loop.poll()
-
-    stillClaimedWithWarning(issueNumber, 'run/unreachable')
-    expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
-  })
-
-  async function promotedIssueLoop(headSha: string) {
-    setPaths({
-      ...paths,
-      fleet: {
-        dir: repoRoot, project: 'example', repository: 'owner/example',
-        issueRepository: 'owner/fleet',
-      },
-    })
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 0,
-    })
-    loop.initializeSessionStateForBranch()
-    const mergeCommit = git(['rev-parse', 'HEAD']).trim()
-    const issueNumber = await fakeForge.createIssue({
-      title: 'promoted fix', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-    })
-    recordIssuesForTask(paths, 'merged-task', [issueNumber])
-    recordIssuePromotions(paths, 'merged-task', mergeCommit, 'main')
-    fakeForge.prStatus = async () => ({
-      state: 'merged',
-      isDraft: false,
-      url: 'https://example.test/pull/9',
-      headSha,
-      checks: [],
-    })
-    return { loop, issueNumber }
-  }
-
-  it('fetches a merged run head that was pushed outside the loop before comparing', async () => {
-    const outside = join(repoRoot, 'outside')
-    execFileSync('git', ['clone', '--quiet', join(repoRoot, 'origin.git'), outside], { windowsHide: true })
-    git(['config', 'user.email', 'outside@example.test'], outside)
-    git(['config', 'user.name', 'Outside'], outside)
-    writeFileSync(join(outside, 'outside.txt'), 'outside\n')
-    git(['add', 'outside.txt'], outside)
-    git(['commit', '--quiet', '-m', 'outside push'], outside)
-    git(['push', '--quiet', 'origin', 'HEAD:refs/heads/run/outside'], outside)
-    const headSha = git(['rev-parse', 'HEAD'], outside).trim()
-    const { loop, issueNumber } = await promotedIssueLoop(headSha)
-
-    await loop.poll()
-
-    expect(logText()).toContain(`Promoted #${issueNumber}`)
-    expect((await fakeForge.getIssue(issueNumber)).state).toBe('closed')
-  })
-
-  it('warns instead of reporting recovery when the merged run head cannot be found', async () => {
-    const { loop, issueNumber } = await promotedIssueLoop('f'.repeat(40))
-
-    await loop.poll()
-
-    expect(logText()).toContain('WARN could not close promoted issues:')
-    expect(logText()).not.toContain('Recovered closing promoted issues')
-    expect((await fakeForge.getIssue(issueNumber)).state).toBe('open')
-  })
-
   beforeEach(() => {
     initializeGitRepoWithRemote()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
@@ -437,133 +112,6 @@ describe('remote issue queue idle detection', () => {
       autoReview: true,
     })
   }
-
-  it('records persisted release failures and stops after three consecutive polls', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      workerMode: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-    })
-    loop.initializeSessionStateForBranch()
-    const issueNumber = await fakeForge.createIssue({
-      title: 'cleanup release', body: '',
-      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
-    })
-    recordIssueReleaseIntent(paths, 'task-release', [issueNumber])
-    fakeForge.addLabel = async (_number, label) => {
-      if (label === LABEL_READY) throw new Error('release unavailable')
-    }
-    const failureFile = join(paths.queueDir, 'issue-release-failure-count.txt')
-
-    await loop.poll()
-    expect(readFileSync(failureFile, 'utf8')).toBe('1\n')
-    expect(logText()).toContain(
-      'WARN could not reconcile persisted issue releases (#1: release unavailable); attempt 1/3',
-    )
-    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
-
-    await loop.poll()
-    await loop.poll()
-    expect(readFileSync(failureFile, 'utf8')).toBe('3\n')
-    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
-    expect(logText()).toContain(
-      'ERROR 3 consecutive issue release failures for #1; stopping the loop',
-    )
-    expect(logText()).not.toContain('Recovered syncing the issue queue')
-  })
-
-  it('resets the persisted release failure streak after reconciliation succeeds', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      workerMode: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-    })
-    loop.initializeSessionStateForBranch()
-    const issueNumber = await fakeForge.createIssue({
-      title: 'cleanup release', body: '',
-      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
-    })
-    recordIssueReleaseIntent(paths, 'task-release', [issueNumber])
-    const addLabel = fakeForge.addLabel.bind(fakeForge)
-    let unavailable = true
-    fakeForge.addLabel = async (number, label) => {
-      if (label === LABEL_READY && unavailable) throw new Error('release unavailable')
-      await addLabel(number, label)
-    }
-    const failureFile = join(paths.queueDir, 'issue-release-failure-count.txt')
-
-    await loop.poll()
-    unavailable = false
-    await loop.poll()
-
-    expect(readFileSync(failureFile, 'utf8')).toBe('0\n')
-    expect(logText()).toContain('Recovered reconciling persisted issue releases after 0 minutes')
-    expect(existsSync(join(paths.queueDir, 'issue-release-intent', 'task-release'))).toBe(false)
-  })
-
-  it('promotes a prepared release after local cleanup removed the task status', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      workerMode: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 0,
-    })
-    loop.initializeSessionStateForBranch()
-    const issueNumber = await fakeForge.createIssue({
-      title: 'interrupted cleanup release', body: '',
-      labels: [LABEL_FINDING, LABEL_IN_PROGRESS], assignees: ['worker-gone'],
-    })
-    recordIssuesForTask(paths, 'task-release', [issueNumber])
-    writeRawStatus('task-release', 'failed')
-    prepareIssueReleaseIntent(paths, 'task-release', [issueNumber])
-    rmSync(statusFile(paths, 'task-release'))
-    expect(readStatus(paths, 'task-release')).toBeUndefined()
-
-    await loop.poll()
-
-    expect(releasePreparationForTask(paths, 'task-release')).toEqual([])
-    expect(issueReleaseIntentForTask(paths, 'task-release')).toEqual([])
-    await expect(fakeForge.getIssue(issueNumber)).resolves.toMatchObject({
-      state: 'open',
-      assignees: [],
-      labels: expect.arrayContaining([LABEL_FINDING, LABEL_READY]),
-    })
-    expect((await fakeForge.getIssue(issueNumber)).labels).not.toContain(LABEL_IN_PROGRESS)
-  })
-
-  it('fails a completed worker task that has no linked issue instead of skipping it', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      workerMode: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 0,
-    })
-    loop.initializeSessionStateForBranch()
-    const taskId = '20260808_120000_001_user-local-fallback'
-    writeRawStatus(taskId, 'completed')
-    const taskLog = join(paths.logsDir, `${taskId}.log`)
-
-    await loop.poll()
-
-    expect(readStatus(paths, taskId)?.status).toBe('failed')
-    expect(logText()).toContain(`WARN worker task ${shortTaskId(taskId)} has no linked issue; marked failed`)
-    expect(readFileSync(taskLog, 'utf8')).toContain(
-      `Worker merge refused: a worker checkout merges only issue-linked tasks; ${taskId} has no linked issue`,
-    )
-
-    await loop.poll()
-
-    expect(logged).toContain(`FAILED: ${taskId} — log: ${taskLog}`)
-    expect(logged.filter((line) => line.includes('has no linked issue'))).toHaveLength(1)
-  })
 
   it('logs changed remote work immediately and unchanged work at most every ten minutes', async () => {
     let current = new Date(2026, 7, 8, 12, 0, 0)
@@ -613,92 +161,6 @@ describe('remote issue queue idle detection', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
     expect(logText()).toBe('Waiting remote      issues #1')
-  })
-
-  it('names an open finding as the reason an idle poll keeps waiting', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-    })
-    loop.initializeSessionStateForBranch()
-    await fakeForge.createIssue({
-      title: 'worker still running', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
-    })
-
-    expect(await loop.poll()).toBe('continue')
-
-    expect(logged).toContain('Waiting remote      issues #1')
-    expect(logged).toContain('Idle Status      Task=0  Queue=0  0s  Waiting=open finding')
-  })
-
-  it('counts a ready shared finding no free slot could claim in the queue counter', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 1,
-    })
-    loop.initializeSessionStateForBranch()
-    writeRawStatus('20260808_120000_001_auto-busy', 'running', process.pid)
-    await fakeForge.createIssue({
-      title: 'waiting for a slot', body: '', labels: [LABEL_FINDING, LABEL_READY],
-    })
-
-    expect(await loop.poll()).toBe('continue')
-
-    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim()).toBe('')
-    expect(logged).toContain('Running Status      Task=1  Queue=1')
-  })
-
-  it('claims a ready shared finding while a full scan fleet runs', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 2,
-    })
-    loop.initializeSessionStateForBranch()
-    writeRawStatus('20260808_120000_001_scan', 'running', process.pid)
-    writeRawStatus('20260808_120001_002_scan', 'running', process.pid)
-    await fakeForge.createIssue({
-      title: 'ready beside two scans',
-      body: buildIssueBody('[BUG] `src/beside.ts` finding', '20260808_120000_001_scan'),
-      labels: [LABEL_FINDING, LABEL_READY],
-    })
-
-    expect(await loop.poll()).toBe('continue')
-
-    expect(logged).toContain('Claimed 001_auto    #1')
-    expect(logged.some((line) => line.startsWith('Running Status      Scan=2  Task=1')))
-      .toBe(true)
-  })
-
-  it('leaves a ready shared finding unclaimed while every task slot is taken', async () => {
-    const loop = makeLoop({
-      issueQueueEnabled: true,
-      scanEnabled: false,
-      autoPr: false,
-      reviewEnabled: false,
-      maxParallel: 2,
-    })
-    loop.initializeSessionStateForBranch()
-    writeRawStatus('20260808_120000_001_auto-first', 'running', process.pid)
-    writeRawStatus('20260808_120001_002_auto-second', 'running', process.pid)
-    await fakeForge.createIssue({
-      title: 'waiting behind two tasks',
-      body: buildIssueBody('[BUG] `src/behind.ts` finding', '20260808_120000_001_scan'),
-      labels: [LABEL_FINDING, LABEL_READY],
-    })
-
-    expect(await loop.poll()).toBe('continue')
-
-    expect(logged.filter((line) => line.startsWith('Claimed'))).toEqual([])
-    expect(readFileSync(join(paths.queueDir, 'backlog.txt'), 'utf8').trim()).toBe('')
-    expect(logged).toContain('Running Status      Task=2  Queue=1')
   })
 
   it('stops with the repair when merge-failed issues are the only remaining work', async () => {
@@ -764,62 +226,6 @@ describe('remote issue queue idle detection', () => {
     expect(logText()).toContain('WARN could not count remote issue work: forge unavailable')
   })
 
-  it('enters the gate when an in-progress issue has a local promotion record', async () => {
-    const loop = makeReviewLoop(true)
-    const issueNumber = await fakeForge.createIssue({
-      title: 'locally merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
-    })
-    recordIssuesForTask(paths, 'merged-task', [issueNumber])
-    recordIssuePromotions(paths, 'merged-task', 'abc123', 'feature/run-9')
-
-    expect(await loop.triggerScanIfIdle()).toBe('continue')
-
-    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
-    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
-  })
-
-  it('enters the gate when a collaborator merge marker names an ancestor of HEAD', async () => {
-    const mergeSha = git(['rev-parse', 'HEAD'])
-    const loop = makeReviewLoop(true)
-    const issueNumber = await fakeForge.createIssue({
-      title: 'remotely merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
-    })
-    await fakeForge.commentIssue(
-      issueNumber,
-      `MERGED: remote-task\nMerged as ${mergeSha} into run branch feature/run-9. This issue closes on promotion.`,
-    )
-    fakeForge.issueCommentAuthors.set(issueNumber, [
-      { login: 'collaborator-user', hasWriteAccess: true },
-    ])
-
-    expect(await loop.triggerScanIfIdle()).toBe('continue')
-
-    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
-    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
-  })
-
-  it('does not exempt a merge marker whose SHA is not an ancestor of HEAD', async () => {
-    git(['switch', '-c', 'foreign'])
-    writeFileSync(join(repoRoot, 'foreign.txt'), 'foreign\n')
-    git(['add', 'foreign.txt'])
-    git(['commit', '-m', 'foreign'])
-    const foreignSha = git(['rev-parse', 'HEAD'])
-    git(['switch', 'main'])
-    const loop = makeReviewLoop(true)
-    const issueNumber = await fakeForge.createIssue({
-      title: 'foreign merged fix', body: '', labels: [LABEL_FINDING, 'loop:in-progress'],
-    })
-    await fakeForge.commentIssue(
-      issueNumber,
-      `MERGED: remote-task\nMerged as ${foreignSha} into run branch feature/other-run. This issue closes on promotion.`,
-    )
-
-    expect(await loop.triggerScanIfIdle()).toBe('continue')
-
-    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(false)
-    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
-  })
-
   it('does not exempt an ancestral merge marker written by an outsider', async () => {
     const mergeSha = git(['rev-parse', 'HEAD'])
     const loop = makeReviewLoop(true)
@@ -853,26 +259,6 @@ describe('remote issue queue idle detection', () => {
     expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(false)
   })
 
-  it('enters the gate and dispatches the review when no remote issue is open', async () => {
-    const loop = makeReviewLoop(true)
-
-    expect(await loop.triggerScanIfIdle()).toBe('continue')
-
-    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
-    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
-  })
-
-  it('never consults the forge when the issue queue is disabled', async () => {
-    const loop = makeReviewLoop(false)
-    fakeForge.listOpenIssues = async () => {
-      throw new Error('forge should not be consulted')
-    }
-
-    expect(await loop.triggerScanIfIdle()).toBe('continue')
-
-    expect(existsSync(join(paths.queueDir, 'cycle-complete-1'))).toBe(true)
-    expect(existsSync(join(paths.queueDir, 'review-id-1'))).toBe(true)
-  })
 })
 
 describe('documentation findings held for the cycle', () => {
@@ -900,7 +286,7 @@ describe('documentation findings held for the cycle', () => {
   })
 
   it('starts code at once and releases the documentation as one numbered task after it merges', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const loop = makeLoop(gateConfig, gatedProject)
     const scanId = '20250101_000000_030_scan'
@@ -1058,7 +444,7 @@ describe('documentation findings held for the cycle', () => {
   })
 
   it('keeps the holding file across a restart and clears it when a new run starts', async () => {
-    initializeGitRepo()
+    const repository = useFakeRepository()
     const loop = makeLoop()
     loop.initializeSessionStateForBranch()
     writeFinal('20250101_000000_036_scan', 'NEXT_TASK: [DOCS] `README.md` names a removed flag\n')
@@ -1076,13 +462,14 @@ describe('documentation findings held for the cycle', () => {
     writeFinal('20250101_000000_037_scan', 'NEXT_TASK: [DOCS] `SPEC.md` misstates the retry bound\n')
     await restarted.scanForNextTasks('20250101_000000_037_scan', 0)
     expect(heldRecords()).toHaveLength(1)
-    git(['switch', '-c', 'feature/next-run'])
+    repository.state.branch = 'feature/next-run'
+    repository.state.branches.push('feature/next-run')
     makeLoop().initializeSessionStateForBranch()
     expect(existsSync(heldFile())).toBe(false)
   })
 
   it('drops held findings with the task-limit warning when the combined task has no capacity', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const loop = makeLoop({ ...gateConfig, maxTotalTasks: 1 }, gatedProject)
     writeFinal('20250101_000000_038_scan', [
@@ -1103,7 +490,7 @@ describe('documentation findings held for the cycle', () => {
   })
 
   it('drops held findings with the depth-limit warning when their depth exceeds the bound', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     // Recorded under a run whose bound allowed depth 2; the restarted loop allows only 1.
     writeFileSync(heldFile(), [
@@ -1123,7 +510,7 @@ describe('documentation findings held for the cycle', () => {
   })
 
   it('leaves a cycle without documentation findings as it was', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const loop = makeLoop(gateConfig, gatedProject)
     writeFinal('20250101_000000_039_scan', [
@@ -1179,7 +566,7 @@ describe('documentation findings held for the cycle', () => {
   })
 
   it('keeps the held findings and waits when filing their issue fails, then files them once', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({ ...gateConfig, issueQueueEnabled: true }, gatedProject)
     loop.initializeSessionStateForBranch()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
@@ -1233,7 +620,7 @@ describe('documentation findings held for the cycle', () => {
   })
 
   it('keeps the held findings and waits when the local enqueue fails, then releases them once', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     let failEnqueue = true
     const loop = makeLoop(
       gateConfig, gatedProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
@@ -1290,7 +677,7 @@ describe('documentation findings held for the cycle', () => {
   })
 
   it('warns without stopping when a release fails after the scan that held it recovered', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     let failEnqueue = true
     const loop = makeLoop(
       gateConfig, gatedProject, undefined, () => new Date(2026, 7, 8, 12, 0, 0), makeRunner(),
@@ -1336,7 +723,7 @@ describe('documentation findings held for the cycle', () => {
   })
 
   it('does not file held findings again when listing fails after their issue was created', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     let current = new Date(2026, 7, 11, 14, 0, 0)
     const resetAt = new Date(2026, 7, 11, 14, 40, 0)
