@@ -11,6 +11,7 @@ import {
   descSlug, existingTaskIdForDesc, forgetTaskId, newTaskId, recordTaskIdForDesc, taskIdForDesc,
 } from './ids.ts'
 import { finalMessageFile, isReviewTaskId, type OrchPaths } from './paths.ts'
+import { markerLineCaptures } from './refresh.ts'
 import { readStatus } from './status.ts'
 import {
   DelegatedTaskMutationError, enqueueTask, failedTaskLeftover, newTaskSpec, specFile,
@@ -1240,11 +1241,8 @@ export function missingRequirementCompletionMarkers(paths: OrchPaths, taskId: st
   if (issueNumbers.length < 2) return []
   const finalFile = finalMessageFile(paths, taskId)
   if (!existsSync(finalFile)) return issueNumbers
-  const markers = new Set(readFileSync(finalFile, 'utf8').split(/\r?\n/)
-    .flatMap((line) => {
-      const match = /^REQUIREMENT_COMPLETE: #(\d+)$/.exec(line.trim())
-      return match === null ? [] : [Number(match[1])]
-    }))
+  const markers = new Set(markerLineCaptures(readFileSync(finalFile, 'utf8'),
+    /^REQUIREMENT_COMPLETE: #(\d+)$/).map(Number))
   return issueNumbers.filter((issueNumber) => !markers.has(issueNumber))
 }
 

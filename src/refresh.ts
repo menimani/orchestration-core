@@ -34,8 +34,18 @@ const FENCE_CLOSER = /^(`{3,}|~{3,})\s*$/
  * control.
  */
 function markerLine(line: string, marker: string): boolean {
+  return unwrappedMarkerTokens(line).includes(marker)
+}
+
+/** What a line holds inside each wrapper pair `markerLine` tolerates, the bare line first. */
+function unwrappedMarkerTokens(line: string): string[] {
   const trimmed = line.trimEnd()
-  return MARKER_WRAPPERS.some((wrapper) => trimmed === `${wrapper}${marker}${wrapper}`)
+  return MARKER_WRAPPERS.flatMap((wrapper) => {
+    if (wrapper === '') return [trimmed]
+    const wrapped = trimmed.length >= 2 * wrapper.length
+      && trimmed.startsWith(wrapper) && trimmed.endsWith(wrapper)
+    return wrapped ? [trimmed.slice(wrapper.length, -wrapper.length)] : []
+  })
 }
 
 /** The index of the line closing the fence opened by `opener`, if any line closes it. */
@@ -48,28 +58,49 @@ function fenceCloser(lines: string[], from: number, opener: string): number | un
 }
 
 /**
- * Whether a final message carries a standalone marker line (see `markerLine`), since a
- * model writing Markdown naturally formats a literal token that way. A marker inside a
- * closed fenced code block counts only when it is the block's sole non-blank line — one
- * more layer of the runner's own formatting — so quoted prompt or forge text stays inert.
- * An opening fence that nothing closes hides nothing: the lines after it are read as
+ * The lines of a final message that may hold a standalone marker (see `markerLine`), since
+ * a model writing Markdown naturally formats a literal token that way. A line inside a
+ * closed fenced code block is a candidate only when it is the block's sole non-blank line —
+ * one more layer of the runner's own formatting — so quoted prompt or forge text stays
+ * inert. An opening fence that nothing closes hides nothing: the lines after it are read as
  * outside a fence, so a mis-nested or unterminated block cannot hide a final marker.
  */
-export function markerLinePresent(text: string, marker: string): boolean {
+function markerCandidateLines(text: string): string[] {
   const lines = text.split('\n')
+  const candidates: string[] = []
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index] ?? ''
     const opener = FENCE_OPENER.exec(line.trimEnd())?.[1]
     const closer = opener === undefined ? undefined : fenceCloser(lines, index + 1, opener)
     if (closer !== undefined) {
       const content = lines.slice(index + 1, closer).filter((inner) => inner.trim() !== '')
-      if (content.length === 1 && markerLine(content[0] ?? '', marker)) return true
+      if (content.length === 1) candidates.push(content[0] ?? '')
       index = closer
       continue
     }
-    if (markerLine(line, marker)) return true
+    candidates.push(line)
   }
-  return false
+  return candidates
+}
+
+/** Whether a final message carries `marker` on a standalone line (see `markerCandidateLines`). */
+export function markerLinePresent(text: string, marker: string): boolean {
+  return markerCandidateLines(text).some((line) => markerLine(line, marker))
+}
+
+/**
+ * The first capture group of every standalone marker line matching `pattern`, under the
+ * same line, formatting, and fence rules as `markerLinePresent`. The pattern must be
+ * anchored at both ends, since it is tested against the whole marker token.
+ */
+export function markerLineCaptures(text: string, pattern: RegExp): string[] {
+  return markerCandidateLines(text).flatMap((line) => {
+    for (const token of unwrappedMarkerTokens(line)) {
+      const captured = pattern.exec(token)?.[1]
+      if (captured !== undefined) return [captured]
+    }
+    return []
+  })
 }
 
 /**

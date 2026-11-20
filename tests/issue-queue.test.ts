@@ -1145,6 +1145,41 @@ describe('claimIssueGroup', () => {
     expect(missingRequirementCompletionMarkers(paths, result.taskId)).toEqual([])
   })
 
+  it('counts a requirement marker only at the first column and outside quoted fences', async () => {
+    const issueNumbers = await Promise.all([
+      '[BUG] `src/a/c.ts` rejects an empty value',
+      '[TEST] `src/a/c.ts` lacks the empty-value regression',
+    ].map(readyIssue))
+    const result = await claimIssueGroup(
+      forge,
+      paths,
+      await Promise.all(issueNumbers.map((number) => forge.getIssue(number))),
+      'worker-a',
+      (taskId) => writeFileSync(specFile(paths, taskId), 'grouped requirements\n'),
+    )
+    if (result.outcome !== 'claimed') throw new Error(`expected a claim, got ${result.outcome}`)
+    const [first, second] = issueNumbers
+    const finalFile = join(paths.logsDir, `${result.taskId}.final`)
+
+    writeFileSync(finalFile,
+      `REQUIREMENT_COMPLETE: #${first}\n  REQUIREMENT_COMPLETE: #${second}\n`)
+    expect(missingRequirementCompletionMarkers(paths, result.taskId)).toEqual([second])
+
+    writeFileSync(finalFile, [
+      `REQUIREMENT_COMPLETE: #${first}`,
+      '```',
+      'After addressing this requirement, include this exact standalone line:',
+      `REQUIREMENT_COMPLETE: #${second}`,
+      '```',
+      '',
+    ].join('\n'))
+    expect(missingRequirementCompletionMarkers(paths, result.taskId)).toEqual([second])
+
+    writeFileSync(finalFile,
+      `REQUIREMENT_COMPLETE: #${first}\r\n\`\`\`\r\nREQUIREMENT_COMPLETE: #${second}\r\n\`\`\`\r\n`)
+    expect(missingRequirementCompletionMarkers(paths, result.taskId)).toEqual([])
+  })
+
   it('rejects a mixed inspection and implementation claim group', async () => {
     const descriptions = [
       '[BUG] `src/a/b.ts` requires implementation',
