@@ -4,10 +4,11 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
+import { FAKE_COMMIT } from './fakeRepository.ts'
 import {
-  configureLocalRemote, configureRemoteDefaultBranch, fakeForge, forgeStatus, git,
-  initializeGitRepo, initializeGitRepoWithRemote, logText, logged, makeLoop, paths,
-  registerLoopHooks, repoRoot, setForgeStatus, stubProject,
+  configureRemoteDefaultBranch, fakeForge, forgeStatus, git, initializeGitRepo,
+  initializeGitRepoWithRemote, logText, logged, makeLoop, paths, registerLoopHooks, repoRoot,
+  setForgeStatus, stubProject, useFakeRepository, useFakeRepositoryWithRemote,
 } from './loopHarness.ts'
 
 const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
@@ -52,12 +53,17 @@ registerLoopHooks()
 
 describe('completion marker output', () => {
   function configureUnopenedPrBranch(): void {
-    initializeGitRepoWithRemote()
-    git(['switch', '-c', 'feature/unopened-pr'])
-    git(['branch', '--set-upstream-to', 'origin/main'])
-    writeFileSync(join(repoRoot, 'feature.txt'), 'feature\n')
-    git(['add', 'feature.txt'])
-    git(['commit', '-m', 'feat: needs a new PR'])
+    const repository = useFakeRepositoryWithRemote()
+    repository.state.branch = 'feature/unopened-pr'
+    repository.state.branches.push('feature/unopened-pr')
+    repository.state.upstreams['feature/unopened-pr'] = 'origin'
+    repository.state.upstreamBranches['feature/unopened-pr'] = 'main'
+    repository.state.ancestors = [repository.state.head]
+    repository.state.head = FAKE_COMMIT
+    repository.state.commitsAhead['origin/main'] = 1
+    repository.state.commits['origin/main'] = [
+      { sha: FAKE_COMMIT, subject: 'feat: needs a new PR', files: ['feature.txt'] },
+    ]
     setForgeStatus({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] })
   }
 
@@ -128,7 +134,7 @@ describe('completion marker output', () => {
   })
 
   it('accepts a confirmed hand-edited PR body without overwriting it', async () => {
-    configureLocalRemote()
+    useFakeRepositoryWithRemote()
     const loop = makeLoop()
     fakeForge.prBody = async () => 'A person rewrote this summary.'
     const updatePr = vi.fn(async () => {})
@@ -144,7 +150,7 @@ describe('completion marker output', () => {
   })
 
   it('does not overwrite an edited PR body with a displaced generated marker', async () => {
-    configureLocalRemote()
+    useFakeRepositoryWithRemote()
     const loop = makeLoop()
     fakeForge.prBody = async () => [
       'A person rewrote this summary.',
@@ -161,18 +167,17 @@ describe('completion marker output', () => {
   })
 
   it('creates and summarizes a PR against the remote default branch', async () => {
-    initializeGitRepo()
-    git(['branch', '-M', 'trunk'])
-    const remote = join(repoRoot, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-    git(['remote', 'add', 'upstream', remote])
-    git(['push', '-u', 'upstream', 'trunk'])
-    git(['symbolic-ref', 'refs/remotes/upstream/HEAD', 'refs/remotes/upstream/trunk'])
-    git(['switch', '-c', 'feature/default-base'])
-    git(['branch', '--set-upstream-to', 'upstream/trunk'])
-    writeFileSync(join(repoRoot, 'feature.txt'), 'feature\n')
-    git(['add', 'feature.txt'])
-    git(['commit', '-m', 'feat: use the configured base'])
+    useFakeRepository({
+      branch: 'feature/default-base',
+      branches: ['trunk', 'feature/default-base'],
+      remotes: [{ name: 'upstream', url: join(repoRoot, 'remote.git'), defaultBranch: 'trunk' }],
+      upstreams: { 'trunk': 'upstream', 'feature/default-base': 'upstream' },
+      upstreamBranches: { 'feature/default-base': 'trunk' },
+      commitsAhead: { 'upstream/trunk': 1 },
+      commits: {
+        'upstream/trunk': [{ sha: FAKE_COMMIT, subject: 'feat: use the configured base', files: ['feature.txt'] }],
+      },
+    })
     setForgeStatus({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] })
     const loop = makeLoop()
     const createPr = vi.fn(async () => 'https://example.test/pull/1')
@@ -236,12 +241,7 @@ describe('completion marker output', () => {
   })
 
   it('emits LOOP_DONE verbatim and the rewrite reminder as a formatted event', async () => {
-    initializeGitRepo()
-    const remote = join(repoRoot, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-    git(['remote', 'add', 'origin', remote])
-    git(['push', '-u', 'origin', 'main'])
-    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    useFakeRepositoryWithRemote()
     const loop = makeLoop()
     fakeForge.markPrReady = async () => {
       setForgeStatus({ ...forgeStatus, isDraft: false })
@@ -260,12 +260,7 @@ describe('completion marker output', () => {
   })
 
   it('neither promotes nor emits LOOP_DONE while the forge reports an earlier head', async () => {
-    const headSha = initializeGitRepo()
-    const remote = join(repoRoot, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-    git(['remote', 'add', 'origin', remote])
-    git(['push', '-u', 'origin', 'main'])
-    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    const headSha = useFakeRepositoryWithRemote().state.head
     setForgeStatus({ ...forgeStatus, headSha: 'f'.repeat(40) })
     const loop = makeLoop()
     const markPrReady = vi.fn(async () => {
@@ -284,12 +279,7 @@ describe('completion marker output', () => {
   })
 
   it('reports varying draft promotion errors and stops after two gate failures', async () => {
-    initializeGitRepo()
-    const remote = join(repoRoot, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-    git(['remote', 'add', 'origin', remote])
-    git(['push', '-u', 'origin', 'main'])
-    git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+    useFakeRepositoryWithRemote()
     const loop = makeLoop({}, {
       ...stubProject,
       manualEnvironmentChecks: [{ environment: 'Linux', command: 'npm run test:linux' }],
