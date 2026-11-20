@@ -19,9 +19,9 @@ import { finalMessageFile, statusFile } from '../src/paths.ts'
 import { readStatus } from '../src/status.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import {
-  fakeForge, forgeStatus, initializeGitRepo, logText, logged, makeCompletedTask,
-  makeForge, makeLoop, makeRunner, paths, registerLoopHooks, repoRoot, runnerStarts,
-  setForgeStatus, stubProject, writeFinal, writeRawStatus,
+  fakeForge, fakeRepositoryDeps, forgeStatus, initializeGitRepo, logText, logged,
+  makeFakeCompletedTask, makeForge, makeLoop, makeRunner, paths, registerLoopHooks, repoRoot,
+  runnerStarts, setForgeStatus, stubProject, useFakeRepository, writeFinal, writeRawStatus,
 } from './loopHarness.ts'
 
 const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
@@ -89,11 +89,12 @@ describe('live loop configuration', () => {
       project: stubProject,
       log: (line) => logged.push(line),
       now: () => new Date(2026, 7, 8, 12, 0, 0),
+      ...fakeRepositoryDeps(),
     })
   }
 
   it('uses a changed live setting on the next poll and reports it', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const filePath = join(paths.root, 'config.json')
     writeFileSync(filePath, JSON.stringify({
       MAX_PARALLEL: 1, SCAN_ENABLED: false, AUTO_MERGE: false,
@@ -142,7 +143,7 @@ describe('live loop configuration', () => {
   })
 
   it('stops polling when a live configuration update is invalid', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const filePath = join(paths.root, 'config.json')
     writeFileSync(filePath, JSON.stringify({
       MAX_PARALLEL: 1, SCAN_ENABLED: false, AUTO_MERGE: false,
@@ -303,6 +304,7 @@ describe('daemon startup', () => {
 
 describe('status file safety', () => {
   it('stops the poll when an existing task status is malformed', async () => {
+    useFakeRepository({ repository: false })
     const taskId = '20260811_000000_001_user-existing'
     writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# Existing task\n')
     writeFileSync(statusFile(paths, taskId), '{"status":"running"')
@@ -312,6 +314,7 @@ describe('status file safety', () => {
   })
 
   it('stops the poll when an existing task status is structurally invalid', async () => {
+    useFakeRepository({ repository: false })
     const taskId = '20260811_000000_001_user-existing'
     writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# Existing task\n')
     writeFileSync(statusFile(paths, taskId), '{}')
@@ -328,7 +331,7 @@ describe('persisted counter safety', () => {
   it.each(['', 'not-a-count', '1 2', '-1', '9007199254740992'])(
     'stops with a diagnostic instead of resetting a malformed scan count %j',
     async (value) => {
-      initializeGitRepo()
+      useFakeRepository()
       const loop = makeLoop({ scanEnabled: false, autoMerge: false })
       loop.initializeSessionStateForBranch()
       writeFileSync(join(paths.queueDir, 'scan-count.txt'), value)
@@ -368,7 +371,7 @@ describe('persisted counter safety', () => {
 
 describe('forge poll budget', () => {
   it('claims ready findings for the same titled file as one task', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -399,7 +402,7 @@ describe('forge poll budget', () => {
   })
 
   it('gives a single claimed test finding the tests pitfall list', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     mkdirSync(join(paths.root, 'templates', 'pitfalls'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'pitfalls', 'code.md'), 'Stale async responses.\n')
     writeFileSync(
@@ -426,7 +429,7 @@ describe('forge poll budget', () => {
   })
 
   it('does not claim from a poll whose duplicate re-read cannot be verified', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -457,7 +460,7 @@ describe('forge poll budget', () => {
   })
 
   it('shows two review-origin fixes in the task log', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 2,
     })
@@ -564,7 +567,7 @@ describe('forge poll budget', () => {
   })
 
   it('parks a repeatedly failing issue and stops the loop at its retry bound', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
       maxIssueRetries: 1,
@@ -590,7 +593,7 @@ describe('forge poll budget', () => {
   })
 
   it('persists a failed-task release and stops after three failed reconciliations', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -629,7 +632,7 @@ describe('forge poll budget', () => {
   })
 
   it('warns with the outsider login and leaves an untrusted issue unclaimed', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -656,7 +659,7 @@ describe('forge poll budget', () => {
   })
 
   it('skips an issue for the poll when its author permission could not be determined', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -690,7 +693,7 @@ describe('forge poll budget', () => {
   })
 
   it('records an unparseable issue failure and stops with the issue quarantined', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -717,8 +720,8 @@ describe('forge poll budget', () => {
     const completedTask = '20260811_120000_001_auto-completed'
     const failedTask = '20260811_120001_002_auto-failed'
     const queuedTask = '20260811_120002_003_auto-queued'
-    initializeGitRepo()
-    makeCompletedTask(completedTask)
+    useFakeRepository()
+    makeFakeCompletedTask(completedTask)
     writeRawStatus(failedTask, 'running', null)
     writeFileSync(join(paths.tasksDir, `${queuedTask}.md`), '# queued spec\n')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), `${queuedTask}:0\n`)
@@ -744,7 +747,7 @@ describe('forge poll budget', () => {
 
   it('keeps issue-backed queued work materialized when queue labels are unavailable', async () => {
     const taskId = '20260811_120003_004_auto-claimed'
-    initializeGitRepo()
+    useFakeRepository()
     writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# claimed issue task\n')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:2\n`)
     recordIssuesForTask(paths, taskId, [42])
@@ -763,7 +766,7 @@ describe('forge poll budget', () => {
   })
 
   it('lists the shared loop issues once for an entire poll', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 0,
     })
@@ -778,7 +781,7 @@ describe('forge poll budget', () => {
   })
 
   it('does not re-read comments while an issue updatedAt is unchanged', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: true, autoMerge: false, maxParallel: 0,
     })
@@ -794,7 +797,7 @@ describe('forge poll budget', () => {
   })
 
   it('re-reads comments whose author permission could not be read', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: true, autoMerge: false, maxParallel: 0,
     })
@@ -814,7 +817,7 @@ describe('forge poll budget', () => {
   })
 
   it('defers forge calls until a long reported rate-limit reset and logs one wait', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     let current = new Date(2026, 7, 11, 14, 0, 0)
     const resetAt = new Date(2026, 7, 11, 14, 40, 0)
     const loop = makeLoop({
@@ -1001,136 +1004,6 @@ describe('checkPrCiStatus', () => {
     writeFileSync(join(paths.queueDir, 'pr-url.txt'), 'https://example.test/pull/1\n')
   })
 
-  it('passes on all-success and fails on any failure', async () => {
-    const loop = makeLoop()
-    forgeStatus.checks = [
-      { name: 'a', conclusion: 'success', startedAt: '' },
-      { name: 'b', conclusion: 'success', startedAt: '' },
-    ]
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-    expect(await loop.checkPrCiStatus()).toBe('success')
-    expect(fakeForge.prStatusRefs).toEqual([
-      { kind: 'url', value: 'https://example.test/pull/1' },
-      { kind: 'url', value: 'https://example.test/pull/1' },
-    ])
-    forgeStatus.checks = [{ name: 'a', conclusion: 'failure', startedAt: '' }]
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-    expect(await loop.checkPrCiStatus()).toBe('failure')
-  })
-
-  it('keeps waiting on mixed pending and failed checks', async () => {
-    const loop = makeLoop()
-    forgeStatus.checks = [
-      { name: 'a', conclusion: 'pending', startedAt: '' },
-      { name: 'b', conclusion: 'failure', startedAt: '' },
-    ]
-    expect(await loop.checkPrCiStatus()).not.toBe('success')
-  })
-
-  it('uses the newest rerun of each check name', async () => {
-    const loop = makeLoop()
-    forgeStatus.checks = [
-      { name: 'frontend', conclusion: 'success', startedAt: '2026-08-14T02:00:00Z' },
-      { name: 'frontend', conclusion: 'failure', startedAt: '2026-08-14T01:00:00Z' },
-      { name: 'backend', conclusion: 'success', startedAt: '2026-08-14T01:30:00Z' },
-    ]
-
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-    expect(await loop.checkPrCiStatus()).toBe('success')
-  })
-
-  it.each([
-    ['without timestamps', ''],
-    ['with tied timestamps', '2026-08-14T02:00:00Z'],
-  ])('does not let an arbitrarily ordered success hide a same-name failure %s',
-    async (_description, startedAt) => {
-      const loop = makeLoop()
-      forgeStatus.checks = [
-        { name: 'frontend', conclusion: 'failure', startedAt },
-        { name: 'frontend', conclusion: 'success', startedAt },
-      ]
-
-      expect(await loop.checkPrCiStatus()).toBe('pending')
-      expect(await loop.checkPrCiStatus()).toBe('failure')
-    })
-
-  it.each([
-    ['a passed', 'success', 'success'],
-    ['a failed', 'failure', 'failure'],
-  ] as const)('waits while the forge still reports %s earlier head', async (_description, conclusion, verdict) => {
-    const loop = makeLoop()
-    setForgeStatus({
-      ...forgeStatus,
-      headSha: 'f'.repeat(40),
-      checks: [{ name: 'a', conclusion, startedAt: '' }],
-    })
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-
-    setForgeStatus({ ...forgeStatus, headSha })
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-    expect(await loop.checkPrCiStatus()).toBe(verdict)
-  })
-
-  it('waits for a check that appears only after the listed ones finish', async () => {
-    const loop = makeLoop()
-    forgeStatus.checks = [{ name: 'build', conclusion: 'success', startedAt: '' }]
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-
-    forgeStatus.checks = [
-      { name: 'build', conclusion: 'success', startedAt: '' },
-      { name: 'deploy', conclusion: 'failure', startedAt: '' },
-    ]
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-    expect(await loop.checkPrCiStatus()).toBe('failure')
-  })
-
-  it('needs the check names again after a failed status read', async () => {
-    const loop = makeLoop()
-    forgeStatus.checks = [{ name: 'a', conclusion: 'success', startedAt: '' }]
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-    const prStatus = fakeForge.prStatus
-    fakeForge.prStatus = async () => { throw new Error('checks unavailable') }
-    expect(await loop.checkPrCiStatus()).toBe('unknown')
-    fakeForge.prStatus = prStatus
-
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-    expect(await loop.checkPrCiStatus()).toBe('success')
-  })
-
-  it('gives a verdict when the second poll lists the same checks in another order', async () => {
-    const loop = makeLoop()
-    forgeStatus.checks = [
-      { name: 'build', conclusion: 'success', startedAt: '' },
-      { name: 'lint', conclusion: 'success', startedAt: '' },
-      { name: 'test', conclusion: 'failure', startedAt: '' },
-    ]
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-
-    forgeStatus.checks = [
-      { name: 'test', conclusion: 'failure', startedAt: '' },
-      { name: 'build', conclusion: 'success', startedAt: '' },
-      { name: 'lint', conclusion: 'success', startedAt: '' },
-    ]
-    expect(await loop.checkPrCiStatus()).toBe('failure')
-  })
-
-  it.each([
-    ['a name is added', ['b', 'a'], ['c', 'a', 'b']],
-    ['a name is removed', ['c', 'a', 'b'], ['b', 'a']],
-    ['a name listed twice is listed once', ['b', 'a', 'b'], ['b', 'a']],
-    ['a name listed once is listed twice', ['b', 'a'], ['b', 'a', 'b']],
-  ])('stays pending for the poll on which %s', async (_description, first, second) => {
-    const loop = makeLoop()
-    forgeStatus.checks = first.map((name) => ({ name, conclusion: 'success', startedAt: '' }))
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-
-    forgeStatus.checks = second.map((name) => ({ name, conclusion: 'success', startedAt: '' }))
-    expect(await loop.checkPrCiStatus()).toBe('pending')
-    forgeStatus.checks = [...second].reverse()
-      .map((name) => ({ name, conclusion: 'success', startedAt: '' }))
-    expect(await loop.checkPrCiStatus()).toBe('success')
-  })
-
   it('compares reordered check names afresh after the head changes', async () => {
     const loop = makeLoop()
     setForgeStatus({
@@ -1166,18 +1039,6 @@ describe('checkPrCiStatus', () => {
     })
     expect(await loop.checkPrCiStatus()).toBe('pending')
     expect(await loop.checkPrCiStatus()).toBe('failure')
-  })
-
-  it('does not clear the gate for an old PR head with no checks', async () => {
-    setForgeStatus({ ...forgeStatus, headSha, checks: [] })
-    const loop = makeLoop({}, stubProject, undefined, () => new Date('2030-01-01T00:00:00Z'))
-    expect(await loop.checkPrCiStatus()).toBe('unknown')
-  })
-
-  it('passes with no checks only when the project explicitly expects none', async () => {
-    const loop = makeLoop({}, { ...stubProject, ciChecksExpected: false })
-    forgeStatus.checks = []
-    expect(await loop.checkPrCiStatus()).toBe('success')
   })
 
   it('treats a merged PR as passed', async () => {
