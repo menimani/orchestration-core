@@ -2352,7 +2352,7 @@ export function createLoop(deps: LoopDeps) {
       // marker goes, or the new run would count them as its own failures.
       if (cycles.size === 1 && cycles.has(currentCycle + 1)) {
         for (const taskId of new Set(entries.map((entry) => entry.taskId))) {
-          cleanupTask(paths, taskId, undefined, false, log)
+          cleanupTask(paths, taskId, undefined, false, log, injectedGit)
         }
         rmSync(marker, { force: true })
         event('Recovered', 'scan cycle', `${currentCycle + 1} after operator stop`)
@@ -2365,7 +2365,7 @@ export function createLoop(deps: LoopDeps) {
       }
 
       const taskIds = [...new Set(entries.map((entry) => entry.taskId))]
-      for (const taskId of taskIds) cleanupTask(paths, taskId, undefined, false, log)
+      for (const taskId of taskIds) cleanupTask(paths, taskId, undefined, false, log, injectedGit)
 
       const failedFile = join(paths.queueDir, `failed-${currentCycle}`)
       if (existsSync(failedFile)) {
@@ -3290,7 +3290,7 @@ export function createLoop(deps: LoopDeps) {
         for (const scanId of attemptedScans) {
           if (scanId === retainedScan) continue
           try {
-            cleanupTask(paths, scanId, undefined, false, log)
+            cleanupTask(paths, scanId, undefined, false, log, injectedGit)
           } catch (error) {
             // A scan that could not be discarded is kept like one whose runner could not
             // be accounted for, so the operator learns why rather than meeting it later.
@@ -3663,7 +3663,7 @@ export function createLoop(deps: LoopDeps) {
               }
               prepareIssueReleaseIntent(paths, taskId, linkedIssues)
             }
-            cleanupTask(paths, taskId, undefined, false, log)
+            cleanupTask(paths, taskId, undefined, false, log, injectedGit)
             reportConflictFailure()
             if (linkedIssues.length === 0) {
               dropClaimedTaskMaterialization(paths, taskId)
@@ -4196,7 +4196,7 @@ export function createLoop(deps: LoopDeps) {
             }
             if (released) {
               try {
-                cleanupTask(paths, entry.taskId, undefined, false, log)
+                cleanupTask(paths, entry.taskId, undefined, false, log, injectedGit)
                 dropClaimedTaskMaterialization(paths, entry.taskId)
               } catch (cleanupError) {
                 event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)

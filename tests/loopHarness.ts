@@ -61,6 +61,15 @@ export function useFakeRepository(state: ConstructorParameters<typeof FakeReposi
   return fakeRepository
 }
 
+/** useFakeRepository for the state initializeGitRepoWithRemote leaves on disk. */
+export function useFakeRepositoryWithRemote(): FakeRepository {
+  return useFakeRepository({
+    remotes: [{ name: 'origin', url: join(repoRoot, 'origin.git'), defaultBranch: 'main' }],
+    upstreams: { main: 'origin' },
+    commitsAhead: { 'origin/main': 0 },
+  })
+}
+
 /** The loop dependencies that point at the fake repository, when the test uses one. */
 export function fakeRepositoryDeps(): Pick<LoopDeps, 'git' | 'startTask'> {
   return fakeRepository === undefined
@@ -248,6 +257,7 @@ export function makeFakeCompletedTask(taskId: string): void {
   const worktree = worktreeDir(paths, taskId)
   mkdirSync(worktree, { recursive: true })
   fakeRepository.state.branches.push(branchName(taskId))
+  fakeRepository.state.worktrees.push({ path: worktree, branch: branchName(taskId) })
   writeFileSync(join(worktree, `${taskId}.txt`), 'completed work\n')
   writeFinal(taskId, 'TASK_COMPLETE\n')
   writeRawStatus(taskId, 'completed')

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { commandFailureSummary } from './errorText.ts'
 import { gateFixStateFiles } from './gateFix.ts'
+import type { GitRunner } from './gitRunner.ts'
 import {
   branchName, finalMessageFile, rebaseEmptiedMarkerFile, statusFile, worktreeDir, type OrchPaths,
 } from './paths.ts'
@@ -45,21 +46,37 @@ const systemRuntime: CleanupRuntime = {
   remove: rmSync,
 }
 
-function git(runtime: CleanupRuntime, paths: OrchPaths, args: readonly string[]): string {
+function git(
+  runtime: CleanupRuntime,
+  paths: OrchPaths,
+  args: readonly string[],
+  run?: GitRunner,
+): string {
+  if (run !== undefined) return run(paths.repoRoot, [...args])
   return runtime.execFile('git', args, {
     cwd: paths.repoRoot,
     windowsHide: true,
   })
 }
 
-function worktreeIsRegistered(runtime: CleanupRuntime, paths: OrchPaths, worktree: string): boolean {
-  const output = git(runtime, paths, ['worktree', 'list', '--porcelain', '-z'])
+function worktreeIsRegistered(
+  runtime: CleanupRuntime,
+  paths: OrchPaths,
+  worktree: string,
+  run?: GitRunner,
+): boolean {
+  const output = git(runtime, paths, ['worktree', 'list', '--porcelain', '-z'], run)
   return worktreeListIncludes(runtime.os, output, worktree)
 }
 
-function branchExists(runtime: CleanupRuntime, paths: OrchPaths, branch: string): boolean {
+function branchExists(
+  runtime: CleanupRuntime,
+  paths: OrchPaths,
+  branch: string,
+  run?: GitRunner,
+): boolean {
   const ref = `refs/heads/${branch}`
-  const output = git(runtime, paths, ['for-each-ref', '--format=%(refname)', 'refs/heads'])
+  const output = git(runtime, paths, ['for-each-ref', '--format=%(refname)', 'refs/heads'], run)
   return output.split(/\r?\n/).includes(ref)
 }
 
@@ -102,7 +119,7 @@ function stopTaskProcess(
  * Stop a task's process and remove its worktree, branch, status and markers.
  * Cleanup precedes a retry, so the announce markers under queue/scanned go too —
  * leaving them would let the loop watch the retry in silence, completed and failed
- * alike.
+ * alike. A caller that passes `run` answers its git invocations instead of git itself.
  */
 export function cleanupTask(
   paths: OrchPaths,
@@ -110,6 +127,7 @@ export function cleanupTask(
   runtime: CleanupRuntime = systemRuntime,
   announce = true,
   report: (line: string) => void = console.log,
+  run?: GitRunner,
 ): void {
   const status = readStatus(
     paths, taskId, runtime.os.processStartIdentity, runtime.os.processTreeIsAlive,
@@ -129,7 +147,7 @@ export function cleanupTask(
   for (let pass = 1; pass <= WORKTREE_REMOVAL_PASSES && runtime.exists(worktree); pass++) {
     const result = removeWorktreeWithFallback(paths.repoRoot, worktree, {
       os: runtime.os,
-      git: (_cwd, args) => git(runtime, paths, args),
+      git: (_cwd, args) => git(runtime, paths, args, run),
     }, report)
     if (result.gitFailure !== undefined) {
       removalFailures.push(
@@ -146,13 +164,13 @@ export function cleanupTask(
   }
 
   try {
-    git(runtime, paths, ['worktree', 'prune', '--expire', 'now'])
+    git(runtime, paths, ['worktree', 'prune', '--expire', 'now'], run)
   } catch {
     throw new Error(`Could not prune worktree metadata for ${worktree}; task state was retained.`)
   }
   let worktreeRegistered: boolean
   try {
-    worktreeRegistered = worktreeIsRegistered(runtime, paths, worktree)
+    worktreeRegistered = worktreeIsRegistered(runtime, paths, worktree, run)
   } catch {
     throw new Error(`Could not verify worktree removal for ${worktree}; task state was retained.`)
   }
@@ -162,13 +180,13 @@ export function cleanupTask(
 
   const branch = branchName(taskId)
   try {
-    git(runtime, paths, ['branch', '-D', branch])
+    git(runtime, paths, ['branch', '-D', branch], run)
   } catch {
     // The branch may already be absent; verify below.
   }
   let branchPresent: boolean
   try {
-    branchPresent = branchExists(runtime, paths, branch)
+    branchPresent = branchExists(runtime, paths, branch, run)
   } catch {
     throw new Error(`Could not verify branch removal for ${branch}; task state was retained.`)
   }

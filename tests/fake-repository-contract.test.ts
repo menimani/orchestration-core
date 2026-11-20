@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -57,6 +57,28 @@ function initialRepository(root: string): Partial<FakeRepositoryState> {
   return { head: setup(root, 'rev-parse', 'HEAD') }
 }
 
+/** A task worktree on its own branch at HEAD, beside the work tree like a remote. */
+function taskWorktree(root: string, state: Partial<FakeRepositoryState>): Partial<FakeRepositoryState> {
+  const path = `${root}-task`
+  setup(root, 'worktree', 'add', '-q', path, '-b', 'task/one')
+  writeFileSync(join(path, 'work.txt'), 'untracked\n')
+  return { ...state, branches: ['main', 'task/one'], worktrees: [{ path, branch: 'task/one' }] }
+}
+
+/** initializeGitRepoWithRemote's state: main pushed to origin, whose HEAD names main. */
+function pushedToOrigin(root: string, state: Partial<FakeRepositoryState>): Partial<FakeRepositoryState> {
+  const url = bareRemote(root, 'origin')
+  setup(root, 'push', '-q', '-u', 'origin', 'main')
+  realGit(url, ['symbolic-ref', 'HEAD', 'refs/heads/main'])
+  setup(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+  return {
+    ...state,
+    remotes: [{ name: 'origin', url, defaultBranch: 'main' }],
+    upstreams: { main: 'origin' },
+    commitsAhead: { 'origin/main': 0 },
+  }
+}
+
 // Beside the work tree rather than in it, where it would be an untracked directory.
 function bareRemote(root: string, name: string): string {
   const remote = `${root}-${name}.git`
@@ -74,6 +96,7 @@ const STATES: ContractState[] = [
       setup(root, 'checkout', '-q', '--detach')
       return { ...state, branch: undefined, branches: ['main'] }
     },
+    extra: [['worktree', 'list', '--porcelain', '-z']],
   },
   {
     name: 'a branch pushed with an upstream to a remote with a default branch',
@@ -127,6 +150,26 @@ const STATES: ContractState[] = [
       }
     },
     extra: [['rev-list', '--count', 'base..HEAD']],
+  },
+  {
+    name: 'main pushed to the default branch of origin',
+    build: (root) => pushedToOrigin(root, initialRepository(root)),
+    extra: [
+      ['fetch', 'origin', 'main', '--quiet'],
+      ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+      ['ls-remote', '--symref', 'origin', 'HEAD'],
+      ['rev-parse', '--verify', 'origin/main^{commit}'],
+      ['log', 'origin/main..HEAD', '--no-merges', '--pretty=%H|%s'],
+      ['rev-list', '--count', 'origin/main..HEAD'],
+    ],
+  },
+  {
+    name: 'a task worktree on its own branch',
+    build: (root) => taskWorktree(root, initialRepository(root)),
+    extra: [
+      ['worktree', 'list', '--porcelain', '-z'],
+      ['for-each-ref', '--format=%(refname)', 'refs/heads'],
+    ],
   },
   {
     name: 'a directory outside every repository',
@@ -183,6 +226,69 @@ describe('the fake repository against real git', () => {
         },
       )
     })
+  })
+})
+
+// cleanupTask removes a task's worktree and branch and then checks that git forgot both.
+// Each step changes the repository, so real git runs the whole sequence first and the
+// fake runs it after the worktree directory is put back; every answer and every
+// effect on disk must agree.
+describe('the fake repository against real git, removing a task worktree', () => {
+  it('removes the worktree and forgets the branch as git does', () => {
+    const root = join(workspace, 'removal')
+    mkdirSync(root)
+    const state = taskWorktree(root, initialRepository(root))
+    const worktree = state.worktrees?.[0]?.path ?? ''
+    const steps: string[][] = [
+      ['branch', '-D', 'task/one'],
+      ['worktree', 'remove', worktree, '--force'],
+      ['worktree', 'prune', '--expire', 'now'],
+      ['worktree', 'list', '--porcelain', '-z'],
+      ['branch', '-D', 'task/one'],
+      ['for-each-ref', '--format=%(refname)', 'refs/heads'],
+      ['branch', '-D', 'task/one'],
+      ['worktree', 'remove', worktree, '--force'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args), worktreePresent: existsSync(worktree),
+    }))
+
+    const real = run(realGit)
+    mkdirSync(worktree)
+    writeFileSync(join(worktree, 'work.txt'), 'untracked\n')
+    const fake = new FakeRepository(root, state)
+
+    expect(run(fake.git)).toEqual(real)
+    expect(fake.unanswered).toEqual([])
+  })
+})
+
+// The loop pushes the run branch before it promotes it. Real git pushes first, and the
+// fake, which changes nothing on disk, then answers the same steps.
+describe('the fake repository against real git, pushing the run branch', () => {
+  it('pushes the branch and catches its remote-tracking ref up as git does', () => {
+    const root = join(workspace, 'push')
+    mkdirSync(root)
+    const pushed = pushedToOrigin(root, initialRepository(root))
+    commit(root, 'ahead\n')
+    const state = { ...pushed, head: setup(root, 'rev-parse', 'HEAD'), commitsAhead: { 'origin/main': 1 } }
+    const steps: string[][] = [
+      ['rev-list', '--count', 'origin/main..HEAD'],
+      ['push', '--quiet', 'absent', 'main'],
+      ['push', '--quiet', 'origin', 'absent'],
+      ['push', '--quiet', 'origin', 'main'],
+      ['rev-list', '--count', 'origin/main..HEAD'],
+      ['rev-parse', '--verify', 'origin/main^{commit}'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const real = run(realGit)
+    const fake = new FakeRepository(root, state)
+
+    expect(run(fake.git)).toEqual(real)
+    expect(fake.unanswered).toEqual([])
   })
 })
 
