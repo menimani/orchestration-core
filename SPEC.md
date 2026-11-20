@@ -1861,9 +1861,17 @@ polls that leave one merged task's marker unverified stop the loop on the poll a
 
 ## Test coverage
 
-The suite drives real git repositories in temporary directories. Its cycle-gate cases in
-`tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's state
-machine — cycle flags, CI outcomes, review rounds, final promotion, and stop conditions.
+The suite drives real git repositories in temporary directories, except where a loop
+test needs git only to answer questions about the checkout — its branch, HEAD, remotes,
+and push configuration. Those tests run against `tests/fakeRepository.ts`, an in-memory
+checkout that answers exactly the invocations the loop makes in git's own output format
+and refuses any other, and `tests/fake-repository-contract.test.ts` asks real git the
+same questions about the same states, so the fake cannot drift from it. The cycle-gate
+cases in `tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's
+state machine — cycle flags, CI outcomes, review rounds, final promotion, and stop
+conditions. Most run on the fake checkout; the cases that launch and discard scan
+worktrees, reset the cycle counter for a new run branch, compare the branch with its
+remote, or find HEAD in a merged pull request still drive real git.
 `tests/documented-defaults.test.ts` holds the configuration tables in this file and in
 `README.md` to the defaults the source resolves. The suite's global setup removes this
 suite's own fixture directories older than six hours from the OS temporary directory,
