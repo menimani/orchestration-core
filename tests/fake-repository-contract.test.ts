@@ -87,6 +87,11 @@ function bareRemote(root: string, name: string): string {
   return remote
 }
 
+// A bare remote's HEAD otherwise names whatever init.defaultBranch the host configures.
+function remoteHead(remote: string, branch: string): void {
+  execFileSync('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], { cwd: remote, windowsHide: true })
+}
+
 const STATES: ContractState[] = [
   { name: 'a fresh repository on main', build: initialRepository },
   {
@@ -111,6 +116,78 @@ const STATES: ContractState[] = [
         upstreams: { main: 'origin' },
       }
     },
+  },
+  {
+    name: 'a remote whose own HEAD names the branch pushed to it',
+    build: (root) => {
+      const state = initialRepository(root)
+      const url = bareRemote(root, 'origin')
+      setup(root, 'push', '-q', '-u', 'origin', 'main')
+      remoteHead(url, 'main')
+      setup(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+      const commits = { main: setup(root, 'rev-parse', 'HEAD') }
+      return {
+        ...state,
+        remotes: [{
+          name: 'origin', url, defaultBranch: 'main', head: 'main',
+          branches: commits, trackingBranches: { ...commits },
+        }],
+        upstreams: { main: 'origin' },
+      }
+    },
+    extra: [
+      ['ls-remote', '--symref', 'origin', 'HEAD'],
+      ['rev-parse', '--verify', 'origin/main^{commit}'],
+      ['rev-parse', '--verify', 'origin/absent^{commit}'],
+      ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+      ['fetch', '--quiet', 'origin', '+refs/heads/absent:refs/remotes/origin/absent'],
+    ],
+  },
+  {
+    name: 'a remote whose own HEAD names a branch it lacks',
+    build: (root) => {
+      const state = initialRepository(root)
+      const url = bareRemote(root, 'origin')
+      setup(root, 'push', '-q', '-u', 'origin', 'main')
+      remoteHead(url, 'missing')
+      const commits = { main: setup(root, 'rev-parse', 'HEAD') }
+      return {
+        ...state,
+        remotes: [{
+          name: 'origin', url, head: 'missing', branches: commits, trackingBranches: { ...commits },
+        }],
+        upstreams: { main: 'origin' },
+      }
+    },
+    extra: [['ls-remote', '--symref', 'origin', 'HEAD']],
+  },
+  {
+    name: 'a stale remote-tracking branch locked by a crashed git process',
+    build: (root) => {
+      initialRepository(root)
+      const url = bareRemote(root, 'origin')
+      setup(root, 'push', '-q', '-u', 'origin', 'main')
+      remoteHead(url, 'main')
+      const stale = setup(root, 'rev-parse', 'HEAD')
+      commit(root, 'advanced\n')
+      const advanced = setup(root, 'rev-parse', 'HEAD')
+      setup(root, 'push', '-q', 'origin', 'main')
+      setup(root, 'update-ref', 'refs/remotes/origin/main', stale)
+      writeFileSync(join(root, '.git', 'refs', 'remotes', 'origin', 'main.lock'), '')
+      return {
+        head: advanced,
+        remotes: [{
+          name: 'origin', url, head: 'main',
+          branches: { main: advanced }, trackingBranches: { main: stale },
+        }],
+        upstreams: { main: 'origin' },
+        lockedRefs: ['refs/remotes/origin/main'],
+      }
+    },
+    extra: [
+      ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+      ['rev-parse', '--verify', 'origin/main^{commit}'],
+    ],
   },
   {
     name: 'two remotes with a configured push remote and push default',
