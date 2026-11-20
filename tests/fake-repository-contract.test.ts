@@ -430,6 +430,102 @@ describe('the fake repository against real git, reaching a missing repository', 
   })
 })
 
+/**
+ * Run branches beside main, as the loop's run-branch probe and cycle gate ask about them:
+ * one kept, one deleted with its commit left behind, a commit another clone pushed to the
+ * remote outside its branches, and a remote whose URL names no repository. Each commit's
+ * SHA is recorded under the placeholder the invocations below name it by.
+ */
+function commitsBesideRunBranches(root: string, commits: Record<string, string>): Partial<FakeRepositoryState> {
+  const { head = '' } = initialRepository(root)
+  const origin = bareRemote(root, 'origin')
+  setup(root, 'push', '-q', '-u', 'origin', 'main')
+  setup(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+  setup(root, 'switch', '-q', '-c', 'run/kept')
+  commit(root, 'kept\n')
+  const kept = setup(root, 'rev-parse', 'HEAD')
+  setup(root, 'switch', '-q', '-c', 'run/deleted', 'main')
+  commit(root, 'deleted\n')
+  const deleted = setup(root, 'rev-parse', 'HEAD')
+  setup(root, 'switch', '-q', 'main')
+  setup(root, 'branch', '-q', '-D', 'run/deleted')
+  const outsideClone = `${root}-outside`
+  execFileSync('git', ['clone', '-q', '--branch', 'main', origin, outsideClone], { windowsHide: true })
+  setup(outsideClone, 'config', 'user.email', 'outside@example.test')
+  setup(outsideClone, 'config', 'user.name', 'Outside')
+  commit(outsideClone, 'outside\n')
+  const outside = setup(outsideClone, 'rev-parse', 'HEAD')
+  setup(outsideClone, 'push', '-q', 'origin', 'HEAD:refs/outside/run')
+  const missing = `${root}-missing.git`
+  setup(root, 'remote', 'add', 'missing', missing)
+  Object.assign(commits, { '<head>': head, '<kept>': kept, '<deleted>': deleted, '<outside>': outside })
+  return {
+    head,
+    branches: ['main', 'run/kept'],
+    remotes: [
+      { name: 'missing', url: missing },
+      {
+        name: 'origin', url: origin, defaultBranch: 'main',
+        branches: { main: head }, commits: { [outside]: [head] },
+      },
+    ],
+    upstreams: { main: 'origin' },
+    otherCommits: { [kept]: [head], [deleted]: [head] },
+    missingRepositories: [missing],
+  }
+}
+
+// In order: the fetch of the outside commit gives the checkout a commit the questions
+// before it could not name.
+const COMMIT_INVOCATIONS: string[][] = [
+  ['merge-base', '--is-ancestor', '<head>', 'HEAD'],
+  ['merge-base', '--is-ancestor', '<kept>', 'HEAD'],
+  ['merge-base', '--is-ancestor', '<head>', '<kept>'],
+  ['merge-base', '--is-ancestor', '<deleted>', 'HEAD'],
+  ['merge-base', '--is-ancestor', '<deleted>', 'origin/main'],
+  ['merge-base', '--is-ancestor', '<head>', 'origin/main'],
+  ['merge-base', '--is-ancestor', 'f'.repeat(40), 'HEAD'],
+  ['merge-base', '--is-ancestor', '<outside>', '<outside>'],
+  ['rev-parse', '--verify', 'origin/main^{commit}'],
+  ['rev-parse', '--verify', 'origin/absent^{commit}'],
+  ['show-ref', '--verify', '--quiet', 'refs/heads/run/kept'],
+  ['show-ref', '--verify', '--quiet', 'refs/heads/run/deleted'],
+  ['ls-remote', '--exit-code', '--heads', 'origin', 'refs/heads/main'],
+  ['ls-remote', '--exit-code', '--heads', 'origin', 'refs/heads/run/kept'],
+  ['ls-remote', '--exit-code', '--heads', 'missing', 'refs/heads/main'],
+  ['fetch', '--quiet', 'origin', 'main'],
+  ['fetch', 'origin', 'main', '--quiet'],
+  ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+  ['fetch', '--quiet', 'origin', 'absent'],
+  ['fetch', '--quiet', 'missing', 'main'],
+  ['fetch', '--quiet', 'origin', 'f'.repeat(40)],
+  ['push', '--quiet', 'origin', 'main'],
+  ['push', '--quiet', 'missing', 'main'],
+  ['fetch', '--quiet', 'origin', '<outside>'],
+  ['merge-base', '--is-ancestor', '<head>', '<outside>'],
+]
+
+describe('the fake repository against real git on commits beside run branches', () => {
+  const commits: Record<string, string> = {}
+  let root: string
+  let fake: FakeRepository
+
+  beforeAll(() => {
+    root = join(workspace, 'commits')
+    mkdirSync(root)
+    fake = new FakeRepository(root, commitsBesideRunBranches(root, commits))
+  })
+
+  it.each([...COMMON_INVOCATIONS, ...COMMIT_INVOCATIONS].map((args) => [args.join(' '), args]))(
+    'answers git %s as git does',
+    (_invocation, args) => {
+      const named = args.map((arg) => commits[arg] ?? arg)
+      expect(outcome(fake.git, root, named)).toEqual(outcome(realGit, root, named))
+      expect(fake.unanswered).toEqual([])
+    },
+  )
+})
+
 describe('the fake repository on a question it does not know', () => {
   it('refuses it loudly and remembers it', () => {
     const fake = new FakeRepository(workspace)
