@@ -1,8 +1,7 @@
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Runner } from '../src/adapters/runner.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { loadConfig } from '../src/config.ts'
@@ -10,8 +9,8 @@ import { createLoop } from '../src/loop.ts'
 import { branchName, orchPaths, statusFile, worktreeDir, type OrchPaths } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
 import { makeFakeForge } from './fakeForge.ts'
+import { FakeRepository } from './fakeRepository.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
-import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject } from './stubProject.ts'
 
 // A poll reads every task's status several times, but only the refresh of a running task
@@ -26,27 +25,12 @@ const RUNNER_STARTED_AT = new Date(POLL_TIME.getTime() - 3_600_000).toISOString(
 let repoRoot: string
 let paths: OrchPaths
 let logged: string[]
-let template: RepositoryTemplate<void> | undefined
-
-function git(args: string[], cwd: string): void {
-  execFileSync('git', args, { cwd, stdio: 'ignore', windowsHide: true })
-}
-
-afterAll(() => {
-  template?.dispose()
-})
+// The checkout on main with one commit, answered in memory (tests/fakeRepository.ts).
+let repository: FakeRepository
 
 beforeEach(() => {
   repoRoot = mkdtempSync(join(tmpdir(), 'orch-loop-status-probes-'))
-  template ??= buildRepositoryTemplate((root) => {
-    git(['init', '--initial-branch=main'], root)
-    git(['config', 'user.email', 'loop-test@example.test'], root)
-    git(['config', 'user.name', 'Loop Test'], root)
-    writeFileSync(join(root, 'tracked.txt'), 'initial\n')
-    git(['add', 'tracked.txt'], root)
-    git(['commit', '-m', 'initial'], root)
-  })
-  template.copyTo(repoRoot)
+  repository = new FakeRepository(repoRoot)
   paths = orchPaths(repoRoot)
   logged = []
 })
@@ -54,6 +38,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   rmSync(repoRoot, { recursive: true, force: true })
+  repository.assertEveryQuestionAnswered()
 })
 
 function writeRunningStatus(taskId: string): void {
@@ -92,6 +77,8 @@ describe('poll status reads', () => {
       project: stubProject,
       log: (line) => logged.push(line),
       now: () => POLL_TIME,
+      git: repository.git,
+      startTask: repository.startTask,
     })
     loop.initializeSessionStateForBranch()
     // Startup classifies every task once by its process; only the poll's reads count.

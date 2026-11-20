@@ -14,8 +14,8 @@ import { forgetTaskProcess } from '../src/processRegistry.ts'
 import { currentProcessStartIdentity } from '../src/processOwner.ts'
 import { readStatus } from '../src/status.ts'
 import {
-  fakeForge, git, initializeGitRepo, logText, logged, makeCompletedTask, makeLoop, paths,
-  registerLoopHooks, repoRoot, writeFinal, writeRawStatus,
+  fakeForge, git, initializeGitRepo, logText, logged, makeCompletedTask, makeFakeCompletedTask,
+  makeLoop, paths, registerLoopHooks, repoRoot, useFakeRepository, writeFinal, writeRawStatus,
 } from './loopHarness.ts'
 
 registerLoopHooks()
@@ -603,8 +603,8 @@ describe('completed task merge recovery', () => {
 
   it('leaves a grouped issue claimed by another account when its merge is abandoned', async () => {
     const taskId = '20260811_120000_068_auto-abandoned-group-reclaimed'
-    initializeGitRepo()
-    makeCompletedTask(taskId)
+    useFakeRepository()
+    makeFakeCompletedTask(taskId)
     const loop = makeLoop({
       autoMerge: true,
       issueQueueEnabled: true,
@@ -656,8 +656,8 @@ describe('completed task merge recovery', () => {
     _cause, lookupError, warns,
   ) => {
     const taskId = '20260811_120000_069_auto-abandoned-group-no-user'
-    initializeGitRepo()
-    makeCompletedTask(taskId)
+    useFakeRepository()
+    makeFakeCompletedTask(taskId)
     const loop = makeLoop({
       autoMerge: true,
       issueQueueEnabled: true,

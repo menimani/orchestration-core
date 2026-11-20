@@ -13,7 +13,7 @@ import { readStatus } from '../src/status.ts'
 import {
   backlogEntries, fakeForge, git, initializeGitRepo, initializeGitRepoWithRemote, logText,
   logged, makeCompletedTask, makeConflictingLocalTask, makeLoop, paths, registerLoopHooks,
-  repoRoot, runnerStarts, stubProject, writeRawStatus,
+  repoRoot, runnerStarts, stubProject, useFakeRepository, writeRawStatus,
 } from './loopHarness.ts'
 
 registerLoopHooks()
@@ -362,7 +362,7 @@ describe('completed task merge recovery', () => {
   })
 
   it('rolls back a claim whose issue holds a malformed conflict retry record', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 1,
     })
