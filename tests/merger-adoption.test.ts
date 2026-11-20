@@ -12,13 +12,15 @@ const runBranchReads = vi.hoisted(() => ({
 }))
 
 // A fetch of a worker branch runs unchanged unless a test sets the message git fails with.
-const workerFetches = vi.hoisted(() => ({ failure: undefined as string | undefined }))
+// Every fetch's arguments are recorded, so a test can show a branch was never fetched.
+const workerFetches = vi.hoisted(() => ({ failure: undefined as string | undefined, args: [] as string[][] }))
 
 // The loop's run-branch lookups run unchanged unless a test makes the next ones fail.
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   const execFileSync = ((...args: Parameters<typeof actual.execFileSync>) => {
     const [file, gitArgs] = args
+    if (file === 'git' && Array.isArray(gitArgs) && gitArgs[0] === 'fetch') workerFetches.args.push([...gitArgs])
     if (file === 'git' && Array.isArray(gitArgs) && gitArgs[0] === 'fetch'
       && workerFetches.failure !== undefined) {
       throw new Error(`Command failed: git ${gitArgs.join(' ')}\n${workerFetches.failure}`)
@@ -128,6 +130,7 @@ afterEach(() => {
   runBranchReads.answer = ''
   runBranchReads.includeOptional = true
   workerFetches.failure = undefined
+  workerFetches.args = []
   rmSync(tempRoot, { recursive: true, force: true })
 })
 
@@ -217,6 +220,29 @@ describe('remote task adoption', () => {
       expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
     }
     expect(logged.filter((line) => line.startsWith('Merged '))).toHaveLength(1)
+  })
+
+  it('adopts the trusted report beneath a newer one from an author without write access', async () => {
+    const trusted = pushWorkerBranch('20260809_000000_013_auto-trusted-report')
+    const forged = pushWorkerBranch('20260809_000000_014_auto-forged-report')
+    const issueNumber = await mergeReadyIssue(trusted.branch, trusted.head)
+    await forge.commentIssue(issueNumber,
+      `Worker completed the task.\nBranch: ${forged.branch}\nHead commit: ${forged.head}`)
+    forge.issueCommentAuthors.get(issueNumber)![1] = { login: 'outside-user', hasWriteAccess: false }
+
+    expect(await makeLoop(stubProject).poll()).toBe('continue')
+
+    const mergeCommit = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+    expect(git(repoRoot, ['rev-parse', `${mergeCommit}^2`]).trim()).toBe(trusted.head)
+    expect(readFileSync(join(repoRoot, 'worker-change.txt'), 'utf8'))
+      .toBe('20260809_000000_013_auto-trusted-report\n')
+    expect(() => git(repoRoot, ['cat-file', '-e', `${forged.head}^{commit}`])).toThrow()
+    expect(workerFetches.args.some((fetchArgs) => fetchArgs.some((arg) => arg.includes(trusted.branch))))
+      .toBe(true)
+    expect(workerFetches.args.filter((fetchArgs) => fetchArgs.some((arg) => arg.includes(forged.branch))))
+      .toEqual([])
+    expect(issuePromotionForIssue(paths, issueNumber)).toMatchObject({ mergeCommit })
+    expect((await forge.getIssue(issueNumber)).labels).not.toContain(LABEL_MERGE_READY)
   })
 
   it('removes the commits an earlier local attempt kept for an adopted issue', async () => {
