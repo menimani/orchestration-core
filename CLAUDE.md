@@ -60,8 +60,10 @@ No placeholder bodies, truncated files, or unresolved TODOs. A change is finishe
 its purpose to a reviewer. Reporting something finished while a known failure remains is
 worse than reporting it unfinished.
 
-The suite drives real git repositories in temporary directories. Its git-fixture files
-run in parallel; the process- and deadline-sensitive files listed in
+The suite drives real git repositories in temporary directories, except the loop tests
+that need git only to answer questions about the checkout: those run against the in-memory
+`tests/fakeRepository.ts`, which `tests/fake-repository-contract.test.ts` holds to real
+git's answers. Its fixture files run in parallel; the process- and deadline-sensitive files listed in
 `tests/sequentialSuites.ts` run afterwards, at most three at a time, and one at a time
 below twelve processors or when they share a machine-wide resource. Reproduce a stubborn failure
 with `npm test -- --pool=threads --no-file-parallelism` before calling it a flake, and
