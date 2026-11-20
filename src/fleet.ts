@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
-import { operatingSystem } from './adapters/os.ts'
+import { operatingSystem, type OperatingSystem } from './adapters/os.ts'
 import { readJsonFile } from './jsonFile.ts'
 import type { FleetLocation } from './paths.ts'
 
@@ -93,31 +93,45 @@ export function resolveFleetProject(fleetDir: string, project: string): Resolved
   }
 }
 
-function comparablePath(path: string): string {
+function comparablePath(path: string, os: OperatingSystem): string {
   let canonical = resolve(path)
   try {
     canonical = realpathSync.native(canonical)
   } catch {
     // A path that does not exist yet still compares by its resolved spelling.
   }
-  return operatingSystem.worktreePathFor(canonical).comparisonKey
+  return os.worktreePathFor(canonical).comparisonKey
+}
+
+/**
+ * Whether the path is the checkout or lies below it. A checkout at a filesystem root
+ * resolves with its trailing separator, so containment is judged by the relative path
+ * rather than a separator-joined prefix.
+ */
+function contains(checkout: string, path: string): boolean {
+  const below = relative(checkout, path)
+  return below === '' || !(below === '..' || below.startsWith(`..${sep}`) || isAbsolute(below))
 }
 
 /**
  * The fleet project whose checkout on this machine contains the directory, if any. The
  * deepest checkout wins, so a project nested inside another's checkout is still found.
  */
-export function projectForDirectory(fleetDir: string, directory: string): string | undefined {
+export function projectForDirectory(
+  fleetDir: string,
+  directory: string,
+  os: OperatingSystem = operatingSystem,
+): string | undefined {
   const dir = resolve(fleetDir)
   const localFile = join(dir, FLEET_LOCAL_FILE)
   if (!existsSync(localFile)) return undefined
   const declared = readFleet(dir).projects
-  const target = comparablePath(directory)
+  const target = comparablePath(directory, os)
   let found: { project: string; length: number } | undefined
   for (const [project, { path }] of Object.entries(readJson(localFile, fleetLocalSchema).projects)) {
     if (declared[project] === undefined) continue
-    const checkout = comparablePath(isAbsolute(path) ? path : resolve(dir, path))
-    if (target !== checkout && !target.startsWith(`${checkout}${sep}`)) continue
+    const checkout = comparablePath(isAbsolute(path) ? path : resolve(dir, path), os)
+    if (!contains(checkout, target)) continue
     if (found === undefined || checkout.length > found.length) {
       found = { project, length: checkout.length }
     }
