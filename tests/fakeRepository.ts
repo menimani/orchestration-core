@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import type { GitRunner } from '../src/gitRunner.ts'
 import { branchName, finalMessageFile, logFile, worktreeDir } from '../src/paths.ts'
 import { recordTaskProcess } from '../src/processRegistry.ts'
-import type { startTask } from '../src/start.ts'
+import { StartupOwnershipUnknownError, type startTask } from '../src/start.ts'
 import { writeStatus } from '../src/status.ts'
 import { specFile } from '../src/tasks.ts'
 
@@ -169,9 +169,20 @@ export class FakeRepository {
   /**
    * startTask without `git worktree add`: the worktree is a plain directory and the task
    * branch exists only here. The runner, the process registry and the status record are
-   * the real ones, as startTask leaves them.
+   * the real ones, as startTask leaves them. It refuses an effort or a missing
+   * specification as startTask does, and records a runner that fails to start as failed.
    */
   readonly startTask: typeof startTask = async (paths, runner, taskId, options) => {
+    if (!['minimal', 'low', 'medium', 'high'].includes(options.effort)) {
+      throw new Error(`effort must be minimal, low, medium or high, got '${options.effort}'`)
+    }
+    const spec = specFile(paths, taskId)
+    if (!existsSync(spec)) {
+      throw new Error(
+        `Task specification not found: ${spec}
+Create the specification first with the 'new' command.`,
+      )
+    }
     const worktree = worktreeDir(paths, taskId)
     mkdirSync(worktree, { recursive: true })
     this.state.branches.push(branchName(taskId))
@@ -179,14 +190,24 @@ export class FakeRepository {
     const log = logFile(paths, taskId)
     writeFileSync(log, '')
     rmSync(finalMessageFile(paths, taskId), { force: true })
-    const pid = await runner.start({
-      worktree,
-      specFile: specFile(paths, taskId),
-      finalMessageFile: finalMessageFile(paths, taskId),
-      logFile: log,
-      effort: options.effort,
-      model: options.model,
-    })
+    let pid: number
+    try {
+      pid = await runner.start({
+        worktree,
+        specFile: spec,
+        finalMessageFile: finalMessageFile(paths, taskId),
+        logFile: log,
+        effort: options.effort,
+        model: options.model,
+      })
+    } catch (error) {
+      appendFileSync(log, `Task startup failed:
+${String(error)}
+`)
+      await writeStatus(paths, taskId, 'failed')
+      throw error
+    }
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new StartupOwnershipUnknownError(pid)
     recordTaskProcess(paths, taskId, pid)
     await writeStatus(paths, taskId, 'running', pid)
     return { outcome: 'started', pid }
