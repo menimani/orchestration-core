@@ -28,6 +28,13 @@ export interface FakeRemote {
    * the checkout has one only once it fetches it by SHA.
    */
   commits?: Record<string, string[]> | undefined
+  /** The branch the remote's own HEAD names, which `git ls-remote --symref` advertises. */
+  head?: string | undefined
+  /**
+   * refs/remotes/<name>/<branch>, each at the commit the last fetch or push saw, when they
+   * lag the remote's branches; unset, they match them.
+   */
+  trackingBranches?: Record<string, string> | undefined
 }
 
 /** A commit HEAD has beyond a base; the fake knows no merge commits. */
@@ -74,6 +81,8 @@ export interface FakeRepositoryState {
   otherCommits: Record<string, string[]>
   /** Remote URLs that name no repository, so fetching or pushing through them fails. */
   missingRepositories: string[]
+  /** Refs whose lock file a crashed git process left behind, so moving them fails. */
+  lockedRefs: string[]
 }
 
 /** The commit the loop tests' fake checkout stands on. */
@@ -128,6 +137,7 @@ export class FakeRepository {
       ancestors: [],
       otherCommits: {},
       missingRepositories: [],
+      lockedRefs: [],
       ...state,
       branch,
     }
@@ -318,6 +328,9 @@ export class FakeRepository {
         // The remote now holds the branch's HEAD, and so does its remote-tracking ref.
         state.commitsAhead[`${name}/${branch}`] = 0
         if (remote.branches !== undefined) remote.branches = { ...remote.branches, [branch]: state.head }
+        if (remote.trackingBranches !== undefined) {
+          remote.trackingBranches = { ...remote.trackingBranches, [branch]: state.head }
+        }
         if (setUpstream !== undefined) state.upstreams[branch] = name
         return ''
       }
@@ -339,8 +352,9 @@ export class FakeRepository {
       if (name === 'HEAD' || state.commitsAhead[name] === 0) return state.head
       const tracking = state.remotes.find((remote) => name.startsWith(`${remote.name}/`))
       if (tracking !== undefined) {
-        if (tracking.branches === undefined) return undefined
-        return tracking.branches[name.slice(tracking.name.length + 1)] ?? null
+        const refs = tracking.trackingBranches ?? tracking.branches
+        if (refs === undefined) return undefined
+        return refs[name.slice(tracking.name.length + 1)] ?? null
       }
       if (/^[0-9a-f]{40}$/.test(name)) return known(name) ? name : null
       return undefined
@@ -368,8 +382,18 @@ export class FakeRepository {
       const branches = fetched.branches
       return () => {
         if (!/^[0-9a-f]{40}$/.test(wanted)) {
-          if (branches[wanted] === undefined) {
+          const commit = branches[wanted]
+          if (commit === undefined) {
             throw gitFailure(args, 128, `fatal: couldn't find remote ref ${wanted}\n`)
+          }
+          // A fetch that finds the tracking ref current leaves it, and its lock, alone.
+          const ref = `refs/remotes/${fetched.name}/${wanted}`
+          if (refspec !== null && fetched.trackingBranches !== undefined
+            && fetched.trackingBranches[wanted] !== commit) {
+            if (state.lockedRefs.includes(ref)) {
+              throw gitFailure(args, 1, `error: cannot lock ref '${ref}': File exists.\n`)
+            }
+            fetched.trackingBranches = { ...fetched.trackingBranches, [wanted]: commit }
           }
           return ''
         }
@@ -396,6 +420,15 @@ export class FakeRepository {
     // empty; the fake knows no other commit or subject.
     const atHead = (ref: string | undefined): boolean => state.commitsAhead[ref ?? ''] === 0
     const remoteSymref = /^ls-remote --symref (\S+) HEAD$/.exec(command)
+    // A remote whose own HEAD the test names advertises it only while it holds that branch.
+    const advertised = remoteNamed(remoteSymref?.[1])
+    if (advertised?.head !== undefined) {
+      const head = advertised.head
+      return () => {
+        const commit = advertised.branches?.[head]
+        return commit === undefined ? '' : `ref: refs/heads/${head}\tHEAD\n${commit}\tHEAD\n`
+      }
+    }
     const remoteDefault = remoteNamed(remoteSymref?.[1])?.defaultBranch
     if (remoteSymref !== null && atHead(`${remoteSymref[1]}/${remoteDefault}`)) {
       return () => `ref: refs/heads/${remoteDefault}\tHEAD\n${state.head}\tHEAD\n`
