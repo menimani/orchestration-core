@@ -148,7 +148,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  rmSync(tempRoot, { recursive: true, force: true })
+  // A refused comparison can return while its sibling git process still holds the checkout.
+  rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
 describe('worker command checkout validation', () => {
@@ -192,6 +193,50 @@ describe('worker command checkout validation', () => {
 
     await expect(runWorkerCommand(orchPaths(worker), 'origin/main', dependencies(launch)))
       .rejects.toThrow(/HEAD is ahead of base ref 'origin\/main'/)
+    expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('refuses with the fetch failure when the base ref remote is unreachable', async () => {
+    const missing = join(tempRoot, 'missing.git').replaceAll('\\', '/')
+    git(worker, ['remote', 'set-url', 'origin', missing])
+    const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+
+    await expect(runWorkerCommand(orchPaths(worker), 'origin/main', dependencies(launch)))
+      .rejects.toMatchObject({
+        message: [
+          `git fetch --quiet origin failed: fatal: '${missing}' does not appear to be a git repository`,
+          'fatal: Could not read from remote repository.',
+          '',
+          'Please make sure you have the correct access rights',
+          'and the repository exists.',
+        ].join('\n'),
+      })
+    expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('refuses a base ref that does not resolve to a commit', async () => {
+    const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+
+    await expect(runWorkerCommand(orchPaths(worker), 'origin/missing', dependencies(launch)))
+      .rejects.toMatchObject({
+        message: 'git rev-parse --verify origin/missing^{commit} failed: fatal: Needed a single revision',
+      })
+    expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('refuses when git cannot compare an unborn HEAD with the base ref', async () => {
+    git(worker, ['checkout', '-q', '--orphan', 'unborn'])
+    const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
+
+    const refusal = await runWorkerCommand(orchPaths(worker), 'origin/main', dependencies(launch))
+      .then(() => undefined, (error: unknown) => error)
+
+    // Both directions are compared concurrently and both fail, so either may reject first.
+    expect(refusal).toBeInstanceOf(Error)
+    expect([
+      "Could not compare HEAD with 'origin/main': fatal: Not a valid object name HEAD",
+      "Could not compare HEAD with 'HEAD': fatal: Not a valid object name origin/main",
+    ]).toContain((refusal as Error).message)
     expect(launch).not.toHaveBeenCalled()
   })
 
