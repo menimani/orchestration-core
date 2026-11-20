@@ -1641,8 +1641,9 @@ async function mergeTaskWithGuardHeld(
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     try {
       io.out(git(prospectiveWorktree, ['diff', `${gatedBase}...HEAD`]))
-    } catch {
-      // an empty inspection diff is fine
+    } catch (error) {
+      // A failed inspection diff must not read as an empty change in the log.
+      io.out(`(diff unavailable: ${commandFailureSummary(error)})`)
     }
     return runMergeChecks(prospectiveWorktree, gatedBase, options, io)
   })
@@ -1812,8 +1813,9 @@ export async function mergeRemoteTask(
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     try {
       io.out(git(worktree, ['diff', `${gatedBase}...HEAD`]))
-    } catch {
-      // an empty inspection diff is fine
+    } catch (error) {
+      // A failed inspection diff must not read as an empty change in the log.
+      io.out(`(diff unavailable: ${commandFailureSummary(error)})`)
     }
     return runMergeChecks(worktree, gatedBase, options, io)
   })
