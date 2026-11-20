@@ -317,6 +317,9 @@ export function createLoop(deps: LoopDeps) {
   const mergeClaimReadFailures = new Map<string, number>()
   // Consecutive failed finding checks per completed task awaiting its scan, kept in memory only.
   const findingCheckFailures = new Map<string, number>()
+  // Consecutive polls per merged task whose merge marker author could not be verified,
+  // kept in memory only.
+  const issueReconciliationDeferrals = new Map<string, number>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
   // The check names the previous CI gate poll saw, for the PR and head it saw them on.
@@ -3378,7 +3381,7 @@ export function createLoop(deps: LoopDeps) {
     ): Promise<boolean> => {
       try {
         recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
-        let deferred = false
+        const deferredIssues: number[] = []
         for (const linkedIssue of linkedIssues) {
           const promotion = issuePromotionForIssue(paths, linkedIssue)
           if (promotion === undefined) throw new Error('promotion record was not persisted')
@@ -3395,7 +3398,7 @@ export function createLoop(deps: LoopDeps) {
           // A marker whose author's permission could not be read is neither confirmed
           // nor reposted; the promotion record keeps it pending for a later poll.
           if (present === undefined) {
-            deferred = true
+            deferredIssues.push(linkedIssue)
             continue
           }
           if (!present) {
@@ -3403,10 +3406,27 @@ export function createLoop(deps: LoopDeps) {
           }
           confirmIssuePromotion(paths, linkedIssue)
         }
-        if (deferred) {
+        if (deferredIssues.length > 0) {
+          // Every poll this stays set skips issue work and the scan trigger, so a lookup
+          // that never recovers would hold the loop for ever: a bounded run of them stops it.
+          const deferrals = (issueReconciliationDeferrals.get(taskId) ?? 0) + 1
+          issueReconciliationDeferrals.set(taskId, deferrals)
+          const subject = deferredIssues.map((number) => `#${number}`).join(' ')
+          warning(`issue-reconciliation-${taskId}`, `reconciling issues after ${shortTaskId(taskId)}`,
+            `merge marker on ${subject} for ${shortTaskId(taskId)} unconfirmed: `
+            + 'the permission lookup for its author failed')
+          if (deferrals >= MAX_CONSECUTIVE_ADOPTION_DEFERRALS) {
+            reportGateFailure(
+              `could not verify the merge marker author on ${subject} for ${shortTaskId(taskId)} `
+              + `on ${deferrals} consecutive polls`,
+              `issue-reconciliation-${taskId}`,
+            )
+          }
           issueReconciliationPending = true
           return false
         }
+        issueReconciliationDeferrals.delete(taskId)
+        warningLog.recovered(`issue-reconciliation-${taskId}`)
         previousGateFailures.delete(`issue-reconciliation-${taskId}`)
         return true
       } catch (error) {

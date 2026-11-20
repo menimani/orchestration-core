@@ -1529,6 +1529,8 @@ account with write access withdraws every `MERGED:` comment before it. When whet
 is undetermined, stale-lease reaping leaves that lease alone for the poll. Likewise, when
 the merge comment the loop would post is carried only by such an author, the adopted
 issue's update and merge reconciliation wait for a later poll instead of posting it again.
+Merge reconciliation warns that the permission lookup failed, and twenty consecutive
+polls that leave one merged task's marker unverified stop the loop on the poll after.
 
 33. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
