@@ -57,6 +57,7 @@ import { pitfallsFileForDesc } from './gates.ts'
 import {
   currentBranchPushRemote, currentBranchRemotes, currentBranchTrackingRemote,
 } from './gitRemote.ts'
+import type { GitRunner } from './gitRunner.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
@@ -114,6 +115,8 @@ export interface LoopDeps {
   branchGuard?: (() => string | undefined) | undefined
   prepareIntegrationWorktree?: (() => void) | undefined
   os?: OperatingSystem | undefined
+  /** Every git invocation the loop makes itself; starting a task or merging one does not use it. */
+  git?: GitRunner | undefined
 }
 
 interface QueueEntry {
@@ -224,7 +227,13 @@ export function createLoop(deps: LoopDeps) {
     startTask: startTaskImpl = startTask,
     resumeTask: resumeTaskImpl = resumeTask,
     os = operatingSystem,
+    git: injectedGit,
   } = deps
+  const runGit: GitRunner = injectedGit ?? ((cwd, args, options) => execFileSync('git', args, {
+    cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    ...(options?.env === undefined ? {} : { env: options.env }),
+  }))
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
   const scannedDir = join(paths.queueDir, 'scanned')
@@ -555,7 +564,7 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function git(args: string[]): string {
-    return gitIn(paths.repoRoot, args)
+    return runGit(paths.repoRoot, args)
   }
 
   function optionalGit(args: string[], quietSuccess = ''): string {
@@ -585,7 +594,7 @@ export function createLoop(deps: LoopDeps) {
     }
     let result = compare()
     if (result.status !== 0 && result.status !== 1) {
-      git(['fetch', '--quiet', currentBranchPushRemote(paths.repoRoot), descendant])
+      git(['fetch', '--quiet', currentBranchPushRemote(paths.repoRoot, injectedGit), descendant])
       result = compare()
     }
     if (result.status === 0) return true
@@ -614,7 +623,7 @@ export function createLoop(deps: LoopDeps) {
       if (defaultRef !== null) return defaultRef
       defaultRef = undefined
       try {
-        const remote = currentBranchTrackingRemote(paths.repoRoot)
+        const remote = currentBranchTrackingRemote(paths.repoRoot, injectedGit)
         const ref = git(['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]).trim()
         if (!ref.startsWith(`${remote}/`)) return undefined
         git(['fetch', '--quiet', remote, ref.slice(remote.length + 1)])
@@ -628,7 +637,7 @@ export function createLoop(deps: LoopDeps) {
       remoteBranchExists: (runBranch) => {
         let remote: string
         try {
-          remote = currentBranchPushRemote(paths.repoRoot)
+          remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
         } catch {
           return undefined
         }
@@ -650,10 +659,7 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function gitIn(cwd: string, args: string[]): string {
-    return execFileSync('git', args, {
-      cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    })
+    return runGit(cwd, args)
   }
 
   async function publishWorkerCompletion(taskId: string, issueNumbers: number[]): Promise<void> {
@@ -727,7 +733,7 @@ export function createLoop(deps: LoopDeps) {
     }
     if (lost.length > 0) throw new LostWorkerClaimError(lost)
 
-    const remote = currentBranchPushRemote(paths.repoRoot)
+    const remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
     gitIn(worktree, ['push', '--quiet', '--set-upstream', remote, branch])
     const issueList = issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
     await Promise.all(pending.map(async (issueNumber) => {
@@ -848,7 +854,7 @@ export function createLoop(deps: LoopDeps) {
       let adoptionTaskId: string | undefined
       let adoptionIssues = [issue]
       try {
-        const remote = currentBranchPushRemote(paths.repoRoot)
+        const remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
         const adoptionComments = async (candidate: ForgeIssue): Promise<ForgeIssueComment[]> => {
           try {
             return await commentsForIssue(candidate)
@@ -900,15 +906,12 @@ export function createLoop(deps: LoopDeps) {
         adoptionTaskId = taskId
         event('Merging', shortTaskId(taskId))
         try {
-          execFileSync('git', [
+          runGit(paths.repoRoot, [
             'fetch', '--quiet', remote,
             `+refs/heads/${report.branch}:refs/remotes/${remote}/${report.branch}`,
           ], {
-            cwd: paths.repoRoot,
             // git's reason is matched below, so it must not be translated.
             env: { ...process.env, LC_ALL: 'C' },
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
           })
         } catch (error) {
           // git's reason stays in the local log: it can quote the remote URL, and the
@@ -2108,7 +2111,7 @@ export function createLoop(deps: LoopDeps) {
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
     let remote: string
     try {
-      remote = currentBranchTrackingRemote(paths.repoRoot)
+      remote = currentBranchTrackingRemote(paths.repoRoot, injectedGit)
     } catch (error) {
       event('WARN', `could not resolve review base: ${errorSummary(error)}`)
       return false
@@ -2430,7 +2433,7 @@ export function createLoop(deps: LoopDeps) {
   function validatePushTarget(): boolean {
     if (!config.autoPr && !config.workerMode) return true
     try {
-      currentBranchPushRemote(paths.repoRoot)
+      currentBranchPushRemote(paths.repoRoot, injectedGit)
       return true
     } catch (error) {
       event('ERROR', `current branch cannot be pushed: ${errorSummary(error)}`)
@@ -2455,19 +2458,15 @@ export function createLoop(deps: LoopDeps) {
     let pushRemote: string
     let baseRemote: string
     try {
-      const remotes = currentBranchRemotes(paths.repoRoot, branch)
+      const remotes = currentBranchRemotes(paths.repoRoot, branch, injectedGit)
       pushRemote = remotes.push
       baseRemote = remotes.tracking
       const hasUpstream = optionalGit([
         'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}',
       ]).trim() !== ''
-      execFileSync('git', [
+      runGit(paths.repoRoot, [
         'push', '--quiet', ...(hasUpstream ? [] : ['--set-upstream']), pushRemote, branch,
-      ], {
-        cwd: paths.repoRoot,
-        stdio: ['ignore', 'ignore', 'pipe'],
-        windowsHide: true,
-      })
+      ])
     } catch (error) {
       reportGateFailure(`could not push branch: ${errorSummary(error)}`)
       return false
@@ -2489,7 +2488,7 @@ export function createLoop(deps: LoopDeps) {
     }
     const cycle = readCount(scanCountFile)
     const title = prTitle(project, paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
-      { cycle, maxCycles: config.maxScanCycles })
+      { cycle, maxCycles: config.maxScanCycles }, injectedGit)
 
     let status
     try {
@@ -2517,7 +2516,7 @@ export function createLoop(deps: LoopDeps) {
         await forge.updatePr(branch, generatedBody
           ? {
               title,
-              body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
+              body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions(), injectedGit),
             }
           : { title })
       } catch (error) {
@@ -2583,7 +2582,7 @@ export function createLoop(deps: LoopDeps) {
         branch,
         base: baseBranch,
         title,
-        body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
+        body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions(), injectedGit),
         draft: true,
       })
       writeFileSync(prUrlFile, `${url}\n`)
