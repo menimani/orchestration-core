@@ -34,12 +34,39 @@ function readMarker(paths: OrchPaths, name: string): string | undefined {
   return existsSync(file) ? readFileSync(file, 'utf8').trim() : undefined
 }
 
+/**
+ * The current branch as `git branch --show-current` names it, '' on a detached HEAD, and
+ * the commit HEAD names. One process answers both for a detached HEAD and for a branch
+ * that has a commit. Anything else, an unborn branch or a HEAD outside refs/heads, is
+ * asked as those two questions, so it fails or answers exactly as they do.
+ */
+function readCheckout(cwd: string): { branch: string, head: () => string } {
+  let answer: string[] = []
+  try {
+    answer = git(cwd, ['rev-parse', 'HEAD', '--symbolic-full-name', 'HEAD']).trim().split(/\r?\n/)
+  } catch {
+    // Asked again below as the two questions, which report the failure.
+  }
+  const [head, name] = answer
+  if (answer.length === 2 && head !== undefined && head !== '' && name !== undefined) {
+    if (name === 'HEAD') return { branch: '', head: () => head }
+    if (name.startsWith('refs/heads/')) {
+      return { branch: name.slice('refs/heads/'.length), head: () => head }
+    }
+  }
+  return {
+    branch: git(cwd, ['branch', '--show-current']).trim(),
+    head: () => git(cwd, ['rev-parse', 'HEAD']).trim(),
+  }
+}
+
 function checkoutProblem(repoRoot: string, branch: string, head: string): string | undefined {
-  const currentBranch = git(repoRoot, ['branch', '--show-current']).trim()
+  const checkout = readCheckout(repoRoot)
+  const currentBranch = checkout.branch
   if (currentBranch !== branch) {
     return `daemon checkout ${currentBranch} does not match fixed branch ${branch}`
   }
-  const currentHead = git(repoRoot, ['rev-parse', 'HEAD']).trim()
+  const currentHead = checkout.head()
   if (currentHead !== head) {
     return `daemon branch ${branch} moved from fixed commit ${head.slice(0, 8)} to ${currentHead.slice(0, 8)}`
   }
@@ -75,8 +102,9 @@ export function prepareBranchTopology(
     }
   }
 
-  const daemonBranch = git(paths.repoRoot, ['branch', '--show-current']).trim()
-  const daemonHead = git(paths.repoRoot, ['rev-parse', 'HEAD']).trim()
+  const daemonCheckout = readCheckout(paths.repoRoot)
+  const daemonBranch = daemonCheckout.branch
+  const daemonHead = daemonCheckout.head()
   if (daemonBranch === '') throw new Error('The daemon checkout must be on a branch.')
 
   git(paths.repoRoot, ['check-ref-format', '--branch', integrationBranch])
