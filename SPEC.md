@@ -1351,11 +1351,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
     rendering behavior inside the adapter. A standalone marker (`TASK_COMPLETE`,
-    `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) is on its own line when that line starts with the
-    marker at the first column and is the marker and nothing else once trailing white space
-    (spaces, tabs, a carriage return) and at most one pair of Markdown inline formatting
-    around the whole token — backticks, `*`, `**`, `_`, or `__` — are removed; one rule
-    applies to all three. Leading white space is not tolerated, since `git log` and `git show`
+    `NO_CHANGE_WARRANTED`, `NO_FINDINGS`, `REQUIREMENT_COMPLETE: #N`) is on its own line when
+    that line starts with the marker at the first column and is the marker and nothing else
+    once trailing white space (spaces, tabs, a carriage return) and at most one pair of
+    Markdown inline formatting around the whole token — backticks, `*`, `**`, `_`, or `__` —
+    are removed; one rule applies to all four. Leading white space is not tolerated, since `git log` and `git show`
     indent commit messages and a diff indents its unchanged lines, and that text comes from
     accounts the loop does not control. A marker inside a sentence, after leading white
     space, with other words or trailing punctuation on the line, in a list item, quoted with
