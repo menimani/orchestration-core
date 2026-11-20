@@ -1409,6 +1409,18 @@ export class MalformedFingerprintLedgerError extends Error {
   }
 }
 
+// A local issue completion or promotion record that cannot be parsed. Like a malformed
+// fingerprint ledger, it stays broken until a person repairs it.
+export class MalformedIssueRecordError extends Error {
+  constructor(kind: 'completion' | 'promotion', file: string, cause?: unknown) {
+    super(
+      `Malformed issue ${kind} record ${file}; repair this file before issue reconciliation can continue`,
+      cause === undefined ? undefined : { cause },
+    )
+    this.name = 'MalformedIssueRecordError'
+  }
+}
+
 /**
  * Retry one durable cleanup release. Each issue leaves the intent as soon as its release
  * verifies, so a retry after a partial failure never touches an issue it already handed
@@ -1536,10 +1548,7 @@ export function issueCompletionForIssue(
 ): IssueCompletion | undefined {
   const file = completionFile(paths, issueNumber)
   if (!existsSync(file)) return undefined
-  const malformed = (cause?: unknown): Error => new Error(
-    `Malformed issue completion record ${file}; repair this file before issue reconciliation can continue`,
-    cause === undefined ? undefined : { cause },
-  )
+  const malformed = (cause?: unknown): Error => new MalformedIssueRecordError('completion', file, cause)
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(file, 'utf8'))
@@ -1589,10 +1598,7 @@ export function issuePromotionForIssue(
 ): IssuePromotion | undefined {
   const file = promotionFile(paths, issueNumber)
   if (!existsSync(file)) return undefined
-  const malformed = (cause?: unknown): Error => new Error(
-    `Malformed issue promotion record ${file}; repair this file before issue reconciliation can continue`,
-    cause === undefined ? undefined : { cause },
-  )
+  const malformed = (cause?: unknown): Error => new MalformedIssueRecordError('promotion', file, cause)
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(file, 'utf8'))

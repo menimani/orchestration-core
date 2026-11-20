@@ -88,7 +88,7 @@ import {
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
-  MalformedFingerprintLedgerError,
+  MalformedFingerprintLedgerError, MalformedIssueRecordError,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
   LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
@@ -2948,6 +2948,7 @@ export function createLoop(deps: LoopDeps) {
         }
         pendingIssueNumbers.sort((a, b) => a - b)
         const remoteCount = pendingIssueNumbers.length
+        previousGateFailures.delete('count-remote-issue-work')
         warningLog.recovered('count-remote-issue-work')
         // A merge-failed issue with no active lifecycle label waits for a person: nothing
         // in the loop adopts, reaps, or retries it. When such issues are all that remains,
@@ -2987,7 +2988,12 @@ export function createLoop(deps: LoopDeps) {
         }
         remoteWaitState = undefined
       } catch (error) {
-        if (!(error instanceof ForgeRateLimitError)) {
+        if (error instanceof MalformedIssueRecordError) {
+          // No later poll can repair the record, so waiting on it would hold the gate
+          // forever: it counts toward a stop instead.
+          reportGateFailure(`could not count remote issue work: ${errorSummary(error)}`,
+            'count-remote-issue-work')
+        } else if (!(error instanceof ForgeRateLimitError)) {
           warning('count-remote-issue-work', 'counting remote issue work',
             `could not count remote issue work: ${errorSummary(error)}`)
         }
@@ -4046,7 +4052,8 @@ export function createLoop(deps: LoopDeps) {
               warningLog.recovered('promoted-issues')
             } catch (error) {
               logPromotedOutcome()
-              if (error instanceof ForgeRateLimitError) throw error
+              if (error instanceof ForgeRateLimitError
+                || error instanceof MalformedIssueRecordError) throw error
               warning('promoted-issues', 'closing promoted issues',
                 `could not close promoted issues: ${errorSummary(error)}`)
             }
@@ -4109,9 +4116,11 @@ export function createLoop(deps: LoopDeps) {
           previousGateFailures.delete('issue-queue-sync')
           warningLog.recovered('issue-queue-sync')
         } catch (error) {
-          if (error instanceof MalformedFingerprintLedgerError) {
-            // No later poll can repair the ledger, so idling on local-only work would
-            // stop reaping and claiming for good: it counts toward a stop instead.
+          if (error instanceof MalformedFingerprintLedgerError
+            || error instanceof MalformedIssueRecordError) {
+            // No later poll can repair the ledger or a local issue record, so idling on
+            // local-only work would stop reaping and claiming for good: it counts toward a
+            // stop instead.
             reportGateFailure(`could not sync the issue queue: ${errorSummary(error)}`, 'issue-queue-sync')
           } else if (error instanceof IssueReleaseReconciliationError) {
             issueReconciliationPending = true

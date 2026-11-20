@@ -735,6 +735,44 @@ describe('scanForNextTasks', () => {
     expect(readFileSync(ledgerFile, 'utf8')).toBe('malformed line here\n')
   })
 
+  it('stops when the issue-queue sync meets a promotion record without a run branch', async () => {
+    useFakeRepository()
+    const loop = makeLoop({
+      issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
+    })
+    loop.initializeSessionStateForBranch()
+    const description = '[BUG] `src/shared.ts` finding behind a malformed promotion record'
+    const issueNumber = await fakeForge.createIssue({
+      title: description,
+      body: buildIssueBody(description, 'scan-1'),
+      labels: [LABEL_FINDING, LABEL_READY],
+    })
+    const promotionFile = join(paths.queueDir, 'issue-promotion', `${issueNumber}.json`)
+    const record = `${JSON.stringify({ taskId: 'older-core-task', issueNumber, mergeCommit: 'a'.repeat(40) })}\n`
+    mkdirSync(join(paths.queueDir, 'issue-promotion'), { recursive: true })
+    writeFileSync(promotionFile, record)
+    const stopFile = join(paths.queueDir, 'stop')
+
+    await loop.poll()
+
+    expect(logText()).toMatch(/WARN could not sync the issue queue: Malformed issue promotion record/)
+    expect(logText()).not.toContain('issue queue unreachable')
+    expect(existsSync(stopFile)).toBe(false)
+
+    await loop.poll()
+
+    expect(logText()).toMatch(
+      /ERROR could not sync the issue queue: Malformed issue promotion record .* \(repeated 2 times\)/,
+    )
+    expect(logText()).toMatch(
+      /ERROR could not count remote issue work: Malformed issue promotion record .* \(repeated 2 times\)/,
+    )
+    expect(existsSync(stopFile)).toBe(true)
+    expect(runnerStarts).toEqual([])
+    expect(fakeForge.issues.get(issueNumber)?.labels).toContain(LABEL_READY)
+    expect(readFileSync(promotionFile, 'utf8')).toBe(record)
+  })
+
   const findingCheckKinds = [
     ['review', '20250101_000000_030_review-c1', 'NEXT_TASK: [BUG] a review finding behind a forge outage'],
     ['documentation', '20250101_000000_031_scan', 'NEXT_TASK: [DOCS] `README.md` names a flag the outage hid'],

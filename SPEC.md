@@ -1671,7 +1671,11 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     `mergeCommit`, and non-empty string `runBranch`; optional `commentConfirmed`, when
     present, is boolean. Invalid JSON, a non-object value, or any schema violation is not
     treated as absent state: issue reconciliation fails closed, leaves the record and issue
-    state unchanged for repair, and resumes only after the record is repaired.
+    state unchanged for repair, and resumes only after the record is repaired. Such a
+    record, or a malformed `queue/issue-completion/<issueNumber>.json`, counts a gate
+    failure under the issue-queue sync's key and, separately, under the cycle gate's count
+    of remote issue work, so the second consecutive poll that meets it stops the loop
+    rather than leaving reaping, claiming, and the gate waiting for good.
     The daemon lists open `loop:finding` issues once per poll and partitions that snapshot
     locally for adoption, reconciliation, lease reaping, claiming, and cycle-gate idle
     detection. MERGED-marker comment reads are cached by issue number and `updatedAt`,
