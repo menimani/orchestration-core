@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ReasoningEffort } from './adapters/runner.ts'
-import { readJsonFile } from './jsonFile.ts'
+import { parseJsonText } from './jsonFile.ts'
 import { PACKAGE_ROOT } from './paths.ts'
 
 const MAX_POLL_INTERVAL_SECONDS = 30 * 60
@@ -293,8 +293,17 @@ function defaultConfigFilePath(cwd = process.cwd()): string {
   return join(cwd, 'orchestration', 'config.json')
 }
 
-function parseConfigFile(file: string): ConfigFileValues {
-  const parsed = readJsonFile(file)
+// A file stamp (modification time and size) can miss a same-length rewrite that lands in
+// the timestamp tick of the read before it, because filesystems record modification times
+// more coarsely than they display them: FAT keeps two-second units, and Linux and Windows
+// stamp files from a clock tick of up to tens of milliseconds. As git does for a racily
+// clean index entry, a cached parse is trusted from the stamp alone only when the file was
+// last modified more than this margin before it was read; two seconds covers the coarsest
+// of them.
+const RACY_MODIFICATION_MARGIN_MS = 2_000
+
+function parseConfigText(text: string): ConfigFileValues {
+  const parsed = parseJsonText(text)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('configuration file must contain a JSON object')
   }
@@ -314,7 +323,8 @@ function settingFromError(error: unknown, changed: Set<string>): string | undefi
 }
 
 /**
- * Return a run-long configuration resolver. The file parse is cached by mtime; the
+ * Return a run-long configuration resolver. The file parse is cached by its stamp, and
+ * by its content while the stamp is too recent to rule out a same-tick rewrite; the
  * proxy makes live settings resolve at their point of use without creating a second
  * override layer for consumers to understand.
  */
@@ -329,6 +339,8 @@ export function loadConfig(
   let activeValues: ConfigFileValues = {}
   let activeConfig!: LoopConfig
   let observedStamp: string | undefined
+  let observedText: string | undefined
+  let observedAt = 0
   let refreshError: Error | undefined
 
   const emitError = (message: string, setting?: string): void => report({
@@ -350,10 +362,13 @@ export function loadConfig(
       }
       return
     }
+    const checkedAt = Date.now()
     let stamp = 'missing'
+    let modifiedAt = 0
     try {
       const stat = statSync(filePath)
       stamp = `${stat.mtimeMs}:${stat.size}`
+      modifiedAt = stat.mtimeMs
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         const message = error instanceof Error ? error.message : String(error)
@@ -365,26 +380,41 @@ export function loadConfig(
         throw refreshError
       }
     }
-    if (stamp === observedStamp) {
+    const racy = observedText !== undefined
+      && observedAt - modifiedAt <= RACY_MODIFICATION_MARGIN_MS
+    if (stamp === observedStamp && !racy) {
       if (refreshError !== undefined) throw refreshError
       return
     }
+    const restamped = stamp !== observedStamp
+    const previousText = observedText
     observedStamp = stamp
+    observedText = undefined
     if (stamp === 'missing') {
       acceptValues({})
       refreshError = undefined
       return
     }
-    let parsed: ConfigFileValues
+    let text: string | undefined
+    let parsed: ConfigFileValues | undefined
     try {
-      parsed = parseConfigFile(filePath)
+      text = readFileSync(filePath, 'utf8')
+      if (restamped || text !== previousText) parsed = parseConfigText(text)
     } catch (error) {
+      observedText = text
+      observedAt = checkedAt
       const message = error instanceof Error ? error.message : String(error)
       refreshError = new Error(
         `Invalid configuration file ${filePath} (setting: file contents): ${message}`,
       )
       emitError(refreshError.message)
       throw refreshError
+    }
+    observedText = text
+    observedAt = checkedAt
+    if (parsed === undefined) {
+      if (refreshError !== undefined) throw refreshError
+      return
     }
     try {
       acceptValues(parsed)

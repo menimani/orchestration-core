@@ -537,7 +537,8 @@ for the `report-upstream` command and cannot be stored in `orchestration/config.
 
 Configuration commands publish updates atomically through a temporary file in the same
 directory, so readers cannot observe a partial write. The file is checked when a setting
-is used and reparsed only after its modification time or size changes. A malformed file or an
+is used and reparsed only after it changes; an edit is seen whatever its size and timing, since
+a file modified within two seconds of the last read is compared by content. A malformed file or an
 invalid value stops the run and reports the file, setting, and failure instead of using an
 older or environment value. Valid live changes are logged with their old and new values.
 `FORGE` and `RUNNER` are pinned because
