@@ -228,15 +228,11 @@ describe('worker command checkout validation', () => {
     git(worker, ['checkout', '-q', '--orphan', 'unborn'])
     const launch = vi.fn<WorkerCommandDependencies['launchDaemon']>(() => 0)
 
-    const refusal = await runWorkerCommand(orchPaths(worker), 'origin/main', dependencies(launch))
-      .then(() => undefined, (error: unknown) => error)
-
-    // Both directions are compared concurrently and both fail, so either may reject first.
-    expect(refusal).toBeInstanceOf(Error)
-    expect([
-      "Could not compare HEAD with 'origin/main': fatal: Not a valid object name HEAD",
-      "Could not compare HEAD with 'HEAD': fatal: Not a valid object name origin/main",
-    ]).toContain((refusal as Error).message)
+    // Both directions are compared concurrently and both fail; either one names the base ref.
+    await expect(runWorkerCommand(orchPaths(worker), 'origin/main', dependencies(launch)))
+      .rejects.toMatchObject({
+        message: "Could not compare HEAD with 'origin/main': fatal: Not a valid object name HEAD",
+      })
     expect(launch).not.toHaveBeenCalled()
   })
 
