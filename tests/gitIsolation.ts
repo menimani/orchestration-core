@@ -28,6 +28,12 @@ writeFileSync(globalConfig, [
 ].join('\n') + '\n')
 process.env.GIT_CONFIG_NOSYSTEM = '1'
 process.env.GIT_CONFIG_GLOBAL = globalConfig
+// tests/fake-repository-contract.test.ts compares git's standard error with the English
+// text the fake prints, so git must not translate it on a host set to another language.
+// LC_ALL overrides every other locale variable, and GNU gettext would still honour
+// LANGUAGE over it, so that one is removed.
+process.env.LC_ALL = 'C'
+delete process.env.LANGUAGE
 
 afterAll(() => {
   rmSync(configRoot, { recursive: true, force: true })

@@ -1868,7 +1868,11 @@ checkout that answers exactly the invocations the loop makes in git's own output
 and refuses any other, and `tests/fake-repository-contract.test.ts` asks real git the
 same questions about the same states, so the fake cannot drift from it: the output, or
 the exit status and the first line of standard error, and the whole of standard error
-wherever the loop matches on git's reason or reports it. The contract covers an unborn
+wherever the loop matches on git's reason or reports it. Real git runs with its messages
+untranslated, and the comparison allows for nothing but the version-dependent wordings
+the contract lists — each spelling observed on git 2.39, 2.44 or 2.56 of a message no
+code under `src/` decides on — which it maps to the one the fake prints; any other
+difference fails it. The contract covers an unborn
 branch, untracked files, a merge commit and a checkout behind its remote-tracking
 branch; a question the fake cannot describe in such a state, such as a merge's first
 parent, it refuses rather than answers. The fake also refuses a state no single history

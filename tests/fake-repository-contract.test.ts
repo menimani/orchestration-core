@@ -26,6 +26,7 @@ const realGit: GitRunner = (cwd, args) => execFileSync('git', args, {
   encoding: 'utf8',
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
+  // The rest comes from tests/gitIsolation.ts, which also keeps git's messages untranslated.
   // A directory outside every repository must not find one above the temporary root.
   env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(cwd) },
 })
@@ -38,6 +39,62 @@ type Outcome = { output: string } | { status: number | null, stderr: string }
 // other failure is compared by the first line of its standard error.
 const REPORTED_FAILURES = [/^fetch /, /^push /, /^merge-base /, /^rev-list /, /^rev-parse --verify /, /^worktree remove /]
 
+interface VersionWording {
+  /** The message as the fake prints it; `$<name>` stands for a captured path or ref. */
+  canonical: string
+  /** Every spelling git has been seen to print, each a whole line or run of lines. */
+  spellings: RegExp[]
+}
+
+// git words some messages differently from one version to another, and the suite runs on
+// several: 2.39 in the node:24-bookworm container of `npm run test:linux`, 2.44 on the
+// Windows development host, and 2.56 on GitHub Actions. The fake prints one spelling of
+// each, so both sides of every standard-error comparison pass through this table, which
+// maps each observed spelling to that one. It lists only what was observed, and none of
+// these texts decides anything in src/. Text it does not know passes through unchanged,
+// so a drift in any other message, or a wording a later git introduces, still fails the
+// contract and names itself.
+const VERSION_WORDINGS: VersionWording[] = [
+  {
+    canonical: 'Another git process seems to be running in this repository, e.g.\n'
+      + "an editor opened by 'git commit'. Please make sure all processes\n"
+      + 'are terminated then try again. If it still fails, a git process\n'
+      + 'may have crashed in this repository earlier:\nremove the file manually to continue.',
+    spellings: [
+      // 2.39 and 2.44.
+      new RegExp("^Another git process seems to be running in this repository, e\\.g\\.\\nan editor opened by 'git commit'\\. "
+        + 'Please make sure all processes\\nare terminated then try again\\. If it still fails, a git process\\n'
+        + 'may have crashed in this repository earlier:\\nremove the file manually to continue\\.$', 'gm'),
+      // 2.56.
+      /^Another git process seems to be running in this repository, or the lock file may be stale$/gm,
+    ],
+  },
+  {
+    canonical: "error: cannot delete branch '$<branch>' used by worktree at '$<path>'",
+    spellings: [
+      // 2.39.
+      /^error: Cannot delete branch '(?<branch>[^'\n]+)' checked out at '(?<path>[^'\n]+)'$/gm,
+      // 2.44 and 2.56.
+      /^error: cannot delete branch '(?<branch>[^'\n]+)' used by worktree at '(?<path>[^'\n]+)'$/gm,
+    ],
+  },
+  {
+    canonical: "error: branch '$<branch>' not found",
+    spellings: [
+      // 2.39.
+      /^error: branch '(?<branch>[^'\n]+)' not found\.$/gm,
+      // 2.44 and 2.56.
+      /^error: branch '(?<branch>[^'\n]+)' not found$/gm,
+    ],
+  },
+]
+
+/** Rewrites each version-dependent spelling VERSION_WORDINGS lists to the fake's one. */
+function versionNeutral(stderr: string): string {
+  return VERSION_WORDINGS.reduce((text, wording) => wording.spellings.reduce(
+    (rewritten, spelling) => rewritten.replace(spelling, wording.canonical), text), stderr)
+}
+
 function outcome(run: GitRunner, cwd: string, args: string[]): Outcome {
   try {
     return { output: run(cwd, args) }
@@ -48,7 +105,8 @@ function outcome(run: GitRunner, cwd: string, args: string[]): Outcome {
     // lines are compared after git's.
     const written = String(failure.stderr ?? '').split(/(?<=\n)/)
     const uploadPack = (line: string): boolean => line.startsWith('fatal: git upload-pack: ')
-    const stderr = [...written.filter((line) => !uploadPack(line)), ...written.filter(uploadPack)].join('')
+    const stderr = versionNeutral(
+      [...written.filter((line) => !uploadPack(line)), ...written.filter(uploadPack)].join(''))
     const whole = REPORTED_FAILURES.some((reported) => reported.test(args.join(' ')))
     return { status: failure.status ?? null, stderr: whole ? stderr : stderr.split('\n')[0] ?? '' }
   }
@@ -994,5 +1052,68 @@ describe('the fake repository on real git started in its root', () => {
 
     expect(fake.realGit).toEqual([])
     expect(() => fake.assertEveryQuestionAnswered()).not.toThrow()
+  })
+})
+
+// The table above is the only allowance the comparison makes for git's version, so it is
+// pinned itself: each spelling it lists, quoted as the version that printed it.
+describe('the version-dependent wordings of git', () => {
+  const lockFailure = "error: cannot lock ref 'refs/remotes/origin/main': Unable to create "
+    + "'/work/root/.git/refs/remotes/origin/main.lock': File exists.\n\n"
+  const observed: string[][] = [
+    [
+      lockFailure + 'Another git process seems to be running in this repository, e.g.\n'
+        + "an editor opened by 'git commit'. Please make sure all processes\n"
+        + 'are terminated then try again. If it still fails, a git process\n'
+        + 'may have crashed in this repository earlier:\nremove the file manually to continue.\n',
+      lockFailure + 'Another git process seems to be running in this repository, or the lock file may be stale\n',
+    ],
+    [
+      "error: Cannot delete branch 'task/one' checked out at '/work/root/.orch/worktrees/one'\n",
+      "error: cannot delete branch 'task/one' used by worktree at '/work/root/.orch/worktrees/one'\n",
+    ],
+    [
+      "error: branch 'task/one' not found.\n",
+      "error: branch 'task/one' not found\n",
+    ],
+  ]
+
+  it('quotes one observed text for every spelling the table lists', () => {
+    expect(observed.map((texts) => texts.length)).toEqual(VERSION_WORDINGS.map((wording) => wording.spellings.length))
+    VERSION_WORDINGS.forEach((wording, message) => wording.spellings.forEach((spelling, index) => {
+      expect(observed[message]?.[index]?.match(new RegExp(spelling.source, 'm'))).not.toBeNull()
+    }))
+  })
+
+  it('maps every spelling of a message to the one the fake prints', () => {
+    expect(observed.map((texts) => texts.map(versionNeutral))).toEqual([
+      [observed[0]?.[0], observed[0]?.[0]],
+      [observed[1]?.[1], observed[1]?.[1]],
+      [observed[2]?.[1], observed[2]?.[1]],
+    ])
+  })
+
+  it('never maps two different messages to the same text', () => {
+    const canonical = observed.map((texts) => versionNeutral(texts[0] ?? ''))
+
+    expect(new Set(canonical).size).toBe(observed.length)
+  })
+
+  it('leaves a text outside the table unchanged, even one word away from a listed spelling', () => {
+    const unknown = [
+      "fatal: couldn't find remote ref refs/heads/absent\n",
+      lockFailure + 'Another git process seems to be running in this repository, or the lock file may be old\n',
+      lockFailure + 'Another git process seems to be running in this repository, e.g.\n'
+        + "an editor opened by 'git commit'. Please make sure all processes\n"
+        + 'are terminated then try again. If it still fails, a git process\n'
+        + 'may have crashed in this repository earlier:\nremove the file manually to proceed.\n',
+      "error: Cannot delete branch 'task/one' used by worktree at '/work/root/.orch/worktrees/one'\n",
+      "error: cannot delete branch 'task/one' checked out in '/work/root/.orch/worktrees/one'\n",
+      "error: branch 'task/one' not found!\n",
+      "error: remote branch 'task/one' not found\n",
+      "warning: branch 'task/one' not found\n",
+    ]
+
+    expect(unknown.map(versionNeutral)).toEqual(unknown)
   })
 })
