@@ -133,3 +133,190 @@ describe('Linux verification wrapper', () => {
     },
   )
 })
+
+// A docker that records the arguments it was given and the archive it read, then
+// succeeds, so a case can inspect what the wrapper would have sent to the container.
+const recordingDocker = [
+  "import { writeFileSync } from 'node:fs'",
+  'writeFileSync(process.env.ORCHESTRATION_TEST_FAKE_DOCKER_ARGS, JSON.stringify(process.argv.slice(2)))',
+  'const chunks = []',
+  "process.stdin.on('data', (chunk) => chunks.push(chunk))",
+  "process.stdin.on('end', () => writeFileSync(process.env.ORCHESTRATION_TEST_FAKE_DOCKER_ARCHIVE, Buffer.concat(chunks)))",
+  '',
+]
+
+function git(cwd: string, args: readonly string[]): void {
+  execFileSync('git', args, { cwd, stdio: 'ignore' })
+}
+
+function recordingFixture(): {
+  archiveFile: string
+  argsFile: string
+  env: NodeJS.ProcessEnv
+  repository: string
+  wrapper: string
+} {
+  const fixture = mkdtempSync(join(tmpdir(), 'orch-test-linux-'))
+  fixtures.push(fixture)
+  const repository = join(fixture, 'repository')
+  const scripts = join(repository, 'scripts')
+  mkdirSync(scripts, { recursive: true })
+  const fakeDocker = join(fixture, 'fake-docker.mjs')
+  writeFileSync(fakeDocker, recordingDocker.join('\n'))
+  const wrapper = join(scripts, 'test-linux.mjs')
+  writeFileSync(wrapper, readFileSync(join(import.meta.dirname, '..', 'scripts', 'test-linux.mjs'), 'utf8')
+    .replace("spawn('docker', [", 'spawn(process.execPath, [process.env.ORCHESTRATION_TEST_FAKE_DOCKER,'))
+  writeFileSync(join(repository, 'marker.txt'), 'main checkout commit\n')
+
+  git(repository, ['init', '-q'])
+  git(repository, ['config', 'user.name', 'Test'])
+  git(repository, ['config', 'user.email', 'test@example.com'])
+  git(repository, ['add', '--force', '.'])
+  git(repository, ['commit', '-qm', 'test fixture'])
+
+  const argsFile = join(fixture, 'docker-args.json')
+  const archiveFile = join(fixture, 'docker-archive.tar')
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ORCHESTRATION_TEST_FAKE_DOCKER: fakeDocker,
+    ORCHESTRATION_TEST_FAKE_DOCKER_ARGS: argsFile,
+    ORCHESTRATION_TEST_FAKE_DOCKER_ARCHIVE: archiveFile,
+  }
+  delete env.TEST_LINUX_PULL
+  return { archiveFile, argsFile, env, repository, wrapper }
+}
+
+describe('Linux verification image pull policy', () => {
+  it('pulls the image on every run by default', async () => {
+    const { argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper], repository, env)
+
+    expect(result.status).toBe(0)
+    const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[]
+    expect(args).toContain('--pull=always')
+    expect(args).not.toContain('--pull=missing')
+    expect(result.stdout).toContain('image pull policy: always')
+    expect(result.stdout).toContain('Linux verification passed.')
+  })
+
+  it('pulls the image only when it is missing when TEST_LINUX_PULL is missing, and says so', async () => {
+    const { argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper], repository, { ...env, TEST_LINUX_PULL: 'missing' })
+
+    expect(result.status).toBe(0)
+    const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[]
+    expect(args).toContain('--pull=missing')
+    expect(args).not.toContain('--pull=always')
+    expect(result.stdout).toContain('image pull policy: missing')
+    expect(result.stdout).toContain('Linux verification passed.')
+  })
+
+  it('refuses an unknown TEST_LINUX_PULL value before anything runs', async () => {
+    const { archiveFile, argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper], repository, { ...env, TEST_LINUX_PULL: 'never' })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('TEST_LINUX_PULL must be one of always, missing')
+    expect(result.stderr).toContain("'never'")
+    expect(result.stdout).not.toContain('Exporting HEAD')
+    expect(existsSync(argsFile)).toBe(false)
+    expect(existsSync(archiveFile)).toBe(false)
+  })
+
+  it('pulls the image only when it is missing when given --pull=missing, and says so', async () => {
+    const { argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper, '--pull=missing'], repository, env)
+
+    expect(result.status).toBe(0)
+    const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[]
+    expect(args).toContain('--pull=missing')
+    expect(args).not.toContain('--pull=always')
+    expect(result.stdout).toContain('image pull policy: missing')
+    expect(result.stdout).toContain('Linux verification passed.')
+  })
+
+  it('takes the --pull argument over TEST_LINUX_PULL', async () => {
+    const { argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper, '--pull=always'], repository, {
+      ...env,
+      TEST_LINUX_PULL: 'missing',
+    })
+
+    expect(result.status).toBe(0)
+    const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[]
+    expect(args).toContain('--pull=always')
+    expect(args).not.toContain('--pull=missing')
+    expect(result.stdout).toContain('image pull policy: always')
+  })
+
+  it('pulls the image on every run when TEST_LINUX_PULL is empty', async () => {
+    const { argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper], repository, { ...env, TEST_LINUX_PULL: '' })
+
+    expect(result.status).toBe(0)
+    const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[]
+    expect(args).toContain('--pull=always')
+    expect(args).not.toContain('--pull=missing')
+    expect(result.stdout).toContain('image pull policy: always')
+    expect(result.stdout).toContain('Linux verification passed.')
+  })
+
+  it('refuses an unknown --pull value before anything runs', async () => {
+    const { archiveFile, argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper, '--pull=never'], repository, {
+      ...env,
+      TEST_LINUX_PULL: 'missing',
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("--pull must be one of always, missing; got 'never'.")
+    expect(result.stdout).not.toContain('Exporting HEAD')
+    expect(existsSync(argsFile)).toBe(false)
+    expect(existsSync(archiveFile)).toBe(false)
+  })
+
+  it('refuses an unknown argument before anything runs', async () => {
+    const { archiveFile, argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper, '--pull', 'missing'], repository, env)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      "Unknown argument '--pull'; the only argument is --pull=<always|missing>.",
+    )
+    expect(result.stdout).not.toContain('Exporting HEAD')
+    expect(existsSync(argsFile)).toBe(false)
+    expect(existsSync(archiveFile)).toBe(false)
+  })
+
+  it('exports the commit of the linked worktree it runs from, not the main checkout', async () => {
+    const { archiveFile, env, repository } = recordingFixture()
+    const worktree = join(repository, '..', 'linked-worktree')
+    git(repository, ['worktree', 'add', '-q', '-b', 'gate', worktree])
+    writeFileSync(join(worktree, 'marker.txt'), 'linked worktree commit\n')
+    // Ignored dependencies, as a gate's worktree may hold, leave the tree clean.
+    writeFileSync(join(worktree, '.gitignore'), 'node_modules/\n')
+    mkdirSync(join(worktree, 'node_modules'))
+    writeFileSync(join(worktree, 'node_modules', 'installed.txt'), 'installed dependency\n')
+    git(worktree, ['add', 'marker.txt', '.gitignore'])
+    git(worktree, ['commit', '-qm', 'worktree commit'])
+
+    const result = await run(process.execPath, [join(worktree, 'scripts', 'test-linux.mjs')], worktree, {
+      ...env,
+      TEST_LINUX_PULL: 'missing',
+    })
+
+    expect(result.status).toBe(0)
+    const archive = readFileSync(archiveFile).toString('latin1')
+    expect(archive).toContain('linked worktree commit')
+    expect(archive).not.toContain('main checkout commit')
+    expect(archive).not.toContain('installed dependency')
+  })
+})

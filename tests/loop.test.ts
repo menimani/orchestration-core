@@ -1,5 +1,6 @@
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync,
+  utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -58,6 +59,21 @@ vi.mock('../src/status.ts', async (importOriginal) => {
       mergedStatusFailure.onWrite?.()
       await actual.writeMergedStatus(...args)
       throw new Error('process stopped after recording the merge')
+    },
+  }
+})
+
+const jsonParses = vi.hoisted(() => ({ count: 0 }))
+
+// JSON parsing runs unchanged; the count lets a test see whether the configuration file
+// was parsed again.
+vi.mock('../src/jsonFile.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/jsonFile.ts')>()
+  return {
+    ...actual,
+    parseJsonText: (...args: Parameters<typeof actual.parseJsonText>) => {
+      jsonParses.count += 1
+      return actual.parseJsonText(...args)
     },
   }
 })
@@ -166,6 +182,106 @@ describe('live loop configuration', () => {
     )
     expect(runnerStarts).toHaveLength(0)
     expect(logText()).toMatch(/setting: MAX_PARALLEL.*must be at least 1/)
+  })
+
+  // A whole second at or after now: inside the window in which a timestamp alone cannot
+  // tell two writes apart, and representable exactly by every filesystem's file times.
+  function sameTickTime(): Date {
+    return new Date(Math.ceil(Date.now() / 1000) * 1000)
+  }
+
+  // Node sets file times through a double, which cannot carry every time a filesystem
+  // records, so restoring a time read with statSync can land on a different stamp. Times
+  // truncated to whole milliseconds survive the round trip exactly, and truncation moves
+  // them back by under a millisecond, never into the future.
+  function truncateFileTimes(filePath: string): void {
+    const stat = statSync(filePath)
+    utimesSync(filePath, new Date(Math.floor(stat.atimeMs)), new Date(Math.floor(stat.mtimeMs)))
+  }
+
+  it('uses a same-length rewrite that keeps the modification time of the read before it', () => {
+    const filePath = join(paths.root, 'config.json')
+    writeFileSync(filePath, JSON.stringify({ MAX_PARALLEL: 1 }))
+    truncateFileTimes(filePath)
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    const loaded = statSync(filePath)
+    expect(config.maxParallel).toBe(1)
+
+    writeFileSync(filePath, JSON.stringify({ MAX_PARALLEL: 2 }))
+    utimesSync(filePath, loaded.atime, loaded.mtime)
+
+    expect(config.maxParallel).toBe(2)
+    expect(logged).toContain("MAX_PARALLEL changed from '1' to '2'")
+  })
+
+  it('stops polling when an invalid same-length rewrite keeps the modification time', async () => {
+    useFakeRepository()
+    const filePath = join(paths.root, 'config.json')
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 1, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+    truncateFileTimes(filePath)
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    const loaded = statSync(filePath)
+    const loop = loopWithConfig(config)
+    loop.initializeSessionStateForBranch()
+    const taskId = '20260820_000004_004_auto-same-tick-invalid-configuration'
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# task\n')
+    writeFileSync(join(paths.queueDir, 'backlog.txt'), `${taskId}:0\n`)
+    writeFileSync(filePath, JSON.stringify({
+      MAX_PARALLEL: 0, SCAN_ENABLED: false, AUTO_MERGE: false,
+    }))
+    utimesSync(filePath, loaded.atime, loaded.mtime)
+
+    await expect(loop.poll()).rejects.toThrow(
+      `Invalid configuration file ${filePath} (setting: MAX_PARALLEL)`,
+    )
+    expect(runnerStarts).toHaveLength(0)
+    expect(logText()).toMatch(/setting: MAX_PARALLEL.*must be at least 1/)
+  })
+
+  it('neither reports nor parses again a recently written file whose content is unchanged', () => {
+    const filePath = join(paths.root, 'config.json')
+    const modified = sameTickTime()
+    writeFileSync(filePath, JSON.stringify({ MAX_PARALLEL: 4, TASK_GATE: 'light' }))
+    utimesSync(filePath, modified, modified)
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    const parses = jsonParses.count
+
+    expect(config.maxParallel).toBe(4)
+    expect(config.taskGate).toBe('light')
+    expect(config.maxParallel).toBe(4)
+
+    expect(jsonParses.count).toBe(parses)
+    expect(logged).toEqual([])
+  })
+
+  it('does not parse again a file older than the timestamp margin', () => {
+    const filePath = join(paths.root, 'config.json')
+    const modified = new Date(Math.floor(Date.now() / 1000) * 1000 - 60_000)
+    writeFileSync(filePath, JSON.stringify({ MAX_PARALLEL: 4, TASK_GATE: 'light' }))
+    utimesSync(filePath, modified, modified)
+    const config = loadConfig({}, {
+      filePath,
+      onEvent: (event) => logged.push(event.message),
+    })
+    const parses = jsonParses.count
+
+    expect(config.maxParallel).toBe(4)
+    expect(config.taskGate).toBe('light')
+    expect(config.maxParallel).toBe(4)
+
+    expect(jsonParses.count).toBe(parses)
+    expect(logged).toEqual([])
   })
 
   it('retains the existing loop behavior when the configuration file is absent', async () => {

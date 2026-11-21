@@ -222,6 +222,21 @@ other environments. It then logs every `manualEnvironmentChecks` entry, includin
 command and the fact that it was not run for the branch. These status lines are operator
 guidance; they do not block or delay promotion.
 
+`npm run test:linux` can also serve as a project's merge check, run from the gate's
+worktree; it exports that worktree's committed `HEAD` and pulls `node:24-bookworm` on every
+run. The policy `missing` pulls the image only when it is not present locally, so a
+registry outage does not fail merges once the image has been pulled. It is given as the
+argument `--pull=missing`: `npm run test:linux -- --pull=missing` through npm, or
+`node scripts/test-linux.mjs --pull=missing`, the form a merge check's single command
+string uses, since it needs no variable set in `cmd.exe` or `sh`. Without the argument the
+script reads `TEST_LINUX_PULL`, where an empty value counts as unset; `always`, the
+default, keeps pulling. Any other value, from either source, and any other argument are
+refused before git or docker runs, and the script prints which policy ran. A host shell
+that exports `TEST_LINUX_PULL` also reaches the suite's own tests of this script, so only
+`always` or `missing` belongs there. The container runs no Windows-specific code, so a
+project gating on it still needs its suite run on Windows somewhere, in its cycle suite or
+CI.
+
 The core-owned pre-commit hook keeps its branch guard repository-neutral by reading the
 tracking remote's advertised default branch. It fails closed when that branch cannot be
 resolved, so repositories using names such as `trunk` receive the same protection without
@@ -529,7 +544,10 @@ for the `report-upstream` command and cannot be stored in `orchestration/config.
 
 Configuration commands publish updates atomically through a temporary file in the same
 directory, so readers cannot observe a partial write. The file is checked when a setting
-is used and reparsed only after its modification time or size changes. A malformed file or an
+is used and reparsed only after it changes; an edit is seen whatever its size and timing,
+provided the file's modification time comes from a clock no more than two seconds behind
+the loop's and is not set back by a restore that keeps the size (`cp -p`, `rsync -t`), since a
+file modified within two seconds of the last read is compared by content. A malformed file or an
 invalid value stops the run and reports the file, setting, and failure instead of using an
 older or environment value. Valid live changes are logged with their old and new values.
 `FORGE` and `RUNNER` are pinned because

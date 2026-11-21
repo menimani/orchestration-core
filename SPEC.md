@@ -243,7 +243,13 @@ temporary file in the same directory and renames it into place atomically, so th
 cannot observe a partially written file.
 
 The loop caches the observed file version against its modification time and size and resolves a
-setting when it is referenced. File values pass through the same validation as environment
+setting when it is referenced. An edit is seen whatever its size and timing,
+provided the file's modification time comes from a clock no more than two seconds behind
+the loop's and is not set back by a restore that keeps the size (`cp -p`, `rsync -t`):
+while the file's modification time is within two seconds of the last read (the coarsest timestamp granularity
+of the supported filesystems), the loop reads the file again and compares its content, so a
+same-length rewrite within one timestamp tick is not missed; unchanged content is neither
+reported nor validated again. File values pass through the same validation as environment
 values. A malformed file or a value that fails that validation stops the run; the error
 reports the file, the affected setting (or the file contents when JSON cannot identify a
 setting), and the validation or parse failure. It never answers from an earlier parse or

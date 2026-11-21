@@ -6,8 +6,12 @@ import { readFileSync } from 'node:fs'
 
 const BYTE_ORDER_MARK = 0xfeff
 
+/** Parse JSON text read from a file, ignoring a leading byte order mark. */
+export function parseJsonText(text: string): unknown {
+  return JSON.parse(text.charCodeAt(0) === BYTE_ORDER_MARK ? text.slice(1) : text) as unknown
+}
+
 /** Read and parse a JSON file, ignoring a leading byte order mark. */
 export function readJsonFile(file: string): unknown {
-  const text = readFileSync(file, 'utf8')
-  return JSON.parse(text.charCodeAt(0) === BYTE_ORDER_MARK ? text.slice(1) : text) as unknown
+  return parseJsonText(readFileSync(file, 'utf8'))
 }
