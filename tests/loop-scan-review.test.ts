@@ -15,8 +15,9 @@ import {
 } from '../src/paths.ts'
 import { readStatus } from '../src/status.ts'
 import { enqueueTask, specFile } from '../src/tasks.ts'
+import { FAKE_COMMIT, FAKE_HEAD } from './fakeRepository.ts'
 import {
-  backlogEntries, fakeForge, git, initializeGitRepo, initializeGitRepoWithRemote, logText,
+  backlogEntries, fakeForge, git, initializeGitRepo, logText,
   logged, makeCompletedTask, makeForge, makeLoop, makeRunner, paths, registerLoopHooks,
   repoRoot, runnerStarts, setLogged, stubProject, useFakeRepository, writeFinal, writeRawStatus,
 } from './loopHarness.ts'
@@ -259,7 +260,15 @@ describe('scan yield', () => {
 
 describe('runAutoReview', () => {
   beforeEach(() => {
-    initializeGitRepoWithRemote()
+    // The default branch advanced on origin after the checkout last fetched it.
+    useFakeRepository({
+      head: FAKE_COMMIT,
+      remotes: [{
+        name: 'origin', url: join(repoRoot, 'origin.git'), defaultBranch: 'main', head: 'main',
+        branches: { main: FAKE_COMMIT }, trackingBranches: { main: FAKE_HEAD },
+      }],
+      upstreams: { main: 'origin' },
+    })
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(join(paths.root, 'templates', 'review-template.md'),
       '# {{REVIEW_ID}} review of cycle {{CYCLE}} against {{BASE_BRANCH}} for {{PR_URL}}\n')
@@ -270,13 +279,7 @@ describe('runAutoReview', () => {
   }
 
   it('refreshes an intact remote default branch before generating the review', () => {
-    const staleBase = git(['rev-parse', 'refs/remotes/origin/main'])
-    writeFileSync(join(repoRoot, 'tracked.txt'), 'advanced\n')
-    git(['add', 'tracked.txt'])
-    git(['commit', '-m', 'advance default branch'])
-    const advancedBase = git(['rev-parse', 'HEAD'])
-    git(['push', 'origin', 'main'])
-    git(['update-ref', 'refs/remotes/origin/main', staleBase])
+    const advancedBase = FAKE_COMMIT
 
     expect(makeLoop().runAutoReview(7, false)).toBe(false)
 
@@ -1124,7 +1127,7 @@ describe('scanForNextTasks', () => {
   })
 
   it('holds a review finding whose task failed until cleanup, and re-admits it after a merge', async () => {
-    initializeGitRepo()
+    const repository = useFakeRepository()
     const loop = makeLoop({ scanEnabled: false, maxParallel: 1 })
     const finding = '[BUG] a defect whose first fix crashed'
 
@@ -1136,7 +1139,9 @@ describe('scanForNextTasks', () => {
 
     // The first attempt failed and kept its worktree: re-queueing it would only be
     // refused at startup, so the finding waits for the operator's cleanup.
-    git(['worktree', 'add', worktreeDir(paths, taskId), '-b', branchName(taskId)])
+    mkdirSync(worktreeDir(paths, taskId), { recursive: true })
+    repository.state.branches.push(branchName(taskId))
+    repository.state.worktrees.push({ path: worktreeDir(paths, taskId), branch: branchName(taskId) })
     writeRawStatus(taskId, 'failed')
     writeFileSync(join(paths.queueDir, 'backlog.txt'), '')
     setLogged([])
@@ -1146,7 +1151,7 @@ describe('scanForNextTasks', () => {
     expect(readdirSync(paths.tasksDir)).toHaveLength(1)
 
     // After cleanup the same finding re-admits the task, and it actually starts.
-    cleanupTask(paths, taskId, undefined, false, () => {})
+    cleanupTask(paths, taskId, undefined, false, () => {}, repository.git)
     writeFinal('20250101_000000_022_review-c1', `NEXT_TASK: ${finding}\n`)
     await loop.scanForNextTasks('20250101_000000_022_review-c1', 0)
     expect(backlogEntries()).toEqual([`${taskId}:1`])

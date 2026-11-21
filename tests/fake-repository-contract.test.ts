@@ -197,7 +197,7 @@ const STATES: ContractState[] = [
       setup(root, 'checkout', '-q', '--detach')
       return { ...state, branch: undefined, branches: ['main'] }
     },
-    extra: [['worktree', 'list', '--porcelain', '-z']],
+    extra: [['worktree', 'list', '--porcelain', '-z'], ['branch', '--list', 'main']],
   },
   {
     name: 'a branch pushed with an upstream to a remote with a default branch',
@@ -237,6 +237,8 @@ const STATES: ContractState[] = [
       ['rev-parse', '--verify', 'origin/absent^{commit}'],
       ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
       ['fetch', '--quiet', 'origin', '+refs/heads/absent:refs/remotes/origin/absent'],
+      ['rev-parse', 'refs/remotes/origin/main'],
+      ['rev-parse', 'refs/remotes/origin/absent'],
     ],
   },
   {
@@ -322,7 +324,8 @@ const STATES: ContractState[] = [
         commitsAhead: { base: 2 },
       }
     },
-    extra: [['rev-list', '--count', 'base..HEAD']],
+    extra: [['rev-list', '--count', 'base..HEAD'], ['rev-parse', 'main'], ['branch', '--list', 'base']],
+    refused: [['rev-parse', 'base']],
   },
   {
     name: 'main pushed to the default branch of origin',
@@ -334,6 +337,7 @@ const STATES: ContractState[] = [
       ['rev-parse', '--verify', 'origin/main^{commit}'],
       ['log', 'origin/main..HEAD', '--no-merges', '--pretty=%H|%s'],
       ['rev-list', '--count', 'origin/main..HEAD'],
+      ['rev-parse', 'refs/remotes/origin/main'],
     ],
   },
   {
@@ -342,7 +346,14 @@ const STATES: ContractState[] = [
     extra: [
       ['worktree', 'list', '--porcelain', '-z'],
       ['for-each-ref', '--format=%(refname)', 'refs/heads'],
+      ['rev-parse', 'main'],
+      ['rev-parse', 'task/one'],
+      ['branch', '--list', 'main'],
+      ['branch', '--list', 'task/one'],
+      ['branch', '--list', 'absent'],
     ],
+    // git matches the pattern and lists task/one.
+    refused: [['branch', '--list', 'task/*']],
   },
   {
     name: 'a directory outside every repository',
@@ -468,6 +479,47 @@ describe('the fake repository against real git, removing a task worktree', () =>
   })
 })
 
+// A task worktree's branch stays at the commit `git worktree add` created it at while the
+// run branch moves on. Real git adds the worktree, commits on main and answers first;
+// the fake adds the worktree, is moved to the same commit, and answers the same steps.
+describe('the fake repository against real git, after HEAD moves past a task worktree', () => {
+  it('answers the worktree branch at the commit it was created at as git does', () => {
+    const root = join(workspace, 'moved')
+    mkdirSync(root)
+    const { head: created = '' } = initialRepository(root)
+    const worktree = `${root}-task`
+    const add = ['worktree', 'add', '--quiet', worktree, '-b', 'task/one']
+    const steps: string[][] = [
+      ['rev-parse', 'HEAD'],
+      ['rev-parse', 'main'],
+      ['rev-parse', 'task/one'],
+      ['worktree', 'list', '--porcelain', '-z'],
+      ['branch', '--list', 'task/one'],
+      ['worktree', 'remove', worktree, '--force'],
+      ['rev-parse', 'task/one'],
+      ['branch', '-D', 'task/one'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const realAdded = outcome(realGit, root, add)
+    commit(root, 'moved\n')
+    const moved = setup(root, 'rev-parse', 'HEAD')
+    const real = run(realGit)
+    const fake = fakeAt(root, { head: created })
+    const fakeAdded = outcome(fake.git, root, add)
+    fake.state.head = moved
+    fake.state.ancestors = [created]
+
+    expect(fakeAdded).toEqual(realAdded)
+    expect(run(fake.git)).toEqual(real)
+    expect(real[2]?.outcome).toEqual({ output: `${created}\n` })
+    expect(fake.unanswered).toEqual([])
+    expect(fake.contradictions).toEqual([])
+  })
+})
+
 // The loop pushes the run branch before it promotes it. Real git pushes first, and the
 // fake, which changes nothing on disk, then answers the same steps.
 describe('the fake repository against real git, pushing the run branch', () => {
@@ -484,6 +536,47 @@ describe('the fake repository against real git, pushing the run branch', () => {
       ['push', '--quiet', 'origin', 'main'],
       ['rev-list', '--count', 'origin/main..HEAD'],
       ['rev-parse', '--verify', 'origin/main^{commit}'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const real = run(realGit)
+    const fake = fakeAt(root, state)
+
+    expect(run(fake.git)).toEqual(real)
+    expect(fake.unanswered).toEqual([])
+  })
+})
+
+// origin's default branch advanced after the checkout last fetched it. Real git fetches
+// first, and the fake then answers the same steps from the state real git started in.
+describe('the fake repository against real git, refreshing a stale remote-tracking branch', () => {
+  it('moves the remote-tracking branch to the commit origin holds as git does', () => {
+    const root = join(workspace, 'refresh')
+    mkdirSync(root)
+    initialRepository(root)
+    const url = bareRemote(root, 'origin')
+    setup(root, 'push', '-q', '-u', 'origin', 'main')
+    remoteHead(url, 'main')
+    const stale = setup(root, 'rev-parse', 'HEAD')
+    commit(root, 'advanced\n')
+    const advanced = setup(root, 'rev-parse', 'HEAD')
+    setup(root, 'push', '-q', 'origin', 'main')
+    setup(root, 'update-ref', 'refs/remotes/origin/main', stale)
+    const state: Partial<FakeRepositoryState> = {
+      head: advanced,
+      remotes: [{
+        name: 'origin', url, defaultBranch: 'main', head: 'main',
+        branches: { main: advanced }, trackingBranches: { main: stale },
+      }],
+      upstreams: { main: 'origin' },
+    }
+    const steps: string[][] = [
+      ['rev-parse', 'refs/remotes/origin/main'],
+      ['rev-parse', 'refs/remotes/origin/absent'],
+      ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+      ['rev-parse', 'refs/remotes/origin/main'],
     ]
     const run = (git: GitRunner) => steps.map((args) => ({
       args: args.join(' '), outcome: outcome(git, root, args),
@@ -832,6 +925,31 @@ describe('the fake repository on a question it does not know', () => {
     const fake = new FakeRepository(workspace, { commitsAhead: { base: 2 } })
 
     expect(() => fake.git(workspace, ['rev-list', '--count', 'other..HEAD'])).toThrow(/does not answer/)
+  })
+
+  // The fake moves no commit, so a loop test that the loop merged nothing holds only while
+  // every git that would move one is refused and fails the test.
+  it.each([
+    ['merge', '--quiet', '--no-ff', 'task/one', '-m', 'Merge task/one via orchestration'],
+    ['commit', '-q', '-m', 'fix: a change'],
+    ['reset', '--hard', FAKE_COMMIT],
+    ['branch', '-f', 'main', FAKE_COMMIT],
+    ['update-ref', 'refs/heads/main', FAKE_COMMIT, FAKE_HEAD],
+  ].map((args) => [args.join(' '), args]))('refuses git %s, which would move a commit', (invocation, args) => {
+    const fake = new FakeRepository(workspace, { branches: ['main', 'task/one'] })
+
+    expect(() => fake.git(workspace, args)).toThrow(`does not answer git ${invocation} in ${workspace}`)
+    expect(fake.state.head).toBe(FAKE_HEAD)
+    expect(fake.unanswered).toEqual([`git ${invocation} in ${workspace}`])
+    expect(() => fake.assertEveryQuestionAnswered())
+      .toThrow(`The fake repository was asked:\ngit ${invocation} in ${workspace}`)
+  })
+
+  it.each(['task/*', 'task/?ne', 'task/[o]ne'])('refuses a branch list matching the pattern %s', (pattern) => {
+    const fake = new FakeRepository(workspace, { branches: ['main', 'task/one'] })
+
+    expectRefused(fake, workspace, ['branch', '--list', pattern])
+    expect(() => fake.assertEveryQuestionAnswered()).toThrow(`git branch --list ${pattern} in ${workspace}`)
   })
 })
 

@@ -49,10 +49,15 @@ export interface FakeCommit {
   merge?: boolean | undefined
 }
 
-/** A linked worktree, as `git worktree add <path> -b <branch>` leaves it at HEAD. */
+/** A linked worktree, as `git worktree add <path> -b <branch>` leaves it. */
 export interface FakeWorktree {
   path: string
   branch: string
+  /**
+   * The commit the worktree and its branch were created at, where HEAD moving later
+   * leaves them; unset, they stand at HEAD as the test describes it.
+   */
+  commit?: string | undefined
 }
 
 export interface FakeRepositoryState {
@@ -67,6 +72,8 @@ export interface FakeRepositoryState {
   branches: string[]
   /** Linked worktrees; the checkout at the root is not one of them. */
   worktrees: FakeWorktree[]
+  /** The commit each branch of a removed worktree still points at, as the worktree left it. */
+  removedWorktreeBranches: Record<string, string>
   remotes: FakeRemote[]
   /** The remote each branch tracks, as `git push -u <remote> <branch>` records it. */
   upstreams: Record<string, string>
@@ -241,6 +248,7 @@ export class FakeRepository {
       unborn: false,
       branches: branch === undefined || state.unborn === true ? [] : [branch],
       worktrees: [],
+      removedWorktreeBranches: {},
       remotes: [],
       upstreams: {},
       upstreamBranches: {},
@@ -339,6 +347,17 @@ export class FakeRepository {
         return `${state.head}\n`
       }
     }
+    // The checked-out branch is HEAD, and a worktree's branch is where `git worktree add`
+    // left it: at the commit it was created at. Where any other branch stands is not described.
+    const worktreeCommit = (worktree: FakeWorktree): string => worktree.commit ?? state.head
+    const branchTip = /^rev-parse ([^-\s]\S*)$/.exec(command)?.[1]
+    const tipWorktree = state.worktrees.find((worktree) => worktree.branch === branchTip)
+    if (branchTip !== undefined && state.branches.includes(branchTip)) {
+      if (branchTip === state.branch) return () => `${state.head}\n`
+      if (tipWorktree !== undefined) return () => `${worktreeCommit(tipWorktree)}\n`
+      const removed = state.removedWorktreeBranches[branchTip]
+      if (removed !== undefined) return () => `${removed}\n`
+    }
     if (state.unborn && command === 'rev-parse --verify HEAD^{commit}') {
       return () => { throw gitFailure(args, 128, 'fatal: Needed a single revision\n') }
     }
@@ -402,11 +421,23 @@ export class FakeRepository {
       }
     }
     if (command === 'worktree list --porcelain -z') {
-      const entry = (path: string, branch: string | undefined): string =>
-        `worktree ${gitPath(path)}\0HEAD ${state.head}\0`
+      const entry = (path: string, commit: string, branch: string | undefined): string =>
+        `worktree ${gitPath(path)}\0HEAD ${commit}\0`
         + `${branch === undefined ? 'detached' : `branch refs/heads/${branch}`}\0\0`
-      return () => entry(this.root, state.branch)
-        + state.worktrees.map((worktree) => entry(worktree.path, worktree.branch)).join('')
+      return () => entry(this.root, state.head, state.branch) + state.worktrees
+        .map((worktree) => entry(worktree.path, worktreeCommit(worktree), worktree.branch)).join('')
+    }
+    // git marks the checked-out branch with `*` and a branch a linked worktree holds with `+`.
+    // A pattern git matches against every branch is refused rather than read as one name.
+    const listedBranch = /^branch --list (\S+)$/.exec(command)
+    if (listedBranch !== null && !/[*?[]/.test(listedBranch[1] ?? '')) {
+      const branch = listedBranch[1] ?? ''
+      return () => {
+        if (!state.branches.includes(branch)) return ''
+        const mark = branch === state.branch ? '*'
+          : state.worktrees.some((worktree) => worktree.branch === branch) ? '+' : ' '
+        return `${mark} ${branch}\n`
+      }
     }
     if (command === 'for-each-ref --format=%(refname) refs/heads') {
       return () => lines(state.branches.map((branch) => `refs/heads/${branch}`).sort())
@@ -420,12 +451,15 @@ export class FakeRepository {
         }
         mkdirSync(path, { recursive: true })
         state.branches.push(branch)
-        state.worktrees.push({ path, branch })
+        state.worktrees.push({ path, branch, commit: state.head })
         return ''
       }
     }
     if (command === 'worktree prune --expire now') {
       return () => {
+        for (const pruned of state.worktrees.filter((worktree) => !existsSync(worktree.path))) {
+          state.removedWorktreeBranches[pruned.branch] = worktreeCommit(pruned)
+        }
         state.worktrees = state.worktrees.filter((worktree) => existsSync(worktree.path))
         return ''
       }
@@ -438,6 +472,7 @@ export class FakeRepository {
         if (linked === undefined) throw gitFailure(args, 128, `fatal: '${path}' is not a working tree\n`)
         rmSync(linked.path, { recursive: true, force: true })
         state.worktrees = state.worktrees.filter((worktree) => worktree !== linked)
+        state.removedWorktreeBranches[linked.branch] = worktreeCommit(linked)
         return ''
       }
     }
@@ -455,10 +490,12 @@ export class FakeRepository {
         if (!state.branches.includes(branch)) {
           throw gitFailure(args, 1, `error: branch '${branch}' not found\n`)
         }
+        const tip = state.removedWorktreeBranches[branch] ?? state.head
         state.branches = state.branches.filter((name) => name !== branch)
         delete state.upstreams[branch]
         delete state.pushRemotes[branch]
-        return `Deleted branch ${branch} (was ${state.head.slice(0, 7)}).\n`
+        delete state.removedWorktreeBranches[branch]
+        return `Deleted branch ${branch} (was ${tip.slice(0, 7)}).\n`
       }
     }
     const missingRepository = (url: string): Error => gitFailure(args, 128,
@@ -599,6 +636,20 @@ export class FakeRepository {
       return () => {
         if (verified === null) throw gitFailure(args, 128, 'fatal: Needed a single revision\n')
         return `${verified}\n`
+      }
+    }
+    // A remote-tracking branch named in full; a remote's own HEAD is a symbolic ref, not one.
+    const trackingRef = /^rev-parse refs\/remotes\/(\S+)$/.exec(command)?.[1]
+    const tracked = trackingRef === undefined || trackingRef.endsWith('/HEAD')
+      ? undefined
+      : commitNamed(trackingRef)
+    if (trackingRef !== undefined && tracked !== undefined) {
+      return () => {
+        if (tracked === null) {
+          throw gitFailure(args, 128, `fatal: ambiguous argument 'refs/remotes/${trackingRef}': unknown `
+            + `revision or path not in the working tree.\n${UNKNOWN_REVISION_HINT}`, `refs/remotes/${trackingRef}\n`)
+        }
+        return `${tracked}\n`
       }
     }
     // HEAD's log against a ref HEAD is no commit beyond is empty, whatever the ref has

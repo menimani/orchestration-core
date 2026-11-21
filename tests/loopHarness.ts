@@ -168,7 +168,10 @@ export function logText(): string {
   return logged.join('\n')
 }
 
+// A test on the fake repository asks it about its root as the loop does; a question the
+// fake cannot answer fails the test like one the loop asked.
 export function git(args: string[], cwd = repoRoot): string {
+  if (fakeRepository !== undefined && cwd === repoRoot) return fakeRepository.git(cwd, args).trim()
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
@@ -208,15 +211,6 @@ export function initializeGitRepoWithRemote(): string {
   return initialRepositoryWithRemote.value
 }
 
-export function configureLocalRemote(): void {
-  initializeGitRepo()
-  const remote = join(repoRoot, 'remote.git')
-  execFileSync('git', ['init', '--bare', remote], { windowsHide: true })
-  git(['remote', 'add', 'origin', remote])
-  git(['push', '-u', 'origin', 'main'])
-  git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
-}
-
 export function backlogEntries(): string[] {
   const backlog = join(paths.queueDir, 'backlog.txt')
   return existsSync(backlog)
@@ -251,7 +245,7 @@ export function makeCompletedTask(taskId: string, writeCompletedStatus = true): 
  * makeCompletedTask for a test on the fake repository: the task's branch exists only
  * there, and its worktree is a plain directory holding the completed work.
  */
-export function makeFakeCompletedTask(taskId: string): void {
+export function makeFakeCompletedTask(taskId: string, writeCompletedStatus = true): void {
   if (fakeRepository === undefined) throw new Error('makeFakeCompletedTask needs useFakeRepository first')
   writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
   const worktree = worktreeDir(paths, taskId)
@@ -260,7 +254,7 @@ export function makeFakeCompletedTask(taskId: string): void {
   fakeRepository.state.worktrees.push({ path: worktree, branch: branchName(taskId) })
   writeFileSync(join(worktree, `${taskId}.txt`), 'completed work\n')
   writeFinal(taskId, 'TASK_COMPLETE\n')
-  writeRawStatus(taskId, 'completed')
+  if (writeCompletedStatus) writeRawStatus(taskId, 'completed')
 }
 
 /** A completed local task whose only commit conflicts with a later run-branch commit. */

@@ -20,7 +20,7 @@ import { StartupProcessRetainedError, startTask } from '../src/start.ts'
 import { enqueueTask, specFile } from '../src/tasks.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import {
-  fakeForge, fakeRepositoryDeps, forgeStatus, git, initializeGitRepo, initializeGitRepoWithRemote,
+  fakeForge, fakeRepositoryDeps, forgeStatus, git, initializeGitRepoWithRemote,
   logText, logged, makeLoop, makeRunner, paths, registerLoopHooks, repoRoot, runnerStarts,
   setForgeStatus, setLogged, stubProject, useFakeRepository, writeRawStatus,
 } from './loopHarness.ts'
@@ -625,7 +625,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('stops claiming work once issue startup failures reach the burst limit', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const attemptedTaskIds: string[] = []
     const runner: Runner = {
       sharedSkills: fakeRunnerSharedSkills,
@@ -664,7 +664,7 @@ describe('failure announcement and burst stop (via poll)', () => {
   })
 
   it('releases a claimed issue immediately when task startup fails', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const description = '[BUG] recover a claimed task after startup fails'
     const attemptedTaskIds: string[] = []
     let attempt = 0
