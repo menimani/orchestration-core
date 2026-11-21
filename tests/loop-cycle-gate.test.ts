@@ -1180,6 +1180,88 @@ describe('cycle gate', () => {
     expect(existsSync(join(paths.queueDir, 'cycle-suite-tip-0'))).toBe(false)
   })
 
+  it('runs every light-gate cycle-suite step once before promoting a run whose scan cap is zero', async () => {
+    useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [
+        {
+          label: 'First', cwd: '',
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'first\\n')"`,
+        },
+        {
+          label: 'Second', cwd: '',
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'second\\n')"`,
+        },
+      ],
+    }
+    const loop = makeLoop(
+      {
+        scanEnabled: true, maxScanCycles: 0, maxEmptyScans: 2,
+        autoPr: true, reviewEnabled: false, taskGate: 'light',
+      },
+      suiteProject,
+    )
+    loop.initializeSessionStateForBranch()
+    const markPrReady = vi.fn(async () => {
+      expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('first\nsecond\n')
+      setForgeStatus({ ...forgeStatus, isDraft: false })
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('first\nsecond\n')
+    expect(logged.filter((line) => line === 'Started Suite       cycle 0')).toHaveLength(1)
+    expect(logged.some((line) => /^Started .* scan \d+\/\d+$/.test(line))).toBe(false)
+    expect(markPrReady).toHaveBeenCalledOnce()
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(logged.some((line) => line.startsWith('CYCLE_COMPLETE:'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-suite-tip-0'))).toBe(false)
+  })
+
+  it('runs every light-gate cycle-suite step once before promoting a run whose empty-scan limit is zero', async () => {
+    useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [
+        {
+          label: 'First', cwd: '',
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'first\\n')"`,
+        },
+        {
+          label: 'Second', cwd: '',
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'second\\n')"`,
+        },
+      ],
+    }
+    const loop = makeLoop(
+      {
+        scanEnabled: true, maxScanCycles: 6, maxEmptyScans: 0,
+        autoPr: true, reviewEnabled: false, taskGate: 'light',
+      },
+      suiteProject,
+    )
+    loop.initializeSessionStateForBranch()
+    const markPrReady = vi.fn(async () => {
+      expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('first\nsecond\n')
+      setForgeStatus({ ...forgeStatus, isDraft: false })
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('first\nsecond\n')
+    expect(logged.filter((line) => line === 'Started Suite       cycle 0')).toHaveLength(1)
+    expect(logged.some((line) => /^Started .* scan \d+\/\d+$/.test(line))).toBe(false)
+    expect(markPrReady).toHaveBeenCalledOnce()
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(logged.some((line) => line.startsWith('CYCLE_COMPLETE:'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-suite-tip-0'))).toBe(false)
+  })
+
   it('stops a queue-only run whose cycle suite fails without promoting it', async () => {
     useFakeRepositoryWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')

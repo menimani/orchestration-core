@@ -311,7 +311,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
 | `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
 | `SKIP_AUTO_TEST` | `false` | When `true` and no `TEST_CMD` or `--test-cmd` is set, skip the project adapter's automatic merge checks. It does not skip the explicit test command. |
-| `TASK_GATE` | `full` | `full` asks the project adapter for its full merge checks; `light` asks for reduced merge checks and runs the whole cycle suite at each cycle gate, or once before promotion in a run that never scans (item 9). Any other value is rejected. |
+| `TASK_GATE` | `full` | `full` asks the project adapter for its full merge checks; `light` asks for reduced merge checks and runs the whole cycle suite at each cycle gate, or once before an enabled promotion in a run that never scans (item 9). Any other value is rejected. |
 | `INTEGRATION_BRANCH` | empty | Empty retains the direct layout where the daemon checkout is also the run branch. A non-empty branch uses a separate integration worktree as the task base, merge and cycle-gate target, and pull-request source. |
 | `ISSUE_QUEUE_ENABLED` | `false` | Keep the backlog in forge issues instead of local queue entries (item 33). |
 | `WORKER_MODE` | `false` | Run an execution-only daemon that claims and executes shared issues (item 36). `true` requires `ISSUE_QUEUE_ENABLED=true`. |

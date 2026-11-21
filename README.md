@@ -562,7 +562,7 @@ settings update at their next use.
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |
 | `MAX_PARALLEL` | 3 | Ordinary task agent processes at once; scan agents use `SCAN_PARALLEL` independently |
 | `SCAN_PARALLEL` | 2 | Requested scan agent processes per cycle; values must be at least 1 and are reduced to the template's numbered section count at launch, independently of `MAX_PARALLEL` |
-| `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle, or once before promotion in a run that never scans; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
+| `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle, or once before an enabled promotion in a run that never scans; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
 | `AUTO_PR` | true | Push the run branch and create or update its draft pull request at each cycle gate, then promote it when the run finishes; `false` performs none of these |
 | `REVIEW_ENABLED` | true | Keep the review boundary in the cycle gate; `false` skips review even with `AUTO_REVIEW=true`, and together with `AUTO_PR=false` bypasses the cycle gate entirely |
 | `AUTO_REVIEW` | false | With `REVIEW_ENABLED=true`, have an agent review cycle diffs at the review boundary and queue the findings as fixes |
