@@ -222,6 +222,14 @@ other environments. It then logs every `manualEnvironmentChecks` entry, includin
 command and the fact that it was not run for the branch. These status lines are operator
 guidance; they do not block or delay promotion.
 
+`npm run test:linux` can also serve as a project's merge check, run from the gate's
+worktree; it exports that worktree's committed `HEAD` and pulls `node:24-bookworm` on every
+run. A gate that sets `TEST_LINUX_PULL=missing` pulls the image only when it is not present
+locally, so a registry outage does not fail merges (`always`, the default, keeps pulling;
+any other value is refused), and the script prints which policy ran. The container runs
+no Windows-specific code, so a project gating on it still needs its suite run on Windows
+somewhere, in its cycle suite or CI.
+
 The core-owned pre-commit hook keeps its branch guard repository-neutral by reading the
 tracking remote's advertised default branch. It fails closed when that branch cannot be
 resolved, so repositories using names such as `trunk` receive the same protection without
