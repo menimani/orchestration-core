@@ -352,6 +352,8 @@ const STATES: ContractState[] = [
       ['branch', '--list', 'task/one'],
       ['branch', '--list', 'absent'],
     ],
+    // git matches the pattern and lists task/one.
+    refused: [['branch', '--list', 'task/*']],
   },
   {
     name: 'a directory outside every repository',
@@ -474,6 +476,47 @@ describe('the fake repository against real git, removing a task worktree', () =>
 
     expect(run(fake.git)).toEqual(real)
     expect(fake.unanswered).toEqual([])
+  })
+})
+
+// A task worktree's branch stays at the commit `git worktree add` created it at while the
+// run branch moves on. Real git adds the worktree, commits on main and answers first;
+// the fake adds the worktree, is moved to the same commit, and answers the same steps.
+describe('the fake repository against real git, after HEAD moves past a task worktree', () => {
+  it('answers the worktree branch at the commit it was created at as git does', () => {
+    const root = join(workspace, 'moved')
+    mkdirSync(root)
+    const { head: created = '' } = initialRepository(root)
+    const worktree = `${root}-task`
+    const add = ['worktree', 'add', '--quiet', worktree, '-b', 'task/one']
+    const steps: string[][] = [
+      ['rev-parse', 'HEAD'],
+      ['rev-parse', 'main'],
+      ['rev-parse', 'task/one'],
+      ['worktree', 'list', '--porcelain', '-z'],
+      ['branch', '--list', 'task/one'],
+      ['worktree', 'remove', worktree, '--force'],
+      ['rev-parse', 'task/one'],
+      ['branch', '-D', 'task/one'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const realAdded = outcome(realGit, root, add)
+    commit(root, 'moved\n')
+    const moved = setup(root, 'rev-parse', 'HEAD')
+    const real = run(realGit)
+    const fake = fakeAt(root, { head: created })
+    const fakeAdded = outcome(fake.git, root, add)
+    fake.state.head = moved
+    fake.state.ancestors = [created]
+
+    expect(fakeAdded).toEqual(realAdded)
+    expect(run(fake.git)).toEqual(real)
+    expect(real[2]?.outcome).toEqual({ output: `${created}\n` })
+    expect(fake.unanswered).toEqual([])
+    expect(fake.contradictions).toEqual([])
   })
 })
 
@@ -882,6 +925,31 @@ describe('the fake repository on a question it does not know', () => {
     const fake = new FakeRepository(workspace, { commitsAhead: { base: 2 } })
 
     expect(() => fake.git(workspace, ['rev-list', '--count', 'other..HEAD'])).toThrow(/does not answer/)
+  })
+
+  // The fake moves no commit, so a loop test that the loop merged nothing holds only while
+  // every git that would move one is refused and fails the test.
+  it.each([
+    ['merge', '--quiet', '--no-ff', 'task/one', '-m', 'Merge task/one via orchestration'],
+    ['commit', '-q', '-m', 'fix: a change'],
+    ['reset', '--hard', FAKE_COMMIT],
+    ['branch', '-f', 'main', FAKE_COMMIT],
+    ['update-ref', 'refs/heads/main', FAKE_COMMIT, FAKE_HEAD],
+  ].map((args) => [args.join(' '), args]))('refuses git %s, which would move a commit', (invocation, args) => {
+    const fake = new FakeRepository(workspace, { branches: ['main', 'task/one'] })
+
+    expect(() => fake.git(workspace, args)).toThrow(`does not answer git ${invocation} in ${workspace}`)
+    expect(fake.state.head).toBe(FAKE_HEAD)
+    expect(fake.unanswered).toEqual([`git ${invocation} in ${workspace}`])
+    expect(() => fake.assertEveryQuestionAnswered())
+      .toThrow(`The fake repository was asked:\ngit ${invocation} in ${workspace}`)
+  })
+
+  it.each(['task/*', 'task/?ne', 'task/[o]ne'])('refuses a branch list matching the pattern %s', (pattern) => {
+    const fake = new FakeRepository(workspace, { branches: ['main', 'task/one'] })
+
+    expectRefused(fake, workspace, ['branch', '--list', pattern])
+    expect(() => fake.assertEveryQuestionAnswered()).toThrow(`git branch --list ${pattern} in ${workspace}`)
   })
 })
 
