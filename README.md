@@ -562,12 +562,12 @@ settings update at their next use.
 | `MAX_SCAN_CYCLES` | 3 | Scan-and-fix rounds before the pull request is promoted |
 | `MAX_PARALLEL` | 3 | Ordinary task agent processes at once; scan agents use `SCAN_PARALLEL` independently |
 | `SCAN_PARALLEL` | 2 | Requested scan agent processes per cycle; values must be at least 1 and are reduced to the template's numbered section count at launch, independently of `MAX_PARALLEL` |
-| `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
+| `TASK_GATE` | full | `light` uses project-adapter-selected reduced checks for each merge, followed by the adapter's cycle suite once per cycle, or once before an enabled promotion in a run that never scans; `runAtEveryTaskGate` lets individual suite steps opt into every mode |
 | `AUTO_PR` | true | Push the run branch and create or update its draft pull request at each cycle gate, then promote it when the run finishes; `false` performs none of these |
 | `REVIEW_ENABLED` | true | Keep the review boundary in the cycle gate; `false` skips review even with `AUTO_REVIEW=true`, and together with `AUTO_PR=false` bypasses the cycle gate entirely |
 | `AUTO_REVIEW` | false | With `REVIEW_ENABLED=true`, have an agent review cycle diffs at the review boundary and queue the findings as fixes |
 | `REVIEW_EVERY_N_CYCLES` | 1 | With `AUTO_REVIEW=true`, review every Nth cycle and always review the final cycle |
-| `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped |
+| `CI_GATE_ENABLED` | false | Enable polling PR checks and queueing CI-fix tasks; when false, the CI gate is skipped. The wait belongs to scanning cycles: a run that never scans runs its cycle suite before promotion but does not wait on CI |
 | `ISSUE_QUEUE_ENABLED` | false | Keep the backlog in forge issues so several machines can share it |
 | `MAX_ISSUE_RETRIES` | 3 | Consecutive failed tasks allowed per issue before it is parked as `loop:retry-exhausted` |
 | `MAX_GATE_FIX_ATTEMPTS` | 1 | Times a completed task whose own content fails merge verification twice in a row is handed back to its runner to fix; `0` counts every failure toward the consecutive-merge-failure stop instead |
