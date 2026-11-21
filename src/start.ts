@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { operatingSystem } from './adapters/os.ts'
 import type { WorktreeSetupStep } from './adapters/project.ts'
 import type { Runner, RunnerStartOptions } from './adapters/runner.ts'
+import type { GitRunner } from './gitRunner.ts'
 import {
   branchName, finalMessageFile, logFile, rebaseEmptiedMarkerFile, worktreeDir, type OrchPaths,
 } from './paths.ts'
@@ -70,12 +71,14 @@ export function worktreeAddArgs(worktree: string, branch: string): string[] {
  * A worktree whose task is already running is a skip, not an error, so the loop
  * does not retry endlessly. A leftover worktree with no live owner may contain work
  * from a crashed runner, so only the explicit cleanup command may discard it.
+ * `run` replaces the git child that creates the worktree; production passes nothing.
  */
 export async function startTask(
   paths: OrchPaths,
   runner: Runner,
   taskId: string,
   options: StartOptions,
+  run?: GitRunner,
 ): Promise<StartResult> {
   // Validated here, not only in the CLI: the loop reaches this directly with values
   // from environment settings and per-task effort files, and an unvalidated value
@@ -113,11 +116,15 @@ export async function startTask(
 
   try {
     options.report?.(`Creating worktree: ${worktree} (branch: ${branch})`)
-    execFileSync('git', worktreeAddArgs(worktree, branch), {
-      cwd: paths.repoRoot,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
+    if (run !== undefined) {
+      run(paths.repoRoot, worktreeAddArgs(worktree, branch))
+    } else {
+      execFileSync('git', worktreeAddArgs(worktree, branch), {
+        cwd: paths.repoRoot,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    }
 
     for (const step of options.setup ?? []) {
       if (step.requires !== undefined && !existsSync(join(worktree, step.requires))) continue
