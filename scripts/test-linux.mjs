@@ -11,6 +11,17 @@ const containerCommand = [
   'npm test -- --pool=threads',
 ].join(' && ')
 
+// A tag already present locally is never refreshed by `docker run`, so the default pulls
+// on every run; without it the check keeps running whichever Node 24 patch was current
+// when the image was first fetched, security releases included. A merge gate may choose
+// `missing` instead, so a registry outage does not fail every merge.
+const pullPolicies = ['always', 'missing']
+const pullPolicy = process.env.TEST_LINUX_PULL ?? 'always'
+if (!pullPolicies.includes(pullPolicy)) {
+  console.error(`TEST_LINUX_PULL must be one of ${pullPolicies.join(', ')}; got '${pullPolicy}'.`)
+  process.exit(1)
+}
+
 const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=normal'], {
   encoding: 'utf8',
 })
@@ -21,16 +32,13 @@ if (status.stdout.trim() !== '') {
   process.exit(1)
 }
 
-console.log(`Exporting HEAD and running verification in ${image}...`)
+console.log(`Exporting HEAD and running verification in ${image} (image pull policy: ${pullPolicy})...`)
 
 const archive = spawn('git', ['archive', '--format=tar', 'HEAD'], {
   stdio: ['ignore', 'pipe', 'inherit'],
 })
-// A tag already present locally is never refreshed by `docker run`, so without the pull
-// the check keeps running whichever Node 24 patch was current when the image was first
-// fetched, security releases included.
 const docker = spawn('docker', [
-  'run', '--rm', '--pull=always', '-i', image, 'sh', '-lc', containerCommand,
+  'run', '--rm', `--pull=${pullPolicy}`, '-i', image, 'sh', '-lc', containerCommand,
 ], {
   stdio: ['pipe', 'inherit', 'inherit'],
 })
