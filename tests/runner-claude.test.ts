@@ -48,6 +48,25 @@ function mockChild(pid: number | undefined = 1234): EventEmitter & {
   })
 }
 
+/**
+ * The environment for a child that must find a program in `directory` before anything else
+ * on the path. A worker thread's process.env is a case-sensitive copy on Windows, and Vitest
+ * hands its threads one holding both `Path` and `PATH` when the parent inherited `Path`;
+ * a child given both keeps only one of them. Every spelling is dropped and one is set.
+ */
+function environmentWithPathFirst(
+  env: NodeJS.ProcessEnv, directory: string,
+): NodeJS.ProcessEnv {
+  const pathKey = Object.keys(env).find((key) => key.toUpperCase() === 'PATH')
+  const result: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toUpperCase() !== 'PATH') result[key] = value
+  }
+  const inherited = pathKey === undefined ? '' : env[pathKey] ?? ''
+  result.PATH = inherited === '' ? directory : `${directory}${delimiter}${inherited}`
+  return result
+}
+
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset()
   mocks.launchAgent.mockResolvedValue(4321)
@@ -297,20 +316,31 @@ describe('Claude process wrapper', () => {
       // A directory in the final message's place makes the rename fail on every platform.
       const finalMessageFile = join(directory, 'final-message.txt')
       fs.mkdirSync(finalMessageFile)
-      const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH')
-        ?? 'PATH'
 
+      // The fake must win wherever the host's own claude sits. One path variable with the
+      // fake's directory first serves every platform; on Windows the wrapper starts claude
+      // through cmd.exe, which searches the working directory before the path, so starting
+      // the wrapper in that directory finds the fake even if the path were to lose it.
       const result = spawnSync(process.execPath, [
         wrapper, '--claude-runner-wrapper', finalMessageFile, '-p',
       ], {
+        cwd: bin,
         encoding: 'utf8',
-        env: { ...process.env, [pathKey]: `${bin}${delimiter}${process.env[pathKey] ?? ''}` },
+        env: environmentWithPathFirst(process.env, bin),
         windowsHide: true,
       })
 
-      expect(result.status).toBe(1)
-      expect(result.stdout.trim()).toBe('partial')
-      expect(result.stderr.startsWith('Claude runner failed: ')).toBe(true)
+      // One comparison, with the child's stderr as its message, so a failure shows what
+      // the child actually did.
+      expect({
+        status: result.status,
+        stdout: result.stdout.trim(),
+        stderrStartsWithFailure: result.stderr.startsWith('Claude runner failed: '),
+      }, result.stderr).toEqual({
+        status: 1,
+        stdout: 'partial',
+        stderrStartsWithFailure: true,
+      })
       expect(fs.readdirSync(directory).sort()).toEqual(['bin', 'final-message.txt'])
       expect(fs.readdirSync(finalMessageFile)).toEqual([])
     } finally {
@@ -334,6 +364,20 @@ describe('Claude process wrapper', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toBe('Claude runner wrapper requires a final-message file.\n')
     expect(result.stdout).toBe('')
+  })
+})
+
+describe('environmentWithPathFirst', () => {
+  it('returns exactly one path variable, the directory first, when given both spellings', () => {
+    const env = environmentWithPathFirst(
+      { Path: `a${delimiter}b`, PATH: 'c', HOME: 'home' }, 'fake',
+    )
+
+    expect(env).toEqual({ HOME: 'home', PATH: `fake${delimiter}a${delimiter}b` })
+  })
+
+  it('sets the path to the directory alone when no path variable is inherited', () => {
+    expect(environmentWithPathFirst({ HOME: 'home' }, 'fake')).toEqual({ HOME: 'home', PATH: 'fake' })
   })
 })
 
