@@ -11,11 +11,11 @@ import { readStatus } from '../src/status.ts'
 import { enqueueTask } from '../src/tasks.ts'
 import {
   controlledProcess, expectReturnedToCompleted, failureCount, finishHandback, gateConfig,
-  handBackClaimedTask, handbacks, makeTask, scriptedGate,
+  handBackClaimedTask, handbacks, makeTask, REQUIREMENT, scriptedGate,
 } from './gateFixHarness.ts'
 import {
-  backlogEntries, fakeForge, git, initializeGitRepo, logged, makeLoop, paths, registerLoopHooks,
-  runnerStarts, setLogged, writeFinal, writeRawStatus,
+  backlogEntries, fakeForge, git, initializeGitRepo, logged, makeFakeCompletedTask, makeLoop, paths,
+  registerLoopHooks, runnerStarts, setLogged, useFakeRepository, writeFinal, writeRawStatus,
 } from './loopHarness.ts'
 
 registerLoopHooks()
@@ -213,8 +213,9 @@ describe('merge gate handback', () => {
 
   it('stops the poll before merging a task whose gate fix record is malformed', async () => {
     const taskId = '20261112_090000_330_auto-gate-fix-malformed'
-    initializeGitRepo()
-    makeTask(taskId)
+    useFakeRepository()
+    makeFakeCompletedTask(taskId)
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), `# spec\n\n## Requirement\n\n${REQUIREMENT}\n`)
     const head = git(['rev-parse', 'HEAD']).trim()
     const tip = git(['rev-parse', branchName(taskId)]).trim()
     const record = join(paths.queueDir, 'gate-fix', `${taskId}.json`)

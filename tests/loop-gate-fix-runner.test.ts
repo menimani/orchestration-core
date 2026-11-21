@@ -21,8 +21,8 @@ import {
   handBackClaimedTask, handbacks, issueGateConfig, makeTask, REQUIREMENT, scriptedGate,
 } from './gateFixHarness.ts'
 import {
-  fakeForge, git, initializeGitRepo, logged, makeLoop, makeRunner, paths, registerLoopHooks,
-  runnerStarts, setLogged, writeRawStatus,
+  fakeForge, git, initializeGitRepo, logged, makeFakeCompletedTask, makeLoop, makeRunner, paths,
+  registerLoopHooks, runnerStarts, setLogged, useFakeRepository, writeRawStatus,
 } from './loopHarness.ts'
 
 registerLoopHooks()
@@ -221,12 +221,13 @@ describe('merge gate handback', () => {
 
   it('removes the handback state when the task is cleaned up', () => {
     const taskId = '20261112_090000_309_auto-gate-fix-cleanup'
-    initializeGitRepo()
-    makeTask(taskId)
+    const repository = useFakeRepository()
+    makeFakeCompletedTask(taskId)
+    writeFileSync(join(paths.tasksDir, `${taskId}.md`), `# spec\n\n## Requirement\n\n${REQUIREMENT}\n`)
     writeGateFixState(paths, taskId, { attempts: 1, verificationFailed: false, pending: true })
     writeFileSync(gateFixSpecFile(paths, taskId), '# follow-up\n')
 
-    cleanupTask(paths, taskId, undefined, false, () => undefined)
+    cleanupTask(paths, taskId, undefined, false, () => undefined, repository.git)
 
     expect(readGateFixState(paths, taskId)).toBeUndefined()
     expect(existsSync(gateFixSpecFile(paths, taskId))).toBe(false)

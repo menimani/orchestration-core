@@ -491,7 +491,7 @@ describe('forge poll budget', () => {
   })
 
   it('returns every failed group member as singleton-ready work', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     let starts = 0
     const runner: Runner = {
       sharedSkills: fakeRunnerSharedSkills,
@@ -533,7 +533,7 @@ describe('forge poll budget', () => {
   })
 
   it('returns a failed single-issue task to ready and drops its materialization', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     let starts = 0
     const runner: Runner = {
       sharedSkills: fakeRunnerSharedSkills,

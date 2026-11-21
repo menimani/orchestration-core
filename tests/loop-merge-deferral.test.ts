@@ -23,8 +23,8 @@ registerLoopHooks()
 describe('completed task merge recovery', () => {
   it('stops the loop when the issue claim of a completed task can never be read', async () => {
     const taskId = '20260815_125258_043_auto-unreadable-claim-stops'
-    const initialHead = initializeGitRepo()
-    makeCompletedTask(taskId)
+    const initialHead = useFakeRepository().state.head
+    makeFakeCompletedTask(taskId)
     const loop = makeLoop({
       autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
     })
@@ -92,8 +92,8 @@ describe('completed task merge recovery', () => {
 
   it('skips a task whose merge is already active without counting a failure', async () => {
     const taskId = '20260815_125258_037_auto-merge-race'
-    const initialHead = initializeGitRepo()
-    makeCompletedTask(taskId)
+    const initialHead = useFakeRepository().state.head
+    makeFakeCompletedTask(taskId)
     const guardDir = join(paths.queueDir, 'merge-guards', taskId)
     mkdirSync(guardDir, { recursive: true })
     writeFileSync(join(guardDir, 'owner.json'), `${JSON.stringify({
@@ -138,8 +138,8 @@ describe('completed task merge recovery', () => {
   it('defers every merge whose completed runner cannot be verified yet', async () => {
     await withUnverifiableRunner(async (runnerPid) => {
       const taskId = '20260815_125259_038_auto-unverifiable-runner'
-      const initialHead = initializeGitRepo()
-      makeCompletedTask(taskId, false)
+      const initialHead = useFakeRepository().state.head
+      makeFakeCompletedTask(taskId, false)
       writeRawStatus(taskId, 'completed', runnerPid)
       const terminate = vi.spyOn(operatingSystem, 'terminateProcessTree')
       const loop = makeLoop({
@@ -560,8 +560,8 @@ describe('completed task merge recovery', () => {
 
   it('does not merge an abandoned grouped task after the loop restarts', async () => {
     const taskId = '20260811_120000_064_auto-abandoned-group'
-    const initialHead = initializeGitRepo()
-    makeCompletedTask(taskId)
+    const initialHead = useFakeRepository().state.head
+    makeFakeCompletedTask(taskId)
     const loop = makeLoop({
       autoMerge: true,
       issueQueueEnabled: true,
