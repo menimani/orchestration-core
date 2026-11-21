@@ -100,6 +100,16 @@ export const SEQUENTIAL_SUITES: string[] = [
   // and logs recovery once the adoption gets past the fetch" timed out at 60 s in a merge
   // gate while another gate ran on the host, and took 32 to 51 s alone on a loaded host.
   'tests/merger-adoption-recovery.test.ts',
+  // Process creation: the same poll-heavy adoption fixture; "stops the loop on the
+  // twentieth consecutive deferral for an undetermined reporter" drives twenty real polls
+  // and timed out at 60 s after 91.6 s in a merge gate, against 44.4 s when the same gate
+  // passed; the file took 100.0 s in a later green gate and 13.8 s in the Linux container.
+  'tests/merger-adoption-persistence.test.ts',
+  // Deadline: an infrastructure probe is a child `node -e ""` with a 1 s timeout; beside
+  // the parallel group it missed that deadline in a merge gate, so the loop logged the
+  // probe's message instead of the project classifier's (5.0 s in the failing run, 1.35 s
+  // in the passing one).
+  'tests/loop-failure-handling.test.ts',
 ]
 
 // Machine-wide resources that two or more files of SEQUENTIAL_SUITES share, each with
