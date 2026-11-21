@@ -2903,6 +2903,38 @@ export function createLoop(deps: LoopDeps) {
     return true
   }
 
+  /**
+   * Run the cycle suite unless it already passed on the current tip, retaining a pass so
+   * a gate retry on an unchanged tip does not run it again. False holds the gate.
+   */
+  function cycleSuitePassedForTip(cycle: number): boolean {
+    const suiteTipFile = join(paths.queueDir, `cycle-suite-tip-${cycle}`)
+    const currentTip = optionalGit(['rev-parse', 'HEAD']).trim()
+    const cycleSuiteEnabled = cycleSuiteEnabledForTaskGate()
+    const suitePassedForTip = cycleSuiteEnabled
+      && currentTip !== ''
+      && existsSync(suiteTipFile)
+      && readFileSync(suiteTipFile, 'utf8').trim() === currentTip
+    if (!suitePassedForTip) {
+      if (!runCycleSuite(cycle)) return false
+      if (cycleSuiteEnabled && currentTip !== '') {
+        writeFileSync(suiteTipFile, `${currentTip}\n`)
+      }
+    }
+    return true
+  }
+
+  /**
+   * A run that never scanned had no cycle gate, so its tip meets the cycle suite here,
+   * once, before promotion. Scanning cycles count from 1, so cycle 0 keys its suite files
+   * without colliding with any cycle a scan opens. A task gate that asks for no step
+   * promotes as before, without asking git for the tip.
+   */
+  function queueOnlySuitePassed(currentScans: number): boolean {
+    if (currentScans > 0 || !cycleSuiteEnabledForTaskGate()) return true
+    return cycleSuitePassedForTip(0)
+  }
+
   /** The inter-cycle gate and idle scan dispatch. */
   async function triggerScanIfIdle(
     knownOpenFindings?: readonly ForgeIssue[] | null,
@@ -3031,7 +3063,6 @@ export function createLoop(deps: LoopDeps) {
     if (currentScans > 0 && (config.autoPr || config.reviewEnabled)) {
       const resumeFlag = join(paths.queueDir, `cycle-resume-${currentScans}`)
       const completeFlag = join(paths.queueDir, `cycle-complete-${currentScans}`)
-      const suiteTipFile = join(paths.queueDir, `cycle-suite-tip-${currentScans}`)
       const ciFixFlag = join(paths.queueDir, `ci-fix-emitted-${currentScans}`)
 
       if (!existsSync(resumeFlag)) {
@@ -3066,18 +3097,7 @@ export function createLoop(deps: LoopDeps) {
             }
           }
 
-          const currentTip = optionalGit(['rev-parse', 'HEAD']).trim()
-          const cycleSuiteEnabled = cycleSuiteEnabledForTaskGate()
-          const suitePassedForTip = cycleSuiteEnabled
-            && currentTip !== ''
-            && existsSync(suiteTipFile)
-            && readFileSync(suiteTipFile, 'utf8').trim() === currentTip
-          if (!suitePassedForTip) {
-            if (!runCycleSuite(currentScans)) return 'continue'
-            if (cycleSuiteEnabled && currentTip !== '') {
-              writeFileSync(suiteTipFile, `${currentTip}\n`)
-            }
-          }
+          if (!cycleSuitePassedForTip(currentScans)) return 'continue'
 
           if (config.autoPr && !(await ensureDraftPr('cycle'))) {
             gateWaitTarget = 'pull request update'
@@ -3159,6 +3179,7 @@ export function createLoop(deps: LoopDeps) {
     // produce another cycle, no source of work remains: close this cycle through the
     // same promotion and cleanup path as an exhausted scan cap.
     if (!config.scanEnabled) {
+      if (config.autoPr && !queueOnlySuitePassed(currentScans)) return 'continue'
       if (config.autoPr && !(await postLoopPr())) {
         gateWaitTarget = 'pull request promotion'
         return 'continue'
@@ -3168,6 +3189,7 @@ export function createLoop(deps: LoopDeps) {
     }
 
     if (currentScans >= config.maxScanCycles) {
+      if (config.autoPr && !queueOnlySuitePassed(currentScans)) return 'continue'
       if (config.autoPr && !(await postLoopPr())) {
         gateWaitTarget = 'pull request promotion'
         return 'continue'
@@ -3178,6 +3200,7 @@ export function createLoop(deps: LoopDeps) {
 
     const emptyScans = readCount(emptyScanFile)
     if (emptyScans >= config.maxEmptyScans) {
+      if (config.autoPr && !queueOnlySuitePassed(currentScans)) return 'continue'
       if (config.autoPr && !(await postLoopPr())) {
         gateWaitTarget = 'pull request promotion'
         return 'continue'

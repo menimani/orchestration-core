@@ -282,8 +282,8 @@ are not parsed by `loadConfig` and are not operator-file settings.
 |----------|---------|----------|
 | `AUTO_MERGE` | `true` | Merge completed local task worktrees automatically. `false` leaves them completed and eligible for an explicit or later merge. |
 | `AUTO_PR` | `true` | Push the run branch, create or update its draft pull request at cycle gates, and promote it with `LOOP_DONE` when the run finishes. `false` performs none of those PR operations. |
-| `CI_GATE_ENABLED` | `false` | Poll the pull request's checks at the cycle gate and generate ci-fix tasks for failures (item 16). `false` skips the CI gate. |
-| `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, performs any enabled final PR promotion, and exits without starting a scan. |
+| `CI_GATE_ENABLED` | `false` | Poll the pull request's checks at the cycle gate and generate ci-fix tasks for failures (item 16). `false` skips the CI gate. A run that never scans has no cycle gate and does not wait on CI (item 9). |
+| `SCAN_ENABLED` | `true` | Start another scan cycle after the current backlog and gate are clear. `false` drains existing local and shared work, runs the cycle suite its task gate asks for before any enabled final PR promotion when no scan ran (item 9), and exits without starting a scan. |
 | `SCAN_PARALLEL` | `2` | Requested scan processes per cycle. It must be at least 1 and is reduced at launch when the scan template has fewer numbered sections. |
 | `MAX_SCAN_CYCLES` | `3` | Cycle number at which the cycle is final and the run promotes its pull request (item 13). |
 | `MAX_EMPTY_SCANS` | `2` | Consecutive empty scan cycles that end the run early (item 12). |
@@ -311,7 +311,7 @@ are not parsed by `loadConfig` and are not operator-file settings.
 | `POLL_INTERVAL` | `30` | Maximum seconds the daemon waits between polls when no wake signal arrives. Values from 0 through 1800 are accepted; the upper bound keeps polling within the issue-heartbeat interval. |
 | `TEST_CMD` | empty | When non-empty, run this command in a task worktree as its merge test and use it instead of the project adapter's path-selected merge checks. A manual merge's `--test-cmd` takes precedence. |
 | `SKIP_AUTO_TEST` | `false` | When `true` and no `TEST_CMD` or `--test-cmd` is set, skip the project adapter's automatic merge checks. It does not skip the explicit test command. |
-| `TASK_GATE` | `full` | `full` asks the project adapter for its full merge checks; `light` asks for reduced merge checks and runs the whole cycle suite at each cycle gate (item 9). Any other value is rejected. |
+| `TASK_GATE` | `full` | `full` asks the project adapter for its full merge checks; `light` asks for reduced merge checks and runs the whole cycle suite at each cycle gate, or once before promotion in a run that never scans (item 9). Any other value is rejected. |
 | `INTEGRATION_BRANCH` | empty | Empty retains the direct layout where the daemon checkout is also the run branch. A non-empty branch uses a separate integration worktree as the task base, merge and cycle-gate target, and pull-request source. |
 | `ISSUE_QUEUE_ENABLED` | `false` | Keep the backlog in forge issues instead of local queue entries (item 33). |
 | `WORKER_MODE` | `false` | Run an execution-only daemon that claims and executes shared issues (item 36). `true` requires `ISSUE_QUEUE_ENABLED=true`. |
@@ -604,6 +604,17 @@ are not parsed by `loadConfig` and are not operator-file settings.
    verdict is retained across gate retries only while the branch tip is unchanged.
    Light-gate attribution cost (a suite break at the gate names no task) is accepted and
    documented; the gate stops the loop rather than promote a failing tip.
+   A queue-only run, one whose scan count is still 0 when its queue is empty and nothing
+   is in flight (as with `SCAN_ENABLED=false`), has no cycle-gate entry, so with
+   `AUTO_PR=true` it runs the same steps for its task gate immediately before promotion,
+   with the same Docker preflight, repair steps, failure diagnosis, stop instead of
+   promoting a failing tip, and deferral while the test lock stays busy. It keys its suite
+   files as cycle 0 (`cycle-suite-0.log`, `queue/cycle-suite-tip-0`, logged as
+   `Started Suite       cycle 0`); scanning cycles count from 1, so the key never
+   collides with one. A passed verdict is retained for the unchanged tip across promotion
+   retries, and a new merge runs the suite again. A queue-only run whose task gate asks
+   for no step is promoted as before, with no suite and no added log line. The CI wait
+   (`CI_GATE_ENABLED`) is not part of this path: it stays a property of scanning cycles.
    A missing-toolchain repair that fails also stops the gate and reports the adapter's
    remediation message without running the subsequent suite step.
    When a step that will run (its `requires` path exists) declares `needsDocker`, the

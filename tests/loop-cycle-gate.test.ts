@@ -8,11 +8,13 @@ import type { Runner } from '../src/adapters/runner.ts'
 import { operatingSystem } from '../src/adapters/os.ts'
 import { LABEL_FINDING, LABEL_IN_PROGRESS } from '../src/issueQueue.ts'
 import { shortTaskId } from '../src/ids.ts'
+import { TEST_LOCK_BUSY_EXIT_CODE } from '../src/merge.ts'
 import { formatEventLine } from '../src/loop.ts'
 import { branchName, statusFile, worktreeDir } from '../src/paths.ts'
 import { recordInterruptedScans } from '../src/scanRecovery.ts'
 import { enqueueTask } from '../src/tasks.ts'
 import { frameUntrustedText, repositoryInspectionPreamble } from '../src/templates.ts'
+import { FAKE_COMMIT } from './fakeRepository.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import {
   fakeForge, forgeStatus, git, initializeGitRepo, initializeGitRepoWithRemote, logText,
@@ -1139,6 +1141,244 @@ describe('cycle gate', () => {
         'Status', 'Linux check', 'not run for this branch; run npm run test:linux',
       ),
     )
+  })
+
+  it('runs every light-gate cycle-suite step once before promoting a queue-only run', async () => {
+    useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [
+        {
+          label: 'First', cwd: '',
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'first\\n')"`,
+        },
+        {
+          label: 'Second', cwd: '',
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'second\\n')"`,
+        },
+      ],
+    }
+    const loop = makeLoop(
+      { scanEnabled: false, autoPr: true, reviewEnabled: false, taskGate: 'light' },
+      suiteProject,
+    )
+    loop.initializeSessionStateForBranch()
+    const markPrReady = vi.fn(async () => {
+      expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('first\nsecond\n')
+      setForgeStatus({ ...forgeStatus, isDraft: false })
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('first\nsecond\n')
+    expect(logged.filter((line) => line === 'Started Suite       cycle 0')).toHaveLength(1)
+    expect(markPrReady).toHaveBeenCalledOnce()
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(logged.some((line) => line.startsWith('CYCLE_COMPLETE:'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-suite-tip-0'))).toBe(false)
+  })
+
+  it('stops a queue-only run whose cycle suite fails without promoting it', async () => {
+    useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [
+        { label: 'Failing', cwd: '', command: 'node -e "process.exit(3)"' },
+        {
+          label: 'Later', cwd: '',
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'later\\n')"`,
+        },
+      ],
+    }
+    const loop = makeLoop(
+      { scanEnabled: false, autoPr: true, reviewEnabled: false, taskGate: 'light' },
+      suiteProject,
+    )
+    loop.initializeSessionStateForBranch()
+    const markPrReady = vi.fn(async () => {
+      setForgeStatus({ ...forgeStatus, isDraft: false })
+    })
+    fakeForge.markPrReady = markPrReady
+
+    expect(await loop.poll()).not.toBe('done')
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain('ERROR cycle suite failed')
+    expect(existsSync(join(repoRoot, 'suite-runs'))).toBe(false)
+    expect(markPrReady).not.toHaveBeenCalled()
+    expect(logged.some((line) => line.startsWith('LOOP_DONE:'))).toBe(false)
+    expect(existsSync(join(paths.queueDir, 'cycle-suite-tip-0'))).toBe(false)
+  })
+
+  it('retains a queue-only suite verdict while the tip is unchanged and reruns it after a new merge', async () => {
+    const repository = useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Marker', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+      }],
+    }
+    const loop = makeLoop(
+      { scanEnabled: false, autoPr: true, reviewEnabled: false, taskGate: 'light' },
+      suiteProject,
+    )
+    loop.initializeSessionStateForBranch()
+    fakeForge.markPrReady = async () => { throw new Error('promotion refused') }
+
+    expect(await loop.poll()).toBe('continue')
+    expect(readFileSync(join(paths.queueDir, 'cycle-suite-tip-0'), 'utf8').trim())
+      .toBe(git(['rev-parse', 'HEAD']).trim())
+    expect(await loop.poll()).toBe('continue')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(logged.filter((line) => line === 'Started Suite       cycle 0')).toHaveLength(1)
+    expect(logText()).toContain('could not promote PR: promotion refused')
+
+    rmSync(join(paths.queueDir, 'stop'), { force: true })
+    repository.state.ancestors = [repository.state.head]
+    repository.state.head = FAKE_COMMIT
+    repository.state.commitsAhead['origin/main'] = 1
+    repository.state.commits['origin/main'] = [
+      { sha: FAKE_COMMIT, subject: 'test: change the promoted tip', files: ['tip-change.txt'] },
+    ]
+    fakeForge.markPrReady = async () => {
+      setForgeStatus({ ...forgeStatus, isDraft: false })
+    }
+
+    await loop.poll()
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\nrun\n')
+    expect(logged.filter((line) => line === 'Started Suite       cycle 0')).toHaveLength(2)
+  })
+
+  it('runs only opted-in steps before promoting a queue-only run under the full gate', async () => {
+    useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [
+        {
+          label: 'Light only', cwd: '',
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'light\\n')"`,
+        },
+        {
+          label: 'Every gate', cwd: '', runAtEveryTaskGate: true,
+          command: `node -e "require('node:fs').appendFileSync('suite-runs', 'every\\n')"`,
+        },
+      ],
+    }
+    const loop = makeLoop(
+      { scanEnabled: false, autoPr: true, reviewEnabled: false, taskGate: 'full' },
+      suiteProject,
+    )
+    loop.initializeSessionStateForBranch()
+    fakeForge.markPrReady = async () => {
+      setForgeStatus({ ...forgeStatus, isDraft: false })
+    }
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('every\n')
+    expect(logged.filter((line) => line === 'Started Suite       cycle 0')).toHaveLength(1)
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
+  })
+
+  it('promotes a queue-only full-gate run with no opted-in step exactly as before', async () => {
+    useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Light only', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'light\\n')"`,
+      }],
+    }
+    const runToPromotion = async (project: ProjectAdapter): Promise<string[]> => {
+      logged.length = 0
+      setForgeStatus({ ...forgeStatus, isDraft: true })
+      const loop = makeLoop(
+        { scanEnabled: false, autoPr: true, reviewEnabled: false, taskGate: 'full' },
+        project,
+      )
+      loop.initializeSessionStateForBranch()
+      fakeForge.markPrReady = async () => {
+        setForgeStatus({ ...forgeStatus, isDraft: false })
+      }
+      expect(await loop.poll()).toBe('done')
+      return [...logged]
+    }
+
+    const withoutSuite = await runToPromotion(stubProject)
+    const withLightOnlySuite = await runToPromotion(suiteProject)
+
+    expect(withLightOnlySuite).toEqual(withoutSuite)
+    expect(withLightOnlySuite).toContain('LOOP_DONE: https://example.test/pull/1')
+    expect(withLightOnlySuite.some((line) => line.startsWith('Started Suite'))).toBe(false)
+    expect(existsSync(join(repoRoot, 'suite-runs'))).toBe(false)
+    expect(existsSync(join(paths.logsDir, 'cycle-suite-0.log'))).toBe(false)
+  })
+
+  it('defers a queue-only run whose suite waited out the test lock without counting a failure', async () => {
+    useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '0\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Locked suite', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n'); process.exit(${TEST_LOCK_BUSY_EXIT_CODE})"`,
+      }],
+    }
+    const loop = makeLoop(
+      { scanEnabled: false, autoPr: true, reviewEnabled: false, taskGate: 'light' },
+      suiteProject,
+    )
+    loop.initializeSessionStateForBranch()
+    const markPrReady = vi.fn(async () => {
+      setForgeStatus({ ...forgeStatus, isDraft: false })
+    })
+    fakeForge.markPrReady = markPrReady
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect(await loop.poll()).toBe('continue')
+    }
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\nrun\nrun\nrun\n')
+    expect(logText()).toContain('WARN cycle suite deferred: the repository test lock stayed busy')
+    expect(logText()).not.toContain('ERROR')
+    expect(markPrReady).not.toHaveBeenCalled()
+    expect(existsSync(join(paths.queueDir, 'cycle-suite-tip-0'))).toBe(false)
+  })
+
+  it('runs a scanning cycle suite at its cycle gate and not again before promotion', async () => {
+    useFakeRepositoryWithRemote()
+    writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
+    const suiteProject: ProjectAdapter = {
+      ...stubProject,
+      cycleSuite: () => [{
+        label: 'Marker', cwd: '',
+        command: `node -e "require('node:fs').appendFileSync('suite-runs', 'run\\n')"`,
+      }],
+    }
+    const loop = makeLoop(
+      { scanEnabled: false, autoPr: true, reviewEnabled: false, taskGate: 'light' },
+      suiteProject,
+    )
+    loop.initializeSessionStateForBranch()
+    fakeForge.markPrReady = async () => {
+      setForgeStatus({ ...forgeStatus, isDraft: false })
+    }
+
+    expect(await loop.poll()).toBe('done')
+
+    expect(readFileSync(join(repoRoot, 'suite-runs'), 'utf8')).toBe('run\n')
+    expect(logged.filter((line) => line.startsWith('Started Suite'))).toEqual(['Started Suite       cycle 1'])
+    expect(logged).toContain('LOOP_DONE: https://example.test/pull/1')
   })
 
   it('concludes an empty run without retrying pull request creation', async () => {
