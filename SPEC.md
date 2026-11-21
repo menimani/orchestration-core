@@ -1882,11 +1882,19 @@ builds it and before every answer, naming the contradiction. And because a loop 
 checkout is a plain directory, a real git process started there past the loop's git
 seam fails the test with the code that started it. The fake starts tasks through the
 real `startTask`, answering only its `git worktree add` with a plain directory and a
-branch it records, so every check, message, status record, log line, and setup step
+branch it records at the commit HEAD then names, where the branch stays when HEAD later
+moves, so every check, message, status record, log line, and setup step
 comes from `src/start.ts`; the contract file starts the same task on real git and on
-the fake and compares the two. A loop test that asks about the checkout itself — which
-branches exist, where a branch or a remote-tracking ref points — asks the fake too, so
-its assertions read the state the loop left there. The cycle-gate
+the fake and compares the two. A `git branch --list` pattern git would match against
+every branch is refused rather than read as one name. A loop test that asks about the
+checkout itself — which branches exist, where a branch or a remote-tracking ref points —
+asks the fake too, so its assertions read the branches, worktrees, and remote-tracking
+refs the loop left there. The fake moves no commit: a merge, commit, reset, forced branch
+move, or ref update asked through the seam is refused, so HEAD and a branch's tip never
+move in it. An assertion that the loop merged nothing, that HEAD still names the commit
+it started at, therefore cannot fail by itself; it relies on that refusal and on the
+real-git check above, which fails the test when the merge, started past the seam, runs
+git in the plain directory. The contract file pins both. The cycle-gate
 cases in `tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's
 state machine — cycle flags, CI outcomes, review rounds, final promotion, and stop
 conditions. Most run on the fake checkout, including those that launch and discard scan
