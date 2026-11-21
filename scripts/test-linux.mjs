@@ -14,11 +14,29 @@ const containerCommand = [
 // A tag already present locally is never refreshed by `docker run`, so the default pulls
 // on every run; without it the check keeps running whichever Node 24 patch was current
 // when the image was first fetched, security releases included. A merge gate may choose
-// `missing` instead, so a registry outage does not fail every merge.
+// `missing` instead, so a registry outage does not fail merges once the image has been
+// pulled. A merge check is one command string, run by cmd.exe on Windows and by sh
+// elsewhere, with no portable way to set a variable, so the argument is read first; an
+// empty variable counts as unset, as it does for the loop's own settings.
 const pullPolicies = ['always', 'missing']
-const pullPolicy = process.env.TEST_LINUX_PULL ?? 'always'
+const pullArgument = '--pull='
+let pullPolicy
+let pullSource
+for (const argument of process.argv.slice(2)) {
+  if (!argument.startsWith(pullArgument)) {
+    console.error(`Unknown argument '${argument}'; the only argument is ${pullArgument}<${pullPolicies.join('|')}>.`)
+    process.exit(1)
+  }
+  pullPolicy = argument.slice(pullArgument.length)
+  pullSource = '--pull'
+}
+if (pullPolicy === undefined && process.env.TEST_LINUX_PULL !== undefined && process.env.TEST_LINUX_PULL !== '') {
+  pullPolicy = process.env.TEST_LINUX_PULL
+  pullSource = 'TEST_LINUX_PULL'
+}
+pullPolicy ??= 'always'
 if (!pullPolicies.includes(pullPolicy)) {
-  console.error(`TEST_LINUX_PULL must be one of ${pullPolicies.join(', ')}; got '${pullPolicy}'.`)
+  console.error(`${pullSource} must be one of ${pullPolicies.join(', ')}; got '${pullPolicy}'.`)
   process.exit(1)
 }
 

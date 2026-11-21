@@ -1,6 +1,6 @@
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync,
-  writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync,
+  utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -190,19 +190,28 @@ describe('live loop configuration', () => {
     return new Date(Math.ceil(Date.now() / 1000) * 1000)
   }
 
+  // Node sets file times through a double, which cannot carry every time a filesystem
+  // records, so restoring a time read with statSync can land on a different stamp. Times
+  // truncated to whole milliseconds survive the round trip exactly, and truncation moves
+  // them back by under a millisecond, never into the future.
+  function truncateFileTimes(filePath: string): void {
+    const stat = statSync(filePath)
+    utimesSync(filePath, new Date(Math.floor(stat.atimeMs)), new Date(Math.floor(stat.mtimeMs)))
+  }
+
   it('uses a same-length rewrite that keeps the modification time of the read before it', () => {
     const filePath = join(paths.root, 'config.json')
-    const modified = sameTickTime()
     writeFileSync(filePath, JSON.stringify({ MAX_PARALLEL: 1 }))
-    utimesSync(filePath, modified, modified)
+    truncateFileTimes(filePath)
     const config = loadConfig({}, {
       filePath,
       onEvent: (event) => logged.push(event.message),
     })
+    const loaded = statSync(filePath)
     expect(config.maxParallel).toBe(1)
 
     writeFileSync(filePath, JSON.stringify({ MAX_PARALLEL: 2 }))
-    utimesSync(filePath, modified, modified)
+    utimesSync(filePath, loaded.atime, loaded.mtime)
 
     expect(config.maxParallel).toBe(2)
     expect(logged).toContain("MAX_PARALLEL changed from '1' to '2'")
@@ -211,15 +220,15 @@ describe('live loop configuration', () => {
   it('stops polling when an invalid same-length rewrite keeps the modification time', async () => {
     useFakeRepository()
     const filePath = join(paths.root, 'config.json')
-    const modified = sameTickTime()
     writeFileSync(filePath, JSON.stringify({
       MAX_PARALLEL: 1, SCAN_ENABLED: false, AUTO_MERGE: false,
     }))
-    utimesSync(filePath, modified, modified)
+    truncateFileTimes(filePath)
     const config = loadConfig({}, {
       filePath,
       onEvent: (event) => logged.push(event.message),
     })
+    const loaded = statSync(filePath)
     const loop = loopWithConfig(config)
     loop.initializeSessionStateForBranch()
     const taskId = '20260820_000004_004_auto-same-tick-invalid-configuration'
@@ -228,7 +237,7 @@ describe('live loop configuration', () => {
     writeFileSync(filePath, JSON.stringify({
       MAX_PARALLEL: 0, SCAN_ENABLED: false, AUTO_MERGE: false,
     }))
-    utimesSync(filePath, modified, modified)
+    utimesSync(filePath, loaded.atime, loaded.mtime)
 
     await expect(loop.poll()).rejects.toThrow(
       `Invalid configuration file ${filePath} (setting: MAX_PARALLEL)`,

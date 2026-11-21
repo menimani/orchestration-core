@@ -226,6 +226,76 @@ describe('Linux verification image pull policy', () => {
     expect(existsSync(archiveFile)).toBe(false)
   })
 
+  it('pulls the image only when it is missing when given --pull=missing, and says so', async () => {
+    const { argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper, '--pull=missing'], repository, env)
+
+    expect(result.status).toBe(0)
+    const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[]
+    expect(args).toContain('--pull=missing')
+    expect(args).not.toContain('--pull=always')
+    expect(result.stdout).toContain('image pull policy: missing')
+    expect(result.stdout).toContain('Linux verification passed.')
+  })
+
+  it('takes the --pull argument over TEST_LINUX_PULL', async () => {
+    const { argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper, '--pull=always'], repository, {
+      ...env,
+      TEST_LINUX_PULL: 'missing',
+    })
+
+    expect(result.status).toBe(0)
+    const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[]
+    expect(args).toContain('--pull=always')
+    expect(args).not.toContain('--pull=missing')
+    expect(result.stdout).toContain('image pull policy: always')
+  })
+
+  it('pulls the image on every run when TEST_LINUX_PULL is empty', async () => {
+    const { argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper], repository, { ...env, TEST_LINUX_PULL: '' })
+
+    expect(result.status).toBe(0)
+    const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[]
+    expect(args).toContain('--pull=always')
+    expect(args).not.toContain('--pull=missing')
+    expect(result.stdout).toContain('image pull policy: always')
+    expect(result.stdout).toContain('Linux verification passed.')
+  })
+
+  it('refuses an unknown --pull value before anything runs', async () => {
+    const { archiveFile, argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper, '--pull=never'], repository, {
+      ...env,
+      TEST_LINUX_PULL: 'missing',
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("--pull must be one of always, missing; got 'never'.")
+    expect(result.stdout).not.toContain('Exporting HEAD')
+    expect(existsSync(argsFile)).toBe(false)
+    expect(existsSync(archiveFile)).toBe(false)
+  })
+
+  it('refuses an unknown argument before anything runs', async () => {
+    const { archiveFile, argsFile, env, repository, wrapper } = recordingFixture()
+
+    const result = await run(process.execPath, [wrapper, '--pull', 'missing'], repository, env)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      "Unknown argument '--pull'; the only argument is --pull=<always|missing>.",
+    )
+    expect(result.stdout).not.toContain('Exporting HEAD')
+    expect(existsSync(argsFile)).toBe(false)
+    expect(existsSync(archiveFile)).toBe(false)
+  })
+
   it('exports the commit of the linked worktree it runs from, not the main checkout', async () => {
     const { archiveFile, env, repository } = recordingFixture()
     const worktree = join(repository, '..', 'linked-worktree')
