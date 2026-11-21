@@ -139,6 +139,60 @@ describe('startTask', () => {
     expect(start).not.toHaveBeenCalled()
   })
 
+  it('refuses an effort outside the supported levels before touching the checkout', async () => {
+    const taskId = '20260809_000000_004_auto-invalid-effort'
+    writeFileSync(specFile(paths, taskId), '# invalid effort task\n')
+    const start = vi.fn(async () => process.pid)
+
+    await expect(startTask(
+      paths, { sharedSkills: fakeRunnerSharedSkills, start }, taskId,
+      { effort: 'maximal' as 'high' },
+    )).rejects.toThrow(new Error("effort must be minimal, low, medium or high, got 'maximal'"))
+
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
+    expect(git(['branch', '--list', branchName(taskId)])).toBe('')
+    expect(existsSync(logFile(paths, taskId))).toBe(false)
+    expect(statusMocks.writeStatus).not.toHaveBeenCalled()
+  })
+
+  it('refuses a task without a specification before touching the checkout', async () => {
+    const taskId = '20260809_000000_005_auto-missing-spec'
+    const start = vi.fn(async () => process.pid)
+
+    await expect(startTask(
+      paths, { sharedSkills: fakeRunnerSharedSkills, start }, taskId, { effort: 'medium' },
+    )).rejects.toThrow(new Error(
+      `Task specification not found: ${specFile(paths, taskId)}\n`
+      + "Create the specification first with the 'new' command.",
+    ))
+
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(worktreeDir(paths, taskId))).toBe(false)
+    expect(git(['branch', '--list', branchName(taskId)])).toBe('')
+    expect(existsSync(logFile(paths, taskId))).toBe(false)
+    expect(statusMocks.writeStatus).not.toHaveBeenCalled()
+  })
+
+  it('names the leftover worktree and the cleanup it needs when no live owner remains', async () => {
+    const taskId = '20260809_000000_006_auto-leftover-worktree'
+    const worktree = worktreeDir(paths, taskId)
+    writeFileSync(specFile(paths, taskId), '# leftover worktree task\n')
+    git(['worktree', 'add', '-q', worktree, '-b', branchName(taskId)])
+    const start = vi.fn(async () => process.pid)
+
+    await expect(startTask(
+      paths, { sharedSkills: fakeRunnerSharedSkills, start }, taskId, { effort: 'medium' },
+    )).rejects.toThrow(new Error(
+      `Task worktree already exists without a live owner: ${worktree}\n`
+      + 'Inspect it for uncommitted changes or commits, then run cleanup explicitly.',
+    ))
+
+    expect(start).not.toHaveBeenCalled()
+    expect(existsSync(logFile(paths, taskId))).toBe(false)
+    expect(statusMocks.writeStatus).not.toHaveBeenCalled()
+  })
+
   it('records and preserves a worktree setup failure before the runner starts', async () => {
     const taskId = '20260809_000000_001_scan'
     writeFileSync(specFile(paths, taskId), '# scan\n')

@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import type { ProjectAdapter, PullRequestChanges } from './adapters/project.ts'
+import type { GitRunner } from './gitRunner.ts'
 
 // The generated pull request. The title reports different things depending on when it
 // is read — mid-run, how many cycles are left; promoted, what landed — and both the
@@ -9,18 +10,22 @@ import type { ProjectAdapter, PullRequestChanges } from './adapters/project.ts'
 
 export const GENERATED_BODY_MARKER = '<!-- marker: autonomous scan loop -->'
 
-function git(repoRoot: string, args: string[]): string {
+function runGit(repoRoot: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+  })
+}
+
+function git(repoRoot: string, args: string[], run: GitRunner = runGit): string {
   try {
-    return execFileSync('git', args, {
-      cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
-    })
+    return run(repoRoot, args)
   } catch {
     return ''
   }
 }
 
-function filesOfCommit(repoRoot: string, sha: string): string[] {
-  return git(repoRoot, ['show', '--name-only', '--pretty=format:', sha])
+function filesOfCommit(repoRoot: string, sha: string, run?: GitRunner): string[] {
+  return git(repoRoot, ['show', '--name-only', '--pretty=format:', sha], run)
     .split(/\r?\n/).filter((line) => line !== '')
 }
 
@@ -29,9 +34,10 @@ export function prRisks(
   repoRoot: string,
   baseRef: string,
   decisions: string[],
+  run?: GitRunner,
 ): string {
   const comparison = `${baseRef}..HEAD`
-  const changed = git(repoRoot, ['diff', '--name-only', comparison])
+  const changed = git(repoRoot, ['diff', '--name-only', comparison], run)
     .split(/\r?\n/).filter((line) => line !== '')
   const lines: string[] = []
 
@@ -48,9 +54,9 @@ export function prRisks(
 
   const changes: PullRequestChanges = {
     files: changed,
-    deletedFiles: git(repoRoot, ['diff', '--name-only', '--diff-filter=D', comparison])
+    deletedFiles: git(repoRoot, ['diff', '--name-only', '--diff-filter=D', comparison], run)
       .split(/\r?\n/).filter((line) => line !== ''),
-    diff: (pathspecs = []) => git(repoRoot, ['diff', comparison, '--', ...pathspecs]),
+    diff: (pathspecs = []) => git(repoRoot, ['diff', comparison, '--', ...pathspecs], run),
   }
   for (const risk of project.pullRequest.detectRisks(changes)) lines.push(`- ${risk}`)
 
@@ -58,9 +64,13 @@ export function prRisks(
   return `${lines.join('\n')}\n`
 }
 
-function branchCommits(repoRoot: string, baseRef: string): Array<{ sha: string; subject: string }> {
+function branchCommits(
+  repoRoot: string,
+  baseRef: string,
+  run?: GitRunner,
+): Array<{ sha: string; subject: string }> {
   // Merge commits are excluded — "Merge xxx via orchestration" gives no information.
-  return git(repoRoot, ['log', `${baseRef}..HEAD`, '--no-merges', '--pretty=%H|%s'])
+  return git(repoRoot, ['log', `${baseRef}..HEAD`, '--no-merges', '--pretty=%H|%s'], run)
     .split(/\r?\n/).filter((line) => line !== '')
     .map((line) => {
       const sep = line.indexOf('|')
@@ -72,10 +82,10 @@ function branchCommits(repoRoot: string, baseRef: string): Array<{ sha: string; 
  * The reasons the run's task merges recorded, oldest first. The commit list says what
  * changed; these say what each merged task was asked to achieve.
  */
-function mergeReasons(repoRoot: string, baseRef: string): string[] {
+function mergeReasons(repoRoot: string, baseRef: string, run?: GitRunner): string[] {
   const log = git(repoRoot, [
     'log', `${baseRef}..HEAD`, '--merges', '--first-parent', '--reverse', '--format=%s%x1f%b%x1e',
-  ])
+  ], run)
   const reasons: string[] = []
   for (const record of log.split('\x1e')) {
     const [subject = '', body = ''] = record.trim().split('\x1f')
@@ -99,6 +109,7 @@ export function prTitle(
   baseRef: string,
   mode: 'cycle' | 'final',
   context: TitleContext,
+  run?: GitRunner,
 ): string {
   const prefix = 'feat: autonomous scan loop'
   if (mode !== 'final') {
@@ -106,10 +117,10 @@ export function prTitle(
   }
 
   const counts = new Map<string, number>()
-  for (const { sha, subject } of branchCommits(repoRoot, baseRef)) {
+  for (const { sha, subject } of branchCommits(repoRoot, baseRef, run)) {
     const category = project.pullRequest.classifyCommit({
       subject,
-      files: filesOfCommit(repoRoot, sha),
+      files: filesOfCommit(repoRoot, sha, run),
     }).category
     counts.set(category, (counts.get(category) ?? 0) + 1)
   }
@@ -131,12 +142,13 @@ export function buildPrBody(
   repoRoot: string,
   baseRef: string,
   decisions: string[],
+  run?: GitRunner,
 ): string {
   const sections = new Map<string, string[]>()
-  for (const { sha, subject } of branchCommits(repoRoot, baseRef)) {
+  for (const { sha, subject } of branchCommits(repoRoot, baseRef, run)) {
     const { category, area } = project.pullRequest.classifyCommit({
       subject,
-      files: filesOfCommit(repoRoot, sha),
+      files: filesOfCommit(repoRoot, sha, run),
     })
     // The type prefix is dropped: the section heading already says it. A screen name on
     // a tooling change would be meaningless, so those go without the area label.
@@ -152,8 +164,8 @@ export function buildPrBody(
     const entries = sections.get(label)
     body += `\n## ${label}\n\n${entries === undefined ? '- None\n' : `${entries.join('\n')}\n`}`
   }
-  const reasons = mergeReasons(repoRoot, baseRef)
+  const reasons = mergeReasons(repoRoot, baseRef, run)
   body += `\n## Reasons\n\n${reasons.length === 0 ? '- None\n' : `${reasons.map((reason) => `- ${reason}`).join('\n')}\n`}`
-  body += `\n## Risks\n\n${prRisks(project, repoRoot, baseRef, decisions)}`
+  body += `\n## Risks\n\n${prRisks(project, repoRoot, baseRef, decisions, run)}`
   return body
 }

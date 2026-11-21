@@ -840,9 +840,13 @@ function describeRebaseConflict(
 function taskCommitsAreEmpty(worktree: string, currentBranch: string): boolean {
   const commits = git(worktree, ['rev-list', '--reverse', `${currentBranch}..HEAD`])
     .trim().split(/\s+/).filter((commit) => commit !== '')
-  return commits.every((commit) =>
-    git(worktree, ['rev-parse', `${commit}^{tree}`]).trim()
-      === git(worktree, ['rev-parse', `${commit}^1^{tree}`]).trim())
+  // One process prints a commit's tree and its parent's, one per line. It fails, as the
+  // second of two separate questions did, for a commit without a parent.
+  return commits.every((commit) => {
+    const [tree, parentTree] = git(worktree, ['rev-parse', `${commit}^{tree}`, `${commit}^1^{tree}`])
+      .trim().split(/\r?\n/)
+    return tree === parentTree
+  })
 }
 
 function mergeIo(outputFile?: string): MergeIo {
@@ -1637,8 +1641,9 @@ async function mergeTaskWithGuardHeld(
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     try {
       io.out(git(prospectiveWorktree, ['diff', `${gatedBase}...HEAD`]))
-    } catch {
-      // an empty inspection diff is fine
+    } catch (error) {
+      // A failed inspection diff must not read as an empty change in the log.
+      io.out(`(diff unavailable: ${commandFailureSummary(error)})`)
     }
     return runMergeChecks(prospectiveWorktree, gatedBase, options, io)
   })
@@ -1808,8 +1813,9 @@ export async function mergeRemoteTask(
     io.out(`=== ${taskId} diff (against ${currentBranch}) ===`)
     try {
       io.out(git(worktree, ['diff', `${gatedBase}...HEAD`]))
-    } catch {
-      // an empty inspection diff is fine
+    } catch (error) {
+      // A failed inspection diff must not read as an empty change in the log.
+      io.out(`(diff unavailable: ${commandFailureSummary(error)})`)
     }
     return runMergeChecks(worktree, gatedBase, options, io)
   })

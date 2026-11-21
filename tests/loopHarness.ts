@@ -3,7 +3,7 @@
 // its own vi.mock calls, because Vitest hoists a mock only within the file that calls it.
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach } from 'vitest'
@@ -21,6 +21,7 @@ import { startTask } from '../src/start.ts'
 import { enqueueTask, specFile } from '../src/tasks.ts'
 import type { TaskProcessTermination } from '../src/taskProcesses.ts'
 import { makeFakeForge, type FakeForge } from './fakeForge.ts'
+import { FakeRepository } from './fakeRepository.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { buildRepositoryTemplate, type RepositoryTemplate } from './repositoryTemplate.ts'
 import { stubProject as sharedStubProject } from './stubProject.ts'
@@ -34,6 +35,8 @@ export let prStatusCalls: number
 export let runnerStarts: string[]
 export let fakeForge: FakeForge
 export const testProcesses = new TestProcessRegistry()
+// Set by a test whose loop asks its questions of an in-memory checkout instead of git.
+let fakeRepository: FakeRepository | undefined
 
 // A test file cannot assign an imported binding, so the state its tests replace has a setter.
 export function setPaths(value: OrchPaths): void {
@@ -48,6 +51,32 @@ export function setForgeStatus(value: PrStatus): void {
   forgeStatus = value
 }
 
+/**
+ * Describes the test's checkout in memory, as initializeGitRepo leaves it on disk unless
+ * the test says otherwise. The loops the test creates afterwards ask it instead of git
+ * and start tasks without worktrees; the test fails if they ask what it cannot answer.
+ */
+export function useFakeRepository(state: ConstructorParameters<typeof FakeRepository>[1] = {}): FakeRepository {
+  fakeRepository = new FakeRepository(repoRoot, state)
+  return fakeRepository
+}
+
+/** useFakeRepository for the state initializeGitRepoWithRemote leaves on disk. */
+export function useFakeRepositoryWithRemote(): FakeRepository {
+  return useFakeRepository({
+    remotes: [{ name: 'origin', url: join(repoRoot, 'origin.git'), defaultBranch: 'main' }],
+    upstreams: { main: 'origin' },
+    commitsAhead: { 'origin/main': 0 },
+  })
+}
+
+/** The loop dependencies that point at the fake repository, when the test uses one. */
+export function fakeRepositoryDeps(): Pick<LoopDeps, 'git' | 'startTask'> {
+  return fakeRepository === undefined
+    ? {}
+    : { git: fakeRepository.git, startTask: fakeRepository.startTask }
+}
+
 export function makeForge(): Forge {
   fakeForge = makeFakeForge()
   fakeForge.prStatus = async (ref) => {
@@ -58,7 +87,9 @@ export function makeForge(): Forge {
     if (forgeStatus.headSha !== '' || forgeStatus.state !== 'open') return forgeStatus
     let localHead = ''
     try {
-      localHead = git(['rev-parse', 'HEAD'])
+      localHead = fakeRepository === undefined
+        ? git(['rev-parse', 'HEAD'])
+        : fakeRepository.git(repoRoot, ['rev-parse', 'HEAD']).trim()
     } catch {
       localHead = ''
     }
@@ -90,7 +121,7 @@ export function makeLoop(
   runner: Runner = makeRunner(),
   enqueueTaskImpl: NonNullable<LoopDeps['enqueueTask']> = enqueueTask,
   terminateTaskProcesses?: () => TaskProcessTermination,
-  startTaskImpl: typeof startTask = startTask,
+  startTaskImpl?: typeof startTask,
 ): Loop {
   // The fixtures register the test process itself as a runner, with a fixed UTC start
   // that a local-time clock puts hours in the past on some hosts. A deadline would stop
@@ -107,7 +138,8 @@ export function makeLoop(
     orchestrationDepsRuntime,
     enqueueTask: enqueueTaskImpl,
     terminateTaskProcesses,
-    startTask: startTaskImpl,
+    ...fakeRepositoryDeps(),
+    ...(startTaskImpl === undefined ? {} : { startTask: startTaskImpl }),
   })
 }
 
@@ -215,6 +247,22 @@ export function makeCompletedTask(taskId: string, writeCompletedStatus = true): 
   if (writeCompletedStatus) writeRawStatus(taskId, 'completed')
 }
 
+/**
+ * makeCompletedTask for a test on the fake repository: the task's branch exists only
+ * there, and its worktree is a plain directory holding the completed work.
+ */
+export function makeFakeCompletedTask(taskId: string): void {
+  if (fakeRepository === undefined) throw new Error('makeFakeCompletedTask needs useFakeRepository first')
+  writeFileSync(join(paths.tasksDir, `${taskId}.md`), '# spec\n')
+  const worktree = worktreeDir(paths, taskId)
+  mkdirSync(worktree, { recursive: true })
+  fakeRepository.state.branches.push(branchName(taskId))
+  fakeRepository.state.worktrees.push({ path: worktree, branch: branchName(taskId) })
+  writeFileSync(join(worktree, `${taskId}.txt`), 'completed work\n')
+  writeFinal(taskId, 'TASK_COMPLETE\n')
+  writeRawStatus(taskId, 'completed')
+}
+
 /** A completed local task whose only commit conflicts with a later run-branch commit. */
 export function makeConflictingLocalTask(taskId: string): {
   initialHead: string
@@ -252,6 +300,7 @@ export function registerLoopHooks(): void {
   })
 
   beforeEach(() => {
+    fakeRepository = undefined
     repoRoot = mkdtempSync(join(tmpdir(), 'orch-loop-'))
     paths = orchPaths(repoRoot)
     logged = []
@@ -263,5 +312,6 @@ export function registerLoopHooks(): void {
   afterEach(async () => {
     await testProcesses.cleanup()
     rmSync(repoRoot, { recursive: true, force: true })
+    fakeRepository?.assertEveryQuestionAnswered()
   })
 }

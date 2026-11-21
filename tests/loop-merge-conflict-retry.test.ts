@@ -19,7 +19,7 @@ import { releasePreparationForTask } from './releasePreparation.ts'
 import {
   backlogEntries, fakeForge, git, initializeGitRepo, logText, logged, makeCompletedTask,
   makeConflictingLocalTask, makeLoop, paths, registerLoopHooks, repoRoot, runnerStarts,
-  stubProject,
+  stubProject, useFakeRepository,
 } from './loopHarness.ts'
 
 const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
@@ -344,7 +344,8 @@ describe('completed task merge recovery', () => {
   })
 
   it('hands a reclaimed issue the attempt that conflicted before it was released', async () => {
-    const head = initializeGitRepo()
+    const repository = useFakeRepository()
+    const head = repository.state.head
     const loop = makeLoop({
       issueQueueEnabled: true, scanEnabled: false, autoMerge: false, maxParallel: 1,
     })
@@ -356,7 +357,7 @@ describe('completed task merge recovery', () => {
       labels: [LABEL_FINDING, LABEL_READY],
     })
     const earlierId = '20260815_181908_194_auto-rebase-conflict'
-    git(['branch', conflictBranchName(earlierId), head])
+    repository.state.branches.push(conflictBranchName(earlierId))
     const attempt = {
       taskId: earlierId,
       branch: conflictBranchName(earlierId),

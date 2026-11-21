@@ -13,7 +13,7 @@ import { readStatus } from '../src/status.ts'
 import {
   backlogEntries, fakeForge, git, initializeGitRepo, initializeGitRepoWithRemote, logText,
   logged, makeCompletedTask, makeConflictingLocalTask, makeLoop, paths, registerLoopHooks,
-  repoRoot, runnerStarts, stubProject, writeRawStatus,
+  repoRoot, runnerStarts, stubProject, useFakeRepository, writeRawStatus,
 } from './loopHarness.ts'
 
 registerLoopHooks()
@@ -209,6 +209,47 @@ describe('completed task merge recovery', () => {
     expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).toBe(true)
   })
 
+  it('warns about an unverifiable merge marker author and stops after a bounded run of polls', async () => {
+    const taskId = '20260811_120000_071_auto-lookup-stuck'
+    initializeGitRepoWithRemote()
+    makeCompletedTask(taskId)
+    const loop = makeLoop({
+      autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    const issueNumber = await fakeForge.createIssue({
+      title: 'stuck marker author', body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+    })
+    recordIssuesForTask(paths, taskId, [issueNumber])
+    const listIssueComments = fakeForge.listIssueComments.bind(fakeForge)
+    fakeForge.listIssueComments = async (number) => (await listIssueComments(number))
+      .map((comment) => ({
+        ...comment,
+        author: { login: comment.author.login, hasWriteAccess: false, permissionLookupFailed: true },
+      }))
+
+    expect(await loop.poll()).toBe('continue')
+
+    const warning = `WARN merge marker on #${issueNumber} for 071_auto unconfirmed: `
+      + 'the permission lookup for its author failed'
+    expect(logText()).toContain(warning)
+    expect(logText().split(warning)).toHaveLength(2)
+
+    for (let poll = 1; poll < 20; poll += 1) await loop.poll()
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(false)
+    expect(logText()).toContain(
+      `WARN could not verify the merge marker author on #${issueNumber} for 071_auto on 20 consecutive polls`)
+
+    await loop.poll()
+
+    expect(existsSync(join(paths.queueDir, 'stop'))).toBe(true)
+    expect(logText()).toContain(
+      `ERROR could not verify the merge marker author on #${issueNumber} for 071_auto `
+      + 'on 21 consecutive polls (repeated 2 times)')
+    expect(issuePromotionForIssue(paths, issueNumber)?.commentConfirmed).not.toBe(true)
+  })
+
   it('retries a failed automerge on the next poll and lets the cycle gate proceed', async () => {
     const taskId = '20260810_040800_064_auto-retry-merge'
     initializeGitRepo()
@@ -362,7 +403,7 @@ describe('completed task merge recovery', () => {
   })
 
   it('rolls back a claim whose issue holds a malformed conflict retry record', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     const loop = makeLoop({
       autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 1,
     })

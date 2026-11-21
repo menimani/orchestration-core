@@ -1351,11 +1351,11 @@ are not parsed by `loadConfig` and are not operator-file settings.
     final-message file — plus effort/model
     arguments mapped to CLI flags, and the runner's own repository skill destination and
     rendering behavior inside the adapter. A standalone marker (`TASK_COMPLETE`,
-    `NO_CHANGE_WARRANTED`, `NO_FINDINGS`) is on its own line when that line starts with the
-    marker at the first column and is the marker and nothing else once trailing white space
-    (spaces, tabs, a carriage return) and at most one pair of Markdown inline formatting
-    around the whole token — backticks, `*`, `**`, `_`, or `__` — are removed; one rule
-    applies to all three. Leading white space is not tolerated, since `git log` and `git show`
+    `NO_CHANGE_WARRANTED`, `NO_FINDINGS`, `REQUIREMENT_COMPLETE: #N`) is on its own line when
+    that line starts with the marker at the first column and is the marker and nothing else
+    once trailing white space (spaces, tabs, a carriage return) and at most one pair of
+    Markdown inline formatting around the whole token — backticks, `*`, `**`, `_`, or `__` —
+    are removed; one rule applies to all four. Leading white space is not tolerated, since `git log` and `git show`
     indent commit messages and a diff indents its unchanged lines, and that text comes from
     accounts the loop does not control. A marker inside a sentence, after leading white
     space, with other words or trailing punctuation on the line, in a list item, quoted with
@@ -1529,6 +1529,8 @@ account with write access withdraws every `MERGED:` comment before it. When whet
 is undetermined, stale-lease reaping leaves that lease alone for the poll. Likewise, when
 the merge comment the loop would post is carried only by such an author, the adopted
 issue's update and merge reconciliation wait for a later poll instead of posting it again.
+Merge reconciliation warns that the permission lookup failed, and twenty consecutive
+polls that leave one merged task's marker unverified stop the loop on the poll after.
 
 33. With `ISSUE_QUEUE_ENABLED=true`, scan and review findings become forge issues
     (labels `loop:finding` + `loop:ready`) instead of local queue entries, under the
@@ -1671,7 +1673,11 @@ issue's update and merge reconciliation wait for a later poll instead of posting
     `mergeCommit`, and non-empty string `runBranch`; optional `commentConfirmed`, when
     present, is boolean. Invalid JSON, a non-object value, or any schema violation is not
     treated as absent state: issue reconciliation fails closed, leaves the record and issue
-    state unchanged for repair, and resumes only after the record is repaired.
+    state unchanged for repair, and resumes only after the record is repaired. Such a
+    record, or a malformed `queue/issue-completion/<issueNumber>.json`, counts a gate
+    failure under the issue-queue sync's key and, separately, under the cycle gate's count
+    of remote issue work, so the second consecutive poll that meets it stops the loop
+    rather than leaving reaping, claiming, and the gate waiting for good.
     The daemon lists open `loop:finding` issues once per poll and partitions that snapshot
     locally for adoption, reconciliation, lease reaping, claiming, and cycle-gate idle
     detection. MERGED-marker comment reads are cached by issue number and `updatedAt`,
@@ -1855,9 +1861,35 @@ issue's update and merge reconciliation wait for a later poll instead of posting
 
 ## Test coverage
 
-The suite drives real git repositories in temporary directories. Its cycle-gate cases in
-`tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's state
-machine — cycle flags, CI outcomes, review rounds, final promotion, and stop conditions.
+The suite drives real git repositories in temporary directories, except where a loop
+test needs git only to answer questions about the checkout — its branch, HEAD, remotes,
+and push configuration. Those tests run against `tests/fakeRepository.ts`, an in-memory
+checkout that answers exactly the invocations the loop makes in git's own output format
+and refuses any other, and `tests/fake-repository-contract.test.ts` asks real git the
+same questions about the same states, so the fake cannot drift from it: the output, or
+the exit status and the first line of standard error, and the whole of standard error
+wherever the loop matches on git's reason or reports it. Real git runs with its messages
+untranslated, and the comparison allows for nothing but the version-dependent wordings
+the contract lists — each spelling observed on git 2.39, 2.44 or 2.56 of a message no
+code under `src/` decides on — which it maps to the one the fake prints; any other
+difference fails it. The contract covers an unborn
+branch, untracked files, a merge commit and a checkout behind its remote-tracking
+branch; a question the fake cannot describe in such a state, such as a merge's first
+parent, it refuses rather than answers. The fake also refuses a state no single history
+can produce — HEAD among its own ancestors, commits beyond a ref whose newest is not
+HEAD, counts that disagree with the commits or the remote-tracking refs — when a test
+builds it and before every answer, naming the contradiction. And because a loop test's
+checkout is a plain directory, a real git process started there past the loop's git
+seam fails the test with the code that started it. The fake starts tasks through the
+real `startTask`, answering only its `git worktree add` with a plain directory and a
+branch it records, so every check, message, status record, log line, and setup step
+comes from `src/start.ts`; the contract file starts the same task on real git and on
+the fake and compares the two. The cycle-gate
+cases in `tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's
+state machine — cycle flags, CI outcomes, review rounds, final promotion, and stop
+conditions. Most run on the fake checkout; the cases that launch and discard scan
+worktrees, reset the cycle counter for a new run branch, compare the branch with its
+remote, or find HEAD in a merged pull request still drive real git.
 `tests/documented-defaults.test.ts` holds the configuration tables in this file and in
 `README.md` to the defaults the source resolves. The suite's global setup removes this
 suite's own fixture directories older than six hours from the OS temporary directory,

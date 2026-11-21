@@ -57,6 +57,7 @@ import { pitfallsFileForDesc } from './gates.ts'
 import {
   currentBranchPushRemote, currentBranchRemotes, currentBranchTrackingRemote,
 } from './gitRemote.ts'
+import type { GitRunner } from './gitRunner.ts'
 import { LoopWarningLog } from './loopLog.ts'
 import { newestChecksByName } from './ciWait.ts'
 import { execShellSync } from './shell.ts'
@@ -87,7 +88,7 @@ import {
   returnIssueToReady,
   ensureQueueLabels, reconcileClosedIssueLifecycleLabels, reconcileFindingFingerprints,
   unresolvedFindings, type ClaimedRequirement, IssueReleaseReconciliationError,
-  MalformedFingerprintLedgerError,
+  MalformedFingerprintLedgerError, MalformedIssueRecordError,
   LABEL_FINDING, LABEL_IN_PROGRESS, LABEL_MERGE_FAILED, LABEL_MERGE_READY, LABEL_READY,
   LABEL_UNTRUSTED_AUTHOR,
 } from './issueQueue.ts'
@@ -114,6 +115,8 @@ export interface LoopDeps {
   branchGuard?: (() => string | undefined) | undefined
   prepareIntegrationWorktree?: (() => void) | undefined
   os?: OperatingSystem | undefined
+  /** Every git invocation the loop makes itself; starting a task or merging one does not use it. */
+  git?: GitRunner | undefined
 }
 
 interface QueueEntry {
@@ -224,7 +227,13 @@ export function createLoop(deps: LoopDeps) {
     startTask: startTaskImpl = startTask,
     resumeTask: resumeTaskImpl = resumeTask,
     os = operatingSystem,
+    git: injectedGit,
   } = deps
+  const runGit: GitRunner = injectedGit ?? ((cwd, args, options) => execFileSync('git', args, {
+    cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    ...(options?.env === undefined ? {} : { env: options.env }),
+  }))
   const queueFile = join(paths.queueDir, 'backlog.txt')
   const stopFile = join(paths.queueDir, 'stop')
   const scannedDir = join(paths.queueDir, 'scanned')
@@ -308,6 +317,9 @@ export function createLoop(deps: LoopDeps) {
   const mergeClaimReadFailures = new Map<string, number>()
   // Consecutive failed finding checks per completed task awaiting its scan, kept in memory only.
   const findingCheckFailures = new Map<string, number>()
+  // Consecutive polls per merged task whose merge marker author could not be verified,
+  // kept in memory only.
+  const issueReconciliationDeferrals = new Map<string, number>()
   let issueQueueInitialized = !config.issueQueueEnabled
   const previousGateFailures = new Map<string, number>()
   // The check names the previous CI gate poll saw, for the PR and head it saw them on.
@@ -555,7 +567,7 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function git(args: string[]): string {
-    return gitIn(paths.repoRoot, args)
+    return runGit(paths.repoRoot, args)
   }
 
   function optionalGit(args: string[], quietSuccess = ''): string {
@@ -585,7 +597,7 @@ export function createLoop(deps: LoopDeps) {
     }
     let result = compare()
     if (result.status !== 0 && result.status !== 1) {
-      git(['fetch', '--quiet', currentBranchPushRemote(paths.repoRoot), descendant])
+      git(['fetch', '--quiet', currentBranchPushRemote(paths.repoRoot, injectedGit), descendant])
       result = compare()
     }
     if (result.status === 0) return true
@@ -614,7 +626,7 @@ export function createLoop(deps: LoopDeps) {
       if (defaultRef !== null) return defaultRef
       defaultRef = undefined
       try {
-        const remote = currentBranchTrackingRemote(paths.repoRoot)
+        const remote = currentBranchTrackingRemote(paths.repoRoot, injectedGit)
         const ref = git(['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]).trim()
         if (!ref.startsWith(`${remote}/`)) return undefined
         git(['fetch', '--quiet', remote, ref.slice(remote.length + 1)])
@@ -628,7 +640,7 @@ export function createLoop(deps: LoopDeps) {
       remoteBranchExists: (runBranch) => {
         let remote: string
         try {
-          remote = currentBranchPushRemote(paths.repoRoot)
+          remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
         } catch {
           return undefined
         }
@@ -650,10 +662,7 @@ export function createLoop(deps: LoopDeps) {
   }
 
   function gitIn(cwd: string, args: string[]): string {
-    return execFileSync('git', args, {
-      cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    })
+    return runGit(cwd, args)
   }
 
   async function publishWorkerCompletion(taskId: string, issueNumbers: number[]): Promise<void> {
@@ -727,7 +736,7 @@ export function createLoop(deps: LoopDeps) {
     }
     if (lost.length > 0) throw new LostWorkerClaimError(lost)
 
-    const remote = currentBranchPushRemote(paths.repoRoot)
+    const remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
     gitIn(worktree, ['push', '--quiet', '--set-upstream', remote, branch])
     const issueList = issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
     await Promise.all(pending.map(async (issueNumber) => {
@@ -848,7 +857,7 @@ export function createLoop(deps: LoopDeps) {
       let adoptionTaskId: string | undefined
       let adoptionIssues = [issue]
       try {
-        const remote = currentBranchPushRemote(paths.repoRoot)
+        const remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
         const adoptionComments = async (candidate: ForgeIssue): Promise<ForgeIssueComment[]> => {
           try {
             return await commentsForIssue(candidate)
@@ -900,15 +909,12 @@ export function createLoop(deps: LoopDeps) {
         adoptionTaskId = taskId
         event('Merging', shortTaskId(taskId))
         try {
-          execFileSync('git', [
+          runGit(paths.repoRoot, [
             'fetch', '--quiet', remote,
             `+refs/heads/${report.branch}:refs/remotes/${remote}/${report.branch}`,
           ], {
-            cwd: paths.repoRoot,
             // git's reason is matched below, so it must not be translated.
             env: { ...process.env, LC_ALL: 'C' },
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
           })
         } catch (error) {
           // git's reason stays in the local log: it can quote the remote URL, and the
@@ -2108,7 +2114,7 @@ export function createLoop(deps: LoopDeps) {
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
     let remote: string
     try {
-      remote = currentBranchTrackingRemote(paths.repoRoot)
+      remote = currentBranchTrackingRemote(paths.repoRoot, injectedGit)
     } catch (error) {
       event('WARN', `could not resolve review base: ${errorSummary(error)}`)
       return false
@@ -2349,7 +2355,7 @@ export function createLoop(deps: LoopDeps) {
       // marker goes, or the new run would count them as its own failures.
       if (cycles.size === 1 && cycles.has(currentCycle + 1)) {
         for (const taskId of new Set(entries.map((entry) => entry.taskId))) {
-          cleanupTask(paths, taskId, undefined, false, log)
+          cleanupTask(paths, taskId, undefined, false, log, injectedGit)
         }
         rmSync(marker, { force: true })
         event('Recovered', 'scan cycle', `${currentCycle + 1} after operator stop`)
@@ -2362,7 +2368,7 @@ export function createLoop(deps: LoopDeps) {
       }
 
       const taskIds = [...new Set(entries.map((entry) => entry.taskId))]
-      for (const taskId of taskIds) cleanupTask(paths, taskId, undefined, false, log)
+      for (const taskId of taskIds) cleanupTask(paths, taskId, undefined, false, log, injectedGit)
 
       const failedFile = join(paths.queueDir, `failed-${currentCycle}`)
       if (existsSync(failedFile)) {
@@ -2430,7 +2436,7 @@ export function createLoop(deps: LoopDeps) {
   function validatePushTarget(): boolean {
     if (!config.autoPr && !config.workerMode) return true
     try {
-      currentBranchPushRemote(paths.repoRoot)
+      currentBranchPushRemote(paths.repoRoot, injectedGit)
       return true
     } catch (error) {
       event('ERROR', `current branch cannot be pushed: ${errorSummary(error)}`)
@@ -2455,19 +2461,15 @@ export function createLoop(deps: LoopDeps) {
     let pushRemote: string
     let baseRemote: string
     try {
-      const remotes = currentBranchRemotes(paths.repoRoot, branch)
+      const remotes = currentBranchRemotes(paths.repoRoot, branch, injectedGit)
       pushRemote = remotes.push
       baseRemote = remotes.tracking
       const hasUpstream = optionalGit([
         'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}',
       ]).trim() !== ''
-      execFileSync('git', [
+      runGit(paths.repoRoot, [
         'push', '--quiet', ...(hasUpstream ? [] : ['--set-upstream']), pushRemote, branch,
-      ], {
-        cwd: paths.repoRoot,
-        stdio: ['ignore', 'ignore', 'pipe'],
-        windowsHide: true,
-      })
+      ])
     } catch (error) {
       reportGateFailure(`could not push branch: ${errorSummary(error)}`)
       return false
@@ -2489,7 +2491,7 @@ export function createLoop(deps: LoopDeps) {
     }
     const cycle = readCount(scanCountFile)
     const title = prTitle(project, paths.repoRoot, baseRef, mode === 'final' ? 'final' : 'cycle',
-      { cycle, maxCycles: config.maxScanCycles })
+      { cycle, maxCycles: config.maxScanCycles }, injectedGit)
 
     let status
     try {
@@ -2517,7 +2519,7 @@ export function createLoop(deps: LoopDeps) {
         await forge.updatePr(branch, generatedBody
           ? {
               title,
-              body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
+              body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions(), injectedGit),
             }
           : { title })
       } catch (error) {
@@ -2583,7 +2585,7 @@ export function createLoop(deps: LoopDeps) {
         branch,
         base: baseBranch,
         title,
-        body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions()),
+        body: buildPrBody(project, paths.repoRoot, baseRef, readDecisions(), injectedGit),
         draft: true,
       })
       writeFileSync(prUrlFile, `${url}\n`)
@@ -2949,6 +2951,7 @@ export function createLoop(deps: LoopDeps) {
         }
         pendingIssueNumbers.sort((a, b) => a - b)
         const remoteCount = pendingIssueNumbers.length
+        previousGateFailures.delete('count-remote-issue-work')
         warningLog.recovered('count-remote-issue-work')
         // A merge-failed issue with no active lifecycle label waits for a person: nothing
         // in the loop adopts, reaps, or retries it. When such issues are all that remains,
@@ -2988,7 +2991,12 @@ export function createLoop(deps: LoopDeps) {
         }
         remoteWaitState = undefined
       } catch (error) {
-        if (!(error instanceof ForgeRateLimitError)) {
+        if (error instanceof MalformedIssueRecordError) {
+          // No later poll can repair the record, so waiting on it would hold the gate
+          // forever: it counts toward a stop instead.
+          reportGateFailure(`could not count remote issue work: ${errorSummary(error)}`,
+            'count-remote-issue-work')
+        } else if (!(error instanceof ForgeRateLimitError)) {
           warning('count-remote-issue-work', 'counting remote issue work',
             `could not count remote issue work: ${errorSummary(error)}`)
         }
@@ -3291,7 +3299,7 @@ export function createLoop(deps: LoopDeps) {
         for (const scanId of attemptedScans) {
           if (scanId === retainedScan) continue
           try {
-            cleanupTask(paths, scanId, undefined, false, log)
+            cleanupTask(paths, scanId, undefined, false, log, injectedGit)
           } catch (error) {
             // A scan that could not be discarded is kept like one whose runner could not
             // be accounted for, so the operator learns why rather than meeting it later.
@@ -3373,7 +3381,7 @@ export function createLoop(deps: LoopDeps) {
     ): Promise<boolean> => {
       try {
         recordIssuePromotions(paths, taskId, mergeCommit, runBranch)
-        let deferred = false
+        const deferredIssues: number[] = []
         for (const linkedIssue of linkedIssues) {
           const promotion = issuePromotionForIssue(paths, linkedIssue)
           if (promotion === undefined) throw new Error('promotion record was not persisted')
@@ -3390,7 +3398,7 @@ export function createLoop(deps: LoopDeps) {
           // A marker whose author's permission could not be read is neither confirmed
           // nor reposted; the promotion record keeps it pending for a later poll.
           if (present === undefined) {
-            deferred = true
+            deferredIssues.push(linkedIssue)
             continue
           }
           if (!present) {
@@ -3398,10 +3406,27 @@ export function createLoop(deps: LoopDeps) {
           }
           confirmIssuePromotion(paths, linkedIssue)
         }
-        if (deferred) {
+        if (deferredIssues.length > 0) {
+          // Every poll this stays set skips issue work and the scan trigger, so a lookup
+          // that never recovers would hold the loop for ever: a bounded run of them stops it.
+          const deferrals = (issueReconciliationDeferrals.get(taskId) ?? 0) + 1
+          issueReconciliationDeferrals.set(taskId, deferrals)
+          const subject = deferredIssues.map((number) => `#${number}`).join(' ')
+          warning(`issue-reconciliation-${taskId}`, `reconciling issues after ${shortTaskId(taskId)}`,
+            `merge marker on ${subject} for ${shortTaskId(taskId)} unconfirmed: `
+            + 'the permission lookup for its author failed')
+          if (deferrals >= MAX_CONSECUTIVE_ADOPTION_DEFERRALS) {
+            reportGateFailure(
+              `could not verify the merge marker author on ${subject} for ${shortTaskId(taskId)} `
+              + `on ${deferrals} consecutive polls`,
+              `issue-reconciliation-${taskId}`,
+            )
+          }
           issueReconciliationPending = true
           return false
         }
+        issueReconciliationDeferrals.delete(taskId)
+        warningLog.recovered(`issue-reconciliation-${taskId}`)
         previousGateFailures.delete(`issue-reconciliation-${taskId}`)
         return true
       } catch (error) {
@@ -3664,7 +3689,7 @@ export function createLoop(deps: LoopDeps) {
               }
               prepareIssueReleaseIntent(paths, taskId, linkedIssues)
             }
-            cleanupTask(paths, taskId, undefined, false, log)
+            cleanupTask(paths, taskId, undefined, false, log, injectedGit)
             reportConflictFailure()
             if (linkedIssues.length === 0) {
               dropClaimedTaskMaterialization(paths, taskId)
@@ -4047,7 +4072,8 @@ export function createLoop(deps: LoopDeps) {
               warningLog.recovered('promoted-issues')
             } catch (error) {
               logPromotedOutcome()
-              if (error instanceof ForgeRateLimitError) throw error
+              if (error instanceof ForgeRateLimitError
+                || error instanceof MalformedIssueRecordError) throw error
               warning('promoted-issues', 'closing promoted issues',
                 `could not close promoted issues: ${errorSummary(error)}`)
             }
@@ -4110,9 +4136,11 @@ export function createLoop(deps: LoopDeps) {
           previousGateFailures.delete('issue-queue-sync')
           warningLog.recovered('issue-queue-sync')
         } catch (error) {
-          if (error instanceof MalformedFingerprintLedgerError) {
-            // No later poll can repair the ledger, so idling on local-only work would
-            // stop reaping and claiming for good: it counts toward a stop instead.
+          if (error instanceof MalformedFingerprintLedgerError
+            || error instanceof MalformedIssueRecordError) {
+            // No later poll can repair the ledger or a local issue record, so idling on
+            // local-only work would stop reaping and claiming for good: it counts toward a
+            // stop instead.
             reportGateFailure(`could not sync the issue queue: ${errorSummary(error)}`, 'issue-queue-sync')
           } else if (error instanceof IssueReleaseReconciliationError) {
             issueReconciliationPending = true
@@ -4197,7 +4225,7 @@ export function createLoop(deps: LoopDeps) {
             }
             if (released) {
               try {
-                cleanupTask(paths, entry.taskId, undefined, false, log)
+                cleanupTask(paths, entry.taskId, undefined, false, log, injectedGit)
                 dropClaimedTaskMaterialization(paths, entry.taskId)
               } catch (cleanupError) {
                 event('WARN', `${shortTaskId(entry.taskId)} startup cleanup failed: ${errorSummary(cleanupError)}`)

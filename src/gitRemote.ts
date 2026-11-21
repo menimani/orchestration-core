@@ -1,25 +1,30 @@
 import { execFileSync } from 'node:child_process'
+import type { GitRunner } from './gitRunner.ts'
 
-function git(repoRoot: string, args: string[]): string {
+function runGit(repoRoot: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd: repoRoot,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
-  }).trim()
+  })
 }
 
-function optionalGit(repoRoot: string, args: string[]): string {
+function git(repoRoot: string, args: string[], run: GitRunner = runGit): string {
+  return run(repoRoot, args).trim()
+}
+
+function optionalGit(repoRoot: string, args: string[], run?: GitRunner): string {
   try {
-    return git(repoRoot, args)
+    return git(repoRoot, args, run)
   } catch {
     return ''
   }
 }
 
-function repositoryRemotes(repoRoot: string): Set<string> {
+function repositoryRemotes(repoRoot: string, run?: GitRunner): Set<string> {
   return new Set(
-    optionalGit(repoRoot, ['remote']).split(/\r?\n/).filter((remote) => remote !== ''),
+    optionalGit(repoRoot, ['remote'], run).split(/\r?\n/).filter((remote) => remote !== ''),
   )
 }
 
@@ -36,8 +41,12 @@ type RemoteCandidate = 'pushRemote' | 'pushDefault' | 'upstream' | 'branchRemote
 const PUSH_PRECEDENCE: RemoteCandidate[] = ['pushRemote', 'pushDefault', 'upstream', 'branchRemote']
 const TRACKING_PRECEDENCE: RemoteCandidate[] = ['upstream', 'branchRemote', 'pushRemote', 'pushDefault']
 
-function readBranchRemoteState(repoRoot: string, currentBranch?: string): BranchRemoteState {
-  const branch = currentBranch ?? git(repoRoot, ['branch', '--show-current'])
+function readBranchRemoteState(
+  repoRoot: string,
+  currentBranch?: string,
+  run?: GitRunner,
+): BranchRemoteState {
+  const branch = currentBranch ?? git(repoRoot, ['branch', '--show-current'], run)
   if (branch === '') throw new Error('the current checkout is not on a branch')
 
   const lookups: Record<RemoteCandidate, string[]> = {
@@ -49,9 +58,9 @@ function readBranchRemoteState(repoRoot: string, currentBranch?: string): Branch
   const answers = new Map<RemoteCandidate, string>()
   return {
     branch,
-    remotes: repositoryRemotes(repoRoot),
+    remotes: repositoryRemotes(repoRoot, run),
     candidate: (name) => {
-      if (!answers.has(name)) answers.set(name, optionalGit(repoRoot, lookups[name]))
+      if (!answers.has(name)) answers.set(name, optionalGit(repoRoot, lookups[name], run))
       return answers.get(name)!
     },
   }
@@ -74,24 +83,26 @@ function resolveCurrentBranchRemote(state: BranchRemoteState, precedence: Remote
 }
 
 /** Return the push remote using Git's configured precedence, or the only remote. */
-export function currentBranchPushRemote(repoRoot: string): string {
-  return resolveCurrentBranchRemote(readBranchRemoteState(repoRoot), PUSH_PRECEDENCE)
+export function currentBranchPushRemote(repoRoot: string, run?: GitRunner): string {
+  return resolveCurrentBranchRemote(readBranchRemoteState(repoRoot, undefined, run), PUSH_PRECEDENCE)
 }
 
 /** Return the tracking/base remote before considering a configured push target. */
-export function currentBranchTrackingRemote(repoRoot: string): string {
-  return resolveCurrentBranchRemote(readBranchRemoteState(repoRoot), TRACKING_PRECEDENCE)
+export function currentBranchTrackingRemote(repoRoot: string, run?: GitRunner): string {
+  return resolveCurrentBranchRemote(
+    readBranchRemoteState(repoRoot, undefined, run), TRACKING_PRECEDENCE,
+  )
 }
 
 /**
  * Return both the push and the tracking remote from one read of the current branch and
  * the repository remotes. A caller that already holds the current branch passes it.
  */
-export function currentBranchRemotes(repoRoot: string, currentBranch?: string): {
+export function currentBranchRemotes(repoRoot: string, currentBranch?: string, run?: GitRunner): {
   push: string
   tracking: string
 } {
-  const state = readBranchRemoteState(repoRoot, currentBranch)
+  const state = readBranchRemoteState(repoRoot, currentBranch, run)
   return {
     push: resolveCurrentBranchRemote(state, PUSH_PRECEDENCE),
     tracking: resolveCurrentBranchRemote(state, TRACKING_PRECEDENCE),
