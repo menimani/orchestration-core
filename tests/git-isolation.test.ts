@@ -34,6 +34,11 @@ describe('the isolated git configuration', () => {
     expect(process.env.GIT_CONFIG_NOSYSTEM).toBe('1')
   })
 
+  it('keeps git to its untranslated messages', () => {
+    expect(process.env.LC_ALL).toBe('C')
+    expect(process.env.LANGUAGE).toBeUndefined()
+  })
+
   it('lets a value set in a fixture repository override the global file', () => {
     const repository = gitRepository()
     git(repository, ['config', 'core.fsync', 'all'])
