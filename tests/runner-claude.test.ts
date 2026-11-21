@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
-import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReasoningEffort, RunnerStartOptions } from '../src/adapters/runner.ts'
@@ -239,6 +240,82 @@ describe('Claude process wrapper', () => {
     await expect(completed).rejects.toBe(error)
     expect(mocks.writeFileSync).not.toHaveBeenCalled()
     expect(mocks.renameSync).not.toHaveBeenCalled()
+  })
+
+  it('resolves 1 when claude is killed by a signal and closes without an exit code', async () => {
+    const child = mockChild()
+    mocks.spawn.mockReturnValue(child)
+
+    const completed = runClaudeProcess('final-message.txt', ['-p'])
+    child.emit('close', null)
+
+    await expect(completed).resolves.toBe(1)
+    expect(mocks.renameSync).toHaveBeenCalledWith(
+      `final-message.txt.${process.pid}.tmp`, 'final-message.txt',
+    )
+  })
+
+  it('rejects and removes the temporary file when the final message cannot be published', async () => {
+    const child = mockChild()
+    mocks.spawn.mockReturnValue(child)
+    const error = Object.assign(new Error('EPERM: operation not permitted, rename'), {
+      code: 'EPERM',
+    })
+    mocks.renameSync.mockImplementation(() => {
+      throw error
+    })
+
+    const completed = runClaudeProcess('final-message.txt', ['-p'])
+    child.emit('close', 0)
+
+    await expect(completed).rejects.toBe(error)
+    expect(mocks.writeFileSync).toHaveBeenCalledWith(
+      `final-message.txt.${process.pid}.tmp`, Buffer.alloc(0),
+    )
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      `final-message.txt.${process.pid}.tmp`, { force: true },
+    )
+  })
+
+  it('exits 1 when the wrapper cannot publish the final message', async () => {
+    // child_process and fs are mocked for this file, so the wrapper runs as a real process
+    // against a fake claude found first on PATH.
+    const { spawnSync } = await vi.importActual<typeof import('node:child_process')>(
+      'node:child_process',
+    )
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs')
+    const wrapper = fileURLToPath(new URL('../src/adapters/runner-claude.ts', import.meta.url))
+    const directory = fs.mkdtempSync(join(tmpdir(), 'runner-claude-'))
+    try {
+      const bin = join(directory, 'bin')
+      fs.mkdirSync(bin)
+      if (process.platform === 'win32') {
+        fs.writeFileSync(join(bin, 'claude.cmd'), '@echo partial\r\n@exit /b 0\r\n')
+      } else {
+        fs.writeFileSync(join(bin, 'claude'), '#!/bin/sh\necho partial\nexit 0\n', { mode: 0o755 })
+      }
+      // A directory in the final message's place makes the rename fail on every platform.
+      const finalMessageFile = join(directory, 'final-message.txt')
+      fs.mkdirSync(finalMessageFile)
+      const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH')
+        ?? 'PATH'
+
+      const result = spawnSync(process.execPath, [
+        wrapper, '--claude-runner-wrapper', finalMessageFile, '-p',
+      ], {
+        encoding: 'utf8',
+        env: { ...process.env, [pathKey]: `${bin}${delimiter}${process.env[pathKey] ?? ''}` },
+        windowsHide: true,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stdout.trim()).toBe('partial')
+      expect(result.stderr.startsWith('Claude runner failed: ')).toBe(true)
+      expect(fs.readdirSync(directory).sort()).toEqual(['bin', 'final-message.txt'])
+      expect(fs.readdirSync(finalMessageFile)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it('exits 1 when the wrapper is started without a final-message file', async () => {

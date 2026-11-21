@@ -56,12 +56,13 @@ async function git(paths: OrchPaths, args: string[]): Promise<string> {
   return result.stdout.trim()
 }
 
-async function isAncestor(paths: OrchPaths, ancestor: string, descendant: string): Promise<boolean> {
+// Both directions name the base ref, so a failure reads the same whichever rejects first.
+async function isAncestor(paths: OrchPaths, ancestor: string, descendant: string, baseRef: string): Promise<boolean> {
   const result = await gitResult(paths, ['merge-base', '--is-ancestor', ancestor, descendant])
   if (result.status === 0) return true
   if (result.status === 1) return false
   const detail = (result.stderr || result.stdout).trim()
-  throw new Error(`Could not compare HEAD with '${descendant}'${detail === '' ? '' : `: ${detail}`}`)
+  throw new Error(`Could not compare HEAD with '${baseRef}'${detail === '' ? '' : `: ${detail}`}`)
 }
 
 async function updateWorkerCheckout(paths: OrchPaths, baseRef: string): Promise<void> {
@@ -71,8 +72,8 @@ async function updateWorkerCheckout(paths: OrchPaths, baseRef: string): Promise<
   await git(paths, ['rev-parse', '--verify', `${baseRef}^{commit}`])
 
   const [headBehindBase, baseBehindHead] = await Promise.all([
-    isAncestor(paths, 'HEAD', baseRef),
-    isAncestor(paths, baseRef, 'HEAD'),
+    isAncestor(paths, 'HEAD', baseRef, baseRef),
+    isAncestor(paths, baseRef, 'HEAD', baseRef),
   ])
   if (!headBehindBase && !baseBehindHead) {
     throw new Error(
