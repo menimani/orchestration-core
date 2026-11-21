@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { ForgeRateLimitError } from '../src/adapters/forge.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
-import { FAKE_COMMIT } from './fakeRepository.ts'
+import { FAKE_COMMIT, FAKE_HEAD } from './fakeRepository.ts'
 import {
   configureRemoteDefaultBranch, fakeForge, forgeStatus, git, initializeGitRepo,
   initializeGitRepoWithRemote, logText, logged, makeLoop, paths, registerLoopHooks, repoRoot,
@@ -170,6 +170,8 @@ describe('completion marker output', () => {
     useFakeRepository({
       branch: 'feature/default-base',
       branches: ['trunk', 'feature/default-base'],
+      head: FAKE_COMMIT,
+      ancestors: [FAKE_HEAD],
       remotes: [{ name: 'upstream', url: join(repoRoot, 'remote.git'), defaultBranch: 'trunk' }],
       upstreams: { 'trunk': 'upstream', 'feature/default-base': 'upstream' },
       upstreamBranches: { 'feature/default-base': 'trunk' },

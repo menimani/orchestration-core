@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import type { GitRunner } from '../src/gitRunner.ts'
 import { startTask } from '../src/start.ts'
+import { markFakeRoot, unmarkFakeRoot } from './realGitGuard.ts'
 
 // An in-memory checkout for the loop tests that only need git to answer questions about
 // the repository: which branch is checked out, what HEAD is, which remotes exist and how
@@ -9,6 +10,8 @@ import { startTask } from '../src/start.ts'
 // git's own output format, and tests/fake-repository-contract.test.ts asks real git the
 // same questions about the same states. Any other invocation is refused and remembered,
 // so a question the loop starts asking fails the test instead of getting a made-up answer.
+// So does a state no history can produce, and real git started in the root past the
+// seam, which tests/realGitGuard.ts records.
 
 export interface FakeRemote {
   name: string
@@ -33,12 +36,17 @@ export interface FakeRemote {
   trackingBranches?: Record<string, string> | undefined
 }
 
-/** A commit HEAD has beyond a base; the fake knows no merge commits. */
+/**
+ * A commit HEAD has beyond a base. The fake knows a merge commit's place among them, but
+ * not its parents or its message body, and refuses the questions that need either.
+ */
 export interface FakeCommit {
   sha: string
   subject: string
-  /** The files the commit changes, none of them deleted. */
+  /** The files the commit changes, none of them deleted; for a merge, against its first parent. */
   files: string[]
+  /** True for a merge commit. */
+  merge?: boolean | undefined
 }
 
 /** A linked worktree, as `git worktree add <path> -b <branch>` leaves it at HEAD. */
@@ -52,7 +60,10 @@ export interface FakeRepositoryState {
   repository: boolean
   /** The checked-out branch; undefined for a detached HEAD. */
   branch: string | undefined
+  /** The commit HEAD names; ignored while the branch is unborn. */
   head: string
+  /** True for a branch that has no commit yet, as `git init` leaves it. */
+  unborn: boolean
   branches: string[]
   /** Linked worktrees; the checkout at the root is not one of them. */
   worktrees: FakeWorktree[]
@@ -67,11 +78,18 @@ export interface FakeRepositoryState {
   pushDefault: string | undefined
   /** Tracked files changed in the working tree. */
   modifiedFiles: string[]
+  /** Files in the working tree that git neither tracks nor ignores. */
+  untrackedFiles: string[]
   /** How many commits HEAD has that each named base does not. */
   commitsAhead: Record<string, number>
+  /** How many commits each named ref has that HEAD does not. */
+  commitsBehind: Record<string, number>
   /** The commits HEAD has that each named base does not, oldest first. */
   commits: Record<string, FakeCommit[]>
-  /** The commits HEAD descends from, other than HEAD itself. */
+  /**
+   * Every commit HEAD descends from, other than HEAD itself. A test that lists none leaves
+   * the length of HEAD's history undescribed, and bounds no commit count by it.
+   */
   ancestors: string[]
   /** The checkout's commits besides HEAD and its ancestors, each with every commit it contains. */
   otherCommits: Record<string, string[]>
@@ -89,6 +107,23 @@ export const FAKE_COMMIT = 'c0de0c0de0c0de0c0de0c0de0c0de0c0de0c0de0'
 export const FAKE_LATER_COMMIT = '1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e'
 
 const NOT_A_REPOSITORY = 'fatal: not a git repository (or any of the parent directories): .git\n'
+// What git adds when the repository a remote names cannot be read.
+const UNREADABLE_REMOTE = 'fatal: Could not read from remote repository.\n\n'
+  + 'Please make sure you have the correct access rights\nand the repository exists.\n'
+// What git prints for a revision it cannot resolve where a path could also stand.
+const UNKNOWN_REVISION_HINT = "Use '--' to separate paths from revisions, like this:\n"
+  + "'git <command> [<revision>...] -- [<file>...]'\n"
+// The questions an unborn branch is answered: those whose answer needs no commit.
+const UNBORN_QUESTION = new RegExp('^(?:branch --show-current|rev-parse HEAD|remote|status --porcelain'
+  + '|config --get \\S+|remote get-url \\S+|show-ref --verify --quiet refs/heads/\\S+'
+  + '|for-each-ref --format=%\\(upstream:remotename\\) refs/heads/\\S+'
+  + '|for-each-ref --format=%\\(refname\\) refs/heads|symbolic-ref --quiet --short refs/remotes/\\S+/HEAD'
+  + '|rev-parse --abbrev-ref --symbolic-full-name @\\{upstream\\}|rev-parse --verify HEAD\\^\\{commit\\})$')
+// What git prints when a ref's lock file is already there.
+const LOCKED_REF_HINT = 'Another git process seems to be running in this repository, e.g.\n'
+  + "an editor opened by 'git commit'. Please make sure all processes\n"
+  + 'are terminated then try again. If it still fails, a git process\n'
+  + 'may have crashed in this repository earlier:\nremove the file manually to continue.\n'
 
 /** A path as git prints it: resolved through links, with forward slashes. */
 function gitPath(path: string): string {
@@ -102,10 +137,88 @@ function gitPath(path: string): string {
 }
 
 /** The error execFileSync throws for a git process that exits with `status`. */
-function gitFailure(args: string[], status: number, stderr: string): Error {
+function gitFailure(args: string[], status: number, stderr: string, stdout = ''): Error {
   return Object.assign(new Error(`Command failed: git ${args.join(' ')}\n${stderr}`), {
-    status, stderr, stdout: '',
+    status, stderr, stdout,
   })
+}
+
+/**
+ * The first contradiction in a state no single history can produce, or undefined. Listed
+ * ancestors are HEAD's whole history; a ref's listed commits are those HEAD has beyond
+ * it, the newest being HEAD itself and the rest its ancestors; and a ref that neither
+ * HEAD nor itself is a commit beyond is HEAD.
+ */
+export function impossibleState(state: FakeRepositoryState): string | undefined {
+  if (state.unborn) {
+    if (state.branch === undefined) return 'an unborn HEAD is on a branch, yet branch is undefined'
+    if (state.branches.includes(state.branch)) {
+      return `the unborn branch ${state.branch} has no ref yet, yet branches lists it`
+    }
+    const committed: [string, unknown[]][] = [
+      ['ancestors', state.ancestors], ['worktrees', state.worktrees],
+      ['modifiedFiles', state.modifiedFiles], ['commits', Object.keys(state.commits)],
+      ['commitsAhead', Object.keys(state.commitsAhead)],
+      ['commitsBehind', Object.keys(state.commitsBehind)],
+      ['otherCommits', Object.keys(state.otherCommits)],
+    ]
+    const named = committed.find(([, values]) => values.length > 0)
+    return named === undefined ? undefined : `an unborn HEAD has no commit, yet ${named[0]} is not empty`
+  }
+  const { head, ancestors } = state
+  if (ancestors.includes(head)) return `HEAD ${head} is listed among its own ancestors`
+  const repeated = ancestors.find((sha, index) => ancestors.indexOf(sha) !== index)
+  if (repeated !== undefined) return `ancestor ${repeated} is listed twice`
+  const history = ancestors.length + 1
+  const inHistory = Object.keys(state.otherCommits).find((sha) => sha === head || ancestors.includes(sha))
+  if (inHistory !== undefined) return `otherCommits lists ${inHistory} beside HEAD's history, yet it is in it`
+  for (const [ref, count] of Object.entries(state.commitsAhead)) {
+    if (!Number.isInteger(count) || count < 0) return `HEAD is ${count} commits beyond ${ref}`
+    if (ancestors.length > 0 && count > history) {
+      return `HEAD is ${count} commits beyond ${ref}, yet its history holds only ${history}`
+    }
+  }
+  for (const [ref, count] of Object.entries(state.commitsBehind)) {
+    if (!Number.isInteger(count) || count < 0) return `${ref} is ${count} commits beyond HEAD`
+  }
+  for (const [ref, commits] of Object.entries(state.commits)) {
+    const shas = commits.map((commit) => commit.sha)
+    const twice = shas.find((sha, index) => shas.indexOf(sha) !== index)
+    if (twice !== undefined) return `commit ${twice} is listed twice beyond ${ref}`
+    const newest = shas.at(-1)
+    if (newest !== undefined && newest !== head) {
+      return `the newest commit beyond ${ref} is ${newest}, yet HEAD is ${head}`
+    }
+    const outside = shas.slice(0, -1).find((sha) => !ancestors.includes(sha))
+    if (outside !== undefined) return `commit ${outside} beyond ${ref} is neither HEAD nor one of its ancestors`
+    const ahead = state.commitsAhead[ref]
+    if (ahead !== undefined && ahead !== commits.length) {
+      return `HEAD is ${ahead} commits beyond ${ref}, yet ${commits.length} are listed beyond it`
+    }
+    if (commits.some((commit) => commit.merge === true) && history < 3) {
+      return `a merge commit beyond ${ref} has two parents, yet HEAD's history holds only ${history} commits`
+    }
+  }
+  for (const remote of state.remotes) {
+    for (const [branch, sha] of Object.entries(remote.trackingBranches ?? remote.branches ?? {})) {
+      const ref = `${remote.name}/${branch}`
+      const ahead = state.commitsAhead[ref]
+      const behind = state.commitsBehind[ref] ?? 0
+      const beyond = (state.commits[ref] ?? []).map((commit) => commit.sha)
+      if (sha === head && ((ahead ?? 0) !== 0 || behind !== 0 || beyond.length > 0)) {
+        return `${ref} is at HEAD, yet commits lie between them`
+      }
+      if (ancestors.includes(sha)) {
+        if (ahead === 0) return `${ref} is at ${sha}, an ancestor of HEAD, yet HEAD is no commit beyond it`
+        if (behind !== 0) return `${ref} is at ${sha}, an ancestor of HEAD, yet it is ${behind} commits beyond HEAD`
+        if (beyond.includes(sha)) return `${sha} is listed beyond ${ref}, yet ${ref} is at it`
+      }
+      if (sha !== head && ahead === 0 && behind === 0) {
+        return `neither HEAD nor ${ref} is a commit beyond the other, so ${ref} is HEAD, yet it is at ${sha}`
+      }
+    }
+  }
+  return undefined
 }
 
 export class FakeRepository {
@@ -113,14 +226,20 @@ export class FakeRepository {
   readonly state: FakeRepositoryState
   /** Every invocation the fake refused, in order. */
   readonly unanswered: string[] = []
+  /** Every contradiction in the state the fake was asked to answer from, in order. */
+  readonly contradictions: string[] = []
+  /** Every real git child started under the root, with its caller, in order. */
+  readonly realGit: string[]
 
   constructor(root: string, state: Partial<FakeRepositoryState> = {}) {
     this.root = resolve(root)
+    this.realGit = markFakeRoot(this.root)
     const branch = 'branch' in state ? state.branch : 'main'
     this.state = {
       repository: true,
       head: FAKE_HEAD,
-      branches: branch === undefined ? [] : [branch],
+      unborn: false,
+      branches: branch === undefined || state.unborn === true ? [] : [branch],
       worktrees: [],
       remotes: [],
       upstreams: {},
@@ -128,7 +247,9 @@ export class FakeRepository {
       pushRemotes: {},
       pushDefault: undefined,
       modifiedFiles: [],
+      untrackedFiles: [],
       commitsAhead: {},
+      commitsBehind: {},
       commits: {},
       ancestors: [],
       otherCommits: {},
@@ -137,10 +258,18 @@ export class FakeRepository {
       ...state,
       branch,
     }
+    const contradiction = impossibleState(this.state)
+    if (contradiction !== undefined) {
+      unmarkFakeRoot(this.root)
+      throw this.impossible(contradiction)
+    }
   }
 
   /** The loop's git port, bound to this repository. */
   readonly git: GitRunner = (cwd, args) => {
+    // A test may change the state between questions, so every answer checks it again.
+    const contradiction = impossibleState(this.state)
+    if (contradiction !== undefined) throw this.impossible(contradiction)
     const answer = resolve(cwd) === this.root ? this.answer(args) : undefined
     if (answer === undefined) {
       const invocation = `git ${args.join(' ')} in ${cwd}`
@@ -157,9 +286,22 @@ export class FakeRepository {
 
   /** Fails a test whose loop asked a question the fake could not answer. */
   assertEveryQuestionAnswered(): void {
+    unmarkFakeRoot(this.root)
+    if (this.realGit.length > 0) {
+      throw new Error(`Real git ran in the fake repository's root, past the git seam:\n${this.realGit.join('\n')}`)
+    }
+    if (this.contradictions.length > 0) {
+      throw new Error(`The fake repository was asked to answer from an impossible state: ${this.contradictions.join('; ')}`)
+    }
     if (this.unanswered.length > 0) {
       throw new Error(`The fake repository was asked:\n${this.unanswered.join('\n')}`)
     }
+  }
+
+  // Remembered as well as thrown, because the loop reads some failed answers as "no".
+  private impossible(contradiction: string): Error {
+    this.contradictions.push(contradiction)
+    return new Error(`The fake repository describes a state no history can produce: ${contradiction}`)
   }
 
   /**
@@ -181,16 +323,33 @@ export class FakeRepository {
     const remoteNamed = (name: string | undefined): FakeRemote | undefined =>
       state.remotes.find((remote) => remote.name === name)
     const command = args.join(' ')
+    // An unborn branch has no commit, so only the questions that need none are answered.
+    if (state.unborn && !UNBORN_QUESTION.test(command)) return undefined
 
     if (command === 'branch --show-current') {
       return () => lines(state.branch === undefined ? [] : [state.branch])
     }
-    if (command === 'rev-parse HEAD') return () => `${state.head}\n`
+    if (command === 'rev-parse HEAD') {
+      return () => {
+        if (state.unborn) {
+          throw gitFailure(args, 128,
+            `fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.\n${UNKNOWN_REVISION_HINT}`,
+            'HEAD\n')
+        }
+        return `${state.head}\n`
+      }
+    }
+    if (state.unborn && command === 'rev-parse --verify HEAD^{commit}') {
+      return () => { throw gitFailure(args, 128, 'fatal: Needed a single revision\n') }
+    }
     if (command === 'remote') {
       return () => lines(state.remotes.map((remote) => remote.name).sort())
     }
     if (command === 'status --porcelain') {
-      return () => lines(state.modifiedFiles.map((file) => ` M ${file}`))
+      return () => lines([
+        ...state.modifiedFiles.map((file) => ` M ${file}`),
+        ...state.untrackedFiles.map((file) => `?? ${file}`),
+      ])
     }
     if (command === 'config --get remote.pushDefault') return configured(state.pushDefault)
     if (command === 'rev-parse --abbrev-ref --symbolic-full-name @{upstream}') {
@@ -198,6 +357,7 @@ export class FakeRepository {
         if (state.branch === undefined) {
           throw gitFailure(args, 128, 'fatal: HEAD does not point to a branch\n')
         }
+        if (state.unborn) throw gitFailure(args, 128, `fatal: no such branch: '${state.branch}'\n`)
         const upstream = state.upstreams[state.branch]
         if (upstream === undefined) {
           throw gitFailure(args, 128, `fatal: no upstream configured for branch '${state.branch}'\n`)
@@ -293,7 +453,7 @@ export class FakeRepository {
             `error: cannot delete branch '${branch}' used by worktree at '${gitPath(checkout)}'\n`)
         }
         if (!state.branches.includes(branch)) {
-          throw gitFailure(args, 1, `error: branch '${branch}' not found.\n`)
+          throw gitFailure(args, 1, `error: branch '${branch}' not found\n`)
         }
         state.branches = state.branches.filter((name) => name !== branch)
         delete state.upstreams[branch]
@@ -302,22 +462,24 @@ export class FakeRepository {
       }
     }
     const missingRepository = (url: string): Error => gitFailure(args, 128,
-      `fatal: '${url}' does not appear to be a git repository\n`)
+      `fatal: '${url}' does not appear to be a git repository\n${UNREADABLE_REMOTE}`)
     const push = /^push --quiet( --set-upstream)? (\S+) (\S+)$/.exec(command)
-    if (push !== null) {
+    // A push the remote would reject for lacking its commits is not described.
+    if (push !== null && (state.commitsBehind[`${push[2]}/${push[3]}`] ?? 0) === 0) {
       const [, setUpstream, name = '', branch = ''] = push
       return () => {
         const remote = remoteNamed(name)
-        if (remote === undefined) {
-          throw gitFailure(args, 128, `fatal: '${name}' does not appear to be a git repository\n`)
-        }
+        if (remote === undefined) throw missingRepository(name)
         const url = remote.pushUrl ?? remote.url
         if (state.missingRepositories.includes(url)) throw missingRepository(url)
         if (!state.branches.includes(branch)) {
-          throw gitFailure(args, 1, `error: src refspec ${branch} does not match any\n`)
+          throw gitFailure(args, 1, `error: src refspec ${branch} does not match any\n`
+            + `error: failed to push some refs to '${url}'\n`)
         }
         // The remote now holds the branch's HEAD, and so does its remote-tracking ref.
         state.commitsAhead[`${name}/${branch}`] = 0
+        delete state.commitsBehind[`${name}/${branch}`]
+        delete state.commits[`${name}/${branch}`]
         if (remote.branches !== undefined) remote.branches = { ...remote.branches, [branch]: state.head }
         if (remote.trackingBranches !== undefined) {
           remote.trackingBranches = { ...remote.trackingBranches, [branch]: state.head }
@@ -332,6 +494,13 @@ export class FakeRepository {
       return () => { throw missingRepository(fetchUrl) }
     }
 
+    // What git and the upload-pack it starts print for a commit a remote reached through a
+    // local path does not hold; the two processes print in no fixed order.
+    const notOurRef = (sha: string): Error => gitFailure(args, 128,
+      `fatal: remote error: upload-pack: not our ref ${sha}\nfatal: git upload-pack: not our ref ${sha}\n`)
+    // A ref that neither HEAD nor itself is a commit beyond names HEAD itself.
+    const atHead = (ref: string | undefined): boolean => state.commitsAhead[ref ?? ''] === 0
+      && (state.commitsBehind[ref ?? ''] ?? 0) === 0
     const contains = (descendant: string, ancestor: string): boolean => descendant === ancestor
       || (descendant === state.head && state.ancestors.includes(ancestor))
       || (state.otherCommits[descendant] ?? []).includes(ancestor)
@@ -340,7 +509,7 @@ export class FakeRepository {
     // The commit a name resolves to as git resolves it, null for one git cannot resolve, and
     // undefined when the test did not describe what the name would point at.
     const commitNamed = (name: string): string | null | undefined => {
-      if (name === 'HEAD' || state.commitsAhead[name] === 0) return state.head
+      if (name === 'HEAD' || atHead(name)) return state.head
       const tracking = state.remotes.find((remote) => name.startsWith(`${remote.name}/`))
       if (tracking !== undefined) {
         const refs = tracking.trackingBranches ?? tracking.branches
@@ -375,14 +544,16 @@ export class FakeRepository {
         if (!/^[0-9a-f]{40}$/.test(wanted)) {
           const commit = branches[wanted]
           if (commit === undefined) {
-            throw gitFailure(args, 128, `fatal: couldn't find remote ref ${wanted}\n`)
+            throw gitFailure(args, 128,
+              `fatal: couldn't find remote ref ${refspec === null ? wanted : `refs/heads/${wanted}`}\n`)
           }
           // A fetch that finds the tracking ref current leaves it, and its lock, alone.
           const ref = `refs/remotes/${fetched.name}/${wanted}`
           if (refspec !== null && fetched.trackingBranches !== undefined
             && fetched.trackingBranches[wanted] !== commit) {
             if (state.lockedRefs.includes(ref)) {
-              throw gitFailure(args, 1, `error: cannot lock ref '${ref}': File exists.\n`)
+              throw gitFailure(args, 1, `error: cannot lock ref '${ref}': Unable to create `
+                + `'${gitPath(this.root)}/.git/${ref}.lock': File exists.\n\n${LOCKED_REF_HINT}`)
             }
             fetched.trackingBranches = { ...fetched.trackingBranches, [wanted]: commit }
           }
@@ -394,7 +565,7 @@ export class FakeRepository {
           return ''
         }
         if (!Object.values(branches).some((tip) => contains(tip, wanted))) {
-          throw gitFailure(args, 128, `fatal: remote error: upload-pack: not our ref ${wanted}\n`)
+          throw notOurRef(wanted)
         }
         return ''
       }
@@ -407,9 +578,6 @@ export class FakeRepository {
       && remoteNamed(fetchRef[1])?.defaultBranch === fetchRef[2]) {
       return () => ''
     }
-    // A ref HEAD has no commits beyond names HEAD itself, and HEAD's log against it is
-    // empty; the fake knows no other commit or subject.
-    const atHead = (ref: string | undefined): boolean => state.commitsAhead[ref ?? ''] === 0
     const remoteSymref = /^ls-remote --symref (\S+) HEAD$/.exec(command)
     // A remote whose own HEAD the test names advertises it only while it holds that branch.
     const advertised = remoteNamed(remoteSymref?.[1])
@@ -433,30 +601,43 @@ export class FakeRepository {
         return `${verified}\n`
       }
     }
+    // HEAD's log against a ref HEAD is no commit beyond is empty, whatever the ref has
+    // beyond HEAD; the fake knows no other commit or subject.
+    const noneBeyond = (ref: string | undefined): boolean => state.commitsAhead[ref ?? ''] === 0
     const log = /^log (.+)\.\.HEAD --no-merges --pretty=%H\|%s$/.exec(command)
-    if (log !== null && atHead(log[1])) return () => ''
+    if (log !== null && noneBeyond(log[1])) return () => ''
     // Beyond a base the test lists commits for, the fake knows their subjects and files.
     const since = (ref: string | undefined): FakeCommit[] | undefined =>
       (atHead(ref) ? [] : state.commits[ref ?? ''])
     const commitLog = since(log?.[1])
     if (commitLog !== undefined) {
-      return () => lines(commitLog.map((commit) => `${commit.sha}|${commit.subject}`).reverse())
+      return () => lines(commitLog.filter((commit) => commit.merge !== true)
+        .map((commit) => `${commit.sha}|${commit.subject}`).reverse())
     }
     const merges = /^log (.+)\.\.HEAD --merges --first-parent --reverse --format=%s%x1f%b%x1e$/
       .exec(command)
-    if (merges !== null && since(merges[1]) !== undefined) return () => ''
+    if (merges !== null && noneBeyond(merges[1])) return () => ''
+    // A merge's first parent and body are not described, so only a log without one is known.
+    const mergeLog = since(merges?.[1])
+    if (merges !== null && mergeLog?.every((commit) => commit.merge !== true) === true) return () => ''
     const changed = /^diff --name-only( --diff-filter=D)? (.+)\.\.HEAD$/.exec(command)
     const changedCommits = since(changed?.[2])
-    if (changed !== null && changedCommits !== undefined) {
+    // Against a ref with commits HEAD lacks, the diff also undoes theirs, which is not described.
+    if (changed !== null && changedCommits !== undefined && (state.commitsBehind[changed[2] ?? ''] ?? 0) === 0) {
       const files = changedCommits.flatMap((commit) => commit.files)
       return () => lines(changed[1] === undefined ? [...new Set(files)].sort() : [])
     }
     const shown = /^show --name-only --pretty=format: (\S+)$/.exec(command)
     const shownCommit = Object.values(state.commits).flat().find((commit) => commit.sha === shown?.[1])
-    if (shownCommit !== undefined) return () => lines(shownCommit.files)
+    // git shows a merge as its combined diff, which the fake cannot derive from the files.
+    if (shownCommit !== undefined && shownCommit.merge !== true) return () => lines(shownCommit.files)
     const ahead = /^rev-list --count (.+)\.\.HEAD$/.exec(command)
     if (ahead !== null && (ahead[1] ?? '') in state.commitsAhead) {
       return () => `${state.commitsAhead[ahead[1] ?? '']}\n`
+    }
+    const behind = /^rev-list --count HEAD\.\.(.+)$/.exec(command)
+    if (behind !== null && ((behind[1] ?? '') in state.commitsBehind || atHead(behind[1]))) {
+      return () => `${state.commitsBehind[behind[1] ?? ''] ?? 0}\n`
     }
     // Whether one commit is contained in another: HEAD in itself only, never in one of its
     // ancestors, and a commit the checkout does not hold is not in the object store at all.
@@ -477,7 +658,7 @@ export class FakeRepository {
     if (fetchCommit !== null && remoteNamed(fetchCommit[1]) !== undefined
       && fetchCommit[2] !== state.head && !state.ancestors.includes(fetchCommit[2] ?? '')) {
       return () => {
-        throw gitFailure(args, 128, `fatal: remote error: upload-pack: not our ref ${fetchCommit[2]}\n`)
+        throw notOurRef(fetchCommit[2] ?? '')
       }
     }
     return undefined

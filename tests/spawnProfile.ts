@@ -136,7 +136,7 @@ export function describeInvocation(name: string, args: readonly unknown[]): Pick
 
 // Arguments the wrapped call would reject must reach it and fail there, as they would
 // without the profile, rather than fail here first.
-function describeOrUnknown(name: string, args: readonly unknown[]): Pick<SpawnRecord, 'executable' | 'subcommand' | 'argv' | 'cwd'> {
+export function describeOrUnknown(name: string, args: readonly unknown[]): Pick<SpawnRecord, 'executable' | 'subcommand' | 'argv' | 'cwd'> {
   try {
     const words = invocationWords(name, args)
     const executable = executableName(words[0] ?? '')
