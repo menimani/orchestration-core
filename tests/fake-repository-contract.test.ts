@@ -197,7 +197,7 @@ const STATES: ContractState[] = [
       setup(root, 'checkout', '-q', '--detach')
       return { ...state, branch: undefined, branches: ['main'] }
     },
-    extra: [['worktree', 'list', '--porcelain', '-z']],
+    extra: [['worktree', 'list', '--porcelain', '-z'], ['branch', '--list', 'main']],
   },
   {
     name: 'a branch pushed with an upstream to a remote with a default branch',
@@ -237,6 +237,8 @@ const STATES: ContractState[] = [
       ['rev-parse', '--verify', 'origin/absent^{commit}'],
       ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
       ['fetch', '--quiet', 'origin', '+refs/heads/absent:refs/remotes/origin/absent'],
+      ['rev-parse', 'refs/remotes/origin/main'],
+      ['rev-parse', 'refs/remotes/origin/absent'],
     ],
   },
   {
@@ -322,7 +324,8 @@ const STATES: ContractState[] = [
         commitsAhead: { base: 2 },
       }
     },
-    extra: [['rev-list', '--count', 'base..HEAD']],
+    extra: [['rev-list', '--count', 'base..HEAD'], ['rev-parse', 'main'], ['branch', '--list', 'base']],
+    refused: [['rev-parse', 'base']],
   },
   {
     name: 'main pushed to the default branch of origin',
@@ -334,6 +337,7 @@ const STATES: ContractState[] = [
       ['rev-parse', '--verify', 'origin/main^{commit}'],
       ['log', 'origin/main..HEAD', '--no-merges', '--pretty=%H|%s'],
       ['rev-list', '--count', 'origin/main..HEAD'],
+      ['rev-parse', 'refs/remotes/origin/main'],
     ],
   },
   {
@@ -342,6 +346,11 @@ const STATES: ContractState[] = [
     extra: [
       ['worktree', 'list', '--porcelain', '-z'],
       ['for-each-ref', '--format=%(refname)', 'refs/heads'],
+      ['rev-parse', 'main'],
+      ['rev-parse', 'task/one'],
+      ['branch', '--list', 'main'],
+      ['branch', '--list', 'task/one'],
+      ['branch', '--list', 'absent'],
     ],
   },
   {
@@ -484,6 +493,47 @@ describe('the fake repository against real git, pushing the run branch', () => {
       ['push', '--quiet', 'origin', 'main'],
       ['rev-list', '--count', 'origin/main..HEAD'],
       ['rev-parse', '--verify', 'origin/main^{commit}'],
+    ]
+    const run = (git: GitRunner) => steps.map((args) => ({
+      args: args.join(' '), outcome: outcome(git, root, args),
+    }))
+
+    const real = run(realGit)
+    const fake = fakeAt(root, state)
+
+    expect(run(fake.git)).toEqual(real)
+    expect(fake.unanswered).toEqual([])
+  })
+})
+
+// origin's default branch advanced after the checkout last fetched it. Real git fetches
+// first, and the fake then answers the same steps from the state real git started in.
+describe('the fake repository against real git, refreshing a stale remote-tracking branch', () => {
+  it('moves the remote-tracking branch to the commit origin holds as git does', () => {
+    const root = join(workspace, 'refresh')
+    mkdirSync(root)
+    initialRepository(root)
+    const url = bareRemote(root, 'origin')
+    setup(root, 'push', '-q', '-u', 'origin', 'main')
+    remoteHead(url, 'main')
+    const stale = setup(root, 'rev-parse', 'HEAD')
+    commit(root, 'advanced\n')
+    const advanced = setup(root, 'rev-parse', 'HEAD')
+    setup(root, 'push', '-q', 'origin', 'main')
+    setup(root, 'update-ref', 'refs/remotes/origin/main', stale)
+    const state: Partial<FakeRepositoryState> = {
+      head: advanced,
+      remotes: [{
+        name: 'origin', url, defaultBranch: 'main', head: 'main',
+        branches: { main: advanced }, trackingBranches: { main: stale },
+      }],
+      upstreams: { main: 'origin' },
+    }
+    const steps: string[][] = [
+      ['rev-parse', 'refs/remotes/origin/main'],
+      ['rev-parse', 'refs/remotes/origin/absent'],
+      ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+      ['rev-parse', 'refs/remotes/origin/main'],
     ]
     const run = (git: GitRunner) => steps.map((args) => ({
       args: args.join(' '), outcome: outcome(git, root, args),

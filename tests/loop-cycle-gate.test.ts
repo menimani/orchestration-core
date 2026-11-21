@@ -337,7 +337,7 @@ describe('cycle gate', () => {
   })
 
   it('discards the scans it started when any scan fails to launch', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(
       join(paths.root, 'templates', 'scan-template.md'),
@@ -387,7 +387,7 @@ describe('cycle gate', () => {
   })
 
   it('reports a scan it could not discard after a launch failure as retained', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(
       join(paths.root, 'templates', 'scan-template.md'),
@@ -433,7 +433,7 @@ describe('cycle gate', () => {
   })
 
   it('retains a scan whose runner returned an invalid PID and discards the rest', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(
       join(paths.root, 'templates', 'scan-template.md'),
@@ -687,7 +687,7 @@ describe('cycle gate', () => {
   })
 
   it('gives the cycle back when writing a later scan specification throws', async () => {
-    initializeGitRepo()
+    useFakeRepository()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     const template = join(paths.root, 'templates', 'scan-template.md')
     const templateText = '# {{SCAN_ID}}\n\n{{SCAN_SCOPE}}\n### 1. First check\n### 2. Second check\n'
@@ -794,7 +794,7 @@ describe('cycle gate', () => {
   })
 
   it('discards first-cycle scans stopped before a new run branch reset the counter', async () => {
-    initializeGitRepo()
+    const repository = useFakeRepository()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(
       join(paths.root, 'templates', 'scan-template.md'),
@@ -808,7 +808,9 @@ describe('cycle gate', () => {
     writeFileSync(marker, `1\t${live}\n1\t${gone}\n`)
     writeRawStatus(live, 'running', null)
     const liveWorktree = worktreeDir(paths, live)
-    git(['worktree', 'add', '-q', liveWorktree, '-b', branchName(live)])
+    mkdirSync(liveWorktree, { recursive: true })
+    repository.state.branches.push(branchName(live))
+    repository.state.worktrees.push({ path: liveWorktree, branch: branchName(live) })
     const loop = makeLoop({ autoPr: false, reviewEnabled: false, maxBurstFailures: 1 })
     loop.initializeSessionStateForBranch()
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')
@@ -831,7 +833,7 @@ describe('cycle gate', () => {
   })
 
   it('discards later-cycle scans stopped before a new run branch reset the counter', async () => {
-    initializeGitRepo()
+    const repository = useFakeRepository()
     mkdirSync(join(paths.root, 'templates'), { recursive: true })
     writeFileSync(
       join(paths.root, 'templates', 'scan-template.md'),
@@ -845,7 +847,9 @@ describe('cycle gate', () => {
     writeFileSync(marker, `2\t${live}\n2\t${gone}\n`)
     writeRawStatus(live, 'running', null)
     const liveWorktree = worktreeDir(paths, live)
-    git(['worktree', 'add', '-q', liveWorktree, '-b', branchName(live)])
+    mkdirSync(liveWorktree, { recursive: true })
+    repository.state.branches.push(branchName(live))
+    repository.state.worktrees.push({ path: liveWorktree, branch: branchName(live) })
     const loop = makeLoop({ autoPr: false, reviewEnabled: false, maxBurstFailures: 1 })
     loop.initializeSessionStateForBranch()
     expect(readFileSync(join(paths.queueDir, 'scan-count.txt'), 'utf8')).toBe('0\n')

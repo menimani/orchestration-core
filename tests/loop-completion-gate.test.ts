@@ -6,7 +6,7 @@ import { TEST_LOCK_BUSY_EXIT_CODE } from '../src/merge.ts'
 import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { FAKE_COMMIT } from './fakeRepository.ts'
 import {
-  configureLocalRemote, fakeForge, forgeStatus, git, logText, logged, makeLoop, paths,
+  fakeForge, forgeStatus, git, logText, logged, makeLoop, paths,
   prStatusCalls, registerLoopHooks, repoRoot, stubProject, useFakeRepository,
   useFakeRepositoryWithRemote,
 } from './loopHarness.ts'
@@ -140,7 +140,7 @@ describe('completion marker output', () => {
   })
 
   it('retains an opted-in full-gate suite verdict for the branch tip', async () => {
-    configureLocalRemote()
+    useFakeRepositoryWithRemote()
     writeFileSync(join(paths.queueDir, 'scan-count.txt'), '1\n')
     const suiteProject: ProjectAdapter = {
       ...stubProject,

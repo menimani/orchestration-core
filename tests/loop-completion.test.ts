@@ -7,7 +7,7 @@ import { GENERATED_BODY_MARKER } from '../src/prbody.ts'
 import { FAKE_COMMIT, FAKE_HEAD } from './fakeRepository.ts'
 import {
   configureRemoteDefaultBranch, fakeForge, forgeStatus, git, initializeGitRepo,
-  initializeGitRepoWithRemote, logText, logged, makeLoop, paths, registerLoopHooks, repoRoot,
+  logText, logged, makeLoop, paths, registerLoopHooks, repoRoot,
   setForgeStatus, stubProject, useFakeRepository, useFakeRepositoryWithRemote,
 } from './loopHarness.ts'
 
@@ -228,11 +228,16 @@ describe('completion marker output', () => {
   })
 
   it('pushes a fresh topic branch through its only remote and establishes the upstream', async () => {
-    initializeGitRepoWithRemote()
-    git(['switch', '-c', 'feature/fresh-topic'])
-    writeFileSync(join(repoRoot, 'fresh.txt'), 'fresh\n')
-    git(['add', 'fresh.txt'])
-    git(['commit', '-m', 'feat: fresh topic'])
+    useFakeRepository({
+      branch: 'feature/fresh-topic',
+      branches: ['main', 'feature/fresh-topic'],
+      head: FAKE_COMMIT,
+      ancestors: [FAKE_HEAD],
+      remotes: [{ name: 'origin', url: join(repoRoot, 'origin.git'), defaultBranch: 'main' }],
+      upstreams: { main: 'origin' },
+      commitsAhead: { 'origin/main': 1 },
+      commits: { 'origin/main': [{ sha: FAKE_COMMIT, subject: 'feat: fresh topic', files: ['fresh.txt'] }] },
+    })
     setForgeStatus({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] })
     const loop = makeLoop()
 

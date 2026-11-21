@@ -339,6 +339,13 @@ export class FakeRepository {
         return `${state.head}\n`
       }
     }
+    // The checked-out branch is HEAD, and a worktree's branch is where `git worktree add`
+    // left it: at HEAD. Where any other branch stands is not described.
+    const branchTip = /^rev-parse ([^-\s]\S*)$/.exec(command)?.[1]
+    if (branchTip !== undefined && state.branches.includes(branchTip) && (branchTip === state.branch
+      || state.worktrees.some((worktree) => worktree.branch === branchTip))) {
+      return () => `${state.head}\n`
+    }
     if (state.unborn && command === 'rev-parse --verify HEAD^{commit}') {
       return () => { throw gitFailure(args, 128, 'fatal: Needed a single revision\n') }
     }
@@ -407,6 +414,17 @@ export class FakeRepository {
         + `${branch === undefined ? 'detached' : `branch refs/heads/${branch}`}\0\0`
       return () => entry(this.root, state.branch)
         + state.worktrees.map((worktree) => entry(worktree.path, worktree.branch)).join('')
+    }
+    // git marks the checked-out branch with `*` and a branch a linked worktree holds with `+`.
+    const listedBranch = /^branch --list (\S+)$/.exec(command)
+    if (listedBranch !== null) {
+      const branch = listedBranch[1] ?? ''
+      return () => {
+        if (!state.branches.includes(branch)) return ''
+        const mark = branch === state.branch ? '*'
+          : state.worktrees.some((worktree) => worktree.branch === branch) ? '+' : ' '
+        return `${mark} ${branch}\n`
+      }
     }
     if (command === 'for-each-ref --format=%(refname) refs/heads') {
       return () => lines(state.branches.map((branch) => `refs/heads/${branch}`).sort())
@@ -599,6 +617,20 @@ export class FakeRepository {
       return () => {
         if (verified === null) throw gitFailure(args, 128, 'fatal: Needed a single revision\n')
         return `${verified}\n`
+      }
+    }
+    // A remote-tracking branch named in full; a remote's own HEAD is a symbolic ref, not one.
+    const trackingRef = /^rev-parse refs\/remotes\/(\S+)$/.exec(command)?.[1]
+    const tracked = trackingRef === undefined || trackingRef.endsWith('/HEAD')
+      ? undefined
+      : commitNamed(trackingRef)
+    if (trackingRef !== undefined && tracked !== undefined) {
+      return () => {
+        if (tracked === null) {
+          throw gitFailure(args, 128, `fatal: ambiguous argument 'refs/remotes/${trackingRef}': unknown `
+            + `revision or path not in the working tree.\n${UNKNOWN_REVISION_HINT}`, `refs/remotes/${trackingRef}\n`)
+        }
+        return `${tracked}\n`
       }
     }
     // HEAD's log against a ref HEAD is no commit beyond is empty, whatever the ref has

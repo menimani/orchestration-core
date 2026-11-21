@@ -1884,12 +1884,15 @@ seam fails the test with the code that started it. The fake starts tasks through
 real `startTask`, answering only its `git worktree add` with a plain directory and a
 branch it records, so every check, message, status record, log line, and setup step
 comes from `src/start.ts`; the contract file starts the same task on real git and on
-the fake and compares the two. The cycle-gate
+the fake and compares the two. A loop test that asks about the checkout itself — which
+branches exist, where a branch or a remote-tracking ref points — asks the fake too, so
+its assertions read the state the loop left there. The cycle-gate
 cases in `tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's
 state machine — cycle flags, CI outcomes, review rounds, final promotion, and stop
-conditions. Most run on the fake checkout; the cases that launch and discard scan
-worktrees, reset the cycle counter for a new run branch, compare the branch with its
-remote, or find HEAD in a merged pull request still drive real git.
+conditions. Most run on the fake checkout, including those that launch and discard scan
+worktrees and reset the cycle counter for a new run branch; the cases that make the
+branch comparison with its remote fail by removing a commit object, or find HEAD in a
+merged pull request, still drive real git.
 `tests/documented-defaults.test.ts` holds the configuration tables in this file and in
 `README.md` to the defaults the source resolves. The suite's global setup removes this
 suite's own fixture directories older than six hours from the OS temporary directory,

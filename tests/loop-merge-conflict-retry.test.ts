@@ -18,8 +18,8 @@ import { specFile } from '../src/tasks.ts'
 import { releasePreparationForTask } from './releasePreparation.ts'
 import {
   backlogEntries, fakeForge, git, initializeGitRepo, logText, logged, makeCompletedTask,
-  makeConflictingLocalTask, makeLoop, paths, registerLoopHooks, repoRoot, runnerStarts,
-  stubProject, useFakeRepository,
+  makeConflictingLocalTask, makeFakeCompletedTask, makeLoop, paths, registerLoopHooks, repoRoot,
+  runnerStarts, stubProject, useFakeRepository,
 } from './loopHarness.ts'
 
 const cleanupFailure = vi.hoisted(() => ({ taskId: undefined as string | undefined }))
@@ -483,8 +483,8 @@ describe('completed task merge recovery', () => {
 
   it('does not merge a completed task whose issue claim was reaped', async () => {
     const taskId = '20260815_125258_040_auto-reaped-merge'
-    const initialHead = initializeGitRepo()
-    makeCompletedTask(taskId)
+    const initialHead = useFakeRepository().state.head
+    makeFakeCompletedTask(taskId)
     const loop = makeLoop({
       autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
     })
@@ -508,8 +508,8 @@ describe('completed task merge recovery', () => {
 
   it('defers the merge of a completed task whose issue claim cannot be read', async () => {
     const taskId = '20260815_125258_041_auto-unreadable-claim'
-    const initialHead = initializeGitRepo()
-    makeCompletedTask(taskId)
+    const initialHead = useFakeRepository().state.head
+    makeFakeCompletedTask(taskId)
     const loop = makeLoop({
       autoMerge: true, issueQueueEnabled: true, scanEnabled: false, maxParallel: 0,
     })
