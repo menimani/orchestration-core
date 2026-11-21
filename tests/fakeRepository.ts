@@ -1,11 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import type { GitRunner } from '../src/gitRunner.ts'
-import { branchName, finalMessageFile, logFile, worktreeDir } from '../src/paths.ts'
-import { recordTaskProcess } from '../src/processRegistry.ts'
-import { StartupOwnershipUnknownError, type startTask } from '../src/start.ts'
-import { writeStatus } from '../src/status.ts'
-import { specFile } from '../src/tasks.ts'
+import { startTask } from '../src/start.ts'
 
 // An in-memory checkout for the loop tests that only need git to answer questions about
 // the repository: which branch is checked out, what HEAD is, which remotes exist and how
@@ -167,51 +163,12 @@ export class FakeRepository {
   }
 
   /**
-   * startTask without `git worktree add`: the worktree is a plain directory and the task
-   * branch exists only here. The runner, the process registry and the status record are
-   * the real ones, as startTask leaves them. It refuses an effort or a missing
-   * specification as startTask does, and records a runner that fails to start as failed.
+   * The real startTask, with `git worktree add` answered here: the worktree is a plain
+   * directory and the task branch exists only in this state. Every check, message, status
+   * record, log line, marker and setup step is startTask's own.
    */
-  readonly startTask: typeof startTask = async (paths, runner, taskId, options) => {
-    if (!['minimal', 'low', 'medium', 'high'].includes(options.effort)) {
-      throw new Error(`effort must be minimal, low, medium or high, got '${options.effort}'`)
-    }
-    const spec = specFile(paths, taskId)
-    if (!existsSync(spec)) {
-      throw new Error(
-        `Task specification not found: ${spec}
-Create the specification first with the 'new' command.`,
-      )
-    }
-    const worktree = worktreeDir(paths, taskId)
-    mkdirSync(worktree, { recursive: true })
-    this.state.branches.push(branchName(taskId))
-    this.state.worktrees.push({ path: worktree, branch: branchName(taskId) })
-    const log = logFile(paths, taskId)
-    writeFileSync(log, '')
-    rmSync(finalMessageFile(paths, taskId), { force: true })
-    let pid: number
-    try {
-      pid = await runner.start({
-        worktree,
-        specFile: spec,
-        finalMessageFile: finalMessageFile(paths, taskId),
-        logFile: log,
-        effort: options.effort,
-        model: options.model,
-      })
-    } catch (error) {
-      appendFileSync(log, `Task startup failed:
-${String(error)}
-`)
-      await writeStatus(paths, taskId, 'failed')
-      throw error
-    }
-    if (!Number.isSafeInteger(pid) || pid <= 0) throw new StartupOwnershipUnknownError(pid)
-    recordTaskProcess(paths, taskId, pid)
-    await writeStatus(paths, taskId, 'running', pid)
-    return { outcome: 'started', pid }
-  }
+  readonly startTask: typeof startTask = (paths, runner, taskId, options) =>
+    startTask(paths, runner, taskId, options, this.git)
 
   /** The answer to one invocation, or undefined for one the fake does not know. */
   private answer(args: string[]): (() => string) | undefined {
@@ -293,6 +250,19 @@ ${String(error)}
     }
     if (command === 'for-each-ref --format=%(refname) refs/heads') {
       return () => lines(state.branches.map((branch) => `refs/heads/${branch}`).sort())
+    }
+    const addWorktree = /^worktree add --quiet (.+) -b (.+)$/.exec(command)
+    if (addWorktree !== null) {
+      const [, path = '', branch = ''] = addWorktree
+      return () => {
+        if (state.branches.includes(branch)) {
+          throw gitFailure(args, 128, `fatal: a branch named '${branch}' already exists\n`)
+        }
+        mkdirSync(path, { recursive: true })
+        state.branches.push(branch)
+        state.worktrees.push({ path, branch })
+        return ''
+      }
     }
     if (command === 'worktree prune --expire now') {
       return () => {

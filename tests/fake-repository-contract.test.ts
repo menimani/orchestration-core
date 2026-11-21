@@ -1,9 +1,16 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { Runner } from '../src/adapters/runner.ts'
 import type { GitRunner } from '../src/gitRunner.ts'
+import { logFile, orchPaths, rebaseEmptiedMarkerFile } from '../src/paths.ts'
+import { forgetTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
+import { startTask } from '../src/start.ts'
+import { readStatus } from '../src/status.ts'
+import { specFile } from '../src/tasks.ts'
+import { fakeRunnerSharedSkills } from './fakeRunner.ts'
 import { FakeRepository, type FakeRepositoryState } from './fakeRepository.ts'
 
 // The fake repository stands in for git in the loop tests, so its answers are only worth
@@ -601,6 +608,88 @@ describe('the fake repository against real git on commits beside run branches', 
       expect(fake.unanswered).toEqual([])
     },
   )
+})
+
+// The loop tests start tasks through the fake, which runs the real startTask and answers
+// only its \`git worktree add\`. Real git starts the same task in one checkout and the fake
+// in another directory standing for the same state; the outcomes, the status record, the
+// log, the recorded process and the worktree and branch git then lists must agree, for a
+// first start, a start over a task still running and one over a worktree left without
+// an owner.
+describe('the fake repository against real git, starting a task', () => {
+  it('starts, skips and refuses a task as startTask on git does', async () => {
+    const realRoot = join(workspace, 'start-real')
+    const fakeRoot = join(workspace, 'start-fake')
+    mkdirSync(realRoot)
+    mkdirSync(fakeRoot)
+    const fake = new FakeRepository(fakeRoot, initialRepository(realRoot))
+    const taskId = '20260809_000000_001_auto-contract-start'
+    const setupSteps = [{
+      label: 'Write setup output',
+      cwd: '',
+      command: 'node -e "console.log(42)"',
+    }]
+
+    const gitPath = (path: string): string => realpathSync.native(path).split(sep).join('/')
+    const run = async (root: string, git: GitRunner | undefined) => {
+      const paths = orchPaths(root)
+      const normalize = (text: string): string =>
+        text.split(root).join('<root>').split(gitPath(root)).join('<root>')
+      writeFileSync(specFile(paths, taskId), '# contract start\n')
+      mkdirSync(join(paths.queueDir, 'rebase-emptied'), { recursive: true })
+      writeFileSync(rebaseEmptiedMarkerFile(paths, taskId), '')
+      writeFileSync(join(paths.queueDir, 'announced-failures.txt'), `${taskId}\n`)
+      const reported: string[] = []
+      const runner: Runner = { sharedSkills: fakeRunnerSharedSkills, start: async () => process.pid }
+      const options = { effort: 'medium' as const, setup: setupSteps, report: (line: string) => { reported.push(line) } }
+      const start = async (): Promise<unknown> => {
+        try {
+          return git === undefined
+            ? await startTask(paths, runner, taskId, options)
+            : await startTask(paths, runner, taskId, options, git)
+        } catch (error) {
+          return { error: normalize((error as Error).message) }
+        }
+      }
+      const status = () => {
+        const record = readStatus(paths, taskId)
+        return record === undefined ? undefined : {
+          ...record, started_at: '', updated_at: '', worktree: normalize(record.worktree),
+        }
+      }
+      const listed = () => normalize((git ?? realGit)(root, ['worktree', 'list', '--porcelain', '-z'])
+        + (git ?? realGit)(root, ['for-each-ref', '--format=%(refname)', 'refs/heads']))
+
+      const first = {
+        result: await start(),
+        status: status(),
+        log: normalize(readFileSync(logFile(paths, taskId), 'utf8')),
+        process: taskProcessPid(paths, taskId),
+        rebaseEmptied: existsSync(rebaseEmptiedMarkerFile(paths, taskId)),
+        announced: readFileSync(join(paths.queueDir, 'announced-failures.txt'), 'utf8'),
+        listed: listed(),
+      }
+      const running = { result: await start(), status: status() }
+      forgetTaskProcess(paths, taskId)
+      const leftover = { result: await start(), status: status(), listed: listed() }
+      return { first, running, leftover, reported: reported.map(normalize) }
+    }
+
+    const real = await run(realRoot, undefined)
+    const faked = await run(fakeRoot, fake.git)
+
+    expect(faked).toEqual(real)
+    expect(real.first.result).toEqual({ outcome: 'started', pid: process.pid })
+    expect(real.first.status).toMatchObject({ status: 'running', pid: process.pid })
+    expect(real.first.log).toBe('42\n')
+    expect(real.first.process).toBe(process.pid)
+    expect(real.first.rebaseEmptied).toBe(false)
+    expect(real.first.announced).toBe('')
+    expect(real.first.listed).toContain(`refs/heads/task/${taskId}`)
+    expect(real.running.result).toEqual({ outcome: 'already-running' })
+    expect(real.leftover.result).toEqual({ error: expect.stringContaining('without a live owner') })
+    expect(fake.unanswered).toEqual([])
+  })
 })
 
 describe('the fake repository on a question it does not know', () => {

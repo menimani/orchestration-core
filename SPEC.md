@@ -1866,7 +1866,11 @@ test needs git only to answer questions about the checkout — its branch, HEAD,
 and push configuration. Those tests run against `tests/fakeRepository.ts`, an in-memory
 checkout that answers exactly the invocations the loop makes in git's own output format
 and refuses any other, and `tests/fake-repository-contract.test.ts` asks real git the
-same questions about the same states, so the fake cannot drift from it. The cycle-gate
+same questions about the same states, so the fake cannot drift from it. The fake starts
+tasks through the real `startTask`, answering only its `git worktree add` with a plain
+directory and a branch it records, so every check, message, status record, log line, and
+setup step comes from `src/start.ts`; the contract file starts the same task on real git
+and on the fake and compares the two. The cycle-gate
 cases in `tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's
 state machine — cycle flags, CI outcomes, review rounds, final promotion, and stop
 conditions. Most run on the fake checkout; the cases that launch and discard scan
