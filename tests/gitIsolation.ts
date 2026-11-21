@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll } from 'vitest'
+import { installRealGitGuard } from './realGitGuard.ts'
 import { recordSpawnProfile } from './spawnProfile.ts'
 
 // The fixtures drive real git repositories, and git reads the host's system and global
@@ -30,6 +32,12 @@ process.env.GIT_CONFIG_GLOBAL = globalConfig
 afterAll(() => {
   rmSync(configRoot, { recursive: true, force: true })
 })
+
+// Watches for real git started in a fake repository's root; tests/realGitGuard.ts says
+// why. Installed before the profile, so the profile still attributes each child to the
+// code that started it rather than to this guard.
+installRealGitGuard(createRequire(import.meta.url)('node:child_process') as Record<string | symbol, unknown>)
+syncBuiltinESMExports()
 
 // Off unless ORCH_TEST_SPAWN_PROFILE names a directory. Installed here, before any test
 // module loads, so it sees every child process the file and the code under test create.

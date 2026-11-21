@@ -1866,11 +1866,21 @@ test needs git only to answer questions about the checkout — its branch, HEAD,
 and push configuration. Those tests run against `tests/fakeRepository.ts`, an in-memory
 checkout that answers exactly the invocations the loop makes in git's own output format
 and refuses any other, and `tests/fake-repository-contract.test.ts` asks real git the
-same questions about the same states, so the fake cannot drift from it. The fake starts
-tasks through the real `startTask`, answering only its `git worktree add` with a plain
-directory and a branch it records, so every check, message, status record, log line, and
-setup step comes from `src/start.ts`; the contract file starts the same task on real git
-and on the fake and compares the two. The cycle-gate
+same questions about the same states, so the fake cannot drift from it: the output, or
+the exit status and the first line of standard error, and the whole of standard error
+wherever the loop matches on git's reason or reports it. The contract covers an unborn
+branch, untracked files, a merge commit and a checkout behind its remote-tracking
+branch; a question the fake cannot describe in such a state, such as a merge's first
+parent, it refuses rather than answers. The fake also refuses a state no single history
+can produce — HEAD among its own ancestors, commits beyond a ref whose newest is not
+HEAD, counts that disagree with the commits or the remote-tracking refs — when a test
+builds it and before every answer, naming the contradiction. And because a loop test's
+checkout is a plain directory, a real git process started there past the loop's git
+seam fails the test with the code that started it. The fake starts tasks through the
+real `startTask`, answering only its `git worktree add` with a plain directory and a
+branch it records, so every check, message, status record, log line, and setup step
+comes from `src/start.ts`; the contract file starts the same task on real git and on
+the fake and compares the two. The cycle-gate
 cases in `tests/loop-cycle-gate.test.ts` are the load-bearing ones: they pin the gate's
 state machine — cycle flags, CI outcomes, review rounds, final promotion, and stop
 conditions. Most run on the fake checkout; the cases that launch and discard scan

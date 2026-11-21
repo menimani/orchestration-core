@@ -9,14 +9,17 @@ import { logFile, orchPaths, rebaseEmptiedMarkerFile } from '../src/paths.ts'
 import { forgetTaskProcess, taskProcessPid } from '../src/processRegistry.ts'
 import { startTask } from '../src/start.ts'
 import { readStatus } from '../src/status.ts'
-import { specFile } from '../src/tasks.ts'
+import { failedTaskLeftover, specFile } from '../src/tasks.ts'
 import { fakeRunnerSharedSkills } from './fakeRunner.ts'
-import { FakeRepository, type FakeRepositoryState } from './fakeRepository.ts'
+import {
+  FAKE_COMMIT, FAKE_HEAD, FakeRepository, type FakeRepositoryState,
+} from './fakeRepository.ts'
+import { unmarkFakeRoot } from './realGitGuard.ts'
 
 // The fake repository stands in for git in the loop tests, so its answers are only worth
 // what this file proves: every state it distinguishes is built in a real repository, and
 // every invocation it answers is asked of real git and of the fake, which must agree on
-// the output, or on the failure status. This file runs real git on purpose.
+// the output, or on the failure status and text. This file runs real git on purpose.
 
 const realGit: GitRunner = (cwd, args) => execFileSync('git', args, {
   cwd,
@@ -27,14 +30,40 @@ const realGit: GitRunner = (cwd, args) => execFileSync('git', args, {
   env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(cwd) },
 })
 
-type Outcome = { output: string } | { status: number | null }
+type Outcome = { output: string } | { status: number | null, stderr: string }
+
+// The failures whose text the loop matches on or reports, compared whole. src/loop.ts
+// matches a refspec fetch's reason and reports the reasons of fetch, push, merge-base,
+// rev-list and rev-parse --verify; cleanup reports why a worktree removal failed. Every
+// other failure is compared by the first line of its standard error.
+const REPORTED_FAILURES = [/^fetch /, /^push /, /^merge-base /, /^rev-list /, /^rev-parse --verify /, /^worktree remove /]
 
 function outcome(run: GitRunner, cwd: string, args: string[]): Outcome {
   try {
     return { output: run(cwd, args) }
   } catch (error) {
-    return { status: (error as { status?: number | null }).status ?? null }
+    const failure = error as { status?: number | null, stderr?: string | Buffer }
+    // For a remote on a local path git starts upload-pack as a second process, and the two
+    // write to the same stream in whichever order they get there, so that process's own
+    // lines are compared after git's.
+    const written = String(failure.stderr ?? '').split(/(?<=\n)/)
+    const uploadPack = (line: string): boolean => line.startsWith('fatal: git upload-pack: ')
+    const stderr = [...written.filter((line) => !uploadPack(line)), ...written.filter(uploadPack)].join('')
+    const whole = REPORTED_FAILURES.some((reported) => reported.test(args.join(' ')))
+    return { status: failure.status ?? null, stderr: whole ? stderr : stderr.split('\n')[0] ?? '' }
   }
+}
+
+// This file asks real git in the fake's root on purpose, so it does not mark the root.
+function fakeAt(root: string, state: Partial<FakeRepositoryState>): FakeRepository {
+  const fake = new FakeRepository(root, state)
+  unmarkFakeRoot(fake.root)
+  return fake
+}
+
+/** Fails unless the fake refuses the invocation as one it does not know. */
+function expectRefused(fake: FakeRepository, root: string, args: string[]): void {
+  expect(() => fake.git(root, args)).toThrow(`does not answer git ${args.join(' ')}`)
 }
 
 interface ContractState {
@@ -43,6 +72,8 @@ interface ContractState {
   build: (root: string) => Partial<FakeRepositoryState>
   /** Invocations only this state can answer, asked in addition to the common ones. */
   extra?: string[][]
+  /** Invocations real git answers in this state that the fake cannot describe, so refuses. */
+  refused?: string[][]
 }
 
 function setup(root: string, ...args: string[]): string {
@@ -259,6 +290,31 @@ const STATES: ContractState[] = [
     name: 'a directory outside every repository',
     build: () => ({ repository: false }),
   },
+  {
+    name: 'a tracked file changed beside an untracked file',
+    build: (root) => {
+      const state = initialRepository(root)
+      writeFileSync(join(root, 'tracked.txt'), 'changed\n')
+      writeFileSync(join(root, 'untracked.txt'), 'untracked\n')
+      return { ...state, modifiedFiles: ['tracked.txt'], untrackedFiles: ['untracked.txt'] }
+    },
+  },
+  {
+    name: 'an unborn branch with an untracked file',
+    build: (root) => {
+      setup(root, 'init', '-q', '--initial-branch=main')
+      writeFileSync(join(root, 'untracked.txt'), 'untracked\n')
+      return { unborn: true, untrackedFiles: ['untracked.txt'] }
+    },
+    extra: [
+      ['rev-parse', '--verify', 'HEAD^{commit}'],
+      ['for-each-ref', '--format=%(refname)', 'refs/heads'],
+    ],
+    refused: [
+      ['worktree', 'list', '--porcelain', '-z'],
+      ['merge-base', '--is-ancestor', 'HEAD', 'HEAD'],
+    ],
+  },
 ]
 
 // Every invocation the fake answers, with the names the states above make present and absent.
@@ -299,7 +355,7 @@ describe('the fake repository against real git', () => {
       beforeAll(() => {
         root = join(workspace, String(index))
         mkdirSync(root)
-        fake = new FakeRepository(root, state.build(root))
+        fake = fakeAt(root, state.build(root))
       })
 
       it.each([...COMMON_INVOCATIONS, ...(state.extra ?? [])].map((args) => [args.join(' '), args]))(
@@ -309,6 +365,13 @@ describe('the fake repository against real git', () => {
           expect(fake.unanswered).toEqual([])
         },
       )
+
+      if (state.refused !== undefined) {
+        it.each(state.refused.map((args) => [args.join(' '), args]))(
+          'refuses git %s, which it cannot describe',
+          (_invocation, args) => expectRefused(fake, root, args),
+        )
+      }
     })
   })
 })
@@ -340,7 +403,7 @@ describe('the fake repository against real git, removing a task worktree', () =>
     const real = run(realGit)
     mkdirSync(worktree)
     writeFileSync(join(worktree, 'work.txt'), 'untracked\n')
-    const fake = new FakeRepository(root, state)
+    const fake = fakeAt(root, state)
 
     expect(run(fake.git)).toEqual(real)
     expect(fake.unanswered).toEqual([])
@@ -369,7 +432,7 @@ describe('the fake repository against real git, pushing the run branch', () => {
     }))
 
     const real = run(realGit)
-    const fake = new FakeRepository(root, state)
+    const fake = fakeAt(root, state)
 
     expect(run(fake.git)).toEqual(real)
     expect(fake.unanswered).toEqual([])
@@ -427,7 +490,7 @@ describe('the fake repository against real git, opening a PR for a topic branch'
     }))
 
     const real = run(realGit)
-    const fake = new FakeRepository(root, state)
+    const fake = fakeAt(root, state)
 
     expect(run(fake.git)).toEqual(real)
     expect(fake.unanswered).toEqual([])
@@ -451,7 +514,7 @@ describe('the fake repository against real git, opening a PR for a topic branch'
     }))
 
     const real = run(realGit)
-    const fake = new FakeRepository(root, state)
+    const fake = fakeAt(root, state)
 
     expect(run(fake.git)).toEqual(real)
     expect(fake.unanswered).toEqual([])
@@ -481,7 +544,7 @@ describe('the fake repository against real git, reaching a missing repository', 
     }))
 
     const real = run(realGit)
-    const fake = new FakeRepository(root, state)
+    const fake = fakeAt(root, state)
 
     expect(run(fake.git)).toEqual(real)
     expect(fake.unanswered).toEqual([])
@@ -507,7 +570,7 @@ describe('the fake repository against real git, reaching a missing repository', 
     }))
 
     const real = run(realGit)
-    const fake = new FakeRepository(root, state)
+    const fake = fakeAt(root, state)
 
     expect(run(fake.git)).toEqual(real)
     expect(fake.unanswered).toEqual([])
@@ -597,7 +660,7 @@ describe('the fake repository against real git on commits beside run branches', 
   beforeAll(() => {
     root = join(workspace, 'commits')
     mkdirSync(root)
-    fake = new FakeRepository(root, commitsBesideRunBranches(root, commits))
+    fake = fakeAt(root, commitsBesideRunBranches(root, commits))
   })
 
   it.each([...COMMON_INVOCATIONS, ...COMMIT_INVOCATIONS].map((args) => [args.join(' '), args]))(
@@ -711,5 +774,225 @@ describe('the fake repository on a question it does not know', () => {
     const fake = new FakeRepository(workspace, { commitsAhead: { base: 2 } })
 
     expect(() => fake.git(workspace, ['rev-list', '--count', 'other..HEAD'])).toThrow(/does not answer/)
+  })
+})
+
+// Commits made one second apart, so git log orders them the same on every host.
+function datedGit(root: string, second: number, ...args: string[]): void {
+  const date = `${1_800_000_000 + second} +0000`
+  execFileSync('git', args, {
+    cwd: root,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+  })
+}
+
+function commitAt(root: string, file: string, subject: string, second: number): void {
+  writeFileSync(join(root, file), `${subject}\n`)
+  setup(root, 'add', file)
+  datedGit(root, second, 'commit', '-q', '-m', subject)
+}
+
+// A side branch merged into main beyond a base: the fake places the merge among the
+// commits beyond the base, but knows neither its parents nor its body.
+describe('the fake repository against real git, beyond a merge commit', () => {
+  it('answers what it describes of the merge and refuses the rest as unknown', () => {
+    const root = join(workspace, 'merge')
+    mkdirSync(root)
+    const { head: initial = '' } = initialRepository(root)
+    setup(root, 'branch', 'base')
+    setup(root, 'switch', '-q', '-c', 'side')
+    commitAt(root, 'side.txt', 'feat: on the side', 1)
+    const side = setup(root, 'rev-parse', 'HEAD')
+    setup(root, 'switch', '-q', 'main')
+    commitAt(root, 'main.txt', 'feat: on main', 2)
+    const main = setup(root, 'rev-parse', 'HEAD')
+    datedGit(root, 3, 'merge', '--no-ff', '-q', '-m', "Merge branch 'side'", 'side')
+    const merge = setup(root, 'rev-parse', 'HEAD')
+    const fake = fakeAt(root, {
+      head: merge,
+      branches: ['main', 'base', 'side'],
+      ancestors: [initial, side, main],
+      commitsAhead: { base: 3 },
+      commits: {
+        base: [
+          { sha: side, subject: 'feat: on the side', files: ['side.txt'] },
+          { sha: main, subject: 'feat: on main', files: ['main.txt'] },
+          { sha: merge, subject: "Merge branch 'side'", files: ['side.txt'], merge: true },
+        ],
+      },
+    })
+    const answered: string[][] = [
+      ['rev-list', '--count', 'base..HEAD'],
+      ['log', 'base..HEAD', '--no-merges', '--pretty=%H|%s'],
+      ['diff', '--name-only', 'base..HEAD'],
+      ['diff', '--name-only', '--diff-filter=D', 'base..HEAD'],
+      ['show', '--name-only', '--pretty=format:', side],
+      ['merge-base', '--is-ancestor', side, 'HEAD'],
+      ['merge-base', '--is-ancestor', 'HEAD', side],
+    ]
+    const mergeLog = ['log', 'base..HEAD', '--merges', '--first-parent', '--reverse', '--format=%s%x1f%b%x1e']
+
+    for (const args of answered) {
+      expect(outcome(fake.git, root, args), args.join(' ')).toEqual(outcome(realGit, root, args))
+    }
+    expect(realGit(root, mergeLog)).toContain("Merge branch 'side'")
+    expectRefused(fake, root, mergeLog)
+    expectRefused(fake, root, ['show', '--name-only', '--pretty=format:', merge])
+    expect(fake.unanswered).toHaveLength(2)
+  })
+})
+
+// Another clone pushed to origin's main, which the checkout fetched without moving HEAD:
+// HEAD is no commit beyond origin/main, which is one beyond HEAD.
+describe('the fake repository against real git, behind its remote-tracking branch', () => {
+  it('counts the commits on each side and refuses what needs the commit it lacks', () => {
+    const root = join(workspace, 'behind')
+    mkdirSync(root)
+    const pushed = pushedToOrigin(root, initialRepository(root))
+    const outsideClone = `${root}-outside`
+    execFileSync('git', ['clone', '-q', '--branch', 'main', pushed.remotes?.[0]?.url ?? '', outsideClone],
+      { windowsHide: true })
+    setup(outsideClone, 'config', 'user.email', 'outside@example.test')
+    setup(outsideClone, 'config', 'user.name', 'Outside')
+    commit(outsideClone, 'outside\n')
+    setup(outsideClone, 'push', '-q', 'origin', 'main')
+    setup(root, 'fetch', '-q', 'origin')
+    const fake = fakeAt(root, {
+      ...pushed, commitsAhead: { 'origin/main': 0 }, commitsBehind: { 'origin/main': 1 },
+    })
+    const answered: string[][] = [
+      ['rev-list', '--count', 'origin/main..HEAD'],
+      ['rev-list', '--count', 'HEAD..origin/main'],
+      ['log', 'origin/main..HEAD', '--no-merges', '--pretty=%H|%s'],
+      ['log', 'origin/main..HEAD', '--merges', '--first-parent', '--reverse', '--format=%s%x1f%b%x1e'],
+    ]
+    const refused: string[][] = [
+      ['rev-parse', '--verify', 'origin/main^{commit}'],
+      ['diff', '--name-only', 'origin/main..HEAD'],
+      ['merge-base', '--is-ancestor', 'HEAD', 'origin/main'],
+      ['ls-remote', '--symref', 'origin', 'HEAD'],
+      ['push', '--quiet', 'origin', 'main'],
+    ]
+
+    for (const args of answered) {
+      expect(outcome(fake.git, root, args), args.join(' ')).toEqual(outcome(realGit, root, args))
+    }
+    for (const args of refused) expectRefused(fake, root, args)
+    expect(fake.unanswered).toHaveLength(refused.length)
+  })
+})
+
+describe('the fake repository on a state no history can produce', () => {
+  const origin = (main: string) => [{ name: 'origin', url: 'origin.git', branches: { main } }]
+  const IMPOSSIBLE: [string, Partial<FakeRepositoryState>, string][] = [
+    ['HEAD among its own ancestors', { ancestors: [FAKE_HEAD] },
+      `HEAD ${FAKE_HEAD} is listed among its own ancestors`],
+    ['an ancestor listed twice', { head: FAKE_COMMIT, ancestors: [FAKE_HEAD, FAKE_HEAD] },
+      `ancestor ${FAKE_HEAD} is listed twice`],
+    ['more commits beyond a base than the listed history holds',
+      { head: FAKE_COMMIT, ancestors: [FAKE_HEAD], commitsAhead: { base: 3 } },
+      'HEAD is 3 commits beyond base, yet its history holds only 2'],
+    ['a newest commit beyond a base other than HEAD', {
+      commitsAhead: { 'upstream/trunk': 1 },
+      commits: { 'upstream/trunk': [{ sha: FAKE_COMMIT, subject: 'feat: a change', files: ['a.txt'] }] },
+    }, `the newest commit beyond upstream/trunk is ${FAKE_COMMIT}, yet HEAD is ${FAKE_HEAD}`],
+    ['a commit beyond a base outside HEAD\'s history', {
+      head: FAKE_COMMIT,
+      commits: {
+        base: [
+          { sha: FAKE_HEAD, subject: 'feat: first', files: ['a.txt'] },
+          { sha: FAKE_COMMIT, subject: 'feat: second', files: ['b.txt'] },
+        ],
+      },
+    }, `commit ${FAKE_HEAD} beyond base is neither HEAD nor one of its ancestors`],
+    ['a count that disagrees with the commits listed', {
+      head: FAKE_COMMIT, ancestors: [FAKE_HEAD], commitsAhead: { base: 2 },
+      commits: { base: [{ sha: FAKE_COMMIT, subject: 'feat: a change', files: ['a.txt'] }] },
+    }, 'HEAD is 2 commits beyond base, yet 1 are listed beyond it'],
+    ['a merge commit with no commit before it', {
+      commits: { base: [{ sha: FAKE_HEAD, subject: "Merge branch 'side'", files: [], merge: true }] },
+    }, "a merge commit beyond base has two parents, yet HEAD's history holds only 1 commits"],
+    ['a remote-tracking branch at HEAD with commits beyond it',
+      { remotes: origin(FAKE_HEAD), commitsBehind: { 'origin/main': 1 } },
+      'origin/main is at HEAD, yet commits lie between them'],
+    ['a remote-tracking branch at an ancestor HEAD is no commit beyond',
+      { head: FAKE_COMMIT, ancestors: [FAKE_HEAD], remotes: origin(FAKE_HEAD), commitsAhead: { 'origin/main': 0 } },
+      `origin/main is at ${FAKE_HEAD}, an ancestor of HEAD, yet HEAD is no commit beyond it`],
+    ['a remote-tracking branch at an ancestor that is beyond HEAD',
+      { head: FAKE_COMMIT, ancestors: [FAKE_HEAD], remotes: origin(FAKE_HEAD), commitsBehind: { 'origin/main': 1 } },
+      `origin/main is at ${FAKE_HEAD}, an ancestor of HEAD, yet it is 1 commits beyond HEAD`],
+    ['a remote-tracking branch its counts name HEAD at another commit',
+      { remotes: origin(FAKE_COMMIT), commitsAhead: { 'origin/main': 0 } },
+      `neither HEAD nor origin/main is a commit beyond the other, so origin/main is HEAD, yet it is at ${FAKE_COMMIT}`],
+    ['a commit beside HEAD\'s history that is in it', { otherCommits: { [FAKE_HEAD]: [] } },
+      `otherCommits lists ${FAKE_HEAD} beside HEAD's history, yet it is in it`],
+    ['an unborn branch with an ancestor', { unborn: true, ancestors: [FAKE_HEAD] },
+      'an unborn HEAD has no commit, yet ancestors is not empty'],
+    ['an unborn branch that has a ref', { unborn: true, branches: ['main'] },
+      'the unborn branch main has no ref yet, yet branches lists it'],
+  ]
+
+  it.each(IMPOSSIBLE)('refuses to be built on %s', (_name, state, contradiction) => {
+    expect(() => new FakeRepository(workspace, state))
+      .toThrow(`The fake repository describes a state no history can produce: ${contradiction}`)
+  })
+
+  it('fails the test whose state becomes impossible before the next answer', () => {
+    const fake = new FakeRepository(workspace)
+    fake.state.head = FAKE_COMMIT
+    fake.state.ancestors = [FAKE_COMMIT]
+
+    expect(() => fake.git(workspace, ['rev-parse', 'HEAD']))
+      .toThrow(`HEAD ${FAKE_COMMIT} is listed among its own ancestors`)
+    expect(() => fake.assertEveryQuestionAnswered()).toThrow('The fake repository was asked to answer '
+      + `from an impossible state: HEAD ${FAKE_COMMIT} is listed among its own ancestors`)
+  })
+})
+
+// The loop tests' checkout is a plain directory, so production code that starts git there
+// itself, past the seam, fails where git would not. The fake's end-of-test check names
+// the code that did.
+describe('the fake repository on real git started in its root', () => {
+  it('fails the test with the caller that started it', () => {
+    const root = join(workspace, 'guarded')
+    mkdirSync(root)
+    const fake = new FakeRepository(root)
+
+    try {
+      failedTaskLeftover(orchPaths(root, false), 'guarded-task')
+    } catch {
+      // Outside a repository git exits 128, which the lookup rethrows.
+    }
+
+    expect(() => fake.assertEveryQuestionAnswered()).toThrow(new RegExp(
+      "^Real git ran in the fake repository's root, past the git seam:\\n"
+      + 'git show-ref --verify --quiet refs/heads/task/guarded-task in .+, started by src/tasks\\.ts:\\d+',
+    ))
+  })
+
+  it('records git pointed into its root with -C', () => {
+    const root = join(workspace, 'pointed')
+    mkdirSync(root)
+    const fake = new FakeRepository(root)
+
+    realGit(workspace, ['-C', root, '--version'])
+
+    expect(() => fake.assertEveryQuestionAnswered()).toThrow(
+      /^Real git ran in the fake repository's root, past the git seam:\ngit -C .+ --version in .+, started by tests\/fake-repository-contract\.test\.ts:\d+/,
+    )
+  })
+
+  it('leaves git started outside its root alone', () => {
+    const root = join(workspace, 'unguarded')
+    mkdirSync(root)
+    const fake = new FakeRepository(root)
+
+    realGit(workspace, ['--version'])
+    realGit(root, ['-C', workspace, '--version'])
+
+    expect(fake.realGit).toEqual([])
+    expect(() => fake.assertEveryQuestionAnswered()).not.toThrow()
   })
 })

@@ -254,7 +254,7 @@ describe('remote issue queue idle detection', () => {
   it('keeps the issues of a deleted run branch the current HEAD was cut from', async () => {
     // main was fast-forwarded to the deleted run branch's merge commit.
     const mergeCommit = 'c'.repeat(40)
-    repository.state.otherCommits[mergeCommit] = [FAKE_HEAD]
+    repository.state.ancestors = [FAKE_HEAD]
     repository.state.head = mergeCommit
     const { loop, issueNumber } = await noPullRequestLoop(mergeCommit, 'run/earlier')
 
