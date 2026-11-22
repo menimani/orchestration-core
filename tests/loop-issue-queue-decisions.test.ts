@@ -288,10 +288,10 @@ describe('remote issue queue idle detection', () => {
     expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
   })
 
-  // Two run branches without a pull request that still exist locally, so every poll asks
-  // the push remote about each of them. The questions the loop asks the checkout are
-  // recorded; only the remote resolution lists the remotes.
-  async function twoRunBranchesLoop() {
+  // Run branches without a pull request that still exist locally, two unless named, so
+  // every poll asks the push remote about each of them. The questions the loop asks the
+  // checkout are recorded; only the remote resolution lists the remotes.
+  async function twoRunBranchesLoop(runBranches = ['run/first', 'run/second']) {
     const answer = repository.git
     const questions = vi.spyOn(repository, 'git').mockImplementation(answer)
     const loop = makeLoop({
@@ -302,7 +302,7 @@ describe('remote issue queue idle detection', () => {
       maxParallel: 0,
     })
     loop.initializeSessionStateForBranch()
-    for (const runBranch of ['run/first', 'run/second']) {
+    for (const runBranch of runBranches) {
       repository.state.branches.push(runBranch)
       const issueNumber = await fakeForge.createIssue({
         title: `fix on ${runBranch}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
@@ -354,8 +354,10 @@ describe('remote issue queue idle detection', () => {
   })
 
   it('does not keep a failed remote resolution and resolves again for the next question of the poll', async () => {
-    const { loop, questions, answer, asked, remoteBranchQuestions } = await twoRunBranchesLoop()
-    // The first listing of the remotes fails, which leaves the checkout without a remote.
+    const { loop, questions, answer, asked, remoteBranchQuestions } =
+      await twoRunBranchesLoop(['run/first', 'run/second', 'run/third'])
+    // The first listing of the remotes fails, which leaves the checkout without a remote;
+    // the resolution that succeeds after it is kept for the third run branch.
     let failures = 1
     questions.mockImplementation((cwd, args, options) => {
       if (args.join(' ') === 'remote' && failures > 0) {
@@ -371,6 +373,7 @@ describe('remote issue queue idle detection', () => {
     expect(asked('remote')).toBe(2)
     expect(remoteBranchQuestions()).toEqual([
       'ls-remote --exit-code --heads origin refs/heads/run/second',
+      'ls-remote --exit-code --heads origin refs/heads/run/third',
     ])
     expect(logText()).toContain('WARN run branch run/first has no pull request')
     expect(logText()).not.toContain('Released')
