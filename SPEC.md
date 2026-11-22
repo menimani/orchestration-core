@@ -963,7 +963,10 @@ are not parsed by `loadConfig` and are not operator-file settings.
     base comes from the tracking remote, chosen from the same candidates with the
     upstream's remote and `branch.<name>.remote` first. Both are answered from one read
     of the branch and its remotes, made fresh at every gate and never cached across polls,
-    and a candidate after the first match is not looked up. Remote work defers the gate with a `Waiting remote` event when its
+    and a candidate after the first match is not looked up. A poll resolves these remotes
+    at most once for every other question it asks about them (worker publication, adoption,
+    the run-branch probe, the review base), resolving again at the next poll and after a
+    resolution that fails. Remote work defers the gate with a `Waiting remote` event when its
     pending issue set changes and every ten minutes while unchanged. When every pending
     issue carries `loop:merge-failed` and neither `loop:ready` nor `loop:in-progress` — a
     `loop:merge-ready` left beside it is a failure relabel that did not finish, which

@@ -566,6 +566,34 @@ export function createLoop(deps: LoopDeps) {
     return count
   }
 
+  // A poll resolves the current branch's remotes at most once and every question of that
+  // poll shares the answer; the next poll resolves again, so a changed configuration takes
+  // effect there. A resolution that fails is not kept. Outside a poll each question
+  // resolves the remotes itself.
+  let pollRemoteScope: { remotes?: { push: string, tracking: string } } | undefined
+
+  async function withPollRemoteScope<T>(step: () => Promise<T>): Promise<T> {
+    if (pollRemoteScope !== undefined) return step()
+    pollRemoteScope = {}
+    try {
+      return await step()
+    } finally {
+      pollRemoteScope = undefined
+    }
+  }
+
+  function pollPushRemote(): string {
+    if (pollRemoteScope === undefined) return currentBranchPushRemote(paths.repoRoot, injectedGit)
+    pollRemoteScope.remotes ??= currentBranchRemotes(paths.repoRoot, undefined, injectedGit)
+    return pollRemoteScope.remotes.push
+  }
+
+  function pollTrackingRemote(): string {
+    if (pollRemoteScope === undefined) return currentBranchTrackingRemote(paths.repoRoot, injectedGit)
+    pollRemoteScope.remotes ??= currentBranchRemotes(paths.repoRoot, undefined, injectedGit)
+    return pollRemoteScope.remotes.tracking
+  }
+
   function git(args: string[]): string {
     return runGit(paths.repoRoot, args)
   }
@@ -597,7 +625,7 @@ export function createLoop(deps: LoopDeps) {
     }
     let result = compare()
     if (result.status !== 0 && result.status !== 1) {
-      git(['fetch', '--quiet', currentBranchPushRemote(paths.repoRoot, injectedGit), descendant])
+      git(['fetch', '--quiet', pollPushRemote(), descendant])
       result = compare()
     }
     if (result.status === 0) return true
@@ -626,7 +654,7 @@ export function createLoop(deps: LoopDeps) {
       if (defaultRef !== null) return defaultRef
       defaultRef = undefined
       try {
-        const remote = currentBranchTrackingRemote(paths.repoRoot, injectedGit)
+        const remote = pollTrackingRemote()
         const ref = git(['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]).trim()
         if (!ref.startsWith(`${remote}/`)) return undefined
         git(['fetch', '--quiet', remote, ref.slice(remote.length + 1)])
@@ -640,7 +668,7 @@ export function createLoop(deps: LoopDeps) {
       remoteBranchExists: (runBranch) => {
         let remote: string
         try {
-          remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
+          remote = pollPushRemote()
         } catch {
           return undefined
         }
@@ -736,7 +764,7 @@ export function createLoop(deps: LoopDeps) {
     }
     if (lost.length > 0) throw new LostWorkerClaimError(lost)
 
-    const remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
+    const remote = pollPushRemote()
     gitIn(worktree, ['push', '--quiet', '--set-upstream', remote, branch])
     const issueList = issueNumbers.map((issueNumber) => `#${issueNumber}`).join(' ')
     await Promise.all(pending.map(async (issueNumber) => {
@@ -857,7 +885,7 @@ export function createLoop(deps: LoopDeps) {
       let adoptionTaskId: string | undefined
       let adoptionIssues = [issue]
       try {
-        const remote = currentBranchPushRemote(paths.repoRoot, injectedGit)
+        const remote = pollPushRemote()
         const adoptionComments = async (candidate: ForgeIssue): Promise<ForgeIssueComment[]> => {
           try {
             return await commentsForIssue(candidate)
@@ -2114,7 +2142,7 @@ export function createLoop(deps: LoopDeps) {
   function generateReviewTask(reviewId: string, cycle: number, prUrl: string): boolean {
     let remote: string
     try {
-      remote = currentBranchTrackingRemote(paths.repoRoot, injectedGit)
+      remote = pollTrackingRemote()
     } catch (error) {
       event('WARN', `could not resolve review base: ${errorSummary(error)}`)
       return false
@@ -4342,7 +4370,7 @@ export function createLoop(deps: LoopDeps) {
 
   async function guardedPoll(): Promise<'stopped' | 'done' | 'continue' | 'restart'> {
     try {
-      return await poll()
+      return await withPollRemoteScope(poll)
     } catch (error) {
       // Even a reset far beyond the ordinary poll window is an external wait, not a
       // branch failure. The proxy suppresses all further forge calls until it expires.
@@ -4366,7 +4394,9 @@ export function createLoop(deps: LoopDeps) {
     scanForNextTasks,
     collectDecisions,
     noteMergeFailure,
-    adoptRemoteTasks,
+    // A test's adoption pass stands for the adoption step of one poll.
+    adoptRemoteTasks: (openFindings?: readonly ForgeIssue[]) =>
+      withPollRemoteScope(() => adoptRemoteTasks(openFindings)),
     cycleIsFinal,
     runAutoReview,
     runCycleSuite,

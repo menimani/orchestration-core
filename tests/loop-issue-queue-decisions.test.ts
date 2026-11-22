@@ -288,6 +288,94 @@ describe('remote issue queue idle detection', () => {
     expect((await fakeForge.getIssue(issueNumber)).assignees).toEqual(['worker-a'])
   })
 
+  // Two run branches without a pull request that still exist locally, so every poll asks
+  // the push remote about each of them. The questions the loop asks the checkout are
+  // recorded; only the remote resolution lists the remotes.
+  async function twoRunBranchesLoop() {
+    const answer = repository.git
+    const questions = vi.spyOn(repository, 'git').mockImplementation(answer)
+    const loop = makeLoop({
+      issueQueueEnabled: true,
+      scanEnabled: false,
+      autoPr: false,
+      reviewEnabled: false,
+      maxParallel: 0,
+    })
+    loop.initializeSessionStateForBranch()
+    for (const runBranch of ['run/first', 'run/second']) {
+      repository.state.branches.push(runBranch)
+      const issueNumber = await fakeForge.createIssue({
+        title: `fix on ${runBranch}`, body: '', labels: [LABEL_FINDING, LABEL_IN_PROGRESS],
+        assignees: ['worker-a'],
+      })
+      const taskId = `task-${runBranch.slice('run/'.length)}`
+      recordIssuesForTask(paths, taskId, [issueNumber])
+      recordIssuePromotions(paths, taskId, 'b'.repeat(40), runBranch)
+    }
+    repository.state.otherCommits['b'.repeat(40)] = [FAKE_HEAD]
+    fakeForge.prStatus = async () => ({ state: 'none', isDraft: false, url: '', headSha: '', checks: [] })
+    const asked = (command: string) => questions.mock.calls
+      .filter(([, args]) => args.join(' ') === command).length
+    const remoteBranchQuestions = () => questions.mock.calls
+      .map(([, args]) => args.join(' '))
+      .filter((command) => command.startsWith('ls-remote --exit-code --heads '))
+    return { loop, questions, answer, asked, remoteBranchQuestions }
+  }
+
+  it('resolves the push remote once for every run branch a poll asks about', async () => {
+    const { loop, questions, asked, remoteBranchQuestions } = await twoRunBranchesLoop()
+    questions.mockClear()
+
+    await loop.poll()
+
+    expect(remoteBranchQuestions()).toEqual([
+      'ls-remote --exit-code --heads origin refs/heads/run/first',
+      'ls-remote --exit-code --heads origin refs/heads/run/second',
+    ])
+    expect(asked('remote')).toBe(1)
+    expect(asked('config --get branch.main.pushRemote')).toBe(1)
+    expect(asked('for-each-ref --format=%(upstream:remotename) refs/heads/main')).toBe(1)
+  })
+
+  it('resolves the remotes again in the next poll and sees a remote changed between polls', async () => {
+    const { loop, questions, asked, remoteBranchQuestions } = await twoRunBranchesLoop()
+    await loop.poll()
+    repository.state.remotes.push({ name: 'mirror', url: join(repoRoot, 'mirror.git'), branches: {} })
+    repository.state.pushRemotes.main = 'mirror'
+    questions.mockClear()
+
+    await loop.poll()
+
+    expect(remoteBranchQuestions()).toEqual([
+      'ls-remote --exit-code --heads mirror refs/heads/run/first',
+      'ls-remote --exit-code --heads mirror refs/heads/run/second',
+    ])
+    expect(asked('remote')).toBe(1)
+  })
+
+  it('does not keep a failed remote resolution and resolves again for the next question of the poll', async () => {
+    const { loop, questions, answer, asked, remoteBranchQuestions } = await twoRunBranchesLoop()
+    // The first listing of the remotes fails, which leaves the checkout without a remote.
+    let failures = 1
+    questions.mockImplementation((cwd, args, options) => {
+      if (args.join(' ') === 'remote' && failures > 0) {
+        failures -= 1
+        throw new Error('Command failed: git remote')
+      }
+      return answer(cwd, args, options)
+    })
+    questions.mockClear()
+
+    await loop.poll()
+
+    expect(asked('remote')).toBe(2)
+    expect(remoteBranchQuestions()).toEqual([
+      'ls-remote --exit-code --heads origin refs/heads/run/second',
+    ])
+    expect(logText()).toContain('WARN run branch run/first has no pull request')
+    expect(logText()).not.toContain('Released')
+  })
+
   async function promotedIssueLoop(headSha: string) {
     setPaths({
       ...paths,
